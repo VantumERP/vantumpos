@@ -36,9 +36,10 @@ impl From<AppError> for CommandError {
             AppError::Database(source) => {
                 Self::new("database_error", format!("Greska baze podataka: {source}"))
             }
-            AppError::Io(source) => {
-                Self::new("file_system_error", format!("Greska fajl sistema: {source}"))
-            }
+            AppError::Io(source) => Self::new(
+                "file_system_error",
+                format!("Greska fajl sistema: {source}"),
+            ),
             AppError::InvalidState(message) => Self::new("invalid_state", message),
         }
     }
