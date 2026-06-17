@@ -103,10 +103,10 @@ CREATE TABLE sales (
     status TEXT NOT NULL CHECK (status IN ('completed', 'voided', 'refunded')),
     fiscal_status TEXT NOT NULL DEFAULT 'not_fiscalized' CHECK (fiscal_status IN ('not_fiscalized', 'fiscalized', 'failed')),
     original_sale_id INTEGER REFERENCES sales(id),
-    subtotal_minor INTEGER NOT NULL,
-    discount_minor INTEGER NOT NULL DEFAULT 0,
-    tax_minor INTEGER NOT NULL,
-    total_minor INTEGER NOT NULL,
+    subtotal_minor INTEGER NOT NULL CHECK (subtotal_minor >= 0),
+    discount_minor INTEGER NOT NULL DEFAULT 0 CHECK (discount_minor >= 0),
+    tax_minor INTEGER NOT NULL CHECK (tax_minor >= 0),
+    total_minor INTEGER NOT NULL CHECK (total_minor >= 0),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -118,12 +118,12 @@ CREATE TABLE sale_items (
     product_name TEXT NOT NULL,
     product_sku TEXT NOT NULL,
     product_barcode TEXT,
-    quantity_milli INTEGER NOT NULL,
-    unit_price_minor INTEGER NOT NULL,
-    discount_minor INTEGER NOT NULL DEFAULT 0,
-    tax_rate_basis_points INTEGER NOT NULL,
-    tax_minor INTEGER NOT NULL,
-    total_minor INTEGER NOT NULL
+    quantity_milli INTEGER NOT NULL CHECK (quantity_milli != 0),
+    unit_price_minor INTEGER NOT NULL CHECK (unit_price_minor >= 0),
+    discount_minor INTEGER NOT NULL DEFAULT 0 CHECK (discount_minor >= 0),
+    tax_rate_basis_points INTEGER NOT NULL CHECK (tax_rate_basis_points >= 0),
+    tax_minor INTEGER NOT NULL CHECK (tax_minor >= 0),
+    total_minor INTEGER NOT NULL CHECK (total_minor >= 0)
 );
 
 CREATE TABLE sale_payments (
@@ -165,11 +165,13 @@ CREATE TABLE backup_jobs (
 );
 
 CREATE INDEX idx_products_name ON products(name);
-CREATE INDEX idx_products_barcode ON products(barcode);
 CREATE INDEX idx_inventory_movements_product ON inventory_movements(product_id, created_at);
 CREATE INDEX idx_sales_created_at ON sales(created_at);
 CREATE INDEX idx_sales_shift ON sales(shift_id);
 CREATE INDEX idx_sale_items_product ON sale_items(product_id);
+CREATE INDEX idx_sale_items_sale ON sale_items(sale_id);
+CREATE INDEX idx_sale_payments_sale ON sale_payments(sale_id);
+CREATE INDEX idx_import_job_rows_job ON import_job_rows(import_job_id);
 "#,
 }];
 
