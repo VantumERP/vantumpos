@@ -3,31 +3,29 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("database error: {0}")]
+    #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
-    #[error("file error: {0}")]
+
+    #[error("File system error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid state: {0}")]
+
+    #[error("{0}")]
     InvalidState(String),
 }
 
 #[derive(Debug, Serialize)]
 pub struct CommandError {
-    pub code: String,
+    pub code: &'static str,
     pub message: String,
-    pub details: Option<String>,
+    pub details: Option<serde_json::Value>,
 }
 
 impl CommandError {
-    pub fn new(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        details: Option<String>,
-    ) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
-            details,
+            details: None,
         }
     }
 }
@@ -35,21 +33,28 @@ impl CommandError {
 impl From<AppError> for CommandError {
     fn from(error: AppError) -> Self {
         match error {
-            AppError::Database(error) => Self::new(
-                "database_error",
-                "Greška pri radu sa lokalnom bazom podataka.",
-                Some(error.to_string()),
-            ),
-            AppError::Io(error) => Self::new(
-                "file_error",
-                "Greška pri pristupu lokalnim fajlovima.",
-                Some(error.to_string()),
-            ),
-            AppError::InvalidState(details) => Self::new(
-                "invalid_state",
-                "Aplikacija nije u ispravnom stanju za ovu operaciju.",
-                Some(details),
-            ),
+            AppError::Database(source) => {
+                Self::new("database_error", format!("Greska baze podataka: {source}"))
+            }
+            AppError::Io(source) => {
+                Self::new("file_system_error", format!("Greska fajl sistema: {source}"))
+            }
+            AppError::InvalidState(message) => Self::new("invalid_state", message),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommandError;
+
+    #[test]
+    fn new_uses_static_code_and_json_details_shape() {
+        let command_error = CommandError::new("invalid_state", "Operacija nije moguca.");
+
+        let details: Option<serde_json::Value> = command_error.details;
+        assert_eq!(command_error.code, "invalid_state");
+        assert_eq!(command_error.message, "Operacija nije moguca.");
+        assert_eq!(details, None);
     }
 }

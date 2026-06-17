@@ -1,6 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-pub mod app_error;
-pub mod db;
+mod app_error;
+mod db;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
