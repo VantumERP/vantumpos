@@ -1,5 +1,11 @@
 const RSD_GROUP_SEPARATOR = ".";
 const RSD_DECIMAL_SEPARATOR = ",";
+const INVALID_MONEY_MESSAGE = "Iznos nije ispravan.";
+const MAX_SAFE_MINOR_UNITS = BigInt(Number.MAX_SAFE_INTEGER);
+const PLAIN_INTEGER_INPUT_PATTERN = /^-?\d+$/;
+const COMMA_DECIMAL_INPUT_PATTERN = /^-?(?:\d+|\d{1,3}(?:\.\d{3})+),\d{1,2}$/;
+const DOT_DECIMAL_INPUT_PATTERN = /^-?\d+\.\d{1,2}$/;
+const DOT_GROUPED_INTEGER_INPUT_PATTERN = /^-?\d{1,3}(?:\.\d{3})+$/;
 
 export function formatRsd(minorUnits: number): string {
   assertInteger(minorUnits, "minorUnits");
@@ -24,38 +30,42 @@ export function parseRsdInput(input: string): number {
   const normalized = normalizeMoneyInput(trimmed);
 
   if (!/^-?\d+(\.\d{1,2})?$/.test(normalized)) {
-    throw new Error("Iznos nije ispravan.");
+    throwInvalidMoneyInput();
   }
 
   const [dinarsPart, parasPart = ""] = normalized.split(".");
-  const sign = dinarsPart.startsWith("-") ? -1 : 1;
-  const dinars = Math.abs(Number.parseInt(dinarsPart, 10));
-  const paras = Number.parseInt(parasPart.padEnd(2, "0"), 10) || 0;
+  const isNegative = dinarsPart.startsWith("-");
+  const dinarsDigits = isNegative ? dinarsPart.slice(1) : dinarsPart;
+  const minorUnits =
+    BigInt(dinarsDigits) * 100n + BigInt(parasPart.padEnd(2, "0") || "0");
 
-  return sign * (dinars * 100 + paras);
+  if (minorUnits > MAX_SAFE_MINOR_UNITS) {
+    throwInvalidMoneyInput();
+  }
+
+  return Number(isNegative ? -minorUnits : minorUnits);
 }
 
 function normalizeMoneyInput(input: string): string {
   const compact = input.replace(/\s/g, "");
-  const hasComma = compact.includes(",");
-  const hasDot = compact.includes(".");
 
-  if (hasComma) {
+  if (COMMA_DECIMAL_INPUT_PATTERN.test(compact)) {
     return compact.replace(/\./g, "").replace(",", ".");
   }
 
-  if (hasDot) {
-    const parts = compact.split(".");
-    const lastPart = parts[parts.length - 1];
+  if (DOT_DECIMAL_INPUT_PATTERN.test(compact)) {
+    return compact;
+  }
 
-    if (lastPart.length <= 2 && parts.length > 1) {
-      return `${parts.slice(0, -1).join("")}.${lastPart}`;
-    }
-
+  if (DOT_GROUPED_INTEGER_INPUT_PATTERN.test(compact)) {
     return compact.replace(/\./g, "");
   }
 
-  return compact;
+  if (PLAIN_INTEGER_INPUT_PATTERN.test(compact)) {
+    return compact;
+  }
+
+  throwInvalidMoneyInput();
 }
 
 function formatDinars(value: number): string {
@@ -66,4 +76,8 @@ function assertInteger(value: number, name: string): void {
   if (!Number.isInteger(value)) {
     throw new Error(`${name} mora biti ceo broj.`);
   }
+}
+
+function throwInvalidMoneyInput(): never {
+  throw new Error(INVALID_MONEY_MESSAGE);
 }

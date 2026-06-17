@@ -22,4 +22,16 @@ describe("RSD money helpers", () => {
     expect(() => parseRsdInput("abc")).toThrow("Iznos nije ispravan.");
     expect(() => parseRsdInput("12,345")).toThrow("Iznos nije ispravan.");
   });
+
+  it("rejects malformed dot-separated input", () => {
+    expect(() => parseRsdInput("1.2.3")).toThrow("Iznos nije ispravan.");
+    expect(() => parseRsdInput("1.23.45")).toThrow("Iznos nije ispravan.");
+    expect(() => parseRsdInput("1.234.56")).toThrow("Iznos nije ispravan.");
+  });
+
+  it("rejects amounts that cannot be represented safely", () => {
+    expect(() => parseRsdInput("9007199254740993")).toThrow(
+      "Iznos nije ispravan.",
+    );
+  });
 });
