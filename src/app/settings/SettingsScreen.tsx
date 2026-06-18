@@ -1,0 +1,952 @@
+import {
+  DatabaseBackupIcon,
+  PlusIcon,
+  RotateCcwIcon,
+  SaveIcon,
+  ShieldAlertIcon,
+} from "lucide-react";
+import { useEffect, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
+import { toast } from "sonner";
+
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
+import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import type { PosServices } from "@/services/ports";
+import type {
+  BackupJob,
+  BackupStatus,
+  CompanySettings,
+  ReceiptSettings,
+  TaxRate,
+} from "@/services/types";
+
+interface SettingsScreenProps {
+  services: PosServices;
+  usersPanel: ReactNode;
+}
+
+type LoadState =
+  | { status: "loading" }
+  | {
+      status: "ready";
+      company: CompanySettings;
+      taxRates: TaxRate[];
+      receipt: ReceiptSettings;
+      backupStatus: BackupStatus;
+      backupJobs: BackupJob[];
+    }
+  | { status: "error"; message: string };
+
+type SettingsTab = "company" | "vat" | "receipts" | "users" | "backup";
+
+export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
+  const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [activeTab, setActiveTab] = useState<SettingsTab>("company");
+
+  const reload = () => {
+    setState({ status: "loading" });
+    Promise.all([
+      services.settings.getCompanySettings(),
+      services.settings.listTaxRates(),
+      services.settings.getReceiptSettings(),
+      services.backup.getBackupStatus(),
+      services.backup.listBackupJobs(),
+    ])
+      .then(([company, taxRates, receipt, backupStatus, backupJobs]) => {
+        setState({
+          status: "ready",
+          company,
+          taxRates,
+          receipt,
+          backupStatus,
+          backupJobs,
+        });
+      })
+      .catch((error) => {
+        setState({
+          status: "error",
+          message: errorMessage(error, "Podesavanja nisu ucitana."),
+        });
+      });
+  };
+
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [services]);
+
+  if (state.status === "loading") {
+    return (
+      <Badge variant="outline" className="w-fit">
+        <Spinner data-icon="inline-start" aria-hidden="true" />
+        Ucitavanje podesavanja
+      </Badge>
+    );
+  }
+
+  if (state.status === "error") {
+    return (
+      <Alert variant="destructive">
+        <ShieldAlertIcon aria-hidden="true" />
+        <AlertTitle>Podesavanja nisu dostupna</AlertTitle>
+        <AlertDescription>{state.message}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div
+        role="tablist"
+        aria-label="Podesavanja"
+        className="inline-flex w-fit items-center justify-center gap-1 rounded-lg bg-muted p-1 text-muted-foreground"
+      >
+        <SettingsTabButton
+          active={activeTab === "company"}
+          onSelect={() => setActiveTab("company")}
+        >
+          Radnja
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "vat"}
+          onSelect={() => setActiveTab("vat")}
+        >
+          PDV
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "receipts"}
+          onSelect={() => setActiveTab("receipts")}
+        >
+          Racuni
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "users"}
+          onSelect={() => setActiveTab("users")}
+        >
+          Korisnici
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "backup"}
+          onSelect={() => setActiveTab("backup")}
+        >
+          Backup
+        </SettingsTabButton>
+      </div>
+
+      {activeTab === "company" ? (
+        <CompanySettingsPanel
+          settings={state.company}
+          onSave={async (request) => {
+            const company = await services.settings.updateCompanySettings(request);
+            setState((current) =>
+              current.status === "ready" ? { ...current, company } : current,
+            );
+            toast.success("Podesavanja radnje su sacuvana.");
+          }}
+        />
+      ) : null}
+
+      {activeTab === "vat" ? (
+        <TaxRatesPanel
+          taxRates={state.taxRates}
+          onSave={async (request) => {
+            const saved = await services.settings.saveTaxRate(request);
+            setState((current) => {
+              if (current.status !== "ready") {
+                return current;
+              }
+
+              const exists = current.taxRates.some((rate) => rate.id === saved.id);
+              const taxRates = exists
+                ? current.taxRates.map((rate) => (rate.id === saved.id ? saved : rate))
+                : [saved, ...current.taxRates];
+
+              return { ...current, taxRates };
+            });
+            toast.success("PDV stopa je sacuvana.");
+          }}
+        />
+      ) : null}
+
+      {activeTab === "receipts" ? (
+        <ReceiptSettingsPanel
+          settings={state.receipt}
+          onSave={async (request) => {
+            const receipt = await services.settings.updateReceiptSettings(request);
+            setState((current) =>
+              current.status === "ready" ? { ...current, receipt } : current,
+            );
+            toast.success("Numeracija racuna je sacuvana.");
+          }}
+        />
+      ) : null}
+
+      {activeTab === "users" ? usersPanel : null}
+
+      {activeTab === "backup" ? (
+        <BackupPanel
+          status={state.backupStatus}
+          jobs={state.backupJobs}
+          onSaveSettings={async (request) => {
+            await services.backup.updateBackupSettings(request);
+            const backupStatus = await services.backup.getBackupStatus();
+            setState((current) =>
+              current.status === "ready" ? { ...current, backupStatus } : current,
+            );
+            toast.success("Backup podesavanja su sacuvana.");
+          }}
+          onCreateBackup={async (backupFolder) => {
+            const job = await services.backup.createBackup({ backupFolder });
+            const backupStatus = await services.backup.getBackupStatus();
+            setState((current) =>
+              current.status === "ready"
+                ? {
+                    ...current,
+                    backupStatus,
+                    backupJobs: [job, ...current.backupJobs],
+                  }
+                : current,
+            );
+            toast.success("Backup je napravljen.");
+          }}
+          onRestore={async (path, confirmationText) => {
+            const job = await services.backup.restoreBackup({
+              path,
+              confirmationText,
+            });
+            const backupStatus = await services.backup.getBackupStatus();
+            setState((current) =>
+              current.status === "ready"
+                ? {
+                    ...current,
+                    backupStatus,
+                    backupJobs: [job, ...current.backupJobs],
+                  }
+                : current,
+            );
+            toast.success("Restore je zavrsen.");
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function SettingsTabButton({
+  active,
+  children,
+  onSelect,
+}: {
+  active: boolean;
+  children: ReactNode;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      className={[
+        "inline-flex h-7 items-center justify-center rounded-md px-3 text-xs font-medium transition-colors",
+        active
+          ? "bg-secondary text-secondary-foreground"
+          : "text-muted-foreground hover:bg-background hover:text-foreground",
+      ].join(" ")}
+      onClick={onSelect}
+    >
+      {children}
+    </button>
+  );
+}
+
+function CompanySettingsPanel({
+  settings,
+  onSave,
+}: {
+  settings: CompanySettings;
+  onSave: (request: CompanySettings) => Promise<void>;
+}) {
+  const [form, setForm] = useState(settings);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setForm(settings);
+  }, [settings]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+
+    if (!form.shopName.trim()) {
+      setError("Naziv radnje je obavezan.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await onSave({
+        shopName: form.shopName,
+        address: form.address,
+        pib: form.pib,
+        registrationNumber: form.registrationNumber,
+        phone: form.phone,
+        logoPath: form.logoPath,
+        currency: form.currency,
+      });
+    } catch (saveError) {
+      setError(errorMessage(saveError, "Podesavanja radnje nisu sacuvana."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle role="heading" aria-level={2}>
+          Radnja
+        </CardTitle>
+        <CardDescription>Podaci koji se koriste na lokalnim racunima.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+          <FieldGroup>
+            {error ? <FieldError>{error}</FieldError> : null}
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field>
+                <FieldLabel htmlFor="company-shop-name">Naziv radnje</FieldLabel>
+                <Input
+                  id="company-shop-name"
+                  value={form.shopName}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      shopName: event.target.value,
+                    }))
+                  }
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="company-pib">PIB</FieldLabel>
+                <Input
+                  id="company-pib"
+                  value={form.pib}
+                  inputMode="numeric"
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, pib: event.target.value }))
+                  }
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="company-registration">Maticni broj</FieldLabel>
+                <Input
+                  id="company-registration"
+                  value={form.registrationNumber}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      registrationNumber: event.target.value,
+                    }))
+                  }
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="company-phone">Telefon</FieldLabel>
+                <Input
+                  id="company-phone"
+                  value={form.phone}
+                  onChange={(event) =>
+                    setForm((current) => ({ ...current, phone: event.target.value }))
+                  }
+                />
+              </Field>
+            </div>
+            <Field>
+              <FieldLabel htmlFor="company-address">Adresa</FieldLabel>
+              <Input
+                id="company-address"
+                value={form.address}
+                onChange={(event) =>
+                  setForm((current) => ({ ...current, address: event.target.value }))
+                }
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="company-currency">Valuta</FieldLabel>
+              <Input id="company-currency" value={form.currency} disabled />
+            </Field>
+            <Field>
+              <Button type="submit" disabled={saving}>
+                {saving ? (
+                  <Spinner data-icon="inline-start" aria-hidden="true" />
+                ) : (
+                  <SaveIcon data-icon="inline-start" />
+                )}
+                Sacuvaj radnju
+              </Button>
+            </Field>
+          </FieldGroup>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function TaxRatesPanel({
+  taxRates,
+  onSave,
+}: {
+  taxRates: TaxRate[];
+  onSave: (request: {
+    id: number | null;
+    name: string;
+    rateBasisPoints: number;
+    active: boolean;
+  }) => Promise<void>;
+}) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <CardTitle role="heading" aria-level={2}>
+              PDV stope
+            </CardTitle>
+            <CardDescription>Stope se deaktiviraju kada vise nisu u upotrebi.</CardDescription>
+          </div>
+          <Button type="button" onClick={() => setDialogOpen(true)}>
+            <PlusIcon data-icon="inline-start" />
+            Nova PDV stopa
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Naziv</TableHead>
+              <TableHead>Stopa</TableHead>
+              <TableHead>Status</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {taxRates.map((rate) => (
+              <TableRow key={rate.id}>
+                <TableCell>{rate.name}</TableCell>
+                <TableCell>{formatBasisPoints(rate.rateBasisPoints)}</TableCell>
+                <TableCell>
+                  <Badge variant={rate.active ? "secondary" : "outline"}>
+                    {rate.active ? "Aktivna" : "Neaktivna"}
+                  </Badge>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+      <TaxRateDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        onSave={async (request) => {
+          await onSave(request);
+          setDialogOpen(false);
+        }}
+      />
+    </Card>
+  );
+}
+
+function TaxRateDialog({
+  open,
+  onOpenChange,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSave: (request: {
+    id: number | null;
+    name: string;
+    rateBasisPoints: number;
+    active: boolean;
+  }) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [rate, setRate] = useState("");
+  const [active, setActive] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setRate("");
+      setActive(true);
+      setError(null);
+    }
+  }, [open]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!name.trim()) {
+      setError("Naziv PDV stope je obavezan.");
+      return;
+    }
+
+    const normalizedRate = Number(rate.replace(",", "."));
+    if (!Number.isFinite(normalizedRate) || normalizedRate < 0) {
+      setError("PDV stopa mora biti ispravan broj.");
+      return;
+    }
+
+    try {
+      await onSave({
+        id: null,
+        name: name.trim(),
+        rateBasisPoints: Math.round(normalizedRate * 100),
+        active,
+      });
+    } catch (saveError) {
+      setError(errorMessage(saveError, "PDV stopa nije sacuvana."));
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>PDV stopa</DialogTitle>
+          <DialogDescription>Unesite naziv i procenat PDV stope.</DialogDescription>
+        </DialogHeader>
+        <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+          <FieldGroup>
+            {error ? <FieldError>{error}</FieldError> : null}
+            <Field data-invalid={error === "Naziv PDV stope je obavezan."}>
+              <FieldLabel htmlFor="tax-rate-name">Naziv</FieldLabel>
+              <Input
+                id="tax-rate-name"
+                value={name}
+                aria-invalid={error === "Naziv PDV stope je obavezan."}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="tax-rate-percent">Stopa (%)</FieldLabel>
+              <Input
+                id="tax-rate-percent"
+                inputMode="decimal"
+                value={rate}
+                onChange={(event) => setRate(event.target.value)}
+              />
+            </Field>
+            <Field orientation="horizontal">
+              <FieldLabel htmlFor="tax-rate-active">Aktivna</FieldLabel>
+              <Switch
+                id="tax-rate-active"
+                checked={active}
+                onCheckedChange={setActive}
+              />
+            </Field>
+          </FieldGroup>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Odustani
+            </Button>
+            <Button type="submit">Sacuvaj PDV stopu</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ReceiptSettingsPanel({
+  settings,
+  onSave,
+}: {
+  settings: ReceiptSettings;
+  onSave: (request: { prefix: string; nextSequenceNumber: number }) => Promise<void>;
+}) {
+  const [prefix, setPrefix] = useState(settings.prefix);
+  const [nextSequenceNumber, setNextSequenceNumber] = useState(
+    String(settings.nextSequenceNumber),
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPrefix(settings.prefix);
+    setNextSequenceNumber(String(settings.nextSequenceNumber));
+  }, [settings]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedSequence = Number(nextSequenceNumber);
+
+    if (!prefix.trim() || !Number.isInteger(parsedSequence) || parsedSequence <= 0) {
+      setError("Unesite prefiks i sledeci broj racuna.");
+      return;
+    }
+
+    try {
+      await onSave({
+        prefix,
+        nextSequenceNumber: parsedSequence,
+      });
+      setError(null);
+    } catch (saveError) {
+      setError(errorMessage(saveError, "Numeracija nije sacuvana."));
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle role="heading" aria-level={2}>
+          Racuni
+        </CardTitle>
+        <CardDescription>Automatski reset nije ukljucen za MVP.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+          <FieldGroup>
+            {error ? <FieldError>{error}</FieldError> : null}
+            <Field>
+              <FieldLabel htmlFor="receipt-prefix">Prefiks racuna</FieldLabel>
+              <Input
+                id="receipt-prefix"
+                value={prefix}
+                onChange={(event) => setPrefix(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="receipt-next">Sledeci broj</FieldLabel>
+              <Input
+                id="receipt-next"
+                inputMode="numeric"
+                value={nextSequenceNumber}
+                onChange={(event) => setNextSequenceNumber(event.target.value)}
+              />
+              <FieldDescription>Reset politika: bez automatskog resetovanja.</FieldDescription>
+            </Field>
+            <Field>
+              <Button type="submit">
+                <SaveIcon data-icon="inline-start" />
+                Sacuvaj numeraciju
+              </Button>
+            </Field>
+          </FieldGroup>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function BackupPanel({
+  status,
+  jobs,
+  onSaveSettings,
+  onCreateBackup,
+  onRestore,
+}: {
+  status: BackupStatus;
+  jobs: BackupJob[];
+  onSaveSettings: (request: {
+    backupFolder: string;
+    automaticBackupEnabled: boolean;
+  }) => Promise<void>;
+  onCreateBackup: (backupFolder: string) => Promise<void>;
+  onRestore: (path: string, confirmationText: string) => Promise<void>;
+}) {
+  const [backupFolder, setBackupFolder] = useState(status.backupFolder);
+  const [automaticBackupEnabled, setAutomaticBackupEnabled] = useState(
+    status.automaticBackupEnabled,
+  );
+  const [restorePath, setRestorePath] = useState("");
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const [confirmationText, setConfirmationText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setBackupFolder(status.backupFolder);
+    setAutomaticBackupEnabled(status.automaticBackupEnabled);
+  }, [status]);
+
+  async function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+
+    try {
+      await onSaveSettings({ backupFolder, automaticBackupEnabled });
+    } catch (saveError) {
+      setError(errorMessage(saveError, "Backup podesavanja nisu sacuvana."));
+    }
+  }
+
+  async function createBackup() {
+    setError(null);
+    try {
+      await onCreateBackup(backupFolder);
+    } catch (backupError) {
+      setError(errorMessage(backupError, "Backup nije uspeo."));
+    }
+  }
+
+  async function restore() {
+    setError(null);
+    try {
+      await onRestore(restorePath, confirmationText);
+      setRestoreOpen(false);
+      setConfirmationText("");
+    } catch (restoreError) {
+      setError(errorMessage(restoreError, "Restore nije uspeo."));
+    }
+  }
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,28rem)_1fr]">
+      <Card>
+        <CardHeader>
+          <CardTitle role="heading" aria-level={2}>
+            Status backupa
+          </CardTitle>
+          <CardDescription>Lokalni backup za ovu kasu.</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          {status.stale ? (
+            <Alert variant="destructive">
+              <ShieldAlertIcon aria-hidden="true" />
+              <AlertTitle>Backup nije napravljen</AlertTitle>
+              <AlertDescription>
+                Napravite rucni backup pre zavrsetka rada.
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <Alert>
+              <DatabaseBackupIcon aria-hidden="true" />
+              <AlertTitle>Backup je spreman</AlertTitle>
+              <AlertDescription>
+                Poslednji backup: {status.lastSuccessfulBackup?.createdAt}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {error ? (
+            <Alert variant="destructive">
+              <ShieldAlertIcon aria-hidden="true" />
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          ) : null}
+
+          <form className="flex flex-col gap-4" onSubmit={saveSettings}>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="backup-folder">Backup folder</FieldLabel>
+                <Input
+                  id="backup-folder"
+                  value={backupFolder}
+                  onChange={(event) => setBackupFolder(event.target.value)}
+                />
+              </Field>
+              <Field orientation="horizontal">
+                <FieldLabel htmlFor="automatic-backup">Automatski backup</FieldLabel>
+                <Switch
+                  id="automatic-backup"
+                  checked={automaticBackupEnabled}
+                  onCheckedChange={setAutomaticBackupEnabled}
+                />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                <Button type="submit" variant="outline">
+                  <SaveIcon data-icon="inline-start" />
+                  Sacuvaj backup podesavanja
+                </Button>
+                <Button type="button" onClick={() => void createBackup()}>
+                  <DatabaseBackupIcon data-icon="inline-start" />
+                  Napravi backup
+                </Button>
+              </div>
+            </FieldGroup>
+          </form>
+
+          <Separator />
+
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="restore-path">Putanja backup fajla</FieldLabel>
+              <Input
+                id="restore-path"
+                value={restorePath}
+                onChange={(event) => setRestorePath(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={!restorePath.trim()}
+                onClick={() => setRestoreOpen(true)}
+              >
+                <RotateCcwIcon data-icon="inline-start" />
+                Vrati backup
+              </Button>
+            </Field>
+          </FieldGroup>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle role="heading" aria-level={2}>
+            Istorija backupa
+          </CardTitle>
+          <CardDescription>Rucni, automatski i restore poslovi.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Tip</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Putanja</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {jobs.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={3}>Nema backup poslova.</TableCell>
+                </TableRow>
+              ) : (
+                jobs.map((job) => (
+                  <TableRow key={job.id}>
+                    <TableCell>{backupTypeLabel(job.backupType)}</TableCell>
+                    <TableCell>
+                      <Badge variant={job.status === "completed" ? "secondary" : "destructive"}>
+                        {job.status === "completed" ? "Zavrsen" : "Neuspesan"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{job.path}</TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <AlertDialog open={restoreOpen} onOpenChange={setRestoreOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Potvrdite restore</AlertDialogTitle>
+            <AlertDialogDescription>
+              Restore zamenjuje trenutne lokalne podatke podacima iz izabranog
+              backup fajla.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="restore-confirmation">Potvrda</FieldLabel>
+              <Input
+                id="restore-confirmation"
+                value={confirmationText}
+                onChange={(event) => setConfirmationText(event.target.value)}
+              />
+              <FieldDescription>Unesite VRATI PODATKE.</FieldDescription>
+            </Field>
+          </FieldGroup>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Odustani</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={confirmationText !== "VRATI PODATKE"}
+              onClick={() => void restore()}
+            >
+              Potvrdi restore
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+function formatBasisPoints(value: number) {
+  return `${(value / 100).toLocaleString("sr-Latn-RS", {
+    maximumFractionDigits: 2,
+  })}%`;
+}
+
+function backupTypeLabel(value: BackupJob["backupType"]) {
+  switch (value) {
+    case "automatic":
+      return "Automatski";
+    case "restore":
+      return "Restore";
+    case "pre_restore":
+      return "Pre restore";
+    case "manual":
+      return "Rucni";
+  }
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof (error as { message: unknown }).message === "string"
+  ) {
+    return (error as { message: string }).message;
+  }
+
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return fallback;
+}

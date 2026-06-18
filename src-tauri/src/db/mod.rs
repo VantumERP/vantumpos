@@ -3,9 +3,11 @@ mod migrations;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use crate::app_error::AppError;
+use crate::clock::utc_now;
+use crate::security::hash_credential;
 
 #[derive(Clone, Debug)]
 pub struct Db {
@@ -20,6 +22,7 @@ impl Db {
             path: Arc::new(path),
         };
         db.migrate()?;
+        db.seed_initial_admin()?;
         Ok(db)
     }
 
@@ -41,6 +44,35 @@ PRAGMA busy_timeout = 5000;
     pub fn migrate(&self) -> Result<(), AppError> {
         let mut connection = self.open()?;
         migrations::run_migrations(&mut connection)
+    }
+
+    fn seed_initial_admin(&self) -> Result<(), AppError> {
+        let connection = self.open()?;
+        let user_count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
+
+        if user_count > 0 {
+            return Ok(());
+        }
+
+        let now = utc_now()?;
+        let pin_hash = hash_credential("1234")?;
+
+        connection.execute(
+            "INSERT INTO users (
+                username,
+                display_name,
+                role,
+                pin_hash,
+                active,
+                created_at,
+                updated_at
+             )
+             VALUES ('admin', 'Administrator', 'admin', ?1, 1, ?2, ?2)",
+            params![pin_hash, now],
+        )?;
+
+        Ok(())
     }
 }
 
@@ -65,7 +97,7 @@ pub fn test_database_path(test_name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::{params, Error, ErrorCode};
+    use rusqlite::{Error, ErrorCode};
 
     const CORE_TABLES: &[&str] = &[
         "settings",
@@ -86,13 +118,17 @@ mod tests {
 
     const EXPLICIT_INDEXES: &[&str] = &[
         "idx_products_name",
+        "idx_shifts_one_open_per_user",
         "idx_inventory_movements_product",
         "idx_sales_created_at",
         "idx_sales_shift",
+        "idx_sales_original_sale",
         "idx_sale_items_product",
         "idx_sale_items_sale",
+        "idx_sale_items_original_sale_item",
         "idx_sale_payments_sale",
         "idx_import_job_rows_job",
+        "idx_backup_jobs_created_at",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -251,6 +287,51 @@ mod tests {
     }
 
     #[test]
+    fn auth_shift_migration_adds_login_and_shift_notes() {
+        with_test_database("auth_shift_migration_adds_login_and_shift_notes", |db| {
+            let connection = db.open().expect("database should open");
+
+            for (table_name, column_name) in [
+                ("users", "last_login_at"),
+                ("shifts", "opening_note"),
+                ("shifts", "closing_note"),
+            ] {
+                let exists: i64 = connection
+                        .query_row(
+                            &format!(
+                                "SELECT COUNT(*) FROM pragma_table_info('{table_name}') WHERE name = ?1"
+                            ),
+                            params![column_name],
+                            |row| row.get(0),
+                        )
+                        .expect("column metadata should query");
+
+                assert_eq!(exists, 1, "expected {table_name}.{column_name}");
+            }
+        });
+    }
+
+    #[test]
+    fn new_seeds_initial_admin_user() {
+        with_test_database("new_seeds_initial_admin_user", |db| {
+            let connection = db.open().expect("database should open");
+
+            let admin: (String, String, String, i64) = connection
+                .query_row(
+                    "SELECT username, display_name, role, active FROM users WHERE username = 'admin'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("bootstrap admin should exist");
+
+            assert_eq!(
+                admin,
+                ("admin".into(), "Administrator".into(), "admin".into(), 1,),
+            );
+        });
+    }
+
+    #[test]
     fn sales_reject_negative_money_fields() {
         with_test_database("sales_reject_negative_money_fields", |db| {
             let connection = db.open().expect("database should open");
@@ -380,7 +461,35 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 1);
+                assert_eq!(migration_count, 5);
+            },
+        );
+    }
+
+    #[test]
+    fn catalog_external_source_migration_adds_provenance_columns() {
+        with_test_database(
+            "catalog_external_source_migration_adds_provenance_columns",
+            |db| {
+                let connection = db.open().expect("database should open");
+
+                for column_name in [
+                    "external_source_provider",
+                    "external_source_label",
+                    "external_source_barcode",
+                    "external_source_fetched_at",
+                    "external_source_accepted_fields_json",
+                ] {
+                    let exists: i64 = connection
+                        .query_row(
+                            "SELECT COUNT(*) FROM pragma_table_info('products') WHERE name = ?1",
+                            params![column_name],
+                            |row| row.get(0),
+                        )
+                        .expect("column metadata should query");
+
+                    assert_eq!(exists, 1, "expected products.{column_name}");
+                }
             },
         );
     }

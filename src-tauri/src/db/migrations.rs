@@ -8,10 +8,11 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial_local_pos_schema",
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial_local_pos_schema",
+        sql: r#"
 CREATE TABLE settings (
     key TEXT PRIMARY KEY NOT NULL,
     value_json TEXT NOT NULL,
@@ -173,7 +174,84 @@ CREATE INDEX idx_sale_items_sale ON sale_items(sale_id);
 CREATE INDEX idx_sale_payments_sale ON sale_payments(sale_id);
 CREATE INDEX idx_import_job_rows_job ON import_job_rows(import_job_id);
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "backup_job_metadata",
+        sql: r#"
+CREATE UNIQUE INDEX idx_shifts_one_open_per_user
+ON shifts(user_id)
+WHERE status = 'open';
+
+CREATE TABLE backup_jobs_next (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    backup_type TEXT NOT NULL CHECK (backup_type IN ('manual', 'automatic', 'restore', 'pre_restore')),
+    path TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+    error_message TEXT,
+    file_size_bytes INTEGER CHECK (file_size_bytes IS NULL OR file_size_bytes >= 0),
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+INSERT INTO backup_jobs_next (
+    id,
+    backup_type,
+    path,
+    status,
+    error_message,
+    created_at,
+    completed_at
+)
+SELECT
+    id,
+    backup_type,
+    path,
+    status,
+    error_message,
+    created_at,
+    CASE WHEN status = 'completed' THEN created_at ELSE NULL END
+FROM backup_jobs;
+
+DROP TABLE backup_jobs;
+ALTER TABLE backup_jobs_next RENAME TO backup_jobs;
+CREATE INDEX idx_backup_jobs_created_at ON backup_jobs(created_at);
+"#,
+    },
+    Migration {
+        version: 3,
+        name: "auth_users_shifts_session_fields",
+        sql: r#"
+ALTER TABLE users ADD COLUMN last_login_at TEXT;
+ALTER TABLE shifts ADD COLUMN opening_note TEXT;
+ALTER TABLE shifts ADD COLUMN closing_note TEXT;
+"#,
+    },
+    Migration {
+        version: 4,
+        name: "receipt_documents_and_returns",
+        sql: r#"
+ALTER TABLE sales ADD COLUMN document_type TEXT NOT NULL DEFAULT 'sale' CHECK (document_type IN ('sale', 'void', 'return'));
+ALTER TABLE sales ADD COLUMN void_reason TEXT;
+ALTER TABLE sales ADD COLUMN return_reason TEXT;
+ALTER TABLE sale_items ADD COLUMN original_sale_item_id INTEGER REFERENCES sale_items(id);
+
+CREATE INDEX idx_sales_original_sale ON sales(original_sale_id);
+CREATE INDEX idx_sale_items_original_sale_item ON sale_items(original_sale_item_id);
+"#,
+    },
+    Migration {
+        version: 5,
+        name: "product_external_source_provenance",
+        sql: r#"
+ALTER TABLE products ADD COLUMN external_source_provider TEXT;
+ALTER TABLE products ADD COLUMN external_source_label TEXT;
+ALTER TABLE products ADD COLUMN external_source_barcode TEXT;
+ALTER TABLE products ADD COLUMN external_source_fetched_at TEXT;
+ALTER TABLE products ADD COLUMN external_source_accepted_fields_json TEXT;
+"#,
+    },
+];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
     conn.execute_batch(

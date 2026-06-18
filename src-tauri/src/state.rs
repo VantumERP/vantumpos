@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
@@ -8,15 +9,44 @@ use crate::db::Db;
 #[derive(Clone, Debug)]
 pub struct AppState {
     db: Db,
+    session_user_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl AppState {
     pub fn new(db: Db) -> Self {
-        Self { db }
+        Self {
+            db,
+            session_user_id: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub fn db(&self) -> &Db {
         &self.db
+    }
+
+    pub fn session_user_id(&self) -> Result<Option<i64>, AppError> {
+        self.session_user_id
+            .lock()
+            .map(|guard| *guard)
+            .map_err(|_| AppError::InvalidState("Sesija nije dostupna.".to_string()))
+    }
+
+    pub fn set_session_user_id(&self, user_id: i64) -> Result<(), AppError> {
+        let mut guard = self
+            .session_user_id
+            .lock()
+            .map_err(|_| AppError::InvalidState("Sesija nije dostupna.".to_string()))?;
+        *guard = Some(user_id);
+        Ok(())
+    }
+
+    pub fn clear_session(&self) -> Result<(), AppError> {
+        let mut guard = self
+            .session_user_id
+            .lock()
+            .map_err(|_| AppError::InvalidState("Sesija nije dostupna.".to_string()))?;
+        *guard = None;
+        Ok(())
     }
 }
 

@@ -22,6 +22,9 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["rand_core"] }
+ureq = { version = "2", features = ["json"] }
