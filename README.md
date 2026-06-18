@@ -1,7 +1,11 @@
-# Tauri + React + Typescript
+# VantumPOS
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Local-first POS foundation for Serbian retail stores and boutiques. The current build uses React, shadcn/ui, Tauri, Rust, and SQLite with no fiscalization or cloud integrations enabled yet.
 
-## Recommended IDE Setup
+## Development
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- `bun run dev` starts the Vite frontend.
+- `bun run tauri dev` starts the desktop app.
+- `bun run test` runs frontend tests.
+- `bun run build` builds the frontend.
+- `cd src-tauri && cargo test -- --test-threads=1` runs Rust tests.
