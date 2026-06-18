@@ -65,17 +65,17 @@ export interface FoundationCard {
 export const foundationCards = [
   {
     title: "Lokalna kasa",
-    description: "Prodajni tok ce koristiti lokalni SQLite backend.",
+    description: "Prodaja, artikli i racuni ostaju vezani za ovu kasu.",
     icon: FileSpreadsheetIcon,
   },
   {
     title: "Jedna radnja",
-    description: "MVP je za jedan objekat, jednu kasu i jednu bazu.",
+    description: "Rad je pripremljen za jedan objekat i jednu kasu.",
     icon: PackageIcon,
   },
   {
-    title: "Adapter arhitektura",
-    description: "UI komunicira preko domain service ugovora.",
+    title: "Dnevni rad",
+    description: "Osnovni statusi za prodaju, lager i izvestaje su spremni.",
     icon: SettingsIcon,
   },
 ] as const satisfies readonly FoundationCard[];

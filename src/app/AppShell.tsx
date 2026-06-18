@@ -93,9 +93,11 @@ export function AppShell({ services }: AppShellProps) {
           </SidebarContent>
           <SidebarSeparator />
           <SidebarFooter>
-            <Badge variant="outline">Smena nije otvorena</Badge>
-            <div className="truncate px-2 text-xs text-sidebar-foreground/70 group-data-[collapsible=icon]:hidden">
-              Admin
+            <div className="flex flex-col gap-2 group-data-[collapsible=icon]:hidden">
+              <Badge variant="outline">Smena nije otvorena</Badge>
+              <div className="truncate px-2 text-xs text-sidebar-foreground/70">
+                Admin
+              </div>
             </div>
           </SidebarFooter>
         </Sidebar>
@@ -126,7 +128,7 @@ export function AppShell({ services }: AppShellProps) {
                       <CardAction>
                         <Icon
                           aria-hidden="true"
-                          className="size-4 text-muted-foreground"
+                          className="text-muted-foreground"
                         />
                       </CardAction>
                     </CardHeader>
@@ -141,15 +143,14 @@ export function AppShell({ services }: AppShellProps) {
               <CardHeader>
                 <CardTitle>Radni modul</CardTitle>
                 <CardDescription>
-                  {activeItem.label} je rezervisan za lokalni MVP tok.
+                  {activeItem.label} je pripremljen za rad u ovoj radnji.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-4">
                 <div className="rounded-md bg-muted/40 p-4">
                   <p className="text-base font-medium">{activeItem.label}</p>
                   <p className="text-xs text-muted-foreground">
-                    Modul ceka sledecu fazu implementacije preko istog service
-                    adaptera.
+                    Podaci za ovaj deo kase bice dostupni kroz dnevni rad.
                   </p>
                 </div>
                 <div>

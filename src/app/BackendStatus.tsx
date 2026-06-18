@@ -2,7 +2,6 @@ import { AlertCircleIcon, CheckCircle2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import type { PosServices } from "@/services/ports";
 import type { AppHealth } from "@/services/types";
@@ -51,37 +50,33 @@ export function BackendStatus({ services }: BackendStatusProps) {
     };
   }, [services]);
 
-  if (status.variant === "loading") {
-    return (
-      <Badge variant="outline">
-        <Spinner data-icon="inline-start" />
-        Provera lokalne baze
-      </Badge>
-    );
-  }
-
-  if (status.variant === "error") {
-    return (
-      <Button variant="destructive" size="sm" type="button">
-        <AlertCircleIcon data-icon="inline-start" />
-        {status.message}
-      </Button>
-    );
-  }
-
-  if (!status.health.migrated) {
-    return (
-      <Badge variant="destructive">
-        <AlertCircleIcon data-icon="inline-start" />
-        Migracije nisu spremne
-      </Badge>
-    );
-  }
-
   return (
-    <Badge variant="secondary">
-      <CheckCircle2Icon data-icon="inline-start" />
-      Lokalna baza spremna
-    </Badge>
+    <span role="status" aria-live="polite" className="inline-flex">
+      {status.variant === "loading" ? (
+        <Badge variant="outline">
+          <Spinner
+            data-icon="inline-start"
+            role="presentation"
+            aria-hidden="true"
+          />
+          Provera lokalne baze
+        </Badge>
+      ) : status.variant === "error" ? (
+        <Badge variant="destructive">
+          <AlertCircleIcon data-icon="inline-start" />
+          {status.message}
+        </Badge>
+      ) : !status.health.migrated ? (
+        <Badge variant="destructive">
+          <AlertCircleIcon data-icon="inline-start" />
+          Migracije nisu spremne
+        </Badge>
+      ) : (
+        <Badge variant="secondary">
+          <CheckCircle2Icon data-icon="inline-start" />
+          Lokalna baza spremna
+        </Badge>
+      )}
+    </span>
   );
 }

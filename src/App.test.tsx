@@ -14,6 +14,9 @@ describe("AppShell", () => {
     expect(screen.getByRole("button", { name: "Artikli" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Lager" })).toBeInTheDocument();
     expect(await screen.findByText("Lokalna baza spremna")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Lokalna baza spremna",
+    );
   });
 
   it("renders a stable fallback when backend health fails", async () => {
@@ -26,6 +29,25 @@ describe("AppShell", () => {
     render(<AppShell services={services} />);
 
     expect(await screen.findByText("Backend nije dostupan.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Backend nije dostupan." }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("boom")).not.toBeInTheDocument();
+  });
+
+  it("keeps visible POS shell copy operator-facing", async () => {
+    render(<AppShell services={createMockServices()} />);
+
+    expect(await screen.findByText("Lokalna baza spremna")).toBeInTheDocument();
+
+    for (const internalTerm of [
+      /SQLite backend/i,
+      /Adapter arhitektura/i,
+      /domain service/i,
+      /MVP/i,
+      /service adapter/i,
+    ]) {
+      expect(screen.queryByText(internalTerm)).not.toBeInTheDocument();
+    }
   });
 });
