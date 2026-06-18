@@ -7,6 +7,8 @@ import { Spinner } from "@/components/ui/spinner";
 import type { PosServices } from "@/services/ports";
 import type { AppHealth } from "@/services/types";
 
+const BACKEND_UNAVAILABLE_MESSAGE = "Backend nije dostupan.";
+
 type BackendStatusState =
   | { variant: "loading" }
   | { variant: "ready"; health: AppHealth }
@@ -33,15 +35,14 @@ export function BackendStatus({ services }: BackendStatusProps) {
           setStatus({ variant: "ready", health });
         }
       })
-      .catch((error: unknown) => {
+      .catch(() => {
         if (ignore) {
           return;
         }
 
         setStatus({
           variant: "error",
-          message:
-            error instanceof Error ? error.message : "Backend nije dostupan.",
+          message: BACKEND_UNAVAILABLE_MESSAGE,
         });
       });
 
