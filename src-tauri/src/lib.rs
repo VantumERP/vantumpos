@@ -12,7 +12,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let db_path = resolve_database_path(&app.handle())?;
+            let db_path = resolve_database_path(app.handle())?;
             let db = Db::new(db_path)?;
             app.manage(AppState::new(db));
             Ok(())
