@@ -295,6 +295,13 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
         </Alert>
       )}
 
+      {previewState.status === "error" && (
+        <Alert variant="destructive">
+          <AlertTitle>Pregled racuna nije moguc</AlertTitle>
+          <AlertDescription>{previewState.message}</AlertDescription>
+        </Alert>
+      )}
+
       <div className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <section className="min-h-0 rounded-md border bg-card">
           {cart.length === 0 ? (

@@ -226,4 +226,36 @@ describe("RegisterScreen", () => {
     expect(await screen.findByText("Nema dovoljno zaliha.")).toBeInTheDocument();
     expect(screen.getByText("Mleko 1 l")).toBeInTheDocument();
   });
+
+  it("renders the swallowed preview error and keeps the cart", async () => {
+    const user = userEvent.setup();
+    const services = createRegisterServices();
+    services.sales.createSalePreview = vi.fn().mockRejectedValue({
+      code: "validation_error",
+      message: "Popust ne moze biti veci od iznosa.",
+    });
+
+    render(<RegisterScreen services={services} />);
+    await user.type(
+      screen.getByRole("searchbox", {
+        name: "Skeniraj barkod ili pretrazi artikal",
+      }),
+      "Mleko{enter}",
+    );
+
+    expect(
+      await screen.findByText("Popust ne moze biti veci od iznosa."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Mleko 1 l")).toBeInTheDocument();
+  });
+
+  it("does not render a preview error when the preview succeeds", async () => {
+    const user = userEvent.setup();
+
+    await addProductToCart(user);
+
+    expect(
+      screen.queryByText("Pregled racuna nije moguc"),
+    ).not.toBeInTheDocument();
+  });
 });
