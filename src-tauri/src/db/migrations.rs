@@ -285,3 +285,79 @@ CREATE TABLE IF NOT EXISTS _migrations (
     tx.commit()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_database_path;
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("table_info should prepare");
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("table_info should query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("table_info rows should collect");
+        names.iter().any(|name| name == column)
+    }
+
+    #[test]
+    fn old_database_migrates_forward_to_latest_schema() {
+        let path = test_database_path("migrations_forward");
+
+        {
+            let mut conn = Connection::open(&path).expect("connection should open");
+
+            // Simulate an installed database stuck at schema version 1 only.
+            conn.execute_batch(
+                r#"
+CREATE TABLE _migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"#,
+            )
+            .expect("migrations table should create");
+            conn.execute_batch(MIGRATIONS[0].sql)
+                .expect("version 1 schema should apply");
+            conn.execute(
+                "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, datetime('now'))",
+                params![MIGRATIONS[0].version, MIGRATIONS[0].name],
+            )
+            .expect("version 1 should record");
+
+            // Columns added by later migrations must be absent before the upgrade.
+            assert!(!column_exists(&conn, "users", "last_login_at"));
+            assert!(!column_exists(&conn, "sales", "document_type"));
+            assert!(!column_exists(
+                &conn,
+                "products",
+                "external_source_provider"
+            ));
+
+            // The real installed-base upgrade path.
+            run_migrations(&mut conn).expect("forward migration should succeed");
+
+            let applied: i64 = conn
+                .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
+                .expect("migration count should query");
+            assert_eq!(applied, MIGRATIONS.len() as i64);
+
+            assert!(column_exists(&conn, "users", "last_login_at"));
+            assert!(column_exists(&conn, "sales", "document_type"));
+            assert!(column_exists(&conn, "products", "external_source_provider"));
+
+            // Re-running migrations on an up-to-date database is a no-op.
+            run_migrations(&mut conn).expect("re-running migrations should be a no-op");
+            let applied_again: i64 = conn
+                .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
+                .expect("migration count should query");
+            assert_eq!(applied_again, MIGRATIONS.len() as i64);
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+}

@@ -129,6 +129,7 @@ export function AppShell({ services }: AppShellProps) {
       ? { status: "loading" }
       : { status: "ready", session: initialSession },
   );
+  const [companyName, setCompanyName] = useState("VantumPOS");
   const activeItem =
     navigationItems.find((item) => item.id === activeId) ?? navigationItems[0];
 
@@ -159,6 +160,27 @@ export function AppShell({ services }: AppShellProps) {
       ignore = true;
     };
   }, [initialSession, services]);
+
+  useEffect(() => {
+    let ignore = false;
+
+    services.settings
+      .getCompanySettings()
+      .then((company) => {
+        if (ignore) {
+          return;
+        }
+        const name = company.shopName.trim();
+        setCompanyName(name.length > 0 ? name : "VantumPOS");
+      })
+      .catch(() => {
+        // Keep the default branding if company settings cannot be read.
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [services]);
 
   if (sessionState.status === "loading") {
     return (
@@ -208,7 +230,7 @@ export function AppShell({ services }: AppShellProps) {
                 <StoreIcon aria-hidden="true" />
               </div>
               <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-                <div className="truncate text-sm font-medium">VantumPOS</div>
+                <div className="truncate text-sm font-medium">{companyName}</div>
                 <div className="truncate text-xs text-sidebar-foreground/70">
                   Lokalna kasa
                 </div>

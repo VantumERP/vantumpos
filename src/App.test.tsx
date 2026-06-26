@@ -15,10 +15,21 @@ const readyHealth = {
   migrated: true,
 };
 
+const readyCompany = {
+  shopName: "Vantum Market",
+  address: "Bulevar 1, Beograd",
+  pib: "",
+  registrationNumber: "87654321",
+  phone: "+381 11 123 456",
+  logoPath: null,
+  currency: "RSD" as const,
+};
+
 function buildAuthServices(overrides: Record<string, unknown> = {}) {
   return {
     settings: {
       getHealth: vi.fn().mockResolvedValue(readyHealth),
+      getCompanySettings: vi.fn().mockResolvedValue(readyCompany),
     },
     auth: {
       getSession: vi.fn().mockResolvedValue(null),
@@ -234,6 +245,37 @@ describe("AppShell", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "Lokalna baza spremna",
     );
+  });
+
+  it("shows the company shop name as the shell brand", async () => {
+    render(<AppShell services={createMockServices()} />);
+
+    expect(await screen.findByText("Vantum Market")).toBeInTheDocument();
+    expect(screen.queryByText("VantumPOS")).not.toBeInTheDocument();
+  });
+
+  it("keeps default branding when company settings cannot be read", async () => {
+    const getCompanySettings = vi.fn().mockRejectedValue({
+      code: "database_error",
+      message: "Baza nije dostupna.",
+    });
+    const services = buildAuthServices({
+      auth: {
+        getSession: vi.fn().mockResolvedValue(adminSession),
+        login: vi.fn(),
+        logout: vi.fn().mockResolvedValue(undefined),
+      },
+      settings: {
+        getHealth: vi.fn().mockResolvedValue(readyHealth),
+        getCompanySettings,
+      },
+    });
+
+    render(<AppShell services={services} />);
+
+    expect(await screen.findByText("Administrator")).toBeInTheDocument();
+    await waitFor(() => expect(getCompanySettings).toHaveBeenCalled());
+    expect(screen.getByText("VantumPOS")).toBeInTheDocument();
   });
 
   it("renders a stable fallback when backend health fails", async () => {
