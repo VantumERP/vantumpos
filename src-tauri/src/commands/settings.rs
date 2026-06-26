@@ -196,6 +196,7 @@ pub fn save_company_settings(
     state: &AppState,
     request: CompanySettingsRequest,
 ) -> Result<CompanySettings, AppError> {
+    super::auth::require_admin(state)?;
     validate_company_request(&request)?;
 
     let settings = CompanySettings {
@@ -228,6 +229,7 @@ pub fn list_tax_rates(state: &AppState) -> Result<Vec<TaxRate>, AppError> {
 }
 
 pub fn save_tax_rate(state: &AppState, request: SaveTaxRateRequest) -> Result<TaxRate, AppError> {
+    super::auth::require_admin(state)?;
     validate_tax_rate_request(&request)?;
 
     let mut conn = state.db().open()?;
@@ -429,6 +431,8 @@ mod tests {
     #[test]
     fn company_settings_round_trip_persists_json_value() {
         with_state("company_settings_round_trip_persists_json_value", |state| {
+            sign_in_admin(state);
+
             let saved = save_company_settings(
                 state,
                 CompanySettingsRequest {
@@ -455,6 +459,8 @@ mod tests {
     #[test]
     fn company_settings_reject_invalid_pib() {
         with_state("company_settings_reject_invalid_pib", |state| {
+            sign_in_admin(state);
+
             let error = save_company_settings(
                 state,
                 CompanySettingsRequest {
@@ -476,10 +482,35 @@ mod tests {
     }
 
     #[test]
+    fn company_settings_update_rejected_for_cashier() {
+        with_state("company_settings_update_rejected_for_cashier", |state| {
+            sign_in_cashier(state);
+
+            let error = save_company_settings(
+                state,
+                CompanySettingsRequest {
+                    shop_name: "Vantum Market".to_string(),
+                    address: "Bulevar 1, Beograd".to_string(),
+                    pib: "123456789".to_string(),
+                    registration_number: "87654321".to_string(),
+                    phone: "+381 11 123 456".to_string(),
+                    logo_path: None,
+                    currency: "RSD".to_string(),
+                },
+            )
+            .expect_err("cashier should not update company settings");
+
+            assert_eq!(error.code(), "forbidden");
+        });
+    }
+
+    #[test]
     fn tax_rate_create_and_update_persists_active_state() {
         with_state(
             "tax_rate_create_and_update_persists_active_state",
             |state| {
+                sign_in_admin(state);
+
                 let created = save_tax_rate(
                     state,
                     SaveTaxRateRequest {
@@ -514,6 +545,8 @@ mod tests {
     #[test]
     fn tax_rate_deactivate_keeps_row_in_list() {
         with_state("tax_rate_deactivate_keeps_row_in_list", |state| {
+            sign_in_admin(state);
+
             let created = save_tax_rate(
                 state,
                 SaveTaxRateRequest {
@@ -549,6 +582,8 @@ mod tests {
     #[test]
     fn tax_rate_update_unknown_id_returns_not_found() {
         with_state("tax_rate_update_unknown_id_returns_not_found", |state| {
+            sign_in_admin(state);
+
             let error = save_tax_rate(
                 state,
                 SaveTaxRateRequest {
@@ -563,6 +598,26 @@ mod tests {
             let command_error: crate::app_error::CommandError = error.into();
 
             assert_eq!(command_error.code, "not_found");
+        });
+    }
+
+    #[test]
+    fn tax_rate_save_rejected_for_cashier() {
+        with_state("tax_rate_save_rejected_for_cashier", |state| {
+            sign_in_cashier(state);
+
+            let error = save_tax_rate(
+                state,
+                SaveTaxRateRequest {
+                    id: None,
+                    name: "PDV 20".to_string(),
+                    rate_basis_points: 2000,
+                    active: true,
+                },
+            )
+            .expect_err("cashier should not save tax rates");
+
+            assert_eq!(error.code(), "forbidden");
         });
     }
 
