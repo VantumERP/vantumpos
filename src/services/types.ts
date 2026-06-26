@@ -486,6 +486,8 @@ export interface ReturnItemsRequest {
 export interface ReportDateQuery {
   from: string;
   to: string;
+  shiftId?: number | null;
+  cashierId?: number | null;
 }
 
 export interface ProductSalesQuery extends ReportDateQuery {

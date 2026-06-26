@@ -13,7 +13,7 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -66,6 +66,7 @@ import type {
   ProductSalesReport,
   ReportDateQuery,
   ShiftTurnoverReport,
+  UserAccount,
 } from "@/services/types";
 
 const turnoverChartConfig = {
@@ -95,10 +96,15 @@ interface ReportsData {
 
 interface ReportsScreenProps {
   reports: ReportsService;
+  currentUser: UserAccount;
   initialQuery?: ReportDateQuery;
 }
 
-export function ReportsScreen({ reports, initialQuery }: ReportsScreenProps) {
+export function ReportsScreen({
+  reports,
+  currentUser,
+  initialQuery,
+}: ReportsScreenProps) {
   const defaultQuery = useMemo(() => initialQuery ?? todayQuery(), [initialQuery]);
   const [filters, setFilters] = useState<ReportDateQuery>(defaultQuery);
   const [appliedQuery, setAppliedQuery] = useState<ReportDateQuery>(defaultQuery);
@@ -151,11 +157,19 @@ export function ReportsScreen({ reports, initialQuery }: ReportsScreenProps) {
   );
 
   useEffect(() => {
+    if (currentUser.role !== "admin") {
+      return;
+    }
     void loadReports(defaultQuery);
-  }, [defaultQuery, loadReports]);
+  }, [currentUser.role, defaultQuery, loadReports]);
 
   function applyFilters(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const validationError = validateDateRange(filters);
+    if (validationError) {
+      setErrorMessage(validationError);
+      return;
+    }
     void loadReports(filters);
   }
 
@@ -173,6 +187,17 @@ export function ReportsScreen({ reports, initialQuery }: ReportsScreenProps) {
         description: errorToMessage(error),
       });
     }
+  }
+
+  if (currentUser.role !== "admin") {
+    return (
+      <Alert>
+        <AlertTitle>Izvestaji</AlertTitle>
+        <AlertDescription>
+          Samo administrator moze da vidi izvestaje.
+        </AlertDescription>
+      </Alert>
+    );
   }
 
   return (
@@ -670,6 +695,16 @@ function ReportsLoading() {
 function todayQuery(): ReportDateQuery {
   const today = new Date().toISOString().slice(0, 10);
   return { from: today, to: today };
+}
+
+function validateDateRange(query: ReportDateQuery): string | null {
+  if (!query.from || !query.to) {
+    return "Izaberite pocetni i krajnji datum.";
+  }
+  if (query.from > query.to) {
+    return "Pocetni datum ne sme biti posle krajnjeg datuma.";
+  }
+  return null;
 }
 
 function toProductSalesQuery(query: ReportDateQuery): ProductSalesQuery {

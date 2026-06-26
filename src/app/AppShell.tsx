@@ -379,7 +379,9 @@ function renderModule({
   }
 
   if (activeId === "reports") {
-    return <ReportsScreen reports={services.reports} />;
+    return (
+      <ReportsScreen reports={services.reports} currentUser={session.user} />
+    );
   }
 
   if (activeId === "inventory") {

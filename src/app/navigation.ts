@@ -42,6 +42,7 @@ export const navigationItems = [
     id: "reports",
     label: "Izvestaji",
     icon: BarChart3Icon,
+    adminOnly: true,
   },
   {
     id: "import",

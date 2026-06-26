@@ -74,4 +74,20 @@ describe("reports service adapter", () => {
       request: { reportType: "dailyTurnover", query: productQuery },
     });
   });
+
+  it("forwards shift and cashier filters in the query envelope", async () => {
+    const invoke = vi.fn().mockResolvedValue({ rows: [] });
+    const services = createLocalServices(invoke);
+
+    await services.reports.getShiftTurnover({
+      from: "2026-06-17",
+      to: "2026-06-17",
+      shiftId: 1,
+      cashierId: 2,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("reports_shift_turnover", {
+      query: { from: "2026-06-17", to: "2026-06-17", shiftId: 1, cashierId: 2 },
+    });
+  });
 });

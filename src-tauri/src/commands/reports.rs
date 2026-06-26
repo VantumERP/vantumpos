@@ -13,6 +13,8 @@ use crate::state::AppState;
 pub struct ReportDateQuery {
     pub from: String,
     pub to: String,
+    pub shift_id: Option<i64>,
+    pub cashier_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -29,6 +31,8 @@ impl ProductSalesQuery {
         ReportDateQuery {
             from: self.from.clone(),
             to: self.to.clone(),
+            shift_id: None,
+            cashier_id: None,
         }
     }
 }
@@ -382,24 +386,29 @@ JOIN users u ON u.id = sh.user_id
 JOIN sales s ON s.shift_id = sh.id
 LEFT JOIN sale_payments sp ON sp.sale_id = s.id
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
+  AND (?3 IS NULL OR sh.id = ?3)
+  AND (?4 IS NULL OR sh.user_id = ?4)
 GROUP BY sh.id, sh.opened_at, sh.closed_at, u.display_name
 ORDER BY sh.opened_at DESC
 "#,
     )?;
 
     let rows = statement
-        .query_map(params![query.from, query.to], |row| {
-            Ok(ShiftTurnoverRow {
-                shift_id: row.get(0)?,
-                opened_at: row.get(1)?,
-                closed_at: row.get(2)?,
-                cashier_name: row.get(3)?,
-                receipt_count: row.get(4)?,
-                cash_minor: row.get(5)?,
-                card_minor: row.get(6)?,
-                total_minor: row.get(7)?,
-            })
-        })?
+        .query_map(
+            params![query.from, query.to, query.shift_id, query.cashier_id],
+            |row| {
+                Ok(ShiftTurnoverRow {
+                    shift_id: row.get(0)?,
+                    opened_at: row.get(1)?,
+                    closed_at: row.get(2)?,
+                    cashier_name: row.get(3)?,
+                    receipt_count: row.get(4)?,
+                    cash_minor: row.get(5)?,
+                    card_minor: row.get(6)?,
+                    total_minor: row.get(7)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(ShiftTurnoverReport { rows })
@@ -419,20 +428,25 @@ SELECT
 FROM users u
 JOIN sales s ON s.cashier_id = u.id
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
+  AND (?3 IS NULL OR s.shift_id = ?3)
+  AND (?4 IS NULL OR u.id = ?4)
 GROUP BY u.id, u.display_name
 ORDER BY total_minor DESC, u.display_name
 "#,
     )?;
 
     let rows = statement
-        .query_map(params![query.from, query.to], |row| {
-            Ok(CashierTurnoverRow {
-                cashier_id: row.get(0)?,
-                cashier_name: row.get(1)?,
-                receipt_count: row.get(2)?,
-                total_minor: row.get(3)?,
-            })
-        })?
+        .query_map(
+            params![query.from, query.to, query.shift_id, query.cashier_id],
+            |row| {
+                Ok(CashierTurnoverRow {
+                    cashier_id: row.get(0)?,
+                    cashier_name: row.get(1)?,
+                    receipt_count: row.get(2)?,
+                    total_minor: row.get(3)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(CashierTurnoverReport { rows })
@@ -1055,6 +1069,8 @@ mod tests {
                     &super::ReportDateQuery {
                         from: "2026-06-17".to_string(),
                         to: "2026-06-17".to_string(),
+                        shift_id: None,
+                        cashier_id: None,
                     },
                 )
                 .expect("daily turnover should query");
@@ -1079,6 +1095,8 @@ mod tests {
                     &super::ReportDateQuery {
                         from: "2026-06-17".to_string(),
                         to: "2026-06-17".to_string(),
+                        shift_id: None,
+                        cashier_id: None,
                     },
                 )
                 .expect("payment methods should query");
@@ -1136,6 +1154,69 @@ mod tests {
                     report.rows[0].last_movement_at.as_deref(),
                     Some("2026-06-17T12:00:00Z")
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn query_shift_turnover_filters_by_shift_id() {
+        with_seeded_reports_database("query_shift_turnover_filters_by_shift_id", |connection| {
+            let matched = super::query_shift_turnover(
+                connection,
+                &super::ReportDateQuery {
+                    from: "2026-06-17".to_string(),
+                    to: "2026-06-17".to_string(),
+                    shift_id: Some(1),
+                    cashier_id: None,
+                },
+            )
+            .expect("shift turnover should query");
+            assert_eq!(matched.rows.len(), 1);
+            assert_eq!(matched.rows[0].shift_id, 1);
+
+            let unmatched = super::query_shift_turnover(
+                connection,
+                &super::ReportDateQuery {
+                    from: "2026-06-17".to_string(),
+                    to: "2026-06-17".to_string(),
+                    shift_id: Some(999),
+                    cashier_id: None,
+                },
+            )
+            .expect("shift turnover should query");
+            assert!(unmatched.rows.is_empty());
+        });
+    }
+
+    #[test]
+    fn query_cashier_turnover_filters_by_cashier_id() {
+        with_seeded_reports_database(
+            "query_cashier_turnover_filters_by_cashier_id",
+            |connection| {
+                let matched = super::query_cashier_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: None,
+                        cashier_id: Some(2),
+                    },
+                )
+                .expect("cashier turnover should query");
+                assert_eq!(matched.rows.len(), 1);
+                assert_eq!(matched.rows[0].cashier_id, 2);
+
+                let unmatched = super::query_cashier_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: None,
+                        cashier_id: Some(999),
+                    },
+                )
+                .expect("cashier turnover should query");
+                assert!(unmatched.rows.is_empty());
             },
         );
     }
