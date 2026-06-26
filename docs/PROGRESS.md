@@ -60,10 +60,14 @@ with a consistent negative-stock guard; the shell header silently falls back to 
 diagnostic warn) if the company read fails; the forward-migration regression test now asserts real v1 data
 survives the v2 table rebuild.
 
-**Deferred (non-blocking, documented):** the shift/cashier report filters are plumbed end-to-end in the
-backend + adapter but have no UI selects yet (the Reports module Acceptance Criteria mandate only date
-filters); surfacing the selects (and a source list of shifts/cashiers) is a follow-up enhancement. Minor
-review nits (logged during execution) are non-blocking.
+**Follow-up shipped (2026-06-26):** the shift/cashier report filters are now surfaced in the UI — two
+selects ("Smena" / "Kasir", default "Sve smene" / "Svi kasiri" = unfiltered) on the Reports screen, with
+a dedicated admin-gated `reports_list_shifts` command sourcing the shift list and `users_list` sourcing
+the cashiers. The filters apply across **all sales-derived sections** (daily turnover, payments, product
+and category sales, and CSV export); `query_low_stock` is intentionally unfiltered (inventory state).
+Branch `feat/reports-shift-cashier-filters` (commits `7d8174e`, `e9c6e5e`), all gates green (bun 95,
+cargo 103), reviewed Ready to merge. Remaining minor review nits (logged during execution) are
+non-blocking.
 
 ---
 
