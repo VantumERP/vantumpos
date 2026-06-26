@@ -24,6 +24,8 @@ pub struct ProductSalesQuery {
     pub to: String,
     pub category_id: Option<i64>,
     pub product_id: Option<i64>,
+    pub shift_id: Option<i64>,
+    pub cashier_id: Option<i64>,
 }
 
 impl ProductSalesQuery {
@@ -31,8 +33,8 @@ impl ProductSalesQuery {
         ReportDateQuery {
             from: self.from.clone(),
             to: self.to.clone(),
-            shift_id: None,
-            cashier_id: None,
+            shift_id: self.shift_id,
+            cashier_id: self.cashier_id,
         }
     }
 }
@@ -324,6 +326,8 @@ SELECT
         JOIN sale_payments sp ON sp.sale_id = ps.id
         WHERE substr(ps.created_at, 1, 10) = substr(s.created_at, 1, 10)
           AND substr(ps.created_at, 1, 10) BETWEEN ?1 AND ?2
+          AND (?3 IS NULL OR ps.shift_id = ?3)
+          AND (?4 IS NULL OR ps.cashier_id = ?4)
           AND sp.payment_method = 'cash'
     ) AS cash_minor,
     (
@@ -334,6 +338,8 @@ SELECT
         JOIN sale_payments sp ON sp.sale_id = ps.id
         WHERE substr(ps.created_at, 1, 10) = substr(s.created_at, 1, 10)
           AND substr(ps.created_at, 1, 10) BETWEEN ?1 AND ?2
+          AND (?3 IS NULL OR ps.shift_id = ?3)
+          AND (?4 IS NULL OR ps.cashier_id = ?4)
           AND sp.payment_method = 'card'
     ) AS card_minor,
     SUM(CASE WHEN s.status = 'completed' THEN s.total_minor ELSE -s.total_minor END) AS total_minor,
@@ -341,23 +347,28 @@ SELECT
     SUM(CASE WHEN s.status <> 'completed' THEN 1 ELSE 0 END) AS refunds_or_voids_count
 FROM sales s
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
+  AND (?3 IS NULL OR s.shift_id = ?3)
+  AND (?4 IS NULL OR s.cashier_id = ?4)
 GROUP BY day
 ORDER BY day
 "#,
     )?;
 
     let rows = statement
-        .query_map(params![query.from, query.to], |row| {
-            Ok(DailyTurnoverRow {
-                day: row.get(0)?,
-                receipt_count: row.get(1)?,
-                cash_minor: row.get(2)?,
-                card_minor: row.get(3)?,
-                total_minor: row.get(4)?,
-                refunds_or_voids_minor: row.get(5)?,
-                refunds_or_voids_count: row.get(6)?,
-            })
-        })?
+        .query_map(
+            params![query.from, query.to, query.shift_id, query.cashier_id],
+            |row| {
+                Ok(DailyTurnoverRow {
+                    day: row.get(0)?,
+                    receipt_count: row.get(1)?,
+                    cash_minor: row.get(2)?,
+                    card_minor: row.get(3)?,
+                    total_minor: row.get(4)?,
+                    refunds_or_voids_minor: row.get(5)?,
+                    refunds_or_voids_count: row.get(6)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let total_minor = rows.iter().map(|row| row.total_minor).sum();
@@ -489,19 +500,24 @@ SELECT
 FROM sale_payments sp
 JOIN sales s ON s.id = sp.sale_id
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
+  AND (?3 IS NULL OR s.shift_id = ?3)
+  AND (?4 IS NULL OR s.cashier_id = ?4)
 GROUP BY sp.payment_method
 ORDER BY CASE sp.payment_method WHEN 'cash' THEN 0 WHEN 'card' THEN 1 ELSE 2 END
 "#,
     )?;
 
     let rows = statement
-        .query_map(params![query.from, query.to], |row| {
-            Ok(PaymentMethodRow {
-                payment_method: row.get(0)?,
-                receipt_count: row.get(1)?,
-                total_minor: row.get(2)?,
-            })
-        })?
+        .query_map(
+            params![query.from, query.to, query.shift_id, query.cashier_id],
+            |row| {
+                Ok(PaymentMethodRow {
+                    payment_method: row.get(0)?,
+                    receipt_count: row.get(1)?,
+                    total_minor: row.get(2)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(PaymentMethodReport { rows })
@@ -534,6 +550,8 @@ LEFT JOIN products p ON p.id = si.product_id
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
   AND (?3 IS NULL OR p.category_id = ?3)
   AND (?4 IS NULL OR si.product_id = ?4)
+  AND (?5 IS NULL OR s.shift_id = ?5)
+  AND (?6 IS NULL OR s.cashier_id = ?6)
 GROUP BY si.product_id, si.product_name, si.product_sku
 ORDER BY revenue_minor DESC, si.product_name
 "#,
@@ -541,7 +559,14 @@ ORDER BY revenue_minor DESC, si.product_name
 
     let rows = statement
         .query_map(
-            params![query.from, query.to, query.category_id, query.product_id],
+            params![
+                query.from,
+                query.to,
+                query.category_id,
+                query.product_id,
+                query.shift_id,
+                query.cashier_id
+            ],
             |row| {
                 Ok(ProductSalesRow {
                     product_id: row.get(0)?,
@@ -584,22 +609,27 @@ JOIN sales s ON s.id = si.sale_id
 LEFT JOIN products p ON p.id = si.product_id
 LEFT JOIN categories c ON c.id = p.category_id
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
+  AND (?3 IS NULL OR s.shift_id = ?3)
+  AND (?4 IS NULL OR s.cashier_id = ?4)
 GROUP BY c.id, category_name
 ORDER BY revenue_minor DESC, category_name
 "#,
     )?;
 
     let rows = statement
-        .query_map(params![query.from, query.to], |row| {
-            Ok(CategorySalesRow {
-                category_id: row.get(0)?,
-                category_name: row.get(1)?,
-                quantity_milli: row.get(2)?,
-                revenue_minor: row.get(3)?,
-                discount_minor: row.get(4)?,
-                estimated_margin_minor: row.get(5)?,
-            })
-        })?
+        .query_map(
+            params![query.from, query.to, query.shift_id, query.cashier_id],
+            |row| {
+                Ok(CategorySalesRow {
+                    category_id: row.get(0)?,
+                    category_name: row.get(1)?,
+                    quantity_milli: row.get(2)?,
+                    revenue_minor: row.get(3)?,
+                    discount_minor: row.get(4)?,
+                    estimated_margin_minor: row.get(5)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(CategorySalesReport { rows })
@@ -1192,6 +1222,8 @@ mod tests {
                         to: "2026-06-17".to_string(),
                         category_id: None,
                         product_id: None,
+                        shift_id: None,
+                        cashier_id: None,
                     },
                 )
                 .expect("product sales should query");
@@ -1308,6 +1340,206 @@ mod tests {
     }
 
     #[test]
+    fn query_daily_turnover_filters_by_shift_and_cashier() {
+        with_seeded_reports_database(
+            "query_daily_turnover_filters_by_shift_and_cashier",
+            |connection| {
+                let by_shift = super::query_daily_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: Some(1),
+                        cashier_id: None,
+                    },
+                )
+                .expect("daily turnover should query");
+                assert_eq!(by_shift.rows.len(), 1);
+                assert_eq!(by_shift.summary.total_minor, 12_000);
+                assert_eq!(by_shift.summary.cash_minor, 8_000);
+                assert_eq!(by_shift.summary.card_minor, 4_000);
+
+                let by_cashier = super::query_daily_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: None,
+                        cashier_id: Some(2),
+                    },
+                )
+                .expect("daily turnover should query");
+                assert_eq!(by_cashier.rows.len(), 1);
+                assert_eq!(by_cashier.summary.total_minor, 12_000);
+
+                let unmatched_shift = super::query_daily_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: Some(999),
+                        cashier_id: None,
+                    },
+                )
+                .expect("daily turnover should query");
+                assert!(unmatched_shift.rows.is_empty());
+                assert_eq!(unmatched_shift.summary.total_minor, 0);
+
+                let unmatched_cashier = super::query_daily_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: None,
+                        cashier_id: Some(999),
+                    },
+                )
+                .expect("daily turnover should query");
+                assert!(unmatched_cashier.rows.is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn query_payment_methods_filters_by_shift_and_cashier() {
+        with_seeded_reports_database(
+            "query_payment_methods_filters_by_shift_and_cashier",
+            |connection| {
+                let matched = super::query_payment_methods(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: Some(1),
+                        cashier_id: Some(2),
+                    },
+                )
+                .expect("payment methods should query");
+                assert_eq!(matched.rows.len(), 2);
+
+                let unmatched_shift = super::query_payment_methods(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: Some(999),
+                        cashier_id: None,
+                    },
+                )
+                .expect("payment methods should query");
+                assert!(unmatched_shift.rows.is_empty());
+
+                let unmatched_cashier = super::query_payment_methods(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: None,
+                        cashier_id: Some(999),
+                    },
+                )
+                .expect("payment methods should query");
+                assert!(unmatched_cashier.rows.is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn query_product_sales_filters_by_shift_and_cashier() {
+        with_seeded_reports_database(
+            "query_product_sales_filters_by_shift_and_cashier",
+            |connection| {
+                let matched = super::query_product_sales(
+                    connection,
+                    &super::ProductSalesQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        category_id: None,
+                        product_id: None,
+                        shift_id: Some(1),
+                        cashier_id: Some(2),
+                    },
+                )
+                .expect("product sales should query");
+                assert_eq!(matched.rows.len(), 2);
+
+                let unmatched_shift = super::query_product_sales(
+                    connection,
+                    &super::ProductSalesQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        category_id: None,
+                        product_id: None,
+                        shift_id: Some(999),
+                        cashier_id: None,
+                    },
+                )
+                .expect("product sales should query");
+                assert!(unmatched_shift.rows.is_empty());
+
+                let unmatched_cashier = super::query_product_sales(
+                    connection,
+                    &super::ProductSalesQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        category_id: None,
+                        product_id: None,
+                        shift_id: None,
+                        cashier_id: Some(999),
+                    },
+                )
+                .expect("product sales should query");
+                assert!(unmatched_cashier.rows.is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn query_category_sales_filters_by_shift_and_cashier() {
+        with_seeded_reports_database(
+            "query_category_sales_filters_by_shift_and_cashier",
+            |connection| {
+                let matched = super::query_category_sales(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: Some(1),
+                        cashier_id: Some(2),
+                    },
+                )
+                .expect("category sales should query");
+                assert_eq!(matched.rows.len(), 1);
+                assert_eq!(matched.rows[0].category_name, "Pica");
+
+                let unmatched_shift = super::query_category_sales(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: Some(999),
+                        cashier_id: None,
+                    },
+                )
+                .expect("category sales should query");
+                assert!(unmatched_shift.rows.is_empty());
+
+                let unmatched_cashier = super::query_category_sales(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-17".to_string(),
+                        to: "2026-06-17".to_string(),
+                        shift_id: None,
+                        cashier_id: Some(999),
+                    },
+                )
+                .expect("category sales should query");
+                assert!(unmatched_cashier.rows.is_empty());
+            },
+        );
+    }
+
+    #[test]
     fn export_report_csv_writes_daily_turnover_with_serbian_headers() {
         with_seeded_reports_database(
             "export_report_csv_writes_daily_turnover_with_serbian_headers",
@@ -1326,6 +1558,8 @@ mod tests {
                             to: "2026-06-17".to_string(),
                             category_id: None,
                             product_id: None,
+                            shift_id: None,
+                            cashier_id: None,
                         },
                     },
                 )
@@ -1372,6 +1606,13 @@ mod tests {
             .expect_err("cashier should not read reports");
 
             assert_eq!(error.code, "forbidden");
+
+            // The shift filter list is admin-only too, so its command wrapper must
+            // reject a cashier before any query runs.
+            let shifts_error = super::reports_list_shifts(app.state::<AppState>())
+                .expect_err("cashier should not list shifts");
+
+            assert_eq!(shifts_error.code, "forbidden");
         }
 
         fs::remove_file(&db_path).unwrap_or_else(|error| {

@@ -282,6 +282,61 @@ describe("ReportsScreen", () => {
     });
   });
 
+  it("clears the shift filter when the all option is chosen", async () => {
+    const user = userEvent.setup();
+    const reports = renderReports();
+
+    await screen.findByRole("heading", { name: "Dnevni promet" });
+    await user.click(screen.getByRole("combobox", { name: "Smena" }));
+    await user.click(
+      await screen.findByRole("option", {
+        name: "#1 - Mira Kasir (2026-06-17)",
+      }),
+    );
+    expect(reports.getShiftTurnover).toHaveBeenLastCalledWith({
+      from: "2026-06-17",
+      to: "2026-06-17",
+      shiftId: 1,
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Smena" }));
+    await user.click(await screen.findByRole("option", { name: "Sve smene" }));
+
+    expect(reports.getShiftTurnover).toHaveBeenLastCalledWith({
+      from: "2026-06-17",
+      to: "2026-06-17",
+      shiftId: null,
+    });
+  });
+
+  it("still renders and filters when the shift and user lists fail to load", async () => {
+    const user = userEvent.setup();
+    const reports = buildReportsService();
+    reports.listShifts = vi.fn().mockRejectedValue({
+      code: "database_error",
+      message: "Smene nisu dostupne.",
+    });
+    const users = buildUsersService();
+    users.listUsers = vi.fn().mockRejectedValue({
+      code: "database_error",
+      message: "Korisnici nisu dostupni.",
+    });
+    renderReports(reports, adminUser, users);
+
+    // The screen must remain usable even though the filter dropdowns stayed empty.
+    await screen.findByRole("heading", { name: "Dnevni promet" });
+    expect(screen.getByRole("combobox", { name: "Smena" })).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText("Od datuma"));
+    await user.type(screen.getByLabelText("Od datuma"), "2026-06-16");
+    await user.click(screen.getByRole("button", { name: "Primeni filtere" }));
+
+    expect(reports.getDailyTurnover).toHaveBeenLastCalledWith({
+      from: "2026-06-16",
+      to: "2026-06-17",
+    });
+  });
+
   it("exports the active report as CSV and shows the exported path", async () => {
     const user = userEvent.setup();
     const reports = renderReports();
