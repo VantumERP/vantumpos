@@ -422,7 +422,7 @@ JOIN sales s ON s.shift_id = sh.id
 LEFT JOIN sale_payments sp ON sp.sale_id = s.id
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
   AND (?3 IS NULL OR sh.id = ?3)
-  AND (?4 IS NULL OR sh.user_id = ?4)
+  AND (?4 IS NULL OR s.cashier_id = ?4)
 GROUP BY sh.id, sh.opened_at, sh.closed_at, u.display_name
 ORDER BY sh.opened_at DESC
 "#,
@@ -1157,6 +1157,176 @@ mod tests {
                 )
                 .expect("sale item should insert");
         }
+    }
+
+    fn with_cross_cashier_reports_database(test_name: &str, test: impl FnOnce(&Connection)) {
+        let db_path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&db_path).expect("database should initialize");
+            let connection = db.open().expect("database should open");
+            seed_cross_cashier_reports_data(&connection);
+            test(&connection);
+        }
+
+        fs::remove_file(&db_path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                db_path.display()
+            )
+        });
+    }
+
+    /// Seeds two shifts on the SAME day whose owners differ from the cashier who
+    /// rang the sale inside them, with opposite cash/card splits. This lets a
+    /// single test prove that (a) the daily-turnover cash/card correlated
+    /// subqueries honour the shift/cashier filter and (b) shift turnover scopes a
+    /// cashier filter to the SALE's cashier rather than the shift owner.
+    fn seed_cross_cashier_reports_data(connection: &Connection) {
+        for (id, username, display_name) in [(10, "ana", "Ana Anic"), (11, "bojan", "Bojan Bojic")]
+        {
+            connection
+                .execute(
+                    "INSERT INTO users (id, username, display_name, role, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'cashier', '2026-06-20T07:00:00Z', '2026-06-20T07:00:00Z')",
+                    params![id, username, display_name],
+                )
+                .expect("cashier should insert");
+        }
+
+        // Shift 10 is owned by Ana (10); shift 11 is owned by Bojan (11).
+        for (shift_id, owner_id) in [(10, 10), (11, 11)] {
+            connection
+                .execute(
+                    "INSERT INTO shifts (
+                        id,
+                        user_id,
+                        opened_at,
+                        opening_cash_minor,
+                        expected_cash_minor,
+                        status,
+                        created_at,
+                        updated_at
+                     )
+                     VALUES (?1, ?2, '2026-06-20T07:30:00Z', 0, 0, 'open', '2026-06-20T07:30:00Z', '2026-06-20T07:30:00Z')",
+                    params![shift_id, owner_id],
+                )
+                .expect("shift should insert");
+        }
+
+        // Each sale is rung by the OTHER cashier (not the shift owner) and uses a
+        // distinct payment method, so filtering by shift or cashier changes the
+        // cash/card totals relative to the unfiltered population.
+        for (sale_id, receipt, shift_id, cashier_id, total, method) in [
+            (100, "X-100", 10, 11, 1_000, "cash"),
+            (200, "X-200", 11, 10, 1_000, "card"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO sales (
+                        id,
+                        local_receipt_number,
+                        shift_id,
+                        cashier_id,
+                        status,
+                        fiscal_status,
+                        subtotal_minor,
+                        discount_minor,
+                        tax_minor,
+                        total_minor,
+                        created_at,
+                        updated_at
+                     )
+                     VALUES (?1, ?2, ?3, ?4, 'completed', 'not_fiscalized', ?5, 0, 0, ?5, '2026-06-20T09:00:00Z', '2026-06-20T09:00:00Z')",
+                    params![sale_id, receipt, shift_id, cashier_id, total],
+                )
+                .expect("sale should insert");
+
+            connection
+                .execute(
+                    "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                     VALUES (?1, ?2, ?3, '2026-06-20T09:00:00Z')",
+                    params![sale_id, method, total],
+                )
+                .expect("payment should insert");
+        }
+    }
+
+    #[test]
+    fn turnover_filters_scope_to_sale_cashier_not_shift_owner() {
+        with_cross_cashier_reports_database(
+            "turnover_filters_scope_to_sale_cashier_not_shift_owner",
+            |connection| {
+                // Unfiltered daily turnover sees both sales: one cash, one card.
+                let all = super::query_daily_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-20".to_string(),
+                        to: "2026-06-20".to_string(),
+                        shift_id: None,
+                        cashier_id: None,
+                    },
+                )
+                .expect("daily turnover should query");
+                assert_eq!(all.summary.cash_minor, 1_000);
+                assert_eq!(all.summary.card_minor, 1_000);
+                assert_eq!(all.summary.total_minor, 2_000);
+
+                // Filtering by shift 10 (all-cash) must scope the cash/card
+                // correlated subqueries too, not just the outer total. If the
+                // subquery filter regressed, card_minor would still surface the
+                // other shift's 1_000.
+                let by_shift = super::query_daily_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-20".to_string(),
+                        to: "2026-06-20".to_string(),
+                        shift_id: Some(10),
+                        cashier_id: None,
+                    },
+                )
+                .expect("daily turnover should query");
+                assert_eq!(by_shift.summary.cash_minor, 1_000);
+                assert_eq!(by_shift.summary.card_minor, 0);
+                assert_eq!(by_shift.summary.total_minor, 1_000);
+
+                // Bojan (11) only rang the all-cash sale inside Ana's shift, so the
+                // cashier filter must likewise scope the cash/card subqueries.
+                let by_cashier = super::query_daily_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-20".to_string(),
+                        to: "2026-06-20".to_string(),
+                        shift_id: None,
+                        cashier_id: Some(11),
+                    },
+                )
+                .expect("daily turnover should query");
+                assert_eq!(by_cashier.summary.cash_minor, 1_000);
+                assert_eq!(by_cashier.summary.card_minor, 0);
+                assert_eq!(by_cashier.summary.total_minor, 1_000);
+
+                // Fix 1: shift turnover filtered by a cashier must match the sale's
+                // cashier, so Bojan (11) maps to Ana's shift (10) where he rang a
+                // sale, NOT to his own shift (11) where Ana rang the sale.
+                let shifts = super::query_shift_turnover(
+                    connection,
+                    &super::ReportDateQuery {
+                        from: "2026-06-20".to_string(),
+                        to: "2026-06-20".to_string(),
+                        shift_id: None,
+                        cashier_id: Some(11),
+                    },
+                )
+                .expect("shift turnover should query");
+                assert_eq!(shifts.rows.len(), 1);
+                assert_eq!(shifts.rows[0].shift_id, 10);
+                assert_eq!(shifts.rows[0].cashier_name, "Ana Anic");
+                assert_eq!(shifts.rows[0].cash_minor, 1_000);
+                assert_eq!(shifts.rows[0].card_minor, 0);
+                assert_eq!(shifts.rows[0].total_minor, 1_000);
+            },
+        );
     }
 
     #[test]
