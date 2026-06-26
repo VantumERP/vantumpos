@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
+use crate::commands::inventory::{write_stock_movement, StockMovementWrite};
 use crate::commands::settings::{ReceiptSettings, RECEIPT_SETTINGS_KEY};
 use crate::db::Db;
 use crate::state::AppState;
@@ -258,34 +259,18 @@ pub fn complete_sale_transaction(
             ],
         )?;
 
-        let movement_quantity = -line.quantity_milli;
-        tx.execute(
-            "INSERT INTO inventory_movements (
-                product_id,
-                movement_type,
-                quantity_milli,
-                reason,
-                reference_type,
-                reference_id,
-                user_id,
-                created_at
-             )
-             VALUES (?1, 'sale', ?2, 'Prodaja', 'sale', ?3, ?4, ?5)",
-            params![
-                line.product.id,
-                movement_quantity,
-                sale_id,
-                shift.cashier_id,
-                created_at
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO inventory_balances (product_id, quantity_milli, updated_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(product_id) DO UPDATE SET
-                 quantity_milli = inventory_balances.quantity_milli + excluded.quantity_milli,
-                 updated_at = excluded.updated_at",
-            params![line.product.id, movement_quantity, created_at],
+        write_stock_movement(
+            &tx,
+            StockMovementWrite {
+                product_id: line.product.id,
+                movement_type: "sale",
+                quantity_milli: -line.quantity_milli,
+                reason: Some("Prodaja"),
+                reference_type: Some("sale"),
+                reference_id: Some(sale_id),
+                user_id: Some(shift.cashier_id),
+                created_at: &created_at,
+            },
         )?;
     }
 
@@ -981,6 +966,53 @@ mod tests {
 
         assert_eq!(sale_count, 0);
         assert_eq!(balance, 1000);
+
+        let _ = std::fs::remove_file(seeded.db_path);
+    }
+
+    #[test]
+    fn complete_sale_transaction_decrements_repeated_product_lines_consistently() {
+        let seeded = seed_sale_data(5000, true);
+        let request = CompleteSaleRequest {
+            items: vec![
+                SaleDraftItem {
+                    product_id: seeded.product_id,
+                    quantity_milli: 2000,
+                    discount: None,
+                },
+                SaleDraftItem {
+                    product_id: seeded.product_id,
+                    quantity_milli: 1000,
+                    discount: None,
+                },
+            ],
+            receipt_discount: Some(DiscountRequest::Amount { amount_minor: 0 }),
+            payments: vec![PaymentDraft {
+                method: PaymentMethod::Cash,
+                amount_minor: 40000,
+            }],
+        };
+
+        complete_sale_transaction(&seeded.db, request).expect("sale should complete");
+
+        let connection = seeded.db.open().expect("database should open");
+        let balance: i64 = connection
+            .query_row(
+                "SELECT quantity_milli FROM inventory_balances WHERE product_id = ?1",
+                params![seeded.product_id],
+                |row| row.get(0),
+            )
+            .expect("balance should query");
+        assert_eq!(balance, 2000);
+
+        let movement_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM inventory_movements WHERE product_id = ?1",
+                params![seeded.product_id],
+                |row| row.get(0),
+            )
+            .expect("movement count should query");
+        assert_eq!(movement_count, 2);
 
         let _ = std::fs::remove_file(seeded.db_path);
     }

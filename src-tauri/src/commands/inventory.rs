@@ -303,22 +303,33 @@ ORDER BY created_at ASC, id ASC
     })
 }
 
-pub fn apply_inventory_adjustment(
-    connection: &mut Connection,
-    movement_type: InventoryMovementType,
-    request: InventoryAdjustmentRequest,
-    created_at: &str,
-) -> Result<InventoryAdjustmentResult, AppError> {
-    validate_adjustment_request(movement_type, &request)?;
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StockMovementWrite<'a> {
+    pub product_id: i64,
+    pub movement_type: &'a str,
+    pub quantity_milli: i64,
+    pub reason: Option<&'a str>,
+    pub reference_type: Option<&'a str>,
+    pub reference_id: Option<i64>,
+    pub user_id: Option<i64>,
+    pub created_at: &'a str,
+}
 
-    let delta_quantity_milli = match movement_type {
-        InventoryMovementType::Receive => request.quantity_milli,
-        InventoryMovementType::Correction => request.quantity_milli,
-        InventoryMovementType::WriteOff => request.quantity_milli.saturating_neg(),
-    };
-    let reason = normalized_optional_text(request.reason.as_deref());
-    let reference_type = normalized_optional_text(request.reference_type.as_deref());
-    let tx = connection.transaction()?;
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StockWriteOutcome {
+    pub movement_id: i64,
+    pub previous_quantity_milli: i64,
+    pub new_quantity_milli: i64,
+}
+
+/// Single source of truth for `inventory_movements` + `inventory_balances`
+/// writes, shared by the inventory-adjustment path and the sales path so the
+/// two cannot drift in balance math or negative-stock rules. The caller must
+/// supply an already-open transaction; this function does not commit.
+pub(crate) fn write_stock_movement(
+    tx: &Connection,
+    write: StockMovementWrite<'_>,
+) -> Result<StockWriteOutcome, AppError> {
     let (previous_quantity_milli, allow_negative_stock): (i64, bool) = tx
         .query_row(
             r#"
@@ -327,13 +338,14 @@ FROM products p
 LEFT JOIN inventory_balances ib ON ib.product_id = p.id
 WHERE p.id = ?1
 "#,
-            params![request.product_id],
+            params![write.product_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
         .ok_or_else(|| AppError::not_found("Artikal nije pronadjen."))?;
+
     let new_quantity_milli = previous_quantity_milli
-        .checked_add(delta_quantity_milli)
+        .checked_add(write.quantity_milli)
         .ok_or_else(quantity_overflow_error)?;
 
     if new_quantity_milli < 0 && !allow_negative_stock {
@@ -341,15 +353,6 @@ WHERE p.id = ?1
             "insufficient_stock",
             "Nema dovoljno zaliha.",
         ));
-    }
-
-    if let Some(purchase_price_minor) = request.purchase_price_minor {
-        tx.execute(
-            "UPDATE products
-             SET purchase_price_minor = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![purchase_price_minor, created_at, request.product_id],
-        )?;
     }
 
     tx.execute(
@@ -367,14 +370,14 @@ INSERT INTO inventory_movements (
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
 "#,
         params![
-            request.product_id,
-            movement_type.as_str(),
-            delta_quantity_milli,
-            reason,
-            reference_type,
-            request.reference_id,
-            request.user_id,
-            created_at,
+            write.product_id,
+            write.movement_type,
+            write.quantity_milli,
+            write.reason,
+            write.reference_type,
+            write.reference_id,
+            write.user_id,
+            write.created_at,
         ],
     )?;
     let movement_id = tx.last_insert_rowid();
@@ -387,18 +390,65 @@ ON CONFLICT(product_id) DO UPDATE SET
     quantity_milli = excluded.quantity_milli,
     updated_at = excluded.updated_at
 "#,
-        params![request.product_id, new_quantity_milli, created_at],
+        params![write.product_id, new_quantity_milli, write.created_at],
+    )?;
+
+    Ok(StockWriteOutcome {
+        movement_id,
+        previous_quantity_milli,
+        new_quantity_milli,
+    })
+}
+
+pub fn apply_inventory_adjustment(
+    connection: &mut Connection,
+    movement_type: InventoryMovementType,
+    request: InventoryAdjustmentRequest,
+    created_at: &str,
+) -> Result<InventoryAdjustmentResult, AppError> {
+    validate_adjustment_request(movement_type, &request)?;
+
+    let delta_quantity_milli = match movement_type {
+        InventoryMovementType::Receive => request.quantity_milli,
+        InventoryMovementType::Correction => request.quantity_milli,
+        InventoryMovementType::WriteOff => request.quantity_milli.saturating_neg(),
+    };
+    let reason = normalized_optional_text(request.reason.as_deref());
+    let reference_type = normalized_optional_text(request.reference_type.as_deref());
+    let tx = connection.transaction()?;
+
+    if let Some(purchase_price_minor) = request.purchase_price_minor {
+        tx.execute(
+            "UPDATE products
+             SET purchase_price_minor = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![purchase_price_minor, created_at, request.product_id],
+        )?;
+    }
+
+    let outcome = write_stock_movement(
+        &tx,
+        StockMovementWrite {
+            product_id: request.product_id,
+            movement_type: movement_type.as_str(),
+            quantity_milli: delta_quantity_milli,
+            reason: reason.as_deref(),
+            reference_type: reference_type.as_deref(),
+            reference_id: request.reference_id,
+            user_id: request.user_id,
+            created_at,
+        },
     )?;
 
     tx.commit()?;
 
     Ok(InventoryAdjustmentResult {
         product_id: request.product_id,
-        movement_id,
+        movement_id: outcome.movement_id,
         movement_type: movement_type.as_str().to_string(),
         quantity_milli: delta_quantity_milli,
-        previous_quantity_milli,
-        new_quantity_milli,
+        previous_quantity_milli: outcome.previous_quantity_milli,
+        new_quantity_milli: outcome.new_quantity_milli,
         created_at: created_at.to_string(),
     })
 }
@@ -558,7 +608,8 @@ mod tests {
     use crate::app_error::CommandError;
     use crate::commands::inventory::{
         apply_inventory_adjustment, get_product_ledger_for_connection, list_stock_for_connection,
-        InventoryAdjustmentRequest, InventoryMovementType, StockListQuery,
+        write_stock_movement, InventoryAdjustmentRequest, InventoryMovementType, StockListQuery,
+        StockMovementWrite,
     };
     use crate::db::{test_database_path, Db};
 
@@ -700,6 +751,90 @@ mod tests {
                         Some(1)
                     )
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn write_stock_movement_sets_absolute_balance() {
+        with_connection("write_stock_movement_sets_absolute_balance", |connection| {
+            connection
+                .execute(
+                    "INSERT INTO inventory_balances (product_id, quantity_milli, updated_at)
+                     VALUES (1, 5000, '2026-06-18T10:00:00Z')",
+                    [],
+                )
+                .expect("balance should seed");
+
+            let outcome = write_stock_movement(
+                connection,
+                StockMovementWrite {
+                    product_id: 1,
+                    movement_type: "sale",
+                    quantity_milli: -2000,
+                    reason: Some("Prodaja"),
+                    reference_type: Some("sale"),
+                    reference_id: Some(7),
+                    user_id: Some(1),
+                    created_at: "2026-06-18T12:00:00Z",
+                },
+            )
+            .expect("write should succeed");
+
+            assert_eq!(outcome.previous_quantity_milli, 5000);
+            assert_eq!(outcome.new_quantity_milli, 3000);
+            assert_eq!(current_balance(connection), 3000);
+
+            let movement: (String, i64, Option<String>, Option<i64>) = connection
+                .query_row(
+                    "SELECT movement_type, quantity_milli, reason, user_id
+                     FROM inventory_movements WHERE id = ?1",
+                    params![outcome.movement_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("movement should query");
+            assert_eq!(
+                movement,
+                (
+                    "sale".to_string(),
+                    -2000,
+                    Some("Prodaja".to_string()),
+                    Some(1)
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn write_stock_movement_blocks_negative_for_non_negative_product() {
+        with_connection(
+            "write_stock_movement_blocks_negative_for_non_negative_product",
+            |connection| {
+                let error = write_stock_movement(
+                    connection,
+                    StockMovementWrite {
+                        product_id: 1,
+                        movement_type: "sale",
+                        quantity_milli: -1000,
+                        reason: Some("Prodaja"),
+                        reference_type: Some("sale"),
+                        reference_id: Some(42),
+                        user_id: Some(1),
+                        created_at: "2026-06-18T12:00:00Z",
+                    },
+                )
+                .expect_err("oversell should fail");
+                let command_error = CommandError::from(error);
+                assert_eq!(command_error.code, "insufficient_stock");
+
+                let movement_count: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM inventory_movements WHERE product_id = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("movement count should query");
+                assert_eq!(movement_count, 0);
             },
         );
     }
