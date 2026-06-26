@@ -39,6 +39,7 @@ pub fn run() {
             commands::reports::reports_product_sales,
             commands::reports::reports_category_sales,
             commands::reports::reports_low_stock,
+            commands::reports::reports_list_shifts,
             commands::reports::reports_export_csv,
             commands::inventory::inventory_list_stock,
             commands::inventory::inventory_get_product_ledger,

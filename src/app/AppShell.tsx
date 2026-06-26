@@ -416,7 +416,11 @@ function renderModule({
 
   if (activeId === "reports") {
     return (
-      <ReportsScreen reports={services.reports} currentUser={session.user} />
+      <ReportsScreen
+        reports={services.reports}
+        users={services.users}
+        currentUser={session.user}
+      />
     );
   }
 

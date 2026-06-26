@@ -843,6 +843,16 @@ export function createMockServices(): PosServices {
           ],
         };
       },
+      async listShifts() {
+        return [
+          {
+            id: 1,
+            openedAt: "2026-06-17T07:30:00Z",
+            closedAt: null,
+            cashierName: "Mira Kasir",
+          },
+        ];
+      },
       async exportReportCsv(request) {
         return {
           fileName: `${request.reportType}-2026-06-17-2026-06-17.csv`,

@@ -30,6 +30,7 @@ import type {
   ReceiptSettings,
   ReceiptSearchResult,
   SalePreview,
+  ShiftListItem,
   ShiftTurnoverReport,
   ShiftSummary,
   StockListResult,
@@ -152,6 +153,7 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       getCategorySales: (query) =>
         invoke<CategorySalesReport>("reports_category_sales", { query }),
       getLowStock: () => invoke<LowStockReport>("reports_low_stock"),
+      listShifts: () => invoke<ShiftListItem[]>("reports_list_shifts"),
       exportReportCsv: (request) =>
         invoke<ExportedFile>("reports_export_csv", { request }),
     },

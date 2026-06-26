@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { Toaster } from "@/components/ui/sonner";
-import type { ReportsService } from "@/services/ports";
+import type { ReportsService, UsersService } from "@/services/ports";
 import type { UserAccount } from "@/services/types";
 
 import { ReportsScreen } from "./ReportsScreen";
@@ -104,6 +104,23 @@ function buildReportsService(): ReportsService {
       mimeType: "text/csv",
       rowCount: 1,
     }),
+    listShifts: vi.fn().mockResolvedValue([
+      {
+        id: 1,
+        openedAt: "2026-06-17T07:30:00Z",
+        closedAt: null,
+        cashierName: "Mira Kasir",
+      },
+    ]),
+  };
+}
+
+function buildUsersService(): UsersService {
+  return {
+    listUsers: vi.fn().mockResolvedValue([adminUser, cashierUser]),
+    createUser: vi.fn(),
+    updateUser: vi.fn(),
+    deactivateUser: vi.fn(),
   };
 }
 
@@ -150,11 +167,13 @@ function buildEmptyReportsService(): ReportsService {
 function renderReports(
   service = buildReportsService(),
   currentUser: UserAccount = adminUser,
+  users: UsersService = buildUsersService(),
 ) {
   render(
     <>
       <ReportsScreen
         reports={service}
+        users={users}
         currentUser={currentUser}
         initialQuery={{ from: "2026-06-17", to: "2026-06-17" }}
       />
@@ -203,6 +222,63 @@ describe("ReportsScreen", () => {
       to: "2026-06-17",
       categoryId: null,
       productId: null,
+    });
+  });
+
+  it("filters reports by the selected shift", async () => {
+    const user = userEvent.setup();
+    const reports = renderReports();
+
+    await screen.findByRole("heading", { name: "Dnevni promet" });
+    await user.click(screen.getByRole("combobox", { name: "Smena" }));
+    await user.click(
+      await screen.findByRole("option", {
+        name: "#1 - Mira Kasir (2026-06-17)",
+      }),
+    );
+
+    expect(reports.getShiftTurnover).toHaveBeenLastCalledWith({
+      from: "2026-06-17",
+      to: "2026-06-17",
+      shiftId: 1,
+    });
+  });
+
+  it("filters reports by the selected cashier", async () => {
+    const user = userEvent.setup();
+    const reports = renderReports();
+
+    await screen.findByRole("heading", { name: "Dnevni promet" });
+    await user.click(screen.getByRole("combobox", { name: "Kasir" }));
+    await user.click(await screen.findByRole("option", { name: "Mira Kasir" }));
+
+    expect(reports.getCashierTurnover).toHaveBeenLastCalledWith({
+      from: "2026-06-17",
+      to: "2026-06-17",
+      cashierId: 2,
+    });
+  });
+
+  it("clears the cashier filter when the all option is chosen", async () => {
+    const user = userEvent.setup();
+    const reports = renderReports();
+
+    await screen.findByRole("heading", { name: "Dnevni promet" });
+    await user.click(screen.getByRole("combobox", { name: "Kasir" }));
+    await user.click(await screen.findByRole("option", { name: "Mira Kasir" }));
+    expect(reports.getCashierTurnover).toHaveBeenLastCalledWith({
+      from: "2026-06-17",
+      to: "2026-06-17",
+      cashierId: 2,
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Kasir" }));
+    await user.click(await screen.findByRole("option", { name: "Svi kasiri" }));
+
+    expect(reports.getCashierTurnover).toHaveBeenLastCalledWith({
+      from: "2026-06-17",
+      to: "2026-06-17",
+      cashierId: null,
     });
   });
 

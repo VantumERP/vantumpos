@@ -38,6 +38,14 @@ import {
 } from "@/components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -54,7 +62,7 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import { formatRsd } from "@/lib/money";
-import type { ReportsService } from "@/services/ports";
+import type { ReportsService, UsersService } from "@/services/ports";
 import type {
   CashierTurnoverReport,
   CategorySalesReport,
@@ -65,6 +73,7 @@ import type {
   ProductSalesQuery,
   ProductSalesReport,
   ReportDateQuery,
+  ShiftListItem,
   ShiftTurnoverReport,
   UserAccount,
 } from "@/services/types";
@@ -84,6 +93,8 @@ const turnoverChartConfig = {
   },
 } satisfies ChartConfig;
 
+const ALL_OPTION = "all";
+
 interface ReportsData {
   dailyTurnover: DailyTurnoverReport;
   shiftTurnover: ShiftTurnoverReport;
@@ -96,12 +107,14 @@ interface ReportsData {
 
 interface ReportsScreenProps {
   reports: ReportsService;
+  users: UsersService;
   currentUser: UserAccount;
   initialQuery?: ReportDateQuery;
 }
 
 export function ReportsScreen({
   reports,
+  users,
   currentUser,
   initialQuery,
 }: ReportsScreenProps) {
@@ -111,6 +124,8 @@ export function ReportsScreen({
   const [data, setData] = useState<ReportsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [shiftOptions, setShiftOptions] = useState<ShiftListItem[]>([]);
+  const [cashierOptions, setCashierOptions] = useState<UserAccount[]>([]);
 
   const loadReports = useCallback(
     async (query: ReportDateQuery) => {
@@ -163,14 +178,66 @@ export function ReportsScreen({
     void loadReports(defaultQuery);
   }, [currentUser.role, defaultQuery, loadReports]);
 
-  function applyFilters(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const validationError = validateDateRange(filters);
-    if (validationError) {
-      setErrorMessage(validationError);
+  useEffect(() => {
+    if (currentUser.role !== "admin") {
       return;
     }
-    void loadReports(filters);
+
+    let active = true;
+
+    // Filter lists are optional: a failed read must not break date filtering,
+    // so each source resolves independently and swallows its own error.
+    reports.listShifts().then(
+      (shifts) => {
+        if (active) {
+          setShiftOptions(shifts);
+        }
+      },
+      () => {},
+    );
+    users.listUsers().then(
+      (accounts) => {
+        if (active) {
+          setCashierOptions(accounts);
+        }
+      },
+      () => {},
+    );
+
+    return () => {
+      active = false;
+    };
+  }, [currentUser.role, reports, users]);
+
+  const applyQuery = useCallback(
+    (query: ReportDateQuery) => {
+      const validationError = validateDateRange(query);
+      if (validationError) {
+        setErrorMessage(validationError);
+        return;
+      }
+      void loadReports(query);
+    },
+    [loadReports],
+  );
+
+  function applyFilters(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    applyQuery(filters);
+  }
+
+  function handleShiftChange(value: string) {
+    const shiftId = value === ALL_OPTION ? null : Number(value);
+    const next = { ...filters, shiftId };
+    setFilters(next);
+    applyQuery(next);
+  }
+
+  function handleCashierChange(value: string) {
+    const cashierId = value === ALL_OPTION ? null : Number(value);
+    const next = { ...filters, cashierId };
+    setFilters(next);
+    applyQuery(next);
   }
 
   async function exportCsv(reportType: ExportReportType) {
@@ -200,13 +267,32 @@ export function ReportsScreen({
     );
   }
 
+  const shiftSelectItems = [
+    { label: "Sve smene", value: ALL_OPTION },
+    ...shiftOptions.map((shift) => ({
+      label: `#${shift.id} - ${shift.cashierName} (${shift.openedAt.slice(0, 10)})`,
+      value: shift.id.toString(),
+    })),
+  ];
+  const cashierSelectItems = [
+    { label: "Svi kasiri", value: ALL_OPTION },
+    ...cashierOptions.map((account) => ({
+      label: account.displayName,
+      value: account.id.toString(),
+    })),
+  ];
+  const shiftValue =
+    filters.shiftId == null ? ALL_OPTION : filters.shiftId.toString();
+  const cashierValue =
+    filters.cashierId == null ? ALL_OPTION : filters.cashierId.toString();
+
   return (
     <div className="flex flex-col gap-4">
       <form
         className="flex flex-col gap-3 rounded-md border bg-background p-3 md:flex-row md:items-end"
         onSubmit={applyFilters}
       >
-        <FieldGroup className="grid flex-1 gap-3 md:grid-cols-2">
+        <FieldGroup className="grid flex-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
           <Field>
             <FieldLabel htmlFor="reports-date-from">Od datuma</FieldLabel>
             <Input
@@ -233,6 +319,26 @@ export function ReportsScreen({
                   to: event.target.value,
                 }))
               }
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="reports-shift">Smena</FieldLabel>
+            <FilterSelect
+              id="reports-shift"
+              ariaLabel="Smena"
+              items={shiftSelectItems}
+              value={shiftValue}
+              onValueChange={handleShiftChange}
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="reports-cashier">Kasir</FieldLabel>
+            <FilterSelect
+              id="reports-cashier"
+              ariaLabel="Kasir"
+              items={cashierSelectItems}
+              value={cashierValue}
+              onValueChange={handleCashierChange}
             />
           </Field>
         </FieldGroup>
@@ -298,6 +404,45 @@ export function ReportsScreen({
         </Tabs>
       )}
     </div>
+  );
+}
+
+function FilterSelect({
+  id,
+  ariaLabel,
+  items,
+  value,
+  onValueChange,
+}: {
+  id: string;
+  ariaLabel: string;
+  items: Array<{ label: string; value: string }>;
+  value: string;
+  onValueChange: (value: string) => void;
+}) {
+  return (
+    <Select
+      items={items}
+      value={value}
+      onValueChange={(nextValue) => {
+        if (nextValue) {
+          onValueChange(nextValue);
+        }
+      }}
+    >
+      <SelectTrigger id={id} aria-label={ariaLabel} className="w-full">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectGroup>
+          {items.map((item) => (
+            <SelectItem key={item.value} value={item.value}>
+              {item.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
   );
 }
 

@@ -90,4 +90,13 @@ describe("reports service adapter", () => {
       query: { from: "2026-06-17", to: "2026-06-17", shiftId: 1, cashierId: 2 },
     });
   });
+
+  it("lists shifts through the dedicated report command", async () => {
+    const invoke = vi.fn().mockResolvedValue([]);
+    const services = createLocalServices(invoke);
+
+    await services.reports.listShifts();
+
+    expect(invoke).toHaveBeenCalledWith("reports_list_shifts");
+  });
 });

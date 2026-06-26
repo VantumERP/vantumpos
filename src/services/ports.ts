@@ -49,6 +49,7 @@ import type {
   SaveProductRequest,
   SaveTaxRateRequest,
   SaveUserRequest,
+  ShiftListItem,
   ShiftTurnoverReport,
   ShiftSummary,
   StockListQuery,
@@ -145,6 +146,7 @@ export interface ReportsService {
   getProductSales(query: ProductSalesQuery): Promise<ProductSalesReport>;
   getCategorySales(query: ReportDateQuery): Promise<CategorySalesReport>;
   getLowStock(): Promise<LowStockReport>;
+  listShifts(): Promise<ShiftListItem[]>;
   exportReportCsv(request: ExportReportRequest): Promise<ExportedFile>;
 }
 

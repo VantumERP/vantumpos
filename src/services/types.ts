@@ -125,6 +125,13 @@ export interface ShiftSummary {
   closingNote: string | null;
 }
 
+export interface ShiftListItem {
+  id: number;
+  openedAt: string;
+  closedAt: string | null;
+  cashierName: string;
+}
+
 export interface AuthSession {
   user: UserAccount;
   currentShift: ShiftSummary | null;

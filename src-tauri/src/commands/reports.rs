@@ -120,6 +120,15 @@ pub struct ShiftTurnoverReport {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ShiftListItem {
+    pub id: i64,
+    pub opened_at: String,
+    pub closed_at: Option<String>,
+    pub cashier_name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CashierTurnoverRow {
     pub cashier_id: i64,
     pub cashier_name: String,
@@ -274,6 +283,13 @@ pub fn reports_low_stock(state: State<'_, AppState>) -> Result<LowStockReport, C
     super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     query_low_stock(&connection).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn reports_list_shifts(state: State<'_, AppState>) -> Result<Vec<ShiftListItem>, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open()?;
+    query_list_shifts(&connection).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -627,6 +643,35 @@ ORDER BY difference_milli ASC, p.name
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(LowStockReport { rows })
+}
+
+pub fn query_list_shifts(connection: &Connection) -> Result<Vec<ShiftListItem>, AppError> {
+    let mut statement = connection.prepare(
+        r#"
+SELECT
+    sh.id,
+    sh.opened_at,
+    sh.closed_at,
+    u.display_name
+FROM shifts sh
+JOIN users u ON u.id = sh.user_id
+ORDER BY sh.opened_at DESC
+LIMIT 200
+"#,
+    )?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(ShiftListItem {
+                id: row.get(0)?,
+                opened_at: row.get(1)?,
+                closed_at: row.get(2)?,
+                cashier_name: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(rows)
 }
 
 pub fn export_report_csv_to_dir(
@@ -1211,6 +1256,22 @@ mod tests {
             .expect("shift turnover should query");
             assert!(unmatched.rows.is_empty());
         });
+    }
+
+    #[test]
+    fn query_list_shifts_returns_seeded_shift_with_cashier_name() {
+        with_seeded_reports_database(
+            "query_list_shifts_returns_seeded_shift_with_cashier_name",
+            |connection| {
+                let shifts = super::query_list_shifts(connection).expect("shift list should query");
+
+                assert_eq!(shifts.len(), 1);
+                assert_eq!(shifts[0].id, 1);
+                assert_eq!(shifts[0].cashier_name, "Mira Kasir");
+                assert_eq!(shifts[0].opened_at, "2026-06-17T07:30:00Z");
+                assert_eq!(shifts[0].closed_at, None);
+            },
+        );
     }
 
     #[test]
