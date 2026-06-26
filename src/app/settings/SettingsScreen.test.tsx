@@ -3,7 +3,130 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { SettingsScreen } from "./SettingsScreen";
+import { Toaster } from "@/components/ui/sonner";
 import { createMockServices } from "@/services/mock-adapter";
+import type { BackupJob, BackupStatus } from "@/services/types";
+
+function renderSettings(services = createMockServices()) {
+  render(
+    <>
+      <SettingsScreen
+        services={services}
+        usersPanel={<div>Korisnici panel</div>}
+      />
+      <Toaster />
+    </>,
+  );
+  return services;
+}
+
+describe("SettingsScreen", () => {
+  it("renders distinct content for each settings tab", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    expect(await screen.findByLabelText("Naziv radnje")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "PDV" }));
+    expect(
+      await screen.findByRole("heading", { name: "PDV stope" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Racuni" }));
+    expect(screen.getByLabelText("Prefiks racuna")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Korisnici" }));
+    expect(screen.getByText("Korisnici panel")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Backup" }));
+    expect(
+      await screen.findByRole("heading", { name: "Status backupa" }),
+    ).toBeInTheDocument();
+  });
+
+  it("saves company settings and shows a success toast", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.clear(await screen.findByLabelText("Naziv radnje"));
+    await user.type(screen.getByLabelText("Naziv radnje"), "Vantum Market");
+    await user.click(screen.getByRole("button", { name: "Sacuvaj radnju" }));
+
+    expect(
+      await screen.findByText("Podesavanja radnje su sacuvana."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a VAT validation error without closing the dialog", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "PDV" }));
+    await user.click(await screen.findByRole("button", { name: "Nova PDV stopa" }));
+    await user.click(screen.getByRole("button", { name: "Sacuvaj PDV stopu" }));
+
+    expect(
+      await screen.findByText("Naziv PDV stope je obavezan."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "PDV stopa" })).toBeInTheDocument();
+  });
+
+  it("renders the stale warning and a failed backup job", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const failedJob: BackupJob = {
+      id: 99,
+      backupType: "automatic",
+      path: "D:/backups/vantumpos-automatic-99.sqlite3",
+      status: "failed",
+      errorMessage: "Disk pun.",
+      fileSizeBytes: null,
+      createdAt: "2026-06-25 10:00:00",
+      completedAt: null,
+    };
+    const staleStatus: BackupStatus = {
+      backupFolder: "D:/backups",
+      automaticBackupEnabled: true,
+      stale: true,
+      lastSuccessfulBackup: null,
+      lastFailedBackup: failedJob,
+    };
+    services.backup.getBackupStatus = async () => staleStatus;
+    services.backup.listBackupJobs = async () => [failedJob];
+
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Backup" }));
+
+    expect(await screen.findByText("Backup nije napravljen")).toBeInTheDocument();
+
+    const historyRow = screen.getByText(failedJob.path).closest("tr");
+    expect(historyRow).not.toBeNull();
+    expect(
+      within(historyRow as HTMLElement).getByText("Neuspesan"),
+    ).toBeInTheDocument();
+  });
+
+  it("requires the exact confirmation text before restore", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Backup" }));
+    await user.type(
+      screen.getByLabelText("Putanja backup fajla"),
+      "D:/backup.sqlite3",
+    );
+    await user.click(screen.getByRole("button", { name: "Vrati backup" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Potvrdite restore" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Potvrdi restore" })).toBeDisabled();
+
+    await user.type(screen.getByLabelText("Potvrda"), "VRATI PODATKE");
+    expect(screen.getByRole("button", { name: "Potvrdi restore" })).toBeEnabled();
+  });
+});
 
 describe("SettingsScreen VAT rates", () => {
   it("edits an existing VAT rate and threads its id to saveTaxRate", async () => {

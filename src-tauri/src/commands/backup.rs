@@ -10,6 +10,7 @@ use crate::commands::settings::{load_json_setting, save_json_setting, BACKUP_SET
 use crate::state::AppState;
 
 const RESTORE_CONFIRMATION: &str = "VRATI PODATKE";
+const BACKUP_STALE_AFTER_HOURS: i64 = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,14 +130,33 @@ pub fn load_backup_status(state: &AppState) -> Result<BackupStatus, AppError> {
         "status = 'completed' AND backup_type IN ('manual', 'automatic')",
     )?;
     let last_failed_backup = query_latest_backup_job(state, "status = 'failed'")?;
+    let stale = is_backup_stale(state)?;
 
     Ok(BackupStatus {
         backup_folder: settings.backup_folder,
         automatic_backup_enabled: settings.automatic_backup_enabled,
-        stale: last_successful_backup.is_none(),
+        stale,
         last_successful_backup,
         last_failed_backup,
     })
+}
+
+fn is_backup_stale(state: &AppState) -> Result<bool, AppError> {
+    let conn = state.db().open()?;
+    let threshold_modifier = format!("-{BACKUP_STALE_AFTER_HOURS} hours");
+    let has_recent_backup: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM backup_jobs
+            WHERE status = 'completed'
+              AND backup_type IN ('manual', 'automatic')
+              AND created_at >= datetime('now', ?1)
+         )",
+        params![threshold_modifier],
+        |row| row.get(0),
+    )?;
+
+    Ok(!has_recent_backup)
 }
 
 pub fn create_backup(
@@ -478,5 +498,59 @@ mod tests {
 
             assert_eq!(command_error.code, "validation_error");
         });
+    }
+
+    #[test]
+    fn backup_status_is_stale_when_last_success_is_older_than_threshold() {
+        with_state(
+            "backup_status_is_stale_when_last_success_is_older_than_threshold",
+            |state| {
+                let conn = state.db().open().expect("database should open");
+                conn.execute(
+                    "INSERT INTO backup_jobs (
+                        backup_type, path, status, error_message,
+                        file_size_bytes, created_at, completed_at
+                     )
+                     VALUES (
+                        'manual', '/tmp/vantumpos-old.sqlite3', 'completed', NULL, 1024,
+                        datetime('now', '-48 hours'), datetime('now', '-48 hours')
+                     )",
+                    [],
+                )
+                .expect("aged backup job should insert");
+
+                let status = load_backup_status(state).expect("backup status should load");
+
+                assert!(status.last_successful_backup.is_some());
+                assert!(status.stale);
+            },
+        );
+    }
+
+    #[test]
+    fn backup_status_is_fresh_when_recent_success_exists() {
+        with_state(
+            "backup_status_is_fresh_when_recent_success_exists",
+            |state| {
+                let conn = state.db().open().expect("database should open");
+                conn.execute(
+                    "INSERT INTO backup_jobs (
+                        backup_type, path, status, error_message,
+                        file_size_bytes, created_at, completed_at
+                     )
+                     VALUES (
+                        'manual', '/tmp/vantumpos-recent.sqlite3', 'completed', NULL, 1024,
+                        datetime('now', '-1 hours'), datetime('now', '-1 hours')
+                     )",
+                    [],
+                )
+                .expect("recent backup job should insert");
+
+                let status = load_backup_status(state).expect("backup status should load");
+
+                assert!(status.last_successful_backup.is_some());
+                assert!(!status.stale);
+            },
+        );
     }
 }
