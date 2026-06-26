@@ -77,6 +77,8 @@ import type {
 interface InventoryScreenProps {
   services: PosServices;
   userId: number;
+  initialLedgerProductId?: number | null;
+  onLedgerOpened?: () => void;
 }
 
 type AdjustmentMode = "receive" | "correction" | "write_off";
@@ -96,7 +98,12 @@ const STOCK_FILTERS: Array<{
   { value: "negative", label: "Negativno" },
 ];
 
-export function InventoryScreen({ services, userId }: InventoryScreenProps) {
+export function InventoryScreen({
+  services,
+  userId,
+  initialLedgerProductId = null,
+  onLedgerOpened,
+}: InventoryScreenProps) {
   const [query, setQuery] = useState<StockListQuery>({ stockState: "all" });
   const [items, setItems] = useState<StockListItem[]>([]);
   const [allItems, setAllItems] = useState<StockListItem[]>([]);
@@ -139,18 +146,27 @@ export function InventoryScreen({ services, userId }: InventoryScreenProps) {
     void refreshStock(query);
   }, [query]);
 
-  async function openLedger(item: StockListItem) {
+  async function openLedger(productId: number) {
     setLedgerOpen(true);
     setLedgerLoading(true);
 
     try {
-      setLedger(await services.inventory.getProductLedger(item.productId));
+      setLedger(await services.inventory.getProductLedger(productId));
     } catch (unknownError) {
       toast.error(getCommandMessage(unknownError));
     } finally {
       setLedgerLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (initialLedgerProductId == null) {
+      return;
+    }
+
+    void openLedger(initialLedgerProductId);
+    onLedgerOpened?.();
+  }, [initialLedgerProductId]);
 
   async function handleAdjustmentSaved(productId: number) {
     await refreshStock();
@@ -324,7 +340,7 @@ function StockTable({
 }: {
   items: StockListItem[];
   onAdjust: (mode: AdjustmentMode, item: StockListItem) => void;
-  onLedger: (item: StockListItem) => void;
+  onLedger: (productId: number) => void;
 }) {
   return (
     <Table>
@@ -395,7 +411,7 @@ function StockTable({
                   variant="secondary"
                   size="sm"
                   aria-label={`Ledger za ${item.productName}`}
-                  onClick={() => onLedger(item)}
+                  onClick={() => onLedger(item.productId)}
                 >
                   <ClipboardListIcon data-icon="inline-start" />
                   Ledger

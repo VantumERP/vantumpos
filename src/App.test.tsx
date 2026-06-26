@@ -734,6 +734,61 @@ describe("AppShell", () => {
     expect(await screen.findByText("Import zavrsen")).toBeInTheDocument();
     expect(screen.getAllByText("artikli.csv")[0]).toBeInTheDocument();
   });
+
+  it("deep-links the catalog Lager action to the product ledger", async () => {
+    const user = userEvent.setup();
+    render(<AppShell services={createMockServices()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Artikli" }));
+    expect(
+      await screen.findByRole("cell", { name: "MLEKO-1L" }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Lager za Mleko 1 l" }),
+    );
+
+    // The ledger Sheet auto-opens as a modal, so the inventory screen behind it
+    // is inert; assert its heading with { hidden: true } to confirm navigation.
+    expect(
+      await screen.findByRole("heading", {
+        name: "Stanje lagera",
+        hidden: true,
+      }),
+    ).toBeInTheDocument();
+
+    const ledger = await screen.findByRole("dialog", {
+      name: "Kartica artikla",
+    });
+    expect(within(ledger).getByText("Mleko 1 l")).toBeInTheDocument();
+    expect(within(ledger).getByText(/MLEKO-1L/)).toBeInTheDocument();
+  });
+
+  it("surfaces an error when the deep-linked ledger fails to load", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    services.inventory.getProductLedger = () =>
+      Promise.reject({ code: "not_found", message: "Artikal nije pronadjen." });
+
+    render(<AppShell services={services} />);
+
+    await user.click(await screen.findByRole("button", { name: "Artikli" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Lager za Mleko 1 l" }),
+    );
+
+    // The ledger Sheet auto-opens as a modal, so the inventory screen behind it
+    // is inert; assert its heading with { hidden: true } to confirm navigation.
+    expect(
+      await screen.findByRole("heading", {
+        name: "Stanje lagera",
+        hidden: true,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Artikal nije pronadjen."),
+    ).toBeInTheDocument();
+  });
 });
 
 async function openImportModule(user: UserEvent) {

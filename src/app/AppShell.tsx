@@ -118,6 +118,9 @@ const ROLE_LABELS: Record<UserRole, string> = {
 
 export function AppShell({ services }: AppShellProps) {
   const [activeId, setActiveId] = useState<NavigationItemId>("register");
+  const [inventoryLedgerProductId, setInventoryLedgerProductId] = useState<
+    number | null
+  >(null);
   const initialSession = (services as PosServices & {
     initialSession?: AppSession | null;
   }).initialSession;
@@ -298,9 +301,14 @@ export function AppShell({ services }: AppShellProps) {
               activeId,
               session,
               services,
-              onNavigate: setActiveId,
               onSessionChange: (nextSession) =>
                 setSessionState({ status: "ready", session: nextSession }),
+              inventoryLedgerProductId,
+              onOpenProductLedger: (productId) => {
+                setInventoryLedgerProductId(productId);
+                setActiveId("inventory");
+              },
+              onInventoryLedgerOpened: () => setInventoryLedgerProductId(null),
             })}
           </main>
         </SidebarInset>
@@ -314,14 +322,18 @@ function renderModule({
   activeId,
   session,
   services,
-  onNavigate,
   onSessionChange,
+  inventoryLedgerProductId,
+  onOpenProductLedger,
+  onInventoryLedgerOpened,
 }: {
   activeId: NavigationItemId;
   session: AppSession;
   services: PosServices;
-  onNavigate: (id: NavigationItemId) => void;
   onSessionChange: (session: AppSession) => void;
+  inventoryLedgerProductId: number | null;
+  onOpenProductLedger: (productId: number) => void;
+  onInventoryLedgerOpened: () => void;
 }) {
   if (session.user.role === "cashier" && !session.currentShift) {
     return (
@@ -351,10 +363,7 @@ function renderModule({
 
   if (activeId === "products") {
     return (
-      <CatalogModule
-        services={services}
-        onOpenInventory={() => onNavigate("inventory")}
-      />
+      <CatalogModule services={services} onOpenInventory={onOpenProductLedger} />
     );
   }
 
@@ -385,7 +394,14 @@ function renderModule({
   }
 
   if (activeId === "inventory") {
-    return <InventoryScreen services={services} userId={session.user.id} />;
+    return (
+      <InventoryScreen
+        services={services}
+        userId={session.user.id}
+        initialLedgerProductId={inventoryLedgerProductId}
+        onLedgerOpened={onInventoryLedgerOpened}
+      />
+    );
   }
 
   if (activeId === "receipts") {

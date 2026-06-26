@@ -90,7 +90,7 @@ type BulkProductEditableField =
 
 interface CatalogModuleProps {
   services: PosServices;
-  onOpenInventory: () => void;
+  onOpenInventory: (productId: number) => void;
 }
 
 interface ProductFormState {
@@ -905,7 +905,7 @@ function ProductTable({
 }: {
   products: ProductSummary[];
   onEdit: (product: ProductSummary) => void;
-  onOpenInventory: () => void;
+  onOpenInventory: (productId: number) => void;
   onSetActive: (product: ProductSummary, active: boolean) => void;
 }) {
   return (
@@ -980,7 +980,7 @@ function ProductTable({
                     variant="ghost"
                     size="sm"
                     aria-label={`Lager za ${product.name}`}
-                    onClick={onOpenInventory}
+                    onClick={() => onOpenInventory(product.id)}
                   >
                     <FolderOpenIcon data-icon="inline-start" />
                     Lager
