@@ -1,0 +1,678 @@
+# VantumPOS — Implementation Progress Report
+
+**Date:** 2026-06-26
+**Overall status:** The application is a genuinely working, local-first POS — every one of the 9 modules is real (no placeholder screens, no stub commands), with green builds and tests; the remaining work is polish, audit-attribution wiring, and test-breadth rather than architecture.
+**Overall completion:** **88%** (simple average of the 9 audited module percentages: 94, 91, 92, 86, 90, 86, 80, 90, 80 → 789 / 9 = 87.7 ≈ 88%).
+**Basis:** All figures are *audited* estimates measured against `docs/module-specs`. Where the independent adversarial audit disagreed with the original assessment, the audited number is treated as the source of truth and the disagreement is called out per module.
+
+---
+
+## Executive Summary
+
+VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.
+
+| Module | Completion % | Status | Top gap |
+|---|---|---|---|
+| 00 Shared Foundation | 94% | Complete | Shell header hard-codes "VantumPOS" instead of reading `settings_get_company` |
+| 01 Auth & Shifts | 91% | Mostly done | Spec-required "deactivated user cannot log in" backend test absent; Close Shift omits opened-at/cashier fields |
+| 02 Catalog & Products | 92% | Complete | "Lager" row action navigates generically instead of deep-linking the product ledger; orphaned dead-code screen remains |
+| 03 Inventory | 86% | Mostly done | Frontend hard-codes `userId:1`; ledger omits user/reference columns; sales duplicates inventory write logic |
+| 04 Register & Sales | 90% | Mostly done | Preview/validation errors are silently swallowed (error state defined but never rendered) |
+| 05 Receipts & Returns | 86% | Mostly done | No loading/empty states + unhandled rejection on search/detail failure; void/return hard-code `userId:1` |
+| 06 Reports | 80% | Mostly done | shift/cashier filters unsupported in backend; screen not admin-gated; no error/empty frontend tests |
+| 07 Import | 90% | Mostly done | No job-detail drill-down UI; missing unknown-VAT/required-mapping tests; XLSX absent (optional) |
+| 08 Settings & Backup | 80% | Mostly done | Admin role-gating for receipt sequence missing everywhere; no Settings component tests; VAT screen is create-only |
+
+---
+
+## Build & Test Health
+
+| Command | Result | Summary |
+|---|---|---|
+| `bun run test` | Pass | vitest: 6 test files, **57 tests passed**, 0 failed (4.88s) |
+| `bun run build` | Pass | tsc typecheck + vite build succeeded; 2709 modules transformed (1.35s); only a non-fatal "chunk > 500 kB" warning |
+| `cd src-tauri && cargo test -- --test-threads=1` | Pass | **67 passed**, 0 failed (lib tests; main.rs 0, doc-tests 0); ~14s |
+| `cd src-tauri && cargo clippy --all-targets --all-features --locked -- -D warnings` | Pass | Compiled clean, zero warnings under `-D warnings` |
+| `cd src-tauri && cargo fmt --check` | Pass | No formatting diffs; exit 0 |
+
+**Backend tests:** 67 passed / 0 failed. **Frontend tests:** 57 passed / 0 failed. The toolchain is healthy and CI-green.
+
+**What blocks the Definition of Done despite green CI:** the failures are not in *what runs* but in *what is not yet tested or wired*. DoD point 6 (happy + failure tests) is the systemic weak spot — module 08 ships **no** `SettingsScreen.test.tsx` (all 5 spec frontend tests absent) and module 06 has no error/empty/loading frontend tests. DoD point 5 (frontend states) is only partial in modules 04 (preview errors swallowed), 05 (no loading/empty + unhandled rejections), and 06 (product/category tables lack empty state). One business-rule gap is an outright miss: module 08's "Receipt sequence updates require admin role" is unenforced at every layer. These are the items standing between "mostly done" and a fully signed-off MVP.
+
+---
+
+## Module Details
+
+### 00 — Shared Foundation — 94% — Complete
+
+Audited 94% (unchanged from assessment). The contract every other module builds on is genuinely implemented, not scaffolded.
+
+**What's done**
+- SQLite wrapper enabling `foreign_keys=ON` + `busy_timeout=5000` (`db/mod.rs:33-42`).
+- Transactional, append-only migration runner: 5 versioned migrations inside one `conn.transaction()`, recorded in `_migrations`; v1 creates all 14 required tables with money/quantity CHECK constraints (`db/migrations.rs:16-166`, `256-287`).
+- Bootstrap admin seeded once with an argon2-hashed PIN only when `users` is empty (`db/mod.rs:49-76`).
+- Typed `AppError → CommandError {code, message, details}` with stable codes and Serbian operator messages (`app_error.rs:81-127`).
+- RFC3339 UTC clock (`clock.rs:6`); argon2 hashing (`security.rs:6-23`); `AppState` holding Db + in-memory session.
+- All 10 canonical commands plus `get_app_health` registered in `lib.rs:23-79`.
+- Strict service-port layering: only `local-adapter.ts` imports `@tauri-apps/api` (grep-verified); full TS ports + DTOs + local and mock adapters; RSD integer-money helpers using BigInt (`lib/money.ts`).
+- Real shadcn sidebar shell (`AppShell.tsx:198-305`) with login, session loading/error states, service-backed footer, and status badges.
+
+**Partial**
+- Shared shell status completeness: user/role/shift/DB/backup are all shown; only the shop-name element is absent (`AppShell.tsx:244-288`).
+- Login `foundationCards` lean slightly toward the "marketing hero" pattern the spec discourages, though guarded by a no-internal-terms test (`navigation.ts:65-81`, `App.test.tsx:218-232`).
+
+**Missing**
+- (Low) Shop name not shown in shell header — `AppShell.tsx:208` hard-codes "VantumPOS"/"Lokalna kasa" and never calls `settings_get_company`, which exists.
+- (Low) No dedicated unit tests for `clock.rs` / `security.rs` (only indirect coverage).
+- (Low) No end-to-end v1→v5 forward-migration regression on a pre-existing old DB (only idempotency + added-column tests).
+
+**Backend commands (present / registered):** `get_app_health`, `auth_login`, `shift_open`, `catalog_search_products`, `inventory_receive`, `sales_complete`, `receipts_search`, `reports_daily_turnover`, `import_validate`, `settings_update_company`, `backup_create` — all present and registered (`lib.rs:23-79`).
+
+**Frontend screen:** Real. The foundation "screen" is the AppShell itself (shadcn sidebar + login). UI states present: loading (BackendStatus, session spinner), ready/error/migration-not-ready, validation (login/open-shift). Only deviation: hard-coded shop name.
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| Money never floating point; integer minor units end to end | Met |
+| Quantities stored as integer milli-units | Met |
+| Append-only migrations; initial migration immutable | Met |
+| Transaction boundary in Rust, one per use case | Met |
+| Stable error codes + Serbian operator messages | Met |
+| One open shift per user enforced at DB level | Met |
+| Bootstrap admin seeded once with hashed credential | Met |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| Service-port layering; no direct Tauri invoke in screens | Yes |
+| All canonical snake_case commands present & registered | Yes |
+| Money as integer minor units; backend integer math | Yes |
+| Quantities milli-units; ISO timestamps backend-created | Yes |
+| All 14 tables via initial migration | Yes |
+| Schema changes append-only; v1 unedited | Yes |
+| State-changing transaction boundary in Rust | Yes |
+| Error contract `{code,message,details}` with stable codes | Yes |
+| Serbian-Latin operator messages; technical cause hidden | Yes |
+| Each nav item renders a distinct real screen | Yes |
+| Shell footer backed by auth state (not hard-coded Admin) | Yes |
+| Shell shows shop name, user, role, shift, DB, backup | Partial (shop name hard-coded) |
+| Frontend loading/empty/validation/error states | Yes |
+| Tests cover happy + failure paths | Yes |
+| App runs local-first (no fiscal/Medusa/cloud) | Yes |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. UI backed by service interfaces — Met
+3. Rust owns state-changing validation/transactions — Met
+4. Structured codes + Serbian messages — Met
+5. Frontend loading/empty/validation/error — Met
+6. Tests happy + failure — Met
+7. Local-first, no fiscal/Medusa/cloud — Met
+
+**Test coverage & gaps:** Backend — schema/index/FK/pragma tests, cascade delete, negative-money/zero-qty CHECK rejections, migration idempotency (count==5), admin seeding, health response. Frontend — money valid/invalid, adapter command-name mapping, AppShell login/session/backend states, operator-copy guard. Gaps: no direct `clock.rs`/`security.rs` unit tests; no pre-existing-old-DB forward-migration regression; no automated assertion that the shell surfaces the company shop name.
+
+**Auditor notes:** Confidence high; the audit independently verified the assessment and found it honest and not over-stated, agreeing at 94%. No genuine placeholders/stubs found (all "placeholder" hits are HTML input attributes). Two *under-claims*: the foundation actually ships ~8000 lines of real downstream command code exercising the contracts, and one-open-shift-per-user is defended at two layers (partial UNIQUE index + pre-insert guard), stronger than the summary implied.
+
+**Key risks:** Shell shop-name remains unwired despite `settings_get_company` existing; `clock.rs`/`security.rs` regressions would only surface via higher-level tests; no explicit old-DB forward-migration regression means a future destructive ALTER could go uncaught.
+
+**Evidence:** `lib.rs:23-79`; `db/migrations.rs:11-254`, `256-287`; `app_error.rs:81-127`; `db/mod.rs:33-42`, `49-76`; `src/services/local-adapter.ts:1`; `AppShell.tsx:198-305`; `BackendStatus.tsx:20-82`; `lib/money.ts`; `App.test.tsx`, `money.test.ts`, `local-adapter.test.ts`.
+
+---
+
+### 01 — Auth & Shifts — 91% — Mostly done
+
+Audited **91%** vs assessed 93% — a **material disagreement** (−2). The audit trimmed it because the spec names two concrete deliverables that are absent (see Auditor notes).
+
+**What's done**
+- All 10 backend commands present and registered (`lib.rs:25-34`): `auth_get_session/login/logout`, `users_list/create/update/deactivate`, `shift_get_current/open/close`.
+- Argon2 PIN/password hashing in Rust (`security.rs:6-23`); bootstrap admin PIN 1234 (`db/mod.rs:49-72`).
+- Login validates trimmed input, rejects deactivated users and bad credentials, updates `last_login_at`, sets process-local session (`auth.rs:81-119`).
+- Shift open rejects negative cash and second open shift; DB unique partial index `idx_shifts_one_open_per_user` (`migrations.rs:181-184`). Shift close requires non-optional counted cash, derives expected cash from completed cash payments only, `WHERE status='open'` guard (`shifts.rs:132-189`).
+- Users CRUD with admin-only guard, unique username, role validation, create wrapped in a transaction (`users.rs:54-302`).
+- Real screens: Login, Open Shift, Close Shift (AlertDialog confirmation), Users (Table + Dialog) — all service-backed (`AppShell.tsx:447-1178`). Shell header/footer data-driven from session.
+
+**Partial**
+- Close Shift screen completeness: functional, but omits the spec-listed "opened at" and cashier-name fields (`AppShell.tsx:757-801`).
+- Frontend empty states: loading/validation/error solid; explicit empty state is the weak spot (users table renders blank, `AppShell.tsx:908-993`).
+- Expected-cash vs partial returns: a partial item return flips the whole original sale to `refunded` (`receipts.rs:593`), over-excluding that sale's cash from a shift's expected cash.
+
+**Missing**
+- (Medium) Backend test "deactivated user cannot log in" — spec explicitly requires it; behavior exists (`auth.rs:93`) but is untested.
+- (Low) Close Shift "opened at" + cashier fields not displayed.
+- (Low) No explicit empty state for the Users list.
+
+**Backend commands (present / registered):** `auth_get_session` (lib.rs:26), `auth_login` (27), `auth_logout` (28), `users_list` (29), `users_create` (30), `users_update` (31), `users_deactivate` (32), `shift_get_current` (33), `shift_open` (34), `shift_close` (34) — all present and registered.
+
+**Frontend screen:** Real. Login, Open Shift, Close Shift (AlertDialog), Users (Table + Dialog). States present: loading (session spinner, users loading badge), validation (opening cash, user form), error (Alerts). Weakness: no Empty component for an empty users list.
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| Deactivated users cannot log in | Met (untested) |
+| Only one open shift per user | Met (double-guarded) |
+| Cashier cannot complete sale without open shift | Met |
+| Closing shift requires counted cash | Met |
+| Expected cash from completed cash payments minus refunds/voids | Met (partial-return edge nuance) |
+| Closing a shift does not delete/mutate sales | Met |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| No hard-coded Admin / "Smena nije otvorena" fixed text | Yes |
+| Sign in → open shift → close → shell status updates | Yes |
+| Kasa sale can depend on `shiftService.getCurrentShift` | Yes |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. Service-backed — Met
+3. Rust validation/transactions — Met
+4. Structured Serbian errors — Met
+5. Frontend states — Partial (no explicit empty state)
+6. Tests happy + failure — Met
+7. Local-first — Met
+
+**Test coverage & gaps:** Backend — login success/fail, second-shift-fails, close-stores-counted-cash, admin seeding (`commands/mod.rs:24-142`). Frontend — login routing, Serbian login error, invalid opening cash, real user+shift in shell, adapter mapping. Gaps: no deactivated-login test; no close-shift happy-path/difference test; no Users CRUD UI test; no expected-cash-derivation test; no admin-guard test.
+
+**Auditor notes:** Confidence high; substantially agrees, every claim source-checked. **Over-claim corrected:** TS contracts match method *signatures* but type *names* differ from the spec (impl `AuthSession`/`UserAccount` vs spec `AppSession`/`UserSummary`), so "verbatim" overstates it. Also flagged: the Users "Deaktiviraj" action fires immediately with no confirmation dialog (`AppShell.tsx:957-986`). **Under-claims:** DB CHECK constraints give a third money-validation layer; login self-heals against mid-login deactivation. Dead code (not a stub): `AppShell.tsx:189` has two identical branches.
+
+**Key risks:** Process-local session (re-login on restart, no multi-window sharing); shift-open does its duplicate check + INSERT without an explicit transaction (the unique index is the real race guard, surfacing as `database_error` rather than the friendly validation message); partial returns over-exclude cash; the missing deactivated-login test means a regression letting inactive users in would pass CI.
+
+**Evidence:** `lib.rs:23-79`; `auth.rs:45-198`; `shifts.rs:43-291`; `users.rs:23-309`; `security.rs:1-23`; `app_error.rs:81-127`; `migrations.rs:181-228`; `db/mod.rs:49-72`; `commands/mod.rs:14-142`; `ports.ts:81-98`; `local-adapter.ts:71-87`; `AppShell.tsx:119-1178`; `App.test.tsx:86-203`.
+
+---
+
+### 02 — Catalog & Products — 92% — Complete
+
+Audited **92%** vs assessed 93% (−1, minor). The audit found the assessment honest and slightly conservative.
+
+**What's done**
+- All 8 spec commands in `catalog.rs` registered in `lib.rs:63-72`, plus a bonus `catalog_lookup_product_by_barcode` (Open Food Facts enrichment, `lib.rs:69`).
+- Real dense screen `CatalogModule.tsx` wired at `AppShell.tsx:346` for `activeId "products"`: Artikli/Kategorije tabs, InputGroup search, all five filters (category/active/VAT + low-stock + missing-barcode), Table with every spec column, Sheet form with every spec field (plus quick + bulk entry), category management.
+- All writes in Rust transactions: `create_product` (271), `update_product` (353), `set_product_active` (435), `save_category` (467).
+- Validation in Rust: required name/sku/unit, non-negative prices, category exists, active tax-rate ref, unique SKU/barcode with structured Serbian errors `duplicate_sku`/`duplicate_barcode` (827, 848).
+- Product list LEFT JOINs `inventory_balances` for live stock (630). Migration v5 adds provenance columns (`migrations.rs:243-253`).
+
+**Partial**
+- Product updates not changing historical `sale_items` snapshots — structurally satisfied (`update_product` touches only `products`) but no catalog-level immutability test.
+- "Existing tests and build pass" — comprehensive tests exist; here confirmed green by the global Build & Test Health run (57 FE / 67 BE pass).
+
+**Missing**
+- (Low) Deep-link "view ledger" from a product row to that product's Lager ledger — the row action navigates to inventory generally (`CatalogModule.tsx:983`).
+- (Low) No frontend test for the category create/edit Sheet happy path.
+- (Low) No backend tests for the `low_stock`/`missing_barcode` SQL filter branches.
+- (Low) Orphaned legacy `src/app/ProductCatalogScreen.tsx` (281 lines) is dead code, never imported — should be deleted.
+
+**Backend commands (present / registered):** `catalog_list_products` (63), `catalog_search_products` (64), `catalog_get_product` (65), `catalog_create_product` (66), `catalog_update_product` (67), `catalog_set_product_active` (68), `catalog_list_categories` (71), `catalog_save_category` (72) — all present/registered; bonus `catalog_lookup_product_by_barcode` (69).
+
+**Frontend screen:** Real and dense. States present: loading (Spinner "Ucitavanje artikala"), empty (Empty component for products + categories), validation (`validateProductForm` + FieldError), error (loadError + `commandFieldErrors` placing duplicate errors on sku/barcode). Caveat: orphaned `ProductCatalogScreen.tsx` is dead code, not the live screen.
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| Product name required | Met |
+| SKU/code required and unique | Met |
+| Barcode optional but unique when present | Met |
+| Sale/purchase price cannot be negative | Met |
+| VAT must reference an active tax rate | Met |
+| Deactivation hides from Kasa search, keeps history | Met |
+| Updates do not change historical sale_items snapshots | Met (cross-module, untested at catalog level) |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| Artikli shows a real catalog screen, not a placeholder | Yes |
+| User can create and edit a product | Yes |
+| Kasa can reuse `searchProducts` (hides inactive) | Yes |
+| Existing tests and build pass | Yes (confirmed by global CI run) |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. Service-backed — Met
+3. Rust validation/transactions — Met
+4. Structured Serbian errors — Met
+5. Frontend states — Met
+6. Tests happy + failure — Met
+7. Local-first — Met
+
+**Test coverage & gaps:** Backend — create persists, duplicate_sku, duplicate_barcode, inactive hidden from search, list includes stock, update, set-active, save-category, provenance, OFF mapping, migration columns. Frontend — module opens with filters/rows, required-field validation, duplicate error placement, deactivate from row, barcode lookup, bulk entry, adapter mapping. Gaps: no `low_stock`/`missing_barcode` backend filter tests; no category UI happy-path test; no catalog-level snapshot-immutability test.
+
+**Auditor notes:** Confidence high; agrees. **Over-claim corrected:** migration v5's test asserts provenance columns exist on a *fresh* DB (all 5 migrations applied) — it is not a true v4-seeded forward-migration regression, so calling it that is slightly generous. **Under-claims:** the barcode-lookup and bulk-entry flows are substantial, well-tested bonus features; `saveCategory` mapping is exercised in adapter tests. Only "placeholder" hit is a legitimate HTML input attribute. Net −1 for the minor polish gaps and orphaned dead code.
+
+**Key risks:** `catalog_lookup_product_by_barcode` makes a live HTTP call to Open Food Facts (`catalog.rs:507-516`) — the one network dependency, but optional and degrades gracefully; orphaned `ProductCatalogScreen.tsx` could mislead maintenance.
+
+**Evidence:** `catalog.rs:156-235`, `271/353/435/467`, `789-855`, `1116-1430`; `lib.rs:63-72`; `CatalogModule.tsx:158-779`; `AppShell.tsx:346-353`; `ports.ts:100-110`; `local-adapter.ts:88-107`; `mock-adapter.ts:430-517`; `migrations.rs:64-79`, `243-253`; `App.test.tsx:313-535`; `src/app/ProductCatalogScreen.tsx` (orphaned).
+
+---
+
+### 03 — Inventory — 86% — Mostly done
+
+Audited **86%** vs assessed 88% — a **material disagreement** (−2), mainly for the `userId:1` placeholder and two missing spec ledger columns.
+
+**What's done**
+- All 5 commands present and registered (`inventory.rs:103-167`; `lib.rs:43-47`).
+- Single transactional helper `apply_inventory_adjustment` validates input, enforces negative-stock rules, writes exactly one `inventory_movements` row + one `inventory_balances` upsert atomically (`inventory.rs:306-404`).
+- Negative-stock guard → `insufficient_stock`/"Nema dovoljno zaliha." when `allow_negative_stock=0` (339-344). Validation: qty≠0, receive/write-off positive, correction/write-off require reason, purchase price ≥ 0 (475-516).
+- Stock list with search/category/stock_state filters and SQL-computed low_stock (169-236); ledger with running balance, newest-first (238-304).
+- Real `InventoryScreen` wired at `AppShell.tsx:368-369`: filterable table, receive/correction/write-off dialogs, ledger Sheet. States: Skeleton loading, Empty, Alert error + toast, FieldError validation.
+- FK preserves ledger: `inventory_movements.product_id REFERENCES products(id)` with default RESTRICT (no cascade); `PRAGMA foreign_keys=ON` verified (`db/mod.rs:37`, test 504-511).
+
+**Partial**
+- Acceptance "Kasa can reuse stock helpers": helpers are `pub` and transactional, but `sales.rs:263-287` reimplements movement/balance logic inline and the movement enum lacks sale/return/void — so the capability exists in principle but is not shared.
+- Ledger columns: implemented date/type/delta/balance/reason; spec's reference type/id and user are not rendered.
+- Stock list "unit": folded into the quantity display ("5 kom") rather than a discrete column.
+
+**Missing**
+- (Medium) Ledger "user" field absent from backend DTO and UI (`inventory.rs:82-93`, `244-258`).
+- (Medium) Frontend hard-codes `userId: 1` (`InventoryScreen.tsx:468`) instead of the session user.
+- (Low) No dedicated backend tests for write-off success or correction; none for zero-qty/positive validation.
+- (Low) True mid-transaction rollback not exercised (insufficient_stock returns before any INSERT).
+- (Low) Receive purchase-price snapshot not surfaced in UI (optional per spec).
+
+**Backend commands (present / registered):** `inventory_list_stock` (43), `inventory_get_product_ledger` (44), `inventory_receive` (45), `inventory_correct` (46), `inventory_write_off` (47) — all present/registered.
+
+**Frontend screen:** Real operational screen. States: loading (Skeleton), empty (list + ledger), error (destructive Alert + toast), validation (client `parseQuantityInput` + FieldError + backend errors). No placeholder text (test asserts "Radni modul" absent). Gaps: ledger omits user/reference columns; `userId` hard-coded.
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| Quantity cannot be zero | Met |
+| Receive quantity must be positive | Met |
+| Correction can be positive or negative | Met |
+| Write-off stored as negative movement | Met |
+| Reject resulting negative balance for non-negative products | Met |
+| All movements must include user id when available | Partial (frontend hard-codes userId:1) |
+| Product deletion does not erase ledger if movements exist | Met (RESTRICT FK; no explicit test) |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| Clicking Lager shows stock and movement UI | Yes |
+| Inventory actions persist to SQLite, visible after refresh | Yes |
+| Kasa sale completion can reuse stock helpers | Partial |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. Service-backed — Met
+3. Rust validation/transactions — Met
+4. Structured Serbian errors — Met
+5. Frontend states — Met
+6. Tests happy + failure — Met
+7. Local-first — Met
+
+**Test coverage & gaps:** Backend — receive increases balance + writes movement; write-off rejects negative + rolls back; ledger newest-first with running balance; low-stock filter (`inventory.rs:667-811`). Frontend — Lager stock list + receive + ledger; Serbian errors; adapter mapping/determinism. Gaps: no write-off-success or standalone correction test; no zero-qty/positive-validation test; no true post-write rollback test; no dedicated `InventoryScreen.test.tsx`; no product-deletion-blocked test.
+
+**Auditor notes:** Confidence high; agrees, no over-claims. Stress-tested the FK claim and confirmed RESTRICT behavior is real. **Stub-like finding:** `userId:1` is the only stub-like element — `session.user` is available in AppShell but not threaded through. **Divergence risk:** `sales.rs:263-289` re-implements inventory writes with a *different* balance strategy (incremental add vs absolute set) and **no negative-stock guard** on the sale path. **Under-claims:** the ledger UI already labels sale/return/void movement types (forward-compatible), and the mock adapter faithfully replicates the negative-stock guard. Net −2 for user-attribution + two missing spec ledger columns; "mostly done" is the right bucket.
+
+**Key risks:** Movements record `userId=1`, so the audit trail does not reflect the real operator; sales duplicating inventory logic risks divergence in negative-stock handling and balance math; adding ledger user attribution later requires a backend change; several failure paths are untested.
+
+**Evidence:** `inventory.rs:103-167`, `306-404`, `475-552`, `667-811`; `lib.rs:43-47`; `migrations.rs:64-97`; `InventoryScreen.tsx:98-716`; `AppShell.tsx:368-369`; `ports.ts:117-123`; `local-adapter.ts:114-123`; `mock-adapter.ts:164-203`; `App.test.tsx:537-590`; `sales.rs:263-287` (divergent inline logic).
+
+---
+
+### 04 — Register & Sales — 90% — Mostly done
+
+Audited **90%** (unchanged). The audit found the assessment well-calibrated and notably honest about its own gaps.
+
+**What's done**
+- Both spec commands present, registered (`lib.rs:72-73`), wired in local adapter.
+- `complete_sale_transaction` runs the full flow in ONE transaction (`connection.transaction()` at `sales.rs:185`, `tx.commit()` at 331): load open shift; `compute_sale` recalculates line gross/discount/included-VAT/totals from DB prices; validate stock honoring `allow_negative_stock`; validate payments; assign local receipt number; hard-set `not_fiscalized`; insert sale/items(with snapshots)/payments/movements + balance upsert; bump `shifts.expected_cash_minor`.
+- Real dense cashier `RegisterScreen.tsx`: search/scan InputGroup, cart table with qty steppers + item/receipt discounts, totals/payment/change panel, AlertDialog clear-cart, completed-sale "Lokalni racun" Dialog (no fiscalization claims), behind open-shift gating (`AppShell.tsx:330-344`).
+- Backed only by `SalesService`/`CatalogService` (no direct invoke).
+
+**Partial**
+- Transaction Flow step 1 "validate authenticated/current user": cashier identity is inferred from the most recent open shift, not a passed session (`sales.rs:466-486`). Acceptable for single-register but weaker than the literal spec step.
+- Frontend validation/preview error states: `PreviewState` defines an `error` variant and the catch sets it (`RegisterScreen.tsx:124-131`), but the JSX renders only the loading branch (428) — a failing `sales_preview` silently zeros totals and disables Complete with no message.
+- Backend "ignores tampered totals" test: covered by design — `CompleteSaleRequest` carries no client totals, so tampering is structurally impossible.
+
+**Missing**
+- (Low) Optional helper `sales_get_next_receipt_number_preview` not implemented.
+- (Low) Cash-change metadata computed/returned but not persisted on the sale.
+- (Low) Sale-level note not implemented.
+- (Low) Percentage discount input absent in the UI (backend supports Percent; screen only sends amount).
+
+**Backend commands (present / registered):** `sales_preview` (lib.rs:72), `sales_complete` (lib.rs:73) — both present/registered.
+
+**Frontend screen:** Real cashier screen. States: loading (Spinner during preview), empty (Empty cart), completion error (Alert preserving cart). Gap: preview-time validation/error variant is defined but never rendered.
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| Sale cannot complete without open shift | Met |
+| Empty cart cannot complete | Met |
+| Quantity cannot be zero | Met |
+| Discount cannot make line/sale total negative | Met |
+| Cash overpayment allowed for change | Met |
+| Stored payment amount not inflated beyond total | Met |
+| Card overpayment not allowed | Met |
+| Mixed payment must exactly cover total (except cash change) | Met |
+| Receipt item snapshots unchanged if product later changes | Met |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| Kasa is a real cashier screen | Yes |
+| Local sale completes end-to-end | Yes |
+| Stock decreases | Yes |
+| Receipt appears in Receipts module data later | Partial (cross-module path exists, no test) |
+| No fiscalization claims in UI | Yes |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. Service-backed — Met
+3. Rust validation/transactions — Met
+4. Structured Serbian errors — Met
+5. Frontend states — Partial (preview error never rendered)
+6. Tests happy + failure — Met
+7. Local-first — Met
+
+**Test coverage & gaps:** Backend (6) — preview recalculation, cash-sale insert + stock decrement, shift-required, insufficient-stock rollback, mixed payment, payment mismatch. Frontend (5) — scan adds item, qty+discount updates preview, cash change, complete shows receipt (asserts no `/fiskal/i`), backend error keeps cart. Gaps: no explicit tampered-totals test (mitigated by design); happy-path test doesn't directly assert a `sale_items` row; no percent-discount path test; no cross-module Receipts surfacing test.
+
+**Auditor notes:** Confidence high; agrees, keeps 90%, no over-claims, no placeholders/TODOs. The one substantive DoD deviation (swallowed preview errors) is correctly flagged. **Under-claims:** the cross-module Receipts read path exists in real code (`receipts.rs:300` queries `FROM sales`), so "Receipt appears later" is structurally stronger than "partial" implies; the recompute path is both tested and tamper-proof by design.
+
+**Key risks:** Preview/validation errors silently swallowed (cashier sees zeroed totals + disabled Complete with no explanation); cashier identity trusts the latest open shift; cash change not persisted (historical receipts can't show tendered/change); UI emits only fixed-amount discounts, so the backend percent + tax-allocation path is exercised only by tests/mock.
+
+**Evidence:** `sales.rs:157-171`, `180-333`, `335-423`, `488-557`, `870-1033`; `lib.rs:72-73`; `local-adapter.ts:108-113`; `mock-adapter.ts:518-543`; `ports.ts:112-115`; `RegisterScreen.tsx` (error variant 72-77 defined, only loading rendered 428); `AppShell.tsx:330-344`; `RegisterScreen.test.tsx`; `migrations.rs:99-136`.
+
+---
+
+### 05 — Receipts & Returns — 86% — Mostly done
+
+Audited **86%** vs assessed 88% — a **material disagreement** (−2), for the audit-attribution gap, a partially-satisfied rollback test, and the missing forward-migration regression.
+
+**What's done**
+- All 4 commands present, registered (`lib.rs:48-51`).
+- Full void: linked "void" sales row + negative `sale_items` + `inventory_movements` (type "void") + balance restore + original status→"voided", one transaction (`receipts.rs:322-436`).
+- Partial return: validates remaining = original − already_returned, creates linked "return" doc with proportional totals + negative items + inventory restore, one transaction (438-603).
+- Search with all 6 filters (215-315); detail with items/payments/totals, linked docs, can_void/can_return flags, returned_quantity per item (605-767).
+- Migration v4 adds document_type CHECK('sale','void','return'), void_reason, return_reason, original_sale_item_id + indexes (`migrations.rs:230-242`).
+- Real two-pane screen wired at `AppShell.tsx:372-374`; void AlertDialog (reason required), return Sheet (per-item qty + reason); original sale never deleted (only INSERT + status UPDATE).
+
+**Partial**
+- Auditable void/return attribution: backend records cashier_id + user_id + reason, but the frontend hard-codes `userId:1` for both (`ReceiptsScreen.tsx:173,236`).
+- Frontend DoD states: validation + mutation-error present; loading, list-empty, and search/load-error states absent.
+- `getReceipt` contract deviation: returns `Option/null` (maps not_found → null) vs spec `Promise<ReceiptDetail>`.
+
+**Missing**
+- (Low) Receipt list loading state (no Spinner/Skeleton).
+- (Low) Receipt list empty state (empty TableBody, no "Nema racuna").
+- (Medium) Search/detail load error handling — `runSearch`/`showDetail` have no try/catch (`ReceiptsScreen.tsx:133-157`); a backend failure becomes an unhandled rejection with no operator UI.
+- (Low) No true mid-transaction rollback test (excessive-qty test only proves pre-write rejection).
+- (Low) No dedicated v3→v4 forward-migration regression test.
+
+**Backend commands (present / registered):** `receipts_search` (48), `receipts_get` (49), `receipts_void` (50), `receipts_return_items` (51) — all present/registered.
+
+**Frontend screen:** Real two-pane (search filters + results Table left; detail panel with items/payments/totals/linked docs + actions right). Void AlertDialog requires reason; return Sheet has per-item qty + reason. States: validation + mutation-error present; loading, list-empty, and search/load-error **absent** (`hasLoadingEmptyErrorStates: false`).
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| Completed receipt can be voided once | Met |
+| Partial return cannot exceed sold minus already returned | Met |
+| Return/void writes inventory movements | Met |
+| Return/void updates inventory balances | Met |
+| Original receipt remains readable | Met |
+| Returned doc uses negative quantities + explicit return/void type | Met |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| Racuni is a real history and operations screen | Yes |
+| Original sale is never deleted | Yes |
+| Voids/returns are auditable and stock-correct | Partial (stock-correct yes; auditable weakened by hard-coded userId) |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. Service-backed — Met
+3. Rust validation/transactions — Met
+4. Structured Serbian errors — Met
+5. Frontend states — Partial (no loading/empty; unhandled read errors)
+6. Tests happy + failure — Met
+7. Local-first — Met
+
+**Test coverage & gaps:** Backend (6) — search returns completed sale; detail includes items/payments/flags; void creates linked doc + restores stock; void rejects duplicate; return rejects excessive qty (no inventory change); return creates linked doc for selected qty. Frontend (3 in App.test.tsx) — opens Racuni; requires reason before void; applies partial return + shows linked doc; adapter tests. Gaps: no true post-write rollback test; no loading/empty/error UI tests (states not implemented); no v3→v4 forward-migration test; detail "totals + linked status" only weakly asserted.
+
+**Auditor notes:** Confidence high; agrees, no over-claims, no stubs. **Under-claims:** the hard-coded `userId:1` is a **systemic project pattern** (Inventory does it too), and the persisted void/return reason text is loaded from the backend but never displayed in the UI. Nudged to 86 because three gaps touch explicit spec/foundation requirements (auditability, the spec-listed rollback test, the forward-migration regression) rather than pure polish.
+
+**Key risks:** Hard-coded `userId:1` always attributes void/return to user 1; unhandled promise rejections on search/detail failure leave no operator feedback; search hard-capped at LIMIT 100 with no pagination (large histories silently truncate); rollback is structurally correct but not directly proven.
+
+**Evidence:** `receipts.rs:175-213`, `322-603`, `913-967`, `1176-1516`; `lib.rs:48-51`; `migrations.rs:230-242`; `app_error.rs:82-85`; `ReceiptsScreen.tsx:133-257`, `394-425`; `ports.ts:125-130`; `local-adapter.ts:125-130`; `mock-adapter.ts:588-644`; `App.test.tsx:592-646`.
+
+---
+
+### 06 — Reports — 80% — Mostly done
+
+Audited **80%** vs assessed 82% — a **material disagreement** (−2). The audit went lower because shift/cashier filtering has **no backend support at all** and the spec's "Product ledger report" scope line is entirely absent from this module.
+
+**What's done**
+- All 8 commands as real SQL in `reports.rs`, registered (`lib.rs:35-42`), exposed via `ReportsService` (`ports.ts:140-149`), mapped (`local-adapter.ts:141-157`), mocked (`mock-adapter.ts:729-840`), typed (`types.ts:486-614`).
+- Real `ReportsScreen.tsx` wired at `AppShell.tsx:364-366`: Promet/Artikli/Lager/Izvoz tabs, 5 metric cards, BarChart, tables matching spec columns.
+- Net-of-voids math across all queries (311-313, tested 1063-1067); labeled margin estimate from `purchase_price_minor` ("Marza je procena na osnovu nabavne cene"); low-stock query; CSV export with Serbian headers for all 7 report types written to a local exports dir.
+
+**Partial**
+- Empty states: handled for daily chart, low-stock, and CompactTable; ProductSalesTable + CategorySalesTable render empty bodies with no Empty component.
+- Acceptance "real admin screen": real and functional, but not role-restricted to admin/owner.
+- Backend per-query coverage: daily/payment/product/low-stock + CSV(daily) tested; shift, cashier, category queries untested; CSV tested only for daily turnover.
+- Structured Serbian errors: infra errors serialize fine, but report commands do no domain validation (e.g. no invalid-date-range code).
+
+**Missing**
+- (Medium) Common filters shift/cashier/category/product — UI exposes only date range; `toProductSalesQuery` hard-codes categoryId/productId to null; shift/cashier have **no backend query support**.
+- (Low) Date-range validation state (bad/inverted ranges silently return empty).
+- (Low) Admin/owner role gating for the screen (cashiers can currently see turnover + margin).
+- (Medium) Frontend empty/error/failure-path tests entirely absent.
+
+**Backend commands (present / registered):** `reports_daily_turnover` (35), `reports_shift_turnover` (36), `reports_cashier_turnover` (37), `reports_payment_methods` (38), `reports_product_sales` (39), `reports_category_sales` (40), `reports_low_stock` (41), `reports_export_csv` (42) — all present/registered.
+
+**Frontend screen:** Real, non-stub. States: loading (Skeleton), error (Alert + sonner toast), several empty states. Caveats: only date-range filter; no validation state; product/category tables lack empty state; not admin-gated.
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| Voids/returns reflected consistently (net decision) | Met |
+| Margin is a labeled estimate from purchase price | Met |
+| Reports must not mutate data | Met |
+| CSV uses Serbian-friendly headers | Met |
+| Use sale-item snapshots for historical product reporting | Met |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| Izvestaji is a real admin screen | Partial (real, but not role-gated) |
+| Owner can answer daily total / cash-card / best products / low stock | Yes |
+| CSV export works for daily turnover and product sales | Yes |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. Service-backed — Met
+3. Rust validation/transactions — Met (read-only; no domain validation)
+4. Structured Serbian errors — Partial (no report-specific codes)
+5. Frontend states — Partial (no validation; product/category empty states missing)
+6. Tests happy + failure — Partial (no error/empty/failure FE tests)
+7. Local-first — Met
+
+**Test coverage & gaps:** Backend (5) — daily turnover net-of-voids, payment methods, product sales net qty/revenue/margin, low stock, CSV daily with Serbian headers. Frontend — renders tabs, applies date filters, exports CSV + path toast; adapter command-name test. Gaps: no error/export-failure/empty/loading FE tests; no shift/cashier/category backend query tests; CSV only tested for daily; no category/product filter param test (UI never sends them).
+
+**Auditor notes:** Confidence high; broadly agrees but lowered to 80%. **Over-claims corrected:** (1) the filters gap is deeper than "UI doesn't send them" — `ReportDateQuery` has only from/to; shift/cashier filtering is unsupported by the queries themselves; (2) the spec scope line "Product ledger report" (`06-reports.md:27`) is entirely absent here (exists only in the inventory module) and was unmentioned. **Under-claims:** "real admin screen" is harshly marked partial — the primary meaning (real, non-stub screen) is fully met and the spec never explicitly mandates runtime role enforcement; backend CSV is genuinely complete for all 7 types, not just the 3 exposed. No stubs/placeholders.
+
+**Key risks:** Cashiers can view all turnover/margin (no role gate); category sales group by *current* category, so reclassification shifts historical numbers (acknowledged in UI); unvalidated date ranges silently yield empty reports; the spec's analytical filters are largely unavailable.
+
+**Evidence:** `reports.rs:208-280`, `282-608`, `610-813`, `1048-1176`; `lib.rs:35-42`; `ports.ts:140-149`; `local-adapter.ts:141-157`; `mock-adapter.ts:729-840`; `types.ts:486-614`; `ReportsScreen.tsx`; `ReportsScreen.test.tsx`; `reports-adapter.test.ts`; `AppShell.tsx:364-366` (no role gate); `06-reports.md:27` (absent ledger report).
+
+---
+
+### 07 — Import — 90% — Mostly done
+
+Audited **90%** vs assessed 88% — a **material disagreement** (+2, the only upward revision). The audit raised it because two "partial" deductions were overstated (unknown-VAT hard-fail is an allowed policy; Progress is a sanctioned loading component).
+
+**What's done**
+- All 5 commands present, registered (`lib.rs:52-56`).
+- Transactional commit: `commit_import` re-validates and rejects on `error_count>0` **before** opening the transaction (`importer.rs:361-377`), then wraps `import_jobs` + `import_job_rows` + products/categories + inventory movements/balances in one rusqlite transaction (382-436); test proves no partial writes on failure (1636-1666).
+- CSV parsing with BOM strip, quoted fields, delimiter auto-detect (`;`/`,`/tab); product required/optional fields; duplicate matching order barcode→sku→name-as-warning; initial-stock match + positive-qty + "receive" movement with reference_type "import"; category create/update; VAT resolution by basis points or name; Serbian decimal-comma money/qty parsing.
+- Real wizard `ImportWizard.tsx` (629 lines): type select, local file read, alias auto-mapping, column-mapping selects, dry-run validation Table with row numbers, commit AlertDialog, persisted history; wired (`AppShell.tsx:376-378`) through ports + local/mock adapters.
+
+**Partial**
+- Loading state: `isBusy` disables buttons + a step Progress bar; no spinner during async work (low severity — Progress is sanctioned).
+- Unknown-VAT policy: hard-fail only; spec allows fail OR warn, so the rule is effectively met; only configurability + a test are missing.
+- Frontend test breadth: 2 flow tests + adapter mapping; no dedicated `ImportWizard.test.tsx`; "Validiraj disabled when required field unmapped" untested.
+
+**Missing**
+- (Low) XLSX import — CSV only; spec marks XLSX optional, so an allowed omission.
+- (Low) Job-detail drill-down UI — `import_get_job`/`getImportJob` exist and return per-row detail, but the history table has no click-through.
+- (Low) Visible spinner during async file-read/validate/commit.
+
+**Backend commands (present / registered):** `import_read_headers` (52), `import_validate` (53), `import_commit` (54), `import_list_jobs` (55), `import_get_job` (56) — all present/registered (`import_get_job` wired in adapters but not consumed by the UI).
+
+**Frontend screen:** Real multi-section wizard. States: error Alert, success Alert, validation table + error Alert, empty states for no-error-rows and empty history. Loading state weak (button-disable + step Progress, no spinner). No job-detail drill-down despite `getImportJob` being available.
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| Product required fields (name, sale price, VAT, SKU/code or barcode) | Met |
+| Product optional fields handled | Met |
+| Duplicate matching order barcode → SKU → name-as-warning | Met |
+| Import never deletes existing products | Met |
+| Initial stock matched by barcode or SKU/code | Met |
+| Initial stock quantity required and positive | Met |
+| Initial stock writes receive/correction movement | Met |
+| In-file duplicate detection | Met |
+| Unknown VAT rate fails or warns per policy | Met (hard-fail; configurability + test absent) |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| Import is a real migration tool, not a file-picker placeholder | Yes |
+| User can validate a CSV before writing data | Yes |
+| Commit is transactional | Yes |
+| Import history is persisted | Yes |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. Service-backed — Met
+3. Rust validation/transactions — Met
+4. Structured Serbian errors — Met
+5. Frontend states — Met (loading weak but present)
+6. Tests happy + failure — Met
+7. Local-first — Met
+
+**Test coverage & gaps:** Backend (7) — header detection, requires-mapping, invalid-money with row number, warns-existing-barcode, commit transactional, commit rejects invalid (no partial writes), initial-stock receive movement. Frontend — validates rows before commit ("Red 2" + commit disabled), commits valid CSV after dry-run + history; adapter mapping. Gaps: no unknown-VAT-row test; no category import test; no initial-stock validation-failure test; no `import_get_job` retrieval test; no dedicated `ImportWizard.test.tsx`; no read-headers/parse-error path test.
+
+**Auditor notes:** Confidence high; agrees on the core conclusion and raised to 90%. **Over-claims corrected:** the "8 backend tests" bullet is a miscount — there are **7** `#[test]` functions; and marking the unknown-VAT rule as not-met understates compliance since hard-fail is an allowed policy. **Under-claims:** loading-state severity is low (not medium — Progress is sanctioned); FE coverage is slightly better than implied (4 of 5 spec FE scenarios). **Notes (not stubs):** `import_jobs.error_rows` is hard-coded to 0 on commit (correct given commit blocks on any error); when SKU is unmapped, commit copies barcode into the NOT-NULL UNIQUE sku column (intentional workaround).
+
+**Key risks:** Minimal loading UX on large CSVs; commit re-parses/re-validates the file (correct but duplicative); `error_rows` never reflects skipped rows; no XLSX path means XLSX-only clients must convert to CSV first.
+
+**Evidence:** `imports.rs:1-46`; `importer.rs:316-505`, `520-690`, `692-921`, `1484-1696`; `lib.rs:52-56`; `migrations.rs:138-175`; `ImportWizard.tsx:1-630`; `AppShell.tsx:376-378`; `ports.ts:132-138`; `local-adapter.ts:132-140`; `mock-adapter.ts:646-728`; `App.test.tsx:648-722`.
+
+---
+
+### 08 — Settings & Backup — 80% — Mostly done
+
+Audited **80%** vs assessed 84% — the **largest material disagreement** (−4). The audit went lower because, beyond the two named high-severity gaps, the VAT screen is create-only (the spec's "deactivate instead of delete" workflow is unreachable by an operator).
+
+**What's done**
+- All 10 commands present, registered (`lib.rs:57-62`, `74-78`), plus a bonus `backup_update_settings`.
+- Real tabbed `SettingsScreen.tsx` (Radnja/PDV/Racuni/Korisnici/Backup) wired at `AppShell.tsx:355-361` with the users panel injected; loading/error/empty/validation states.
+- Rust-owned validation + transactions: company validation incl. 9-digit PIB and RSD-only currency; tax-rate save in a transaction; receipt validation; backup job insert in a transaction.
+- Backup uses the SQLite **backup API** (`source.backup(...)`, not file copy); restore uses `conn.restore` + re-migrate; pre-restore backup created first; restore gated by exact "VRATI PODATKE" in both Rust and the UI AlertDialog.
+- Migration v2 rebuilds `backup_jobs` to add file_size_bytes + completed_at and widen backup_type to include restore/pre_restore; receipt numbering genuinely consumed/incremented inside the sales transaction (`sales.rs:597-630`).
+
+**Partial**
+- Stale-backup detection: `stale = last_successful_backup.is_none()` — flags only "never backed up", not age-based, so an old-but-once-successful backup gives no "Backup kasni" warning.
+- VAT hard-delete protection: satisfied at API level (no delete command; deactivate via `active` flag) but **the UI offers no way to edit/deactivate an existing rate** (see Auditor notes).
+- Tabs: hand-rolled `role=tablist` buttons instead of the prescribed shadcn Tabs.
+- No dedicated v1→v2 backup_jobs migration-forward data-preservation test.
+
+**Missing**
+- (High) Admin role-gating for receipt sequence updates — `settings_update_receipt`/`save_receipt_settings` take no user/role argument and perform no admin check; navigation carries no role requirement and the screen renders for any role.
+- (High) Frontend component tests for Settings/Backup — none of the 5 spec FE tests exist; no `SettingsScreen.test.tsx` (only adapter-level wiring tests).
+
+**Backend commands (present / registered):** `settings_get_company` (57), `settings_update_company` (58), `settings_list_tax_rates` (59), `settings_save_tax_rate` (60), `settings_get_receipt` (61), `settings_update_receipt` (62, no admin check), `backup_get_status` (74), `backup_create` (76), `backup_restore` (77), `backup_list_jobs` (78) — all present/registered; bonus `backup_update_settings` (75).
+
+**Frontend screen:** Real tabbed admin screen. States: loading badge, error Alert, empty backup-jobs row, validation messages, error Alerts. Deviations: tabs are custom buttons (not shadcn Tabs); currency field correctly disabled; **VAT tab is create-only** (no edit/deactivate affordance).
+
+**Business rules**
+
+| Rule | Status |
+|---|---|
+| PIB field exists with basic validation | Met |
+| Currency is RSD and not freely changed | Met |
+| VAT rates cannot be hard-deleted; deactivate instead | Met at API level / unreachable in UI |
+| Receipt sequence updates require admin role | Missing |
+| Restore replaces data and requires confirmation | Met |
+| Restore creates a pre-restore backup first | Met |
+
+**Acceptance criteria**
+
+| Criterion | Met |
+|---|---|
+| Podesavanja is a real admin screen | Yes |
+| Shop profile and VAT settings persist | Yes |
+| Manual backup works | Yes |
+| Restore is guarded by confirmation | Yes |
+| Backup status available for shell warning | Yes (stale logic is is_none-only) |
+
+**Definition-of-Done checklist**
+1. Distinct useful screen — Met
+2. Service-backed — Met
+3. Rust validation/transactions — Met
+4. Structured Serbian errors — Met
+5. Frontend states — Met
+6. Tests happy + failure — Partial (no FE component tests)
+7. Local-first — Met
+
+**Test coverage & gaps:** Backend (8) — company round-trip, invalid-PIB reject, tax-rate create/update, receipt numbering round-trip, backup settings drive status, manual backup creates SQLite copy + success job, restore rejects missing file, restore requires confirmation text. Frontend — adapter command-name + payload mapping + mock round-trips only. Gaps: no `SettingsScreen.test.tsx`; missing all 5 spec FE tests (tab content, company save + toast, VAT validation render, backup stale/failed render, restore confirmation); no "unreadable file" restore test; no v1→v2 migration-forward data-preservation test.
+
+**Auditor notes:** Confidence high; broadly agrees, adjusted 84→80. **Over-claims corrected:** (1) the VAT "deactivate instead of delete" rule is only met at the API level — `TaxRateDialog` always submits `id:null` and resets to empty, and rows have no edit affordance, so an operator cannot edit/deactivate an existing rate; (2) admin role-gating is missing at **every** layer (Rust command takes no session arg; nav items carry no role; the settings screen renders with no role check), so a cashier reaching Podesavanja can change receipt numbering. **Under-claims:** receipt numbering is atomically consumed/incremented in the sales transaction; migration v2 carefully backfills `completed_at` and widens the CHECK. No placeholder pages — VAT is create-only (a missing-feature gap, not a stub).
+
+**Key risks:** Receipt numbering changeable by any role (data-integrity/audit risk); UI behavior untested at component level (form/toast/validation/restore-gate regressions would pass CI); stale-backup warning only fires when no backup ever existed; restore-then-re-migrate behavior on a corrupt/older-schema backup is untested.
+
+**Evidence:** `settings.rs:105-352`; `backup.rs:67-482`; `lib.rs:57-78`; `SettingsScreen.tsx:1-953` (VAT create-only 481-551); `AppShell.tsx:355-361`, `417-444`; `ports.ts` (Settings/Backup); `local-adapter.ts:47-70`; `mock-adapter.ts:207-313`; `migrations.rs:159-218`; `sales.rs:597-630`; `local-adapter.test.ts:90-154`, `499-522`.
+
+---
+
+## Cross-Cutting Observations
+
+**Shared-foundation health is excellent and is carrying the app.** The foundation (module 00) is genuinely complete: strict service-port layering (only `local-adapter.ts` imports Tauri), a transactional append-only migration runner, a uniform `{code, message, details}` error contract with Serbian operator messages, BigInt integer-money helpers, and every canonical command registered. Crucially, the foundation already ships ~8000 lines of real downstream command code, so the contracts are exercised by real callers, not theory. This is why every higher module could be rated "mostly done" or better.
+
+**Systemic test gaps skew toward the frontend.** Backend coverage is strong (67 passing Rust tests, with transactional rollback and failure-path tests in nearly every module). The weak spot is UI test breadth: module 08 ships **zero** Settings component tests (all 5 spec FE tests absent), module 06 has no error/empty/failure FE tests, and modules 03/05 lack dedicated screen test files. Several spec-named tests are missing module by module (01 deactivated-login, 07 unknown-VAT/required-mapping, 05 true post-write rollback). None of these fail CI today precisely because they don't exist — which is the risk.
+
+**Command registration is uniformly correct.** Across all 9 modules every spec command is present *and* registered in the `lib.rs` invoke_handler, plus three intentional bonus commands (catalog barcode lookup, backup settings update). The only registration-adjacent finding is that `import_get_job` is wired through the adapters but not yet consumed by the Import UI — a missing drill-down, not a broken wire.
+
+**Two recurring patterns hold back MVP polish.** (1) **Hard-coded `userId:1`** in Inventory and Receipts/Returns frontends breaks the operator audit trail even though `session.user.id` is available and is correctly threaded into other screens (Users). (2) **No role enforcement** on admin-only surfaces — Reports and the whole Settings screen render for any logged-in role, and the spec's "receipt sequence requires admin" rule is unenforced at every layer. Both are small, localized wiring fixes with outsized correctness/compliance impact.
+
+**Local-first integrity is intact everywhere.** Every module runs against local SQLite with `not_fiscalized` defaults and no Medusa/cloud references. The single network touch is the optional Open Food Facts barcode lookup in Catalog, which degrades gracefully and never blocks local use.
+
+---
+
+## Recommended Next Steps
+
+Prioritized to reach MVP, following the spec's Recommended Order (01 → 02 → 03 → 04 → 05 → 06 → 07 → 08) and front-loading the highest-severity, lowest-effort correctness fixes:
+
+1. **(01) Add the spec-required "deactivated user cannot log in" backend test** and a close-shift expected-cash-derivation test. Behavior exists; this closes a known regression hole cheaply.
+2. **(08) Enforce admin role-gating for receipt-sequence updates** end to end — add a session/role argument to `settings_update_receipt`, gate the Podesavanja nav/screen by role, and reject non-admin callers in Rust. This is the only outright-missing business rule in the app.
+3. **(08) Make the VAT screen edit/deactivate an existing rate** (wire `TaxRateDialog` to pass the rate `id` and expose a row edit/deactivate action), making the "deactivate instead of delete" workflow actually reachable.
+4. **(03, 05) Thread the real session user into Inventory and Receipts** to replace `userId:1`, restoring a correct audit trail for movements, voids, and returns.
+5. **(04) Render the swallowed preview/validation error state** in RegisterScreen so cashiers see why an over-limit discount or invalid quantity blocks completion.
+6. **(05) Add receipt-list loading + empty states and try/catch around search/detail reads**, eliminating the current unhandled rejections; surface the persisted void/return reason text.
+7. **(06) Add backend shift/cashier filtering** (extend the report query params) and **role-gate the Reports screen**; add the missing error/empty/failure FE tests and date-range validation.
+8. **(02) Delete the orphaned `ProductCatalogScreen.tsx`** and deep-link the product "Lager" row action to that product's ledger.
+9. **(07) Surface job-detail drill-down** by consuming `import_get_job` in the history table; add the unknown-VAT and required-mapping tests; correct the "8 tests" miscount in docs.
+10. **(08) Add the missing Settings/Backup component tests** (tabs, company save + toast, VAT validation, backup stale/failed render, restore confirmation) and make stale-backup detection age-based rather than `is_none`-only.
+11. **(00) Wire the shell header to `settings_get_company`** so the company shop name replaces the hard-coded "VantumPOS", and add a pre-existing-old-DB forward-migration regression test to protect the installed base.
+12. **Reconcile the sales/inventory write divergence (03/04):** unify the inventory movement/balance write path (or add a negative-stock guard to the sales path) so the two code paths cannot drift in balance math or stock rules.
+
+Items 1-4 are the highest-leverage correctness/compliance fixes and should land first; items 5-12 are polish and test-breadth that move the four "mostly done" modules to "complete" and lift the overall figure above 88%.
