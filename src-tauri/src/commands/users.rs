@@ -7,7 +7,7 @@ use crate::clock::utc_now;
 use crate::security::hash_credential;
 use crate::state::AppState;
 
-use super::auth::{active_user_by_id, user_account_from_row, UserAccount};
+use super::auth::{require_admin, user_account_from_row, UserAccount};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,26 +182,6 @@ pub fn deactivate_user(state: &AppState, user_id: i64) -> Result<(), AppError> {
 
     if changed == 0 {
         return Err(AppError::not_found("Korisnik nije pronadjen."));
-    }
-
-    Ok(())
-}
-
-fn require_admin(state: &AppState) -> Result<(), CommandError> {
-    let Some(user_id) = state.session_user_id().map_err(CommandError::from)? else {
-        return Err(CommandError::new("unauthorized", "Prijavite se za rad."));
-    };
-
-    let Some(user) = active_user_by_id(state, user_id).map_err(CommandError::from)? else {
-        state.clear_session().map_err(CommandError::from)?;
-        return Err(CommandError::new("unauthorized", "Prijavite se za rad."));
-    };
-
-    if user.role != "admin" {
-        return Err(CommandError::new(
-            "unauthorized",
-            "Samo administrator moze da uredjuje korisnike.",
-        ));
     }
 
     Ok(())

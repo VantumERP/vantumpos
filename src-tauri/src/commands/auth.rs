@@ -150,18 +150,25 @@ pub(crate) fn active_user_by_id(
     .map_err(Into::into)
 }
 
+/// The single authoritative admin gate, shared by every admin-only command
+/// (Settings, Users, and later Reports). The acting user is derived from the
+/// server-side session, never from a client-supplied role.
 pub(crate) fn require_admin(state: &AppState) -> Result<UserAccount, AppError> {
     let user_id = state
         .session_user_id()?
         .ok_or_else(|| AppError::business("unauthorized", "Niste prijavljeni."))?;
 
-    let user = active_user_by_id(state, user_id)?
-        .ok_or_else(|| AppError::business("unauthorized", "Niste prijavljeni."))?;
+    let Some(user) = active_user_by_id(state, user_id)? else {
+        // The session points at a user that no longer exists or is inactive;
+        // drop the stale session before reporting the failure.
+        state.clear_session()?;
+        return Err(AppError::business("unauthorized", "Niste prijavljeni."));
+    };
 
     if user.role != "admin" {
         return Err(AppError::business(
             "forbidden",
-            "Samo administrator moze da menja numeraciju racuna.",
+            "Samo administrator moze da izvrsi ovu akciju.",
         ));
     }
 
@@ -213,4 +220,108 @@ fn invalid_credentials_error() -> CommandError {
         "invalid_credentials",
         "Korisnicko ime ili lozinka nisu ispravni.",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{test_database_path, Db};
+
+    fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
+        let path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let state = AppState::new(db);
+            test(&state);
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    fn seed_admin_session(state: &AppState) -> i64 {
+        let admin_id: i64 = state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist");
+        state
+            .set_session_user_id(admin_id)
+            .expect("admin session should set");
+        admin_id
+    }
+
+    fn seed_cashier_session(state: &AppState) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, created_at, updated_at)
+                 VALUES ('marko', 'Marko Markovic', 'cashier', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("cashier should insert");
+        let cashier_id = connection.last_insert_rowid();
+        state
+            .set_session_user_id(cashier_id)
+            .expect("cashier session should set");
+    }
+
+    #[test]
+    fn require_admin_returns_signed_in_admin() {
+        with_state("require_admin_returns_signed_in_admin", |state| {
+            let admin_id = seed_admin_session(state);
+
+            let user = require_admin(state).expect("admin should pass the gate");
+
+            assert_eq!(user.id, admin_id);
+            assert_eq!(user.role, "admin");
+        });
+    }
+
+    #[test]
+    fn require_admin_rejects_cashier_with_forbidden() {
+        with_state("require_admin_rejects_cashier_with_forbidden", |state| {
+            seed_cashier_session(state);
+
+            let error = require_admin(state).expect_err("cashier should be denied");
+
+            assert_eq!(error.code(), "forbidden");
+        });
+    }
+
+    #[test]
+    fn require_admin_rejects_without_session_with_unauthorized() {
+        with_state(
+            "require_admin_rejects_without_session_with_unauthorized",
+            |state| {
+                let error = require_admin(state).expect_err("anonymous caller should be denied");
+
+                assert_eq!(error.code(), "unauthorized");
+            },
+        );
+    }
+
+    #[test]
+    fn require_admin_clears_stale_session_and_rejects() {
+        with_state("require_admin_clears_stale_session_and_rejects", |state| {
+            // Session points at a user id that does not exist (or is inactive).
+            state
+                .set_session_user_id(9999)
+                .expect("stale session should set");
+
+            let error = require_admin(state).expect_err("stale session should be denied");
+
+            assert_eq!(error.code(), "unauthorized");
+            assert_eq!(
+                state
+                    .session_user_id()
+                    .expect("session should remain readable"),
+                None,
+                "the stale session must be cleared",
+            );
+        });
+    }
 }

@@ -257,7 +257,7 @@ export function createMockServices(): PosServices {
         if (session?.user.role !== "admin") {
           throw {
             code: "forbidden",
-            message: "Samo administrator moze da menja numeraciju racuna.",
+            message: "Samo administrator moze da izvrsi ovu akciju.",
           };
         }
 
