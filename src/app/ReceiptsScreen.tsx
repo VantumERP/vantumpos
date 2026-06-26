@@ -7,6 +7,7 @@ import {
 import { useEffect, useState } from "react";
 
 import { formatQuantity, parseQuantityInput } from "@/app/format";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -25,6 +26,13 @@ import {
   FieldGroup,
   FieldLabel,
 } from "@/components/ui/field";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import {
   InputGroup,
@@ -33,6 +41,7 @@ import {
 } from "@/components/ui/input-group";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Separator } from "@/components/ui/separator";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Sheet,
   SheetContent,
@@ -130,20 +139,48 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
   const [returnReason, setReturnReason] = useState("");
   const [returnQuantities, setReturnQuantities] = useState<Record<number, string>>({});
   const [returnError, setReturnError] = useState<string | undefined>();
+  const [listStatus, setListStatus] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [listError, setListError] = useState<string | undefined>();
+  const [detailError, setDetailError] = useState<string | undefined>();
 
   async function runSearch(query: ReceiptSearchQuery = {}) {
-    const result = await receipts.searchReceipts(query);
-    setRows(result.receipts);
+    setListStatus("loading");
+    setListError(undefined);
+
+    try {
+      const result = await receipts.searchReceipts(query);
+      setRows(result.receipts);
+      setListStatus("ready");
+    } catch (error) {
+      const commandError = error as CommandErrorShape;
+      setListError(commandError.message ?? "Ucitavanje racuna nije uspelo.");
+      setListStatus("error");
+    }
   }
 
   useEffect(() => {
     let cancelled = false;
 
-    receipts.searchReceipts({}).then((result) => {
-      if (!cancelled) {
-        setRows(result.receipts);
-      }
-    });
+    setListStatus("loading");
+    setListError(undefined);
+
+    receipts
+      .searchReceipts({})
+      .then((result) => {
+        if (!cancelled) {
+          setRows(result.receipts);
+          setListStatus("ready");
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          const commandError = error as CommandErrorShape;
+          setListError(commandError.message ?? "Ucitavanje racuna nije uspelo.");
+          setListStatus("error");
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -151,7 +188,14 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
   }, [receipts]);
 
   async function showDetail(id: number) {
-    setSelected(await receipts.getReceipt(id));
+    setDetailError(undefined);
+
+    try {
+      setSelected(await receipts.getReceipt(id));
+    } catch (error) {
+      const commandError = error as CommandErrorShape;
+      setDetailError(commandError.message ?? "Ucitavanje detalja nije uspelo.");
+    }
   }
 
   async function submitSearch() {
@@ -379,55 +423,85 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
           </FieldGroup>
         </div>
 
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Broj</TableHead>
-              <TableHead>Datum</TableHead>
-              <TableHead>Kasir</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Fiskalno</TableHead>
-              <TableHead>Placanje</TableHead>
-              <TableHead>Ukupno</TableHead>
-              <TableHead>Akcije</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.id}>
-                <TableCell>{row.receiptNumber}</TableCell>
-                <TableCell>{formatDateTime(row.createdAt)}</TableCell>
-                <TableCell>{row.cashierName}</TableCell>
-                <TableCell>
-                  <Badge variant={row.status === "completed" ? "secondary" : "outline"}>
-                    {statusLabels[row.status]}
-                  </Badge>
-                </TableCell>
-                <TableCell>{fiscalSummaryLabels[row.fiscalStatus]}</TableCell>
-                <TableCell>
-                  {row.paymentMethods
-                    .map((method) => paymentSummaryLabels[method])
-                    .join(", ")}
-                </TableCell>
-                <TableCell>{formatRsd(row.totalMinor)}</TableCell>
-                <TableCell>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => showDetail(row.id)}
-                  >
-                    <FileTextIcon data-icon="inline-start" />
-                    Detalji za {row.receiptNumber}
-                  </Button>
-                </TableCell>
+        {listStatus === "loading" ? (
+          <div className="flex items-center gap-2 rounded-md border border-border p-4 text-sm text-muted-foreground">
+            <Spinner aria-hidden="true" />
+            Ucitavanje racuna...
+          </div>
+        ) : listStatus === "error" ? (
+          <Alert variant="destructive">
+            <AlertTitle>Racuni nisu ucitani</AlertTitle>
+            <AlertDescription>{listError}</AlertDescription>
+          </Alert>
+        ) : rows.length === 0 ? (
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <FileTextIcon aria-hidden="true" />
+              </EmptyMedia>
+              <EmptyTitle>Nema racuna za izabrane filtere</EmptyTitle>
+              <EmptyDescription>
+                Promenite filtere ili napravite novu prodaju.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Broj</TableHead>
+                <TableHead>Datum</TableHead>
+                <TableHead>Kasir</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Fiskalno</TableHead>
+                <TableHead>Placanje</TableHead>
+                <TableHead>Ukupno</TableHead>
+                <TableHead>Akcije</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => (
+                <TableRow key={row.id}>
+                  <TableCell>{row.receiptNumber}</TableCell>
+                  <TableCell>{formatDateTime(row.createdAt)}</TableCell>
+                  <TableCell>{row.cashierName}</TableCell>
+                  <TableCell>
+                    <Badge variant={row.status === "completed" ? "secondary" : "outline"}>
+                      {statusLabels[row.status]}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>{fiscalSummaryLabels[row.fiscalStatus]}</TableCell>
+                  <TableCell>
+                    {row.paymentMethods
+                      .map((method) => paymentSummaryLabels[method])
+                      .join(", ")}
+                  </TableCell>
+                  <TableCell>{formatRsd(row.totalMinor)}</TableCell>
+                  <TableCell>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => showDetail(row.id)}
+                    >
+                      <FileTextIcon data-icon="inline-start" />
+                      Detalji za {row.receiptNumber}
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
       </section>
 
       <section className="flex min-w-0 flex-col gap-4">
+        {detailError ? (
+          <Alert variant="destructive">
+            <AlertTitle>Detalji nisu ucitani</AlertTitle>
+            <AlertDescription>{detailError}</AlertDescription>
+          </Alert>
+        ) : null}
         {selected ? (
           <ReceiptDetailPanel
             detail={selected}
@@ -625,6 +699,20 @@ function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProp
           </dl>
         </div>
       </div>
+
+      {detail.voidReason ? (
+        <div className="flex flex-col gap-1">
+          <h3 className="text-sm font-medium">Razlog storniranja</h3>
+          <p className="text-sm text-muted-foreground">{detail.voidReason}</p>
+        </div>
+      ) : null}
+
+      {detail.returnReason ? (
+        <div className="flex flex-col gap-1">
+          <h3 className="text-sm font-medium">Razlog povrata</h3>
+          <p className="text-sm text-muted-foreground">{detail.returnReason}</p>
+        </div>
+      ) : null}
 
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-medium">Povezani dokumenti</h3>
