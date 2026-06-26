@@ -173,8 +173,13 @@ export function AppShell({ services }: AppShellProps) {
         const name = company.shopName.trim();
         setCompanyName(name.length > 0 ? name : "VantumPOS");
       })
-      .catch(() => {
-        // Keep the default branding if company settings cannot be read.
+      .catch((error) => {
+        // Keep the default branding if company settings cannot be read,
+        // but surface the failure so it stays diagnosable in dev.
+        console.warn(
+          "Naziv radnje nije ucitan; koristi se podrazumevani naziv.",
+          error,
+        );
       });
 
     return () => {
