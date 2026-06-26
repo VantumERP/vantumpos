@@ -143,6 +143,15 @@ const cashierUser: UserAccount = {
   role: "cashier",
 };
 
+const inactiveCashier: UserAccount = {
+  ...adminUser,
+  id: 3,
+  username: "stara",
+  displayName: "Stara Kasirka",
+  role: "cashier",
+  active: false,
+};
+
 function buildEmptyReportsService(): ReportsService {
   const service = buildReportsService();
   service.getDailyTurnover = vi.fn().mockResolvedValue({
@@ -257,6 +266,30 @@ describe("ReportsScreen", () => {
       to: "2026-06-17",
       cashierId: 2,
     });
+  });
+
+  it("omits deactivated users from the cashier dropdown", async () => {
+    const user = userEvent.setup();
+    const users = buildUsersService();
+    users.listUsers = vi
+      .fn()
+      .mockResolvedValue([adminUser, cashierUser, inactiveCashier]);
+    renderReports(buildReportsService(), adminUser, users);
+
+    await screen.findByRole("heading", { name: "Dnevni promet" });
+    await user.click(screen.getByRole("combobox", { name: "Kasir" }));
+
+    // The active admin and cashier remain selectable, but the deactivated
+    // account must not appear as an option.
+    expect(
+      await screen.findByRole("option", { name: "Mira Kasir" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Administrator" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Stara Kasirka" }),
+    ).not.toBeInTheDocument();
   });
 
   it("clears the cashier filter when the all option is chosen", async () => {

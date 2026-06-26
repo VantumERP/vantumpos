@@ -276,10 +276,14 @@ export function ReportsScreen({
   ];
   const cashierSelectItems = [
     { label: "Svi kasiri", value: ALL_OPTION },
-    ...cashierOptions.map((account) => ({
-      label: account.displayName,
-      value: account.id.toString(),
-    })),
+    // Only active users can be selected; deactivated accounts are dropped while
+    // every role is kept (an admin can also complete a sale).
+    ...cashierOptions
+      .filter((account) => account.active)
+      .map((account) => ({
+        label: account.displayName,
+        value: account.id.toString(),
+      })),
   ];
   const shiftValue =
     filters.shiftId == null ? ALL_OPTION : filters.shiftId.toString();
