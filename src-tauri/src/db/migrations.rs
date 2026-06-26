@@ -329,6 +329,23 @@ CREATE TABLE _migrations (
             )
             .expect("version 1 should record");
 
+            // Seed representative installed-base data using only v1 columns so the
+            // forward migration can be proven to preserve it (no data loss).
+            conn.execute(
+                "INSERT INTO users (username, display_name, role, active, created_at, updated_at)
+                 VALUES ('stara_kasirka', 'Stara Kasirka', 'cashier', 1, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("v1 users row should insert");
+            // backup_jobs exists at v1 and is rebuilt by v2 (CREATE new / copy / DROP /
+            // RENAME); a seeded row proves the rebuild actually copies existing data.
+            conn.execute(
+                "INSERT INTO backup_jobs (backup_type, path, status, error_message, created_at)
+                 VALUES ('manual', 'D:/backup/stari.sqlite3', 'completed', NULL, '2025-02-02T08:00:00Z')",
+                [],
+            )
+            .expect("v1 backup_jobs row should insert");
+
             // Columns added by later migrations must be absent before the upgrade.
             assert!(!column_exists(&conn, "users", "last_login_at"));
             assert!(!column_exists(&conn, "sales", "document_type"));
@@ -349,6 +366,31 @@ CREATE TABLE _migrations (
             assert!(column_exists(&conn, "users", "last_login_at"));
             assert!(column_exists(&conn, "sales", "document_type"));
             assert!(column_exists(&conn, "products", "external_source_provider"));
+
+            // The pre-existing users row must survive the v3/v4/v5 ALTERs intact.
+            let (username, role, active): (String, String, i64) = conn
+                .query_row(
+                    "SELECT username, role, active FROM users WHERE username = 'stara_kasirka'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("seeded users row should survive forward migration");
+            assert_eq!(username, "stara_kasirka");
+            assert_eq!(role, "cashier");
+            assert_eq!(active, 1);
+
+            // The pre-existing backup_jobs row must survive the v2 table rebuild
+            // (CREATE new / copy / DROP / RENAME) with its original values intact.
+            let (backup_type, backup_path, status): (String, String, String) = conn
+                .query_row(
+                    "SELECT backup_type, path, status FROM backup_jobs WHERE path = 'D:/backup/stari.sqlite3'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("seeded backup_jobs row should survive the v2 rebuild");
+            assert_eq!(backup_type, "manual");
+            assert_eq!(backup_path, "D:/backup/stari.sqlite3");
+            assert_eq!(status, "completed");
 
             // Re-running migrations on an up-to-date database is a no-op.
             run_migrations(&mut conn).expect("re-running migrations should be a no-op");
