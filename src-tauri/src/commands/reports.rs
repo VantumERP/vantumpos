@@ -214,6 +214,7 @@ pub fn reports_daily_turnover(
     state: State<'_, AppState>,
     query: ReportDateQuery,
 ) -> Result<DailyTurnoverReport, CommandError> {
+    super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     query_daily_turnover(&connection, &query).map_err(Into::into)
 }
@@ -223,6 +224,7 @@ pub fn reports_shift_turnover(
     state: State<'_, AppState>,
     query: ReportDateQuery,
 ) -> Result<ShiftTurnoverReport, CommandError> {
+    super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     query_shift_turnover(&connection, &query).map_err(Into::into)
 }
@@ -232,6 +234,7 @@ pub fn reports_cashier_turnover(
     state: State<'_, AppState>,
     query: ReportDateQuery,
 ) -> Result<CashierTurnoverReport, CommandError> {
+    super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     query_cashier_turnover(&connection, &query).map_err(Into::into)
 }
@@ -241,6 +244,7 @@ pub fn reports_payment_methods(
     state: State<'_, AppState>,
     query: ReportDateQuery,
 ) -> Result<PaymentMethodReport, CommandError> {
+    super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     query_payment_methods(&connection, &query).map_err(Into::into)
 }
@@ -250,6 +254,7 @@ pub fn reports_product_sales(
     state: State<'_, AppState>,
     query: ProductSalesQuery,
 ) -> Result<ProductSalesReport, CommandError> {
+    super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     query_product_sales(&connection, &query).map_err(Into::into)
 }
@@ -259,12 +264,14 @@ pub fn reports_category_sales(
     state: State<'_, AppState>,
     query: ReportDateQuery,
 ) -> Result<CategorySalesReport, CommandError> {
+    super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     query_category_sales(&connection, &query).map_err(Into::into)
 }
 
 #[tauri::command]
 pub fn reports_low_stock(state: State<'_, AppState>) -> Result<LowStockReport, CommandError> {
+    super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     query_low_stock(&connection).map_err(Into::into)
 }
@@ -274,6 +281,7 @@ pub fn reports_export_csv(
     state: State<'_, AppState>,
     request: ExportReportRequest,
 ) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
     let connection = state.db().open()?;
     let export_dir = state.db().path().parent().map_or_else(
         || Path::new(".").join("exports"),
@@ -831,8 +839,25 @@ mod tests {
     use std::fs;
 
     use rusqlite::{params, Connection};
+    use tauri::Manager;
 
     use crate::db::{test_database_path, Db};
+    use crate::state::AppState;
+
+    fn sign_in_cashier(state: &AppState) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, created_at, updated_at)
+                 VALUES ('marko', 'Marko Markovic', 'cashier', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("cashier should insert");
+        let cashier_id = connection.last_insert_rowid();
+        state
+            .set_session_user_id(cashier_id)
+            .expect("cashier session should set");
+    }
 
     fn with_seeded_reports_database(test_name: &str, test: impl FnOnce(&Connection)) {
         let db_path = test_database_path(test_name);
@@ -1254,5 +1279,45 @@ mod tests {
                 fs::remove_dir_all(export_dir).expect("export dir should be removed");
             },
         );
+    }
+
+    #[test]
+    fn reports_command_rejected_for_cashier() {
+        let db_path = test_database_path("reports_command_rejected_for_cashier");
+
+        {
+            let db = Db::new(&db_path).expect("database should initialize");
+            let state = AppState::new(db);
+            sign_in_cashier(&state);
+
+            // Reports is an admin-only surface, so the command wrapper must reject a
+            // cashier before any query runs. The command takes a Tauri `State`, so we
+            // build a headless mock app to obtain a real managed state.
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app should build");
+            let managed = app.state::<AppState>();
+
+            let error = super::reports_daily_turnover(
+                managed,
+                super::ReportDateQuery {
+                    from: "2026-06-17".to_string(),
+                    to: "2026-06-17".to_string(),
+                    shift_id: None,
+                    cashier_id: None,
+                },
+            )
+            .expect_err("cashier should not read reports");
+
+            assert_eq!(error.code, "forbidden");
+        }
+
+        fs::remove_file(&db_path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                db_path.display()
+            )
+        });
     }
 }

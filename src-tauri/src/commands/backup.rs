@@ -107,6 +107,8 @@ pub fn save_backup_settings(
     state: &AppState,
     request: BackupSettingsRequest,
 ) -> Result<BackupSettings, AppError> {
+    super::auth::require_admin(state)?;
+
     if request.backup_folder.trim().is_empty() {
         return Err(AppError::validation(
             "Folder za backup je obavezan.",
@@ -163,6 +165,8 @@ pub fn create_backup(
     state: &AppState,
     request: CreateBackupRequest,
 ) -> Result<BackupJob, AppError> {
+    super::auth::require_admin(state)?;
+
     let backup_type = request
         .backup_type
         .as_deref()
@@ -206,6 +210,8 @@ pub fn restore_backup(
     state: &AppState,
     request: RestoreBackupRequest,
 ) -> Result<BackupJob, AppError> {
+    super::auth::require_admin(state)?;
+
     if request.confirmation_text.trim() != RESTORE_CONFIRMATION {
         return Err(AppError::validation(
             "Potvrdite restore unosom teksta VRATI PODATKE.",
@@ -413,9 +419,40 @@ mod tests {
         path
     }
 
+    fn sign_in_admin(state: &AppState) {
+        let admin_id: i64 = state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist");
+        state
+            .set_session_user_id(admin_id)
+            .expect("admin session should set");
+    }
+
+    fn sign_in_cashier(state: &AppState) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, created_at, updated_at)
+                 VALUES ('marko', 'Marko Markovic', 'cashier', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("cashier should insert");
+        let cashier_id = connection.last_insert_rowid();
+        state
+            .set_session_user_id(cashier_id)
+            .expect("cashier session should set");
+    }
+
     #[test]
     fn backup_settings_round_trip_drives_status() {
         with_state("backup_settings_round_trip_drives_status", |state| {
+            sign_in_admin(state);
+
             let folder = test_backup_dir("vantumpos-backup-settings");
 
             let saved = save_backup_settings(
@@ -441,6 +478,8 @@ mod tests {
         with_state(
             "manual_backup_creates_sqlite_copy_and_success_job",
             |state| {
+                sign_in_admin(state);
+
                 let folder = test_backup_dir("vantumpos-manual-backup");
 
                 let job = create_backup(
@@ -464,6 +503,8 @@ mod tests {
         with_state(
             "restore_rejects_missing_file_without_recording_success",
             |state| {
+                sign_in_admin(state);
+
                 let missing = std::env::temp_dir().join("vantumpos-missing-backup.sqlite3");
 
                 let error = restore_backup(
@@ -485,6 +526,8 @@ mod tests {
     #[test]
     fn restore_requires_confirmation_text() {
         with_state("restore_requires_confirmation_text", |state| {
+            sign_in_admin(state);
+
             let error = restore_backup(
                 state,
                 RestoreBackupRequest {
@@ -552,5 +595,63 @@ mod tests {
                 assert!(!status.stale);
             },
         );
+    }
+
+    #[test]
+    fn save_backup_settings_rejected_for_cashier() {
+        with_state("save_backup_settings_rejected_for_cashier", |state| {
+            sign_in_cashier(state);
+
+            let folder = test_backup_dir("vantumpos-backup-settings-forbidden");
+
+            let error = save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: true,
+                },
+            )
+            .expect_err("cashier should not save backup settings");
+
+            assert_eq!(error.code(), "forbidden");
+        });
+    }
+
+    #[test]
+    fn create_backup_rejected_for_cashier() {
+        with_state("create_backup_rejected_for_cashier", |state| {
+            sign_in_cashier(state);
+
+            let folder = test_backup_dir("vantumpos-create-backup-forbidden");
+
+            let error = create_backup(
+                state,
+                CreateBackupRequest {
+                    backup_folder: Some(folder.display().to_string()),
+                    backup_type: None,
+                },
+            )
+            .expect_err("cashier should not create a backup");
+
+            assert_eq!(error.code(), "forbidden");
+        });
+    }
+
+    #[test]
+    fn restore_backup_rejected_for_cashier() {
+        with_state("restore_backup_rejected_for_cashier", |state| {
+            sign_in_cashier(state);
+
+            let error = restore_backup(
+                state,
+                RestoreBackupRequest {
+                    path: "C:/backup.sqlite3".to_string(),
+                    confirmation_text: "VRATI PODATKE".to_string(),
+                },
+            )
+            .expect_err("cashier should not restore a backup");
+
+            assert_eq!(error.code(), "forbidden");
+        });
     }
 }

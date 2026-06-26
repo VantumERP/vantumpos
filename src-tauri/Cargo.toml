@@ -28,3 +28,8 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 argon2 = { version = "0.5", features = ["std"] }
 password-hash = { version = "0.5", features = ["rand_core"] }
 ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+# Enables `tauri::test` (mock_builder/mock_context) so command wrappers that take
+# `State<'_, AppState>` can be exercised in unit tests (e.g. admin-gate rejection).
+tauri = { version = "2", features = ["test"] }
