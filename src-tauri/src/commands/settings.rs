@@ -277,6 +277,7 @@ pub fn save_receipt_settings(
     state: &AppState,
     request: ReceiptSettingsRequest,
 ) -> Result<ReceiptSettings, AppError> {
+    super::auth::require_admin(state)?;
     validate_receipt_request(&request)?;
 
     let settings = ReceiptSettings {
@@ -396,6 +397,35 @@ mod tests {
         std::fs::remove_file(&path).expect("test database should be removed");
     }
 
+    fn sign_in_admin(state: &AppState) {
+        let admin_id: i64 = state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist");
+        state
+            .set_session_user_id(admin_id)
+            .expect("admin session should set");
+    }
+
+    fn sign_in_cashier(state: &AppState) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, created_at, updated_at)
+                 VALUES ('marko', 'Marko Markovic', 'cashier', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("cashier should insert");
+        let cashier_id = connection.last_insert_rowid();
+        state
+            .set_session_user_id(cashier_id)
+            .expect("cashier session should set");
+    }
+
     #[test]
     fn company_settings_round_trip_persists_json_value() {
         with_state("company_settings_round_trip_persists_json_value", |state| {
@@ -486,6 +516,8 @@ mod tests {
         with_state(
             "receipt_numbering_round_trip_persists_no_reset_policy",
             |state| {
+                sign_in_admin(state);
+
                 let saved = save_receipt_settings(
                     state,
                     ReceiptSettingsRequest {
@@ -501,6 +533,61 @@ mod tests {
                     load_receipt_settings(state).expect("receipt settings should load after save");
 
                 assert_eq!(loaded, saved);
+            },
+        );
+    }
+
+    #[test]
+    fn receipt_numbering_update_allowed_for_admin() {
+        with_state("receipt_numbering_update_allowed_for_admin", |state| {
+            sign_in_admin(state);
+
+            let saved = save_receipt_settings(
+                state,
+                ReceiptSettingsRequest {
+                    prefix: "VP-".to_string(),
+                    next_sequence_number: 7,
+                },
+            )
+            .expect("admin should update receipt numbering");
+
+            assert_eq!(saved.next_sequence_number, 7);
+        });
+    }
+
+    #[test]
+    fn receipt_numbering_update_rejected_for_cashier() {
+        with_state("receipt_numbering_update_rejected_for_cashier", |state| {
+            sign_in_cashier(state);
+
+            let error = save_receipt_settings(
+                state,
+                ReceiptSettingsRequest {
+                    prefix: "VP-".to_string(),
+                    next_sequence_number: 7,
+                },
+            )
+            .expect_err("cashier should not update receipt numbering");
+
+            assert_eq!(error.code(), "forbidden");
+        });
+    }
+
+    #[test]
+    fn receipt_numbering_update_rejected_without_session() {
+        with_state(
+            "receipt_numbering_update_rejected_without_session",
+            |state| {
+                let error = save_receipt_settings(
+                    state,
+                    ReceiptSettingsRequest {
+                        prefix: "VP-".to_string(),
+                        next_sequence_number: 7,
+                    },
+                )
+                .expect_err("anonymous caller should not update receipt numbering");
+
+                assert_eq!(error.code(), "unauthorized");
             },
         );
     }

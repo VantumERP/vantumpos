@@ -136,6 +136,40 @@ describe("AppShell", () => {
     expect(screen.queryByText("Smena nije otvorena")).not.toBeInTheDocument();
   });
 
+  it("hides the Podesavanja nav item from cashiers", async () => {
+    const services = buildAuthServices({
+      auth: {
+        getSession: vi.fn().mockResolvedValue(cashierSession),
+        login: vi.fn(),
+        logout: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    render(<AppShell services={services} />);
+
+    expect(await screen.findByRole("button", { name: "Kasa" })).toBeInTheDocument();
+    expect(screen.getByText("@marko")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Podesavanja" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the Podesavanja nav item for admins", async () => {
+    const services = buildAuthServices({
+      auth: {
+        getSession: vi.fn().mockResolvedValue(adminSession),
+        login: vi.fn(),
+        logout: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    render(<AppShell services={services} />);
+
+    expect(
+      await screen.findByRole("button", { name: "Podesavanja" }),
+    ).toBeInTheDocument();
+  });
+
   it("shows Serbian login errors without leaking technical messages", async () => {
     const services = buildAuthServices({
       auth: {

@@ -150,6 +150,24 @@ pub(crate) fn active_user_by_id(
     .map_err(Into::into)
 }
 
+pub(crate) fn require_admin(state: &AppState) -> Result<UserAccount, AppError> {
+    let user_id = state
+        .session_user_id()?
+        .ok_or_else(|| AppError::business("unauthorized", "Niste prijavljeni."))?;
+
+    let user = active_user_by_id(state, user_id)?
+        .ok_or_else(|| AppError::business("unauthorized", "Niste prijavljeni."))?;
+
+    if user.role != "admin" {
+        return Err(AppError::business(
+            "forbidden",
+            "Samo administrator moze da menja numeraciju racuna.",
+        ));
+    }
+
+    Ok(user)
+}
+
 fn credential_user_by_username(
     state: &AppState,
     username: &str,

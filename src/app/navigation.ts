@@ -14,6 +14,7 @@ export interface NavigationItem {
   id: string;
   label: string;
   icon: LucideIcon;
+  adminOnly?: boolean;
 }
 
 export const navigationItems = [
@@ -51,6 +52,7 @@ export const navigationItems = [
     id: "settings",
     label: "Podesavanja",
     icon: SettingsIcon,
+    adminOnly: true,
   },
 ] as const satisfies readonly NavigationItem[];
 

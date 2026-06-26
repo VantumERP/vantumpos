@@ -217,25 +217,31 @@ export function AppShell({ services }: AppShellProps) {
               <SidebarGroupLabel>Rad</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {navigationItems.map((item) => {
-                    const Icon = item.icon;
-                    const isActive = item.id === activeId;
+                  {navigationItems
+                    .filter(
+                      (item) =>
+                        session.user.role === "admin" ||
+                        !("adminOnly" in item && item.adminOnly),
+                    )
+                    .map((item) => {
+                      const Icon = item.icon;
+                      const isActive = item.id === activeId;
 
-                    return (
-                      <SidebarMenuItem key={item.id}>
-                        <SidebarMenuButton
-                          type="button"
-                          tooltip={item.label}
-                          isActive={isActive}
-                          aria-current={isActive ? "page" : undefined}
-                          onClick={() => setActiveId(item.id)}
-                        >
-                          <Icon aria-hidden="true" />
-                          <span>{item.label}</span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
+                      return (
+                        <SidebarMenuItem key={item.id}>
+                          <SidebarMenuButton
+                            type="button"
+                            tooltip={item.label}
+                            isActive={isActive}
+                            aria-current={isActive ? "page" : undefined}
+                            onClick={() => setActiveId(item.id)}
+                          >
+                            <Icon aria-hidden="true" />
+                            <span>{item.label}</span>
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                      );
+                    })}
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
@@ -353,6 +359,17 @@ function renderModule({
   }
 
   if (activeId === "settings") {
+    if (session.user.role !== "admin") {
+      return (
+        <Alert>
+          <AlertTitle>Podesavanja</AlertTitle>
+          <AlertDescription>
+            Samo administrator moze da menja podesavanja.
+          </AlertDescription>
+        </Alert>
+      );
+    }
+
     return (
       <SettingsScreen
         services={services}

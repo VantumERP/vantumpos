@@ -254,6 +254,13 @@ export function createMockServices(): PosServices {
         return receiptSettings;
       },
       async updateReceiptSettings(request) {
+        if (session?.user.role !== "admin") {
+          throw {
+            code: "forbidden",
+            message: "Samo administrator moze da menja numeraciju racuna.",
+          };
+        }
+
         receiptSettings = { ...request, resetPolicy: "none" };
         return receiptSettings;
       },
