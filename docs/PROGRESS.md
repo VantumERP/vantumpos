@@ -1,9 +1,69 @@
 # VantumPOS — Implementation Progress Report
 
+> **✅ Status update (2026-06-26):** All 12 recommendations in this report are now **implemented** on branch `feat/mvp-completion`. See the **MVP Completion Update** section immediately below. The rest of this document is the original audit baseline (the "before").
+
 **Date:** 2026-06-26
 **Overall status:** The application is a genuinely working, local-first POS — every one of the 9 modules is real (no placeholder screens, no stub commands), with green builds and tests; the remaining work is polish, audit-attribution wiring, and test-breadth rather than architecture.
 **Overall completion:** **88%** (simple average of the 9 audited module percentages: 94, 91, 92, 86, 90, 86, 80, 90, 80 → 789 / 9 = 87.7 ≈ 88%).
 **Basis:** All figures are *audited* estimates measured against `docs/module-specs`. Where the independent adversarial audit disagreed with the original assessment, the audited number is treated as the source of truth and the disagreement is called out per module.
+
+---
+
+## MVP Completion Update (2026-06-26)
+
+The 12 recommendations below were implemented as a 13-task TDD plan
+(`docs/superpowers/plans/2026-06-26-vantumpos-mvp-completion.md`, design at
+`docs/superpowers/specs/2026-06-26-vantumpos-mvp-completion-design.md`) on branch `feat/mvp-completion`.
+Each task was implemented by a fresh agent, reviewed for spec compliance + quality, fixed where needed,
+and a final adversarial whole-branch review passed **Ready to merge: Yes**.
+
+**Outcome:** MVP scope is complete — all 12 recommendations closed; every touched module now meets its
+`docs/module-specs` Acceptance Criteria and the 7-point Definition of Done. The role-gating model is now
+coherent and complete across the app.
+
+**Final verification gates (all green at HEAD):**
+
+| Gate | Result |
+|---|---|
+| `bun run test` | **89 passed** / 0 failed (was 57) |
+| `bun run build` | pass (tsc + vite) |
+| `cargo test -- --test-threads=1` | **98 passed** / 0 failed (was 67) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+
+**Recommendations closed:**
+
+| # | Item | Status | Key commits |
+|---|---|---|---|
+| 1 | Auth/shift backend tests (deactivated-login, close-shift expected-cash) | ✅ Done | `234e3bb` |
+| 2 | Admin role-gating for receipt-sequence updates | ✅ Done | `64e145d`, `32b754b` |
+| 3 | VAT rate edit/deactivate workflow | ✅ Done | `4a976ff` |
+| 4 | Thread real session user into Inventory & Receipts (drop `userId:1`) | ✅ Done | `4d492d5` |
+| 5 | Render swallowed preview/validation error in Register | ✅ Done | `b98d610` |
+| 6 | Receipts loading/empty/error states + void/return reason text | ✅ Done | `102ec81` |
+| 7 | Reports shift/cashier backend filters + role-gate + FE state tests | ✅ Done | `699c4f9` |
+| 8 | Remove dead `ProductCatalogScreen.tsx`; deep-link product ledger | ✅ Done | `c3c54bc` |
+| 9 | Import job-detail drill-down + unknown-VAT/required-mapping tests; docs count fix | ✅ Done | `93fe051` |
+| 10 | Settings/Backup component tests + age-based stale detection | ✅ Done | `3c06647` |
+| 11 | Shell header reads company name + forward-migration data-survival test | ✅ Done | `ce9d5c1`, `199031e` |
+| 12 | Reconcile sales/inventory write divergence (shared `write_stock_movement`) | ✅ Done | `1ecd922` |
+
+**Role-gating model (final, coherent):** one authoritative server-derived `require_admin` (in `auth.rs`,
+unspoofable — derived from the session, never a client-supplied role). Gated: all state-changing settings
+writes (company / tax rate / receipt numbering), the 4 user-management commands, the 3 state-changing
+backup commands (incl. the destructive `backup_restore`), and all 8 `reports_*` commands (Reports is an
+admin-only surface). Left open (consumed by non-admin flows): settings/company/tax **reads** (shell header,
+VAT calc) and backup status/list reads. Commits `790553a`, `b1366a5`.
+
+**Other correctness wins:** sales and inventory now share a single transaction-safe stock-write helper
+with a consistent negative-stock guard; the shell header silently falls back to "VantumPOS" (now with a
+diagnostic warn) if the company read fails; the forward-migration regression test now asserts real v1 data
+survives the v2 table rebuild.
+
+**Deferred (non-blocking, documented):** the shift/cashier report filters are plumbed end-to-end in the
+backend + adapter but have no UI selects yet (the Reports module Acceptance Criteria mandate only date
+filters); surfacing the selects (and a source list of shifts/cashiers) is a follow-up enhancement. Minor
+review nits (logged during execution) are non-blocking.
 
 ---
 
