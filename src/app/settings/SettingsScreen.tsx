@@ -451,6 +451,7 @@ function TaxRatesPanel({
   }) => Promise<void>;
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingRate, setEditingRate] = useState<TaxRate | null>(null);
 
   return (
     <Card>
@@ -462,7 +463,13 @@ function TaxRatesPanel({
             </CardTitle>
             <CardDescription>Stope se deaktiviraju kada vise nisu u upotrebi.</CardDescription>
           </div>
-          <Button type="button" onClick={() => setDialogOpen(true)}>
+          <Button
+            type="button"
+            onClick={() => {
+              setEditingRate(null);
+              setDialogOpen(true);
+            }}
+          >
             <PlusIcon data-icon="inline-start" />
             Nova PDV stopa
           </Button>
@@ -475,6 +482,7 @@ function TaxRatesPanel({
               <TableHead>Naziv</TableHead>
               <TableHead>Stopa</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead className="text-right">Akcije</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -487,6 +495,40 @@ function TaxRatesPanel({
                     {rate.active ? "Aktivna" : "Neaktivna"}
                   </Badge>
                 </TableCell>
+                <TableCell className="text-right">
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Uredi ${rate.name}`}
+                      onClick={() => {
+                        setEditingRate(rate);
+                        setDialogOpen(true);
+                      }}
+                    >
+                      Uredi
+                    </Button>
+                    {rate.active ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`Deaktiviraj ${rate.name}`}
+                        onClick={() =>
+                          void onSave({
+                            id: rate.id,
+                            name: rate.name,
+                            rateBasisPoints: rate.rateBasisPoints,
+                            active: false,
+                          })
+                        }
+                      >
+                        Deaktiviraj
+                      </Button>
+                    ) : null}
+                  </div>
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -495,6 +537,7 @@ function TaxRatesPanel({
       <TaxRateDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
+        taxRate={editingRate}
         onSave={async (request) => {
           await onSave(request);
           setDialogOpen(false);
@@ -508,9 +551,11 @@ function TaxRateDialog({
   open,
   onOpenChange,
   onSave,
+  taxRate,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  taxRate: TaxRate | null;
   onSave: (request: {
     id: number | null;
     name: string;
@@ -525,12 +570,12 @@ function TaxRateDialog({
 
   useEffect(() => {
     if (open) {
-      setName("");
-      setRate("");
-      setActive(true);
+      setName(taxRate?.name ?? "");
+      setRate(taxRate ? String(taxRate.rateBasisPoints / 100).replace(".", ",") : "");
+      setActive(taxRate?.active ?? true);
       setError(null);
     }
-  }, [open]);
+  }, [open, taxRate]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -548,7 +593,7 @@ function TaxRateDialog({
 
     try {
       await onSave({
-        id: null,
+        id: taxRate?.id ?? null,
         name: name.trim(),
         rateBasisPoints: Math.round(normalizedRate * 100),
         active,

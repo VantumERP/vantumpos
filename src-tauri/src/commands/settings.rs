@@ -512,6 +512,61 @@ mod tests {
     }
 
     #[test]
+    fn tax_rate_deactivate_keeps_row_in_list() {
+        with_state("tax_rate_deactivate_keeps_row_in_list", |state| {
+            let created = save_tax_rate(
+                state,
+                SaveTaxRateRequest {
+                    id: None,
+                    name: "PDV 20".to_string(),
+                    rate_basis_points: 2000,
+                    active: true,
+                },
+            )
+            .expect("tax rate should be created");
+
+            save_tax_rate(
+                state,
+                SaveTaxRateRequest {
+                    id: Some(created.id),
+                    name: created.name.clone(),
+                    rate_basis_points: created.rate_basis_points,
+                    active: false,
+                },
+            )
+            .expect("tax rate should deactivate");
+
+            let rates = list_tax_rates(state).expect("tax rates should list");
+            let stored = rates
+                .iter()
+                .find(|rate| rate.id == created.id)
+                .expect("deactivated rate should still be present");
+
+            assert!(!stored.active);
+        });
+    }
+
+    #[test]
+    fn tax_rate_update_unknown_id_returns_not_found() {
+        with_state("tax_rate_update_unknown_id_returns_not_found", |state| {
+            let error = save_tax_rate(
+                state,
+                SaveTaxRateRequest {
+                    id: Some(9_999),
+                    name: "PDV 20".to_string(),
+                    rate_basis_points: 2000,
+                    active: false,
+                },
+            )
+            .expect_err("updating a missing tax rate should fail");
+
+            let command_error: crate::app_error::CommandError = error.into();
+
+            assert_eq!(command_error.code, "not_found");
+        });
+    }
+
+    #[test]
     fn receipt_numbering_round_trip_persists_no_reset_policy() {
         with_state(
             "receipt_numbering_round_trip_persists_no_reset_policy",
