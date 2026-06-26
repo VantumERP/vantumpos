@@ -296,3 +296,141 @@ fn normalized_note(value: Option<String>) -> Option<String> {
         (!trimmed.is_empty()).then_some(trimmed)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::params;
+
+    use super::{close_shift_for_user, open_shift_for_user, CloseShiftRequest, OpenShiftRequest};
+    use crate::db::{test_database_path, Db};
+    use crate::state::AppState;
+
+    fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
+        let path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let state = AppState::new(db);
+            test(&state);
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    fn seed_cashier(state: &AppState) -> i64 {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, active, created_at, updated_at)
+                 VALUES ('kasir', 'Kasir', 'cashier', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("cashier should insert");
+        connection.last_insert_rowid()
+    }
+
+    fn seed_completed_sale(
+        state: &AppState,
+        shift_id: i64,
+        cashier_id: i64,
+        cash_minor: i64,
+        card_minor: i64,
+    ) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO sales (
+                    local_receipt_number, shift_id, cashier_id, status,
+                    subtotal_minor, tax_minor, total_minor, created_at, updated_at
+                 )
+                 VALUES ('VP-000001', ?1, ?2, 'completed', 20000, 0, 20000,
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![shift_id, cashier_id],
+            )
+            .expect("sale should insert");
+        let sale_id = connection.last_insert_rowid();
+
+        connection
+            .execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, 'cash', ?2, '2026-01-01T00:00:00Z')",
+                params![sale_id, cash_minor],
+            )
+            .expect("cash payment should insert");
+        connection
+            .execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, 'card', ?2, '2026-01-01T00:00:00Z')",
+                params![sale_id, card_minor],
+            )
+            .expect("card payment should insert");
+    }
+
+    #[test]
+    fn close_shift_for_user_derives_expected_cash() {
+        with_state("close_shift_derives_expected_cash", |state| {
+            let cashier_id = seed_cashier(state);
+
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+            assert_eq!(opened.status, "open");
+
+            seed_completed_sale(state, opened.id, cashier_id, 12000, 8000);
+
+            let closed = close_shift_for_user(
+                state,
+                cashier_id,
+                CloseShiftRequest {
+                    shift_id: opened.id,
+                    counted_cash_minor: 17000,
+                    note: None,
+                },
+            )
+            .expect("shift should close");
+
+            assert_eq!(closed.status, "closed");
+            assert_eq!(closed.cash_sales_minor, 12000);
+            assert_eq!(closed.card_sales_minor, 8000);
+            assert_eq!(closed.expected_cash_minor, 17000);
+            assert_eq!(closed.counted_cash_minor, Some(17000));
+            assert_eq!(closed.difference_minor, Some(0));
+        });
+    }
+
+    #[test]
+    fn open_shift_for_user_rejects_second_open_shift() {
+        with_state("open_second_shift_fails", |state| {
+            let cashier_id = seed_cashier(state);
+
+            open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 0,
+                    note: None,
+                },
+            )
+            .expect("first shift should open");
+
+            let error = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 0,
+                    note: None,
+                },
+            )
+            .expect_err("second shift should fail");
+
+            assert_eq!(error.code, "validation_error");
+            assert_eq!(error.message, "Korisnik vec ima otvorenu smenu.");
+        });
+    }
+}

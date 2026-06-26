@@ -226,6 +226,7 @@ fn invalid_credentials_error() -> CommandError {
 mod tests {
     use super::*;
     use crate::db::{test_database_path, Db};
+    use crate::security::hash_credential;
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
         let path = test_database_path(test_name);
@@ -322,6 +323,81 @@ mod tests {
                 None,
                 "the stale session must be cleared",
             );
+        });
+    }
+
+    #[test]
+    fn login_user_succeeds_with_valid_credentials() {
+        with_state("login_succeeds", |state| {
+            let session = login_user(
+                state,
+                LoginRequest {
+                    username: "admin".to_string(),
+                    credential: "1234".to_string(),
+                },
+            )
+            .expect("seeded admin should log in");
+
+            assert_eq!(session.user.username, "admin");
+            assert_eq!(session.user.role, "admin");
+            assert!(session.user.active);
+            assert!(session.current_shift.is_none());
+            assert_eq!(
+                state.session_user_id().expect("session id should read"),
+                Some(session.user.id)
+            );
+        });
+    }
+
+    #[test]
+    fn login_user_rejects_invalid_credentials() {
+        with_state("login_invalid_credentials", |state| {
+            let error = login_user(
+                state,
+                LoginRequest {
+                    username: "admin".to_string(),
+                    credential: "0000".to_string(),
+                },
+            )
+            .expect_err("wrong pin should fail");
+
+            assert_eq!(error.code, "invalid_credentials");
+            assert!(state
+                .session_user_id()
+                .expect("session id should read")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn login_user_rejects_deactivated_user() {
+        with_state("login_deactivated", |state| {
+            let pin_hash = hash_credential("4321").expect("pin hash should compute");
+            let connection = state.db().open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO users (
+                        username, display_name, role, pin_hash, active, created_at, updated_at
+                     )
+                     VALUES ('kasir', 'Kasir', 'cashier', ?1, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    params![pin_hash],
+                )
+                .expect("deactivated cashier should insert");
+
+            let error = login_user(
+                state,
+                LoginRequest {
+                    username: "kasir".to_string(),
+                    credential: "4321".to_string(),
+                },
+            )
+            .expect_err("deactivated user should not log in");
+
+            assert_eq!(error.code, "invalid_credentials");
+            assert!(state
+                .session_user_id()
+                .expect("session id should read")
+                .is_none());
         });
     }
 }
