@@ -735,6 +735,25 @@ describe("AppShell", () => {
     expect(screen.getAllByText("artikli.csv")[0]).toBeInTheDocument();
   });
 
+  it("opens the import job detail drill-down from history", async () => {
+    const user = userEvent.setup();
+    render(<AppShell services={createMockServices()} />);
+
+    await openImportModule(user);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Detalji importa prethodni-products.csv",
+      }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Detalji importa: prethodni-products.csv",
+    });
+    expect(within(dialog).getByText("Red 2")).toBeInTheDocument();
+    expect(within(dialog).getByText("Upisano")).toBeInTheDocument();
+  });
+
   it("deep-links the catalog Lager action to the product ledger", async () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);

@@ -729,7 +729,14 @@ export function createMockServices(): PosServices {
 
         return {
           ...job,
-          rows: [],
+          rows: [
+            {
+              rowNumber: 2,
+              status: "imported" as const,
+              message: null,
+              values: { Naziv: "Hleb", Cena: "120,00" },
+            },
+          ],
         };
       },
     },

@@ -1694,4 +1694,76 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn validate_products_flags_unknown_vat_rate_as_error() {
+        with_test_database("validate_products_flags_unknown_vat_rate_as_error", |db| {
+            // No tax rate seeded, so the 20% column cannot resolve to a tax_rates row.
+            let request = ValidateImportRequest {
+                import_type: ImportType::Products,
+                file_name: "artikli.csv".to_string(),
+                csv_text: "Naziv;Cena;PDV;Sifra\nHleb;120,00;20;SKU-1\n".to_string(),
+                mapping: mapping(&[
+                    ("name", "Naziv"),
+                    ("sale_price", "Cena"),
+                    ("vat_rate", "PDV"),
+                    ("sku", "Sifra"),
+                ]),
+            };
+
+            let result = validate_import(db, &request).expect("validation should run");
+
+            assert_eq!(result.error_count, 1);
+            assert_eq!(result.rows[0].row_number, 2);
+            assert_eq!(result.rows[0].status, ImportRowStatus::Error);
+            assert_eq!(result.rows[0].message, "PDV stopa nije pronadjena.");
+        });
+    }
+
+    #[test]
+    fn validate_products_accepts_known_vat_rate() {
+        with_test_database("validate_products_accepts_known_vat_rate", |db| {
+            seed_tax_rate(db, "PDV 20", 2000);
+            let request = ValidateImportRequest {
+                import_type: ImportType::Products,
+                file_name: "artikli.csv".to_string(),
+                csv_text: "Naziv;Cena;PDV;Sifra\nHleb;120,00;20;SKU-1\n".to_string(),
+                mapping: mapping(&[
+                    ("name", "Naziv"),
+                    ("sale_price", "Cena"),
+                    ("vat_rate", "PDV"),
+                    ("sku", "Sifra"),
+                ]),
+            };
+
+            let result = validate_import(db, &request).expect("validation should run");
+
+            assert_eq!(result.error_count, 0);
+            assert_eq!(result.rows[0].status, ImportRowStatus::Valid);
+            assert_eq!(result.rows[0].action, ImportRowAction::Create);
+        });
+    }
+
+    #[test]
+    fn validate_initial_stock_requires_quantity_and_sku_or_barcode_mapping() {
+        with_test_database(
+            "validate_initial_stock_requires_quantity_and_sku_or_barcode_mapping",
+            |db| {
+                let request = ValidateImportRequest {
+                    import_type: ImportType::InitialStock,
+                    file_name: "stanje.csv".to_string(),
+                    csv_text: "Sifra;Kolicina\nSKU-1;2\n".to_string(),
+                    mapping: mapping(&[("sku", "Sifra")]),
+                };
+
+                let result = validate_import(db, &request).expect("validation should run");
+
+                assert_eq!(result.error_count, 1);
+                assert_eq!(
+                    result.rows[0].message,
+                    "Mapirajte kolicinu i sifru ili barcode artikla."
+                );
+            },
+        );
+    }
 }

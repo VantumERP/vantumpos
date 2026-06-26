@@ -34,6 +34,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Empty,
   EmptyContent,
   EmptyDescription,
@@ -69,6 +76,7 @@ import type { PosServices } from "@/services/ports";
 import type {
   ImportHeaders,
   ImportJob,
+  ImportJobDetail,
   ImportMapping,
   ImportType,
   ImportValidationResult,
@@ -422,7 +430,7 @@ export function ImportWizard({ services }: ImportWizardProps) {
 
       {validation ? <ValidationPanel validation={validation} /> : null}
 
-      <ImportHistory history={history} />
+      <ImportHistory history={history} services={services} />
     </div>
   );
 }
@@ -502,7 +510,43 @@ function ValidationPanel({
   );
 }
 
-function ImportHistory({ history }: { history: ImportJob[] }) {
+function ImportHistory({
+  history,
+  services,
+}: {
+  history: ImportJob[];
+  services: PosServices;
+}) {
+  const [detail, setDetail] = useState<ImportJobDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+
+  async function openDetail(jobId: number) {
+    setDetailBusy(true);
+    setDetailError(null);
+
+    try {
+      const job = await services.imports.getImportJob(jobId);
+
+      if (job) {
+        setDetail(job);
+      } else {
+        setDetailError("Detalji importa nisu dostupni.");
+      }
+    } catch (caught) {
+      setDetailError(messageFromError(caught));
+    } finally {
+      setDetailBusy(false);
+    }
+  }
+
+  function closeDetail(open: boolean) {
+    if (!open) {
+      setDetail(null);
+      setDetailError(null);
+    }
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -523,7 +567,18 @@ function ImportHistory({ history }: { history: ImportJob[] }) {
             <TableBody>
               {history.map((job) => (
                 <TableRow key={job.id}>
-                  <TableCell>{job.fileName}</TableCell>
+                  <TableCell>
+                    <Button
+                      type="button"
+                      variant="link"
+                      className="h-auto p-0"
+                      aria-label={`Detalji importa ${job.fileName}`}
+                      disabled={detailBusy}
+                      onClick={() => openDetail(job.id)}
+                    >
+                      {job.fileName}
+                    </Button>
+                  </TableCell>
                   <TableCell>{IMPORT_TYPE_LABELS[job.importType]}</TableCell>
                   <TableCell>
                     <Badge variant={job.status === "failed" ? "destructive" : "outline"}>
@@ -550,7 +605,80 @@ function ImportHistory({ history }: { history: ImportJob[] }) {
           </Empty>
         )}
       </CardContent>
+      <ImportJobDetailDialog
+        detail={detail}
+        error={detailError}
+        onOpenChange={closeDetail}
+      />
     </Card>
+  );
+}
+
+function ImportJobDetailDialog({
+  detail,
+  error,
+  onOpenChange,
+}: {
+  detail: ImportJobDetail | null;
+  error: string | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={Boolean(detail || error)} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {detail ? `Detalji importa: ${detail.fileName}` : "Detalji importa"}
+          </DialogTitle>
+          <DialogDescription>
+            Redovi importa sa statusom i porukom za svaki red.
+          </DialogDescription>
+        </DialogHeader>
+
+        {error ? (
+          <Alert variant="destructive">
+            <AlertCircleIcon aria-hidden="true" />
+            <AlertTitle>Detalji nisu dostupni</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : detail && detail.rows.length ? (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Red</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Poruka</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {detail.rows.map((row) => (
+                <TableRow key={row.rowNumber}>
+                  <TableCell>Red {row.rowNumber}</TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={row.status === "error" ? "destructive" : "secondary"}
+                    >
+                      {statusLabel(row.status)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>{row.message || "-"}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <FileTextIcon aria-hidden="true" />
+              </EmptyMedia>
+              <EmptyTitle>Nema sacuvanih redova</EmptyTitle>
+              <EmptyDescription>Ovaj posao nema redove za prikaz.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
