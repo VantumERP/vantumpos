@@ -76,6 +76,7 @@ import type {
 
 interface InventoryScreenProps {
   services: PosServices;
+  userId: number;
 }
 
 type AdjustmentMode = "receive" | "correction" | "write_off";
@@ -95,7 +96,7 @@ const STOCK_FILTERS: Array<{
   { value: "negative", label: "Negativno" },
 ];
 
-export function InventoryScreen({ services }: InventoryScreenProps) {
+export function InventoryScreen({ services, userId }: InventoryScreenProps) {
   const [query, setQuery] = useState<StockListQuery>({ stockState: "all" });
   const [items, setItems] = useState<StockListItem[]>([]);
   const [allItems, setAllItems] = useState<StockListItem[]>([]);
@@ -274,6 +275,7 @@ export function InventoryScreen({ services }: InventoryScreenProps) {
       <InventoryAdjustmentDialog
         adjustment={adjustment}
         services={services}
+        userId={userId}
         onOpenChange={(open) => {
           if (!open) {
             setAdjustment(null);
@@ -426,11 +428,13 @@ function StockBadge({ item }: { item: StockListItem }) {
 function InventoryAdjustmentDialog({
   adjustment,
   services,
+  userId,
   onOpenChange,
   onSaved,
 }: {
   adjustment: AdjustmentState | null;
   services: PosServices;
+  userId: number;
   onOpenChange: (open: boolean) => void;
   onSaved: (productId: number) => Promise<void>;
 }) {
@@ -465,7 +469,7 @@ function InventoryAdjustmentDialog({
         productId: adjustment.item.productId,
         quantityMilli,
         reason,
-        userId: 1,
+        userId,
       };
 
       if (adjustment.mode === "receive") {

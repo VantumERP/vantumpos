@@ -366,11 +366,11 @@ function renderModule({
   }
 
   if (activeId === "inventory") {
-    return <InventoryScreen services={services} />;
+    return <InventoryScreen services={services} userId={session.user.id} />;
   }
 
   if (activeId === "receipts") {
-    return <ReceiptsScreen receipts={services.receipts} />;
+    return <ReceiptsScreen receipts={services.receipts} userId={session.user.id} />;
   }
 
   if (activeId === "import") {

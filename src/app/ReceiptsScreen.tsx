@@ -62,6 +62,7 @@ import type {
 
 interface ReceiptsScreenProps {
   receipts: ReceiptsService;
+  userId: number;
 }
 
 interface ReceiptFilters {
@@ -118,7 +119,7 @@ const paymentSummaryLabels = {
   card: "Karticom",
 };
 
-export function ReceiptsScreen({ receipts }: ReceiptsScreenProps) {
+export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
   const [filters, setFilters] = useState(emptyFilters);
   const [rows, setRows] = useState<ReceiptSummary[]>([]);
   const [selected, setSelected] = useState<ReceiptDetail | null>(null);
@@ -170,7 +171,7 @@ export function ReceiptsScreen({ receipts }: ReceiptsScreenProps) {
     try {
       const detail = await receipts.voidReceipt({
         receiptId: selected.id,
-        userId: 1,
+        userId,
         reason: voidReason,
       });
       setSelected(detail);
@@ -233,7 +234,7 @@ export function ReceiptsScreen({ receipts }: ReceiptsScreenProps) {
 
       const detail = await receipts.returnItems({
         receiptId: selected.id,
-        userId: 1,
+        userId,
         reason: returnReason,
         items,
       });
