@@ -85,6 +85,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   });
   const [receiptDiscountInput, setReceiptDiscountInput] = useState("");
   const [cashInput, setCashInput] = useState("");
+  const [cashTouched, setCashTouched] = useState(false);
   const [cardInput, setCardInput] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [isCompleting, setIsCompleting] = useState(false);
@@ -138,12 +139,19 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
 
   const preview =
     previewState.status === "ready" ? previewState.preview : undefined;
+  const previewTotalMinor = preview?.totalMinor;
   const cashMinor = parseOptionalMoney(cashInput);
   const cardMinor = parseOptionalMoney(cardInput);
   const changeMinor =
     preview && cashMinor + cardMinor > preview.totalMinor
       ? cashMinor + cardMinor - preview.totalMinor
       : 0;
+
+  useEffect(() => {
+    if (!cashTouched && previewTotalMinor !== undefined) {
+      setCashInput((previewTotalMinor / 100).toFixed(2));
+    }
+  }, [previewTotalMinor, cashTouched]);
 
   async function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -284,6 +292,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       setCompletedSale(sale);
       setCart([]);
       setCashInput("");
+      setCashTouched(false);
       setCardInput("");
       setReceiptDiscountInput("");
     } catch (error) {
@@ -451,6 +460,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                           aria-label={`Popust za ${item.product.name}`}
                           className="h-8 w-24 rounded-md border bg-background px-2 text-sm"
                           inputMode="decimal"
+                          placeholder="20 ili 20%"
                           value={item.discountInput}
                           onChange={(event) =>
                             updateDiscount(item.product.id, event.target.value)
@@ -493,6 +503,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                 <InputGroupInput
                   id="receipt-discount"
                   inputMode="decimal"
+                  placeholder="20 ili 20%"
                   value={receiptDiscountInput}
                   onChange={(event) => setReceiptDiscountInput(event.target.value)}
                 />
@@ -506,7 +517,10 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                   id="cash-received"
                   inputMode="decimal"
                   value={cashInput}
-                  onChange={(event) => setCashInput(event.target.value)}
+                  onChange={(event) => {
+                    setCashTouched(true);
+                    setCashInput(event.target.value);
+                  }}
                 />
                 <InputGroupAddon align="inline-end">RSD</InputGroupAddon>
               </InputGroup>
@@ -671,6 +685,20 @@ function parseOptionalMoney(input: string) {
 }
 
 function moneyDiscountFromInput(input: string): DiscountDraft | null {
+  const trimmed = input.trim();
+
+  if (trimmed.endsWith("%")) {
+    const percent = Number.parseFloat(
+      trimmed.slice(0, -1).replace(",", ".").trim(),
+    );
+
+    if (!Number.isFinite(percent) || percent <= 0) {
+      return null;
+    }
+
+    return { type: "percent", basisPoints: Math.round(percent * 100) };
+  }
+
   const amountMinor = parseOptionalMoney(input);
 
   return amountMinor > 0 ? { type: "amount", amountMinor } : null;

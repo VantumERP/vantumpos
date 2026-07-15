@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -81,7 +81,11 @@ function createSalePreview(request: SaleDraftRequest): SalePreview {
       (product.salePriceMinor * item.quantityMilli) / 1000,
     );
     const discountMinor =
-      item.discount?.type === "amount" ? item.discount.amountMinor : 0;
+      item.discount?.type === "amount"
+        ? item.discount.amountMinor
+        : item.discount?.type === "percent"
+          ? Math.round((lineSubtotalMinor * item.discount.basisPoints) / 10000)
+          : 0;
     const totalMinor = lineSubtotalMinor - discountMinor;
 
     return {
@@ -107,14 +111,19 @@ function createSalePreview(request: SaleDraftRequest): SalePreview {
     (sum, item) => sum + item.discountMinor,
     0,
   );
-  const receiptDiscountMinor =
-    request.receiptDiscount?.type === "amount"
-      ? request.receiptDiscount.amountMinor
-      : 0;
   const totalBeforeReceiptDiscount = items.reduce(
     (sum, item) => sum + item.totalMinor,
     0,
   );
+  const receiptDiscountMinor =
+    request.receiptDiscount?.type === "amount"
+      ? request.receiptDiscount.amountMinor
+      : request.receiptDiscount?.type === "percent"
+        ? Math.round(
+            (totalBeforeReceiptDiscount * request.receiptDiscount.basisPoints) /
+              10000,
+          )
+        : 0;
   const totalMinor = totalBeforeReceiptDiscount - receiptDiscountMinor;
 
   return {
@@ -182,11 +191,35 @@ describe("RegisterScreen", () => {
     expect((await screen.findAllByText("309,98 RSD")).length).toBeGreaterThan(0);
   });
 
+  it("applies a percent line discount typed as 20%", async () => {
+    const user = userEvent.setup();
+
+    await addProductToCart(user);
+    await user.clear(screen.getByLabelText("Popust za Mleko 1 l"));
+    await user.type(screen.getByLabelText("Popust za Mleko 1 l"), "20%");
+
+    // 15999 - round(15999 * 2000 / 10000 = 3200) = 12799 -> "127,99 RSD"
+    expect((await screen.findAllByText("127,99 RSD")).length).toBeGreaterThan(0);
+  });
+
+  it("prefills the cash tender field to the preview total", async () => {
+    const user = userEvent.setup();
+
+    await addProductToCart(user);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Gotovina primljeno")).toHaveValue("159.99"),
+    );
+  });
+
   it("shows cash change from the current preview total", async () => {
     const user = userEvent.setup();
 
     await addProductToCart(user);
-    await user.type(screen.getByLabelText("Gotovina primljeno"), "200");
+    const cashField = screen.getByLabelText("Gotovina primljeno");
+    await waitFor(() => expect(cashField).toHaveValue("159.99"));
+    await user.clear(cashField);
+    await user.type(cashField, "200");
 
     expect(await screen.findByText("Kusur")).toBeInTheDocument();
     expect(screen.getByText("40,01 RSD")).toBeInTheDocument();
@@ -196,7 +229,10 @@ describe("RegisterScreen", () => {
     const user = userEvent.setup();
 
     await addProductToCart(user);
-    await user.type(screen.getByLabelText("Gotovina primljeno"), "160");
+    const cashField = screen.getByLabelText("Gotovina primljeno");
+    await waitFor(() => expect(cashField).toHaveValue("159.99"));
+    await user.clear(cashField);
+    await user.type(cashField, "160");
     await user.click(screen.getByRole("button", { name: "Zavrsi prodaju" }));
 
     const dialog = await screen.findByRole("dialog", {
@@ -220,6 +256,7 @@ describe("RegisterScreen", () => {
       }),
       "Mleko{enter}",
     );
+    await user.clear(screen.getByLabelText("Gotovina primljeno"));
     await user.type(screen.getByLabelText("Gotovina primljeno"), "160");
     await user.click(screen.getByRole("button", { name: "Zavrsi prodaju" }));
 
