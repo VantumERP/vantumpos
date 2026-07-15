@@ -251,6 +251,26 @@ ALTER TABLE products ADD COLUMN external_source_fetched_at TEXT;
 ALTER TABLE products ADD COLUMN external_source_accepted_fields_json TEXT;
 "#,
     },
+    Migration {
+        version: 6,
+        name: "signed_sale_payments",
+        sql: r#"
+CREATE TABLE sale_payments_next (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('cash', 'card')),
+    amount_minor INTEGER NOT NULL CHECK (amount_minor <> 0),
+    created_at TEXT NOT NULL
+);
+
+INSERT INTO sale_payments_next (id, sale_id, payment_method, amount_minor, created_at)
+SELECT id, sale_id, payment_method, amount_minor, created_at FROM sale_payments;
+
+DROP TABLE sale_payments;
+ALTER TABLE sale_payments_next RENAME TO sale_payments;
+CREATE INDEX idx_sale_payments_sale ON sale_payments(sale_id);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {

@@ -332,6 +332,28 @@ mod tests {
     }
 
     #[test]
+    fn migration_v6_allows_signed_sale_payment_amounts() {
+        with_test_database("migration_v6_signed_sale_payments", |db| {
+            let connection = db.open().expect("database should open");
+            let schema: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sale_payments'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("sale_payments schema should load");
+            assert!(
+                schema.contains("amount_minor") && schema.contains("<> 0"),
+                "expected signed amount_minor, schema was: {schema}"
+            );
+            assert!(
+                !schema.contains(">= 0"),
+                "expected no non-negative constraint, schema was: {schema}"
+            );
+        });
+    }
+
+    #[test]
     fn sales_reject_negative_money_fields() {
         with_test_database("sales_reject_negative_money_fields", |db| {
             let connection = db.open().expect("database should open");
@@ -461,7 +483,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 5);
+                assert_eq!(migration_count, 6);
             },
         );
     }
