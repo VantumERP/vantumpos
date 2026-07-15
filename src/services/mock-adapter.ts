@@ -343,6 +343,14 @@ export function createMockServices(): PosServices {
       async listBackupJobs() {
         return backupJobs;
       },
+      async resetTradingData(confirmationText: string) {
+        if (confirmationText !== "OBRISI PODATKE") {
+          throw {
+            code: "validation_error",
+            message: "Potvrdite brisanje unosom teksta OBRISI PODATKE.",
+          };
+        }
+      },
     },
     auth: {
       async getSession() {

@@ -303,6 +303,16 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           }}
         />
       ) : null}
+
+      {activeTab === "backup" ? (
+        <GoLiveResetCard
+          onReset={async (confirmationText) => {
+            await services.backup.resetTradingData(confirmationText);
+            reload();
+            toast.success("Podaci za probu su obrisani.");
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1024,4 +1034,82 @@ function errorMessage(error: unknown, fallback: string) {
   }
 
   return fallback;
+}
+
+function GoLiveResetCard({
+  onReset,
+}: {
+  onReset: (confirmationText: string) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [confirmationText, setConfirmationText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onReset(confirmationText);
+      setOpen(false);
+      setConfirmationText("");
+    } catch (caught) {
+      setError(errorMessage(caught, "Brisanje nije uspelo."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="border-destructive/40">
+      <CardHeader>
+        <CardTitle>Priprema za pocetak rada</CardTitle>
+        <CardDescription>
+          Obrisi probne racune i vrati brojac racuna na 1. Katalog, korisnici i
+          podesavanja ostaju. Pravi se sigurnosna kopija pre brisanja.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Button
+          type="button"
+          variant="destructive"
+          onClick={() => setOpen(true)}
+        >
+          Obrisi probne podatke
+        </Button>
+        <AlertDialog open={open} onOpenChange={setOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Obrisati sve probne podatke?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Ova radnja je nepovratna. Unesite OBRISI PODATKE za potvrdu.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <Input
+              aria-label="Potvrda brisanja"
+              value={confirmationText}
+              onChange={(event) => setConfirmationText(event.target.value)}
+              placeholder="OBRISI PODATKE"
+            />
+            {error ? (
+              <p role="alert" className="text-sm text-destructive">
+                {error}
+              </p>
+            ) : null}
+            <AlertDialogFooter>
+              <AlertDialogCancel>Odustani</AlertDialogCancel>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={busy || confirmationText !== "OBRISI PODATKE"}
+                onClick={submit}
+              >
+                Obrisi
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardContent>
+    </Card>
+  );
 }

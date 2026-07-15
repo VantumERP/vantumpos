@@ -154,6 +154,17 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenNthCalledWith(11, "backup_list_jobs");
   });
 
+  it("maps resetTradingData to backup_reset_trading_data", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    const services = createLocalServices(invoke);
+
+    await services.backup.resetTradingData("OBRISI PODATKE");
+
+    expect(invoke).toHaveBeenCalledWith("backup_reset_trading_data", {
+      confirmationText: "OBRISI PODATKE",
+    });
+  });
+
   it("maps sales settings to stable Tauri command names", async () => {
     const invoke = vi.fn().mockResolvedValue({ allowOverselling: false });
     const services = createLocalServices(invoke);
