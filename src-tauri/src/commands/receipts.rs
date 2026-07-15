@@ -134,6 +134,8 @@ pub struct ReturnItemsRequest {
     pub user_id: i64,
     pub reason: String,
     pub items: Vec<ReturnItemRequest>,
+    #[serde(default)]
+    pub refund_tender: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -480,6 +482,8 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
     validate_user_id(request.user_id)?;
     let reason = require_reason(&request.reason, "reason")?;
     let requested = normalize_return_items(&request.items)?;
+    let refund_tender = request.refund_tender.as_deref().unwrap_or("cash").to_string();
+    validate_payment_method(&refund_tender)?;
     let now = utc_now()?;
     let mut connection = db.open()?;
 
@@ -489,6 +493,7 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
             .ok_or_else(|| AppError::not_found("Racun nije pronadjen."))?;
 
         ensure_returnable(&tx, &header)?;
+        let shift_id = current_open_shift_id(&tx)?;
 
         let mut return_items = Vec::<(OriginalSaleItem, i64)>::new();
         for (sale_item_id, quantity_milli) in requested {
@@ -557,7 +562,7 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
              VALUES (?1, ?2, ?3, 'refunded', 'not_fiscalized', 'return', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
             params![
                 linked_number,
-                header.shift_id,
+                shift_id,
                 request.user_id,
                 request.receipt_id,
                 subtotal_minor,
@@ -626,6 +631,15 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
                 request.user_id,
                 &now,
             )?;
+        }
+
+        if total_minor != 0 {
+            tx.execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![linked_sale_id, refund_tender, -total_minor, now],
+            )
+            .map_err(AppError::from)?;
         }
 
         tx.execute(
@@ -1505,6 +1519,7 @@ mod tests {
                             sale_item_id: seed.sale_item_id,
                             quantity_milli: 3000,
                         }],
+                        refund_tender: None,
                     },
                 )
                 .expect_err("excessive return should fail");
@@ -1540,6 +1555,7 @@ mod tests {
                             sale_item_id: seed.sale_item_id,
                             quantity_milli: 1000,
                         }],
+                        refund_tender: None,
                     },
                 )
                 .expect("partial return should succeed");
@@ -1705,6 +1721,150 @@ mod tests {
                 )
                 .expect("count should query");
             assert_eq!(voids, 0);
+        });
+    }
+
+    #[test]
+    fn return_records_negative_cash_refund_by_default() {
+        with_receipt_database("return_default_cash_refund", |db, seeded| {
+            return_items(
+                db,
+                ReturnItemsRequest {
+                    receipt_id: seeded.sale_id,
+                    user_id: seeded.user_id,
+                    reason: "Ostecen artikal".to_string(),
+                    items: vec![ReturnItemRequest {
+                        sale_item_id: seeded.sale_item_id,
+                        quantity_milli: 1000,
+                    }],
+                    refund_tender: None,
+                },
+            )
+            .expect("return should succeed");
+
+            let connection = db.open().expect("database should open");
+            let refund: i64 = connection
+                .query_row(
+                    "SELECT sp.amount_minor FROM sale_payments sp
+                     JOIN sales s ON s.id = sp.sale_id
+                     WHERE s.original_sale_id = ?1 AND s.document_type = 'return'
+                       AND sp.payment_method = 'cash'",
+                    params![seeded.sale_id],
+                    |row| row.get(0),
+                )
+                .expect("cash refund should exist");
+            assert_eq!(refund, -50_000);
+        });
+    }
+
+    #[test]
+    fn return_refund_tender_card_records_negative_card_refund() {
+        with_receipt_database("return_card_refund", |db, seeded| {
+            return_items(
+                db,
+                ReturnItemsRequest {
+                    receipt_id: seeded.sale_id,
+                    user_id: seeded.user_id,
+                    reason: "Zamena velicine".to_string(),
+                    items: vec![ReturnItemRequest {
+                        sale_item_id: seeded.sale_item_id,
+                        quantity_milli: 1000,
+                    }],
+                    refund_tender: Some("card".to_string()),
+                },
+            )
+            .expect("return should succeed");
+
+            let connection = db.open().expect("database should open");
+            let refund: i64 = connection
+                .query_row(
+                    "SELECT sp.amount_minor FROM sale_payments sp
+                     JOIN sales s ON s.id = sp.sale_id
+                     WHERE s.original_sale_id = ?1 AND s.document_type = 'return'
+                       AND sp.payment_method = 'card'",
+                    params![seeded.sale_id],
+                    |row| row.get(0),
+                )
+                .expect("card refund should exist");
+            assert_eq!(refund, -50_000);
+        });
+    }
+
+    #[test]
+    fn return_requires_open_shift() {
+        with_receipt_database("return_requires_open_shift", |db, seeded| {
+            db.open()
+                .expect("database should open")
+                .execute("UPDATE shifts SET status = 'closed'", [])
+                .expect("shift should close");
+
+            let error = return_items(
+                db,
+                ReturnItemsRequest {
+                    receipt_id: seeded.sale_id,
+                    user_id: seeded.user_id,
+                    reason: "Ostecen".to_string(),
+                    items: vec![ReturnItemRequest {
+                        sale_item_id: seeded.sale_item_id,
+                        quantity_milli: 1000,
+                    }],
+                    refund_tender: None,
+                },
+            )
+            .expect_err("return without an open shift should fail");
+            assert_eq!(error.code, "shift_required");
+        });
+    }
+
+    #[test]
+    fn return_rejects_invalid_refund_tender() {
+        with_receipt_database("return_invalid_tender", |db, seeded| {
+            let error = return_items(
+                db,
+                ReturnItemsRequest {
+                    receipt_id: seeded.sale_id,
+                    user_id: seeded.user_id,
+                    reason: "Ostecen".to_string(),
+                    items: vec![ReturnItemRequest {
+                        sale_item_id: seeded.sale_item_id,
+                        quantity_milli: 1000,
+                    }],
+                    refund_tender: Some("bitcoin".to_string()),
+                },
+            )
+            .expect_err("invalid refund tender should fail");
+            assert_eq!(error.code, "validation_error");
+        });
+    }
+
+    #[test]
+    fn void_is_blocked_after_a_partial_return() {
+        with_receipt_database("void_blocked_after_return", |db, seeded| {
+            return_items(
+                db,
+                ReturnItemsRequest {
+                    receipt_id: seeded.sale_id,
+                    user_id: seeded.user_id,
+                    reason: "Delimican povrat".to_string(),
+                    items: vec![ReturnItemRequest {
+                        sale_item_id: seeded.sale_item_id,
+                        quantity_milli: 1000,
+                    }],
+                    refund_tender: None,
+                },
+            )
+            .expect("partial return should succeed");
+
+            let error = void_receipt(
+                db,
+                VoidReceiptRequest {
+                    receipt_id: seeded.sale_id,
+                    user_id: seeded.user_id,
+                    reason: "Greska".to_string(),
+                },
+            )
+            .expect_err("void after a return must stay blocked");
+            assert_eq!(error.code, "invalid_receipt_state");
         });
     }
 }
