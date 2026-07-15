@@ -52,6 +52,7 @@ pub fn run() {
             commands::shifts::shift_open,
             commands::shifts::shift_close,
             commands::shifts::shift_admin_close,
+            commands::shifts::shift_cash_movement,
             commands::reports::reports_daily_turnover,
             commands::reports::reports_shift_turnover,
             commands::reports::reports_cashier_turnover,

@@ -122,6 +122,7 @@ mod tests {
         "import_jobs",
         "import_job_rows",
         "backup_jobs",
+        "cash_movements",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -137,6 +138,7 @@ mod tests {
         "idx_sale_payments_sale",
         "idx_import_job_rows_job",
         "idx_backup_jobs_created_at",
+        "idx_cash_movements_shift",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -491,7 +493,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 6);
+                assert_eq!(migration_count, 7);
             },
         );
     }

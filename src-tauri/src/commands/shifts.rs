@@ -40,6 +40,14 @@ pub struct CloseShiftRequest {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CashMovementRequest {
+    pub direction: String, // "pay_in" | "pay_out"
+    pub amount_minor: i64,
+    pub reason: Option<String>,
+}
+
 #[tauri::command]
 pub fn shift_get_current(state: State<'_, AppState>) -> Result<Option<ShiftSummary>, CommandError> {
     let Some(user_id) = state
@@ -78,6 +86,58 @@ pub fn shift_admin_close(
 ) -> Result<ShiftSummary, CommandError> {
     super::auth::require_admin(state.inner()).map_err(CommandError::from)?;
     admin_close_shift(state.inner(), request)
+}
+
+#[tauri::command]
+pub fn shift_cash_movement(
+    state: State<'_, AppState>,
+    request: CashMovementRequest,
+) -> Result<ShiftSummary, CommandError> {
+    let user_id = super::auth::require_session(state.inner()).map_err(CommandError::from)?;
+    record_cash_movement(state.inner(), user_id, request)
+}
+
+pub fn record_cash_movement(
+    state: &AppState,
+    user_id: i64,
+    request: CashMovementRequest,
+) -> Result<ShiftSummary, CommandError> {
+    if request.direction != "pay_in" && request.direction != "pay_out" {
+        return Err(CommandError::new(
+            "validation_error",
+            "Nepoznat tip transakcije.",
+        ));
+    }
+    if request.amount_minor <= 0 {
+        return Err(CommandError::new(
+            "validation_error",
+            "Iznos mora biti veći od nule.",
+        ));
+    }
+    let summary = current_shift_for_user(state, user_id)?
+        .ok_or_else(|| CommandError::new("shift_required", "Smena nije otvorena."))?;
+    let now = utc_now().map_err(CommandError::from)?;
+    let note = normalized_note(request.reason);
+    state
+        .db()
+        .open()
+        .map_err(CommandError::from)?
+        .execute(
+            "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, reason, user_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                summary.id,
+                request.direction,
+                request.amount_minor,
+                note,
+                user_id,
+                now
+            ],
+        )
+        .map_err(AppError::from)
+        .map_err(CommandError::from)?;
+    current_shift_for_user(state, user_id)?
+        .ok_or_else(|| CommandError::new("shift_required", "Smena nije otvorena."))
 }
 
 pub fn admin_close_shift(
@@ -355,7 +415,8 @@ mod tests {
 
     use super::{
         admin_close_shift, close_shift_for_user, current_shift_for_user, open_shift_for_user,
-        shift_admin_close, CloseShiftRequest, OpenShiftRequest,
+        record_cash_movement, shift_admin_close, CashMovementRequest, CloseShiftRequest,
+        OpenShiftRequest,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -681,5 +742,141 @@ mod tests {
         }
 
         std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn record_cash_movement_inserts_pay_in_and_pay_out_rows() {
+        with_state("record_cash_movement_inserts_rows", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 0,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_in".to_string(),
+                    amount_minor: 5000,
+                    reason: Some("Sitan novac".to_string()),
+                },
+            )
+            .expect("pay_in should record");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_out".to_string(),
+                    amount_minor: 2000,
+                    reason: None,
+                },
+            )
+            .expect("pay_out should record");
+
+            let connection = state.db().open().expect("database should open");
+            let (count, total_pay_in, total_pay_out): (i64, i64, i64) = connection
+                .query_row(
+                    "SELECT
+                        COUNT(*),
+                        COALESCE(SUM(CASE WHEN movement_type = 'pay_in' THEN amount_minor ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN movement_type = 'pay_out' THEN amount_minor ELSE 0 END), 0)
+                     FROM cash_movements WHERE shift_id = ?1",
+                    params![opened.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("cash movements should query");
+
+            assert_eq!(count, 2);
+            assert_eq!(total_pay_in, 5000);
+            assert_eq!(total_pay_out, 2000);
+        });
+    }
+
+    #[test]
+    fn record_cash_movement_requires_open_shift() {
+        with_state("record_cash_movement_requires_open_shift", |state| {
+            let cashier_id = seed_cashier(state);
+
+            let error = record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_in".to_string(),
+                    amount_minor: 5000,
+                    reason: None,
+                },
+            )
+            .expect_err("cash movement without an open shift should fail");
+
+            assert_eq!(error.code, "shift_required");
+        });
+    }
+
+    #[test]
+    fn record_cash_movement_rejects_non_positive_amount() {
+        with_state(
+            "record_cash_movement_rejects_non_positive_amount",
+            |state| {
+                let cashier_id = seed_cashier(state);
+                open_shift_for_user(
+                    state,
+                    cashier_id,
+                    OpenShiftRequest {
+                        opening_cash_minor: 0,
+                        note: None,
+                    },
+                )
+                .expect("shift should open");
+
+                let error = record_cash_movement(
+                    state,
+                    cashier_id,
+                    CashMovementRequest {
+                        direction: "pay_in".to_string(),
+                        amount_minor: 0,
+                        reason: None,
+                    },
+                )
+                .expect_err("non-positive amount should fail");
+
+                assert_eq!(error.code, "validation_error");
+            },
+        );
+    }
+
+    #[test]
+    fn record_cash_movement_rejects_unknown_direction() {
+        with_state("record_cash_movement_rejects_unknown_direction", |state| {
+            let cashier_id = seed_cashier(state);
+            open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 0,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            let error = record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "refund".to_string(),
+                    amount_minor: 1000,
+                    reason: None,
+                },
+            )
+            .expect_err("unknown direction should fail");
+
+            assert_eq!(error.code, "validation_error");
+        });
     }
 }

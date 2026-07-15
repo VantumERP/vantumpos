@@ -271,6 +271,22 @@ ALTER TABLE sale_payments_next RENAME TO sale_payments;
 CREATE INDEX idx_sale_payments_sale ON sale_payments(sale_id);
 "#,
     },
+    Migration {
+        version: 7,
+        name: "cash_movements",
+        sql: r#"
+CREATE TABLE cash_movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shift_id INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+    movement_type TEXT NOT NULL CHECK (movement_type IN ('pay_in', 'pay_out')),
+    amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+    reason TEXT,
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_cash_movements_shift ON cash_movements(shift_id);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
