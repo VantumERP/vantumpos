@@ -317,10 +317,10 @@ pub fn query_daily_turnover(
         r#"
 SELECT
     substr(s.created_at, 1, 10) AS day,
-    SUM(CASE WHEN s.status = 'completed' THEN 1 ELSE 0 END) AS receipt_count,
+    SUM(CASE WHEN s.document_type = 'sale' THEN 1 ELSE 0 END) AS receipt_count,
     (
         SELECT COALESCE(SUM(
-            CASE WHEN ps.status = 'completed' THEN sp.amount_minor ELSE -sp.amount_minor END
+            sp.amount_minor
         ), 0)
         FROM sales ps
         JOIN sale_payments sp ON sp.sale_id = ps.id
@@ -332,7 +332,7 @@ SELECT
     ) AS cash_minor,
     (
         SELECT COALESCE(SUM(
-            CASE WHEN ps.status = 'completed' THEN sp.amount_minor ELSE -sp.amount_minor END
+            sp.amount_minor
         ), 0)
         FROM sales ps
         JOIN sale_payments sp ON sp.sale_id = ps.id
@@ -342,9 +342,9 @@ SELECT
           AND (?4 IS NULL OR ps.cashier_id = ?4)
           AND sp.payment_method = 'card'
     ) AS card_minor,
-    SUM(CASE WHEN s.status = 'completed' THEN s.total_minor ELSE -s.total_minor END) AS total_minor,
-    -SUM(CASE WHEN s.status <> 'completed' THEN s.total_minor ELSE 0 END) AS refunds_or_voids_minor,
-    SUM(CASE WHEN s.status <> 'completed' THEN 1 ELSE 0 END) AS refunds_or_voids_count
+    SUM(CASE WHEN s.document_type = 'sale' THEN s.total_minor ELSE -s.total_minor END) AS total_minor,
+    -SUM(CASE WHEN s.document_type IN ('void', 'return') THEN s.total_minor ELSE 0 END) AS refunds_or_voids_minor,
+    SUM(CASE WHEN s.document_type IN ('void', 'return') THEN 1 ELSE 0 END) AS refunds_or_voids_count
 FROM sales s
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
   AND (?3 IS NULL OR s.shift_id = ?3)
@@ -404,18 +404,10 @@ SELECT
     sh.opened_at,
     sh.closed_at,
     u.display_name,
-    SUM(CASE WHEN s.status = 'completed' THEN 1 ELSE 0 END) AS receipt_count,
-    COALESCE(SUM(CASE
-        WHEN sp.payment_method = 'cash' AND s.status = 'completed' THEN sp.amount_minor
-        WHEN sp.payment_method = 'cash' THEN -sp.amount_minor
-        ELSE 0
-    END), 0) AS cash_minor,
-    COALESCE(SUM(CASE
-        WHEN sp.payment_method = 'card' AND s.status = 'completed' THEN sp.amount_minor
-        WHEN sp.payment_method = 'card' THEN -sp.amount_minor
-        ELSE 0
-    END), 0) AS card_minor,
-    SUM(CASE WHEN s.status = 'completed' THEN s.total_minor ELSE -s.total_minor END) AS total_minor
+    SUM(CASE WHEN s.document_type = 'sale' THEN 1 ELSE 0 END) AS receipt_count,
+    COALESCE(SUM(CASE WHEN sp.payment_method = 'cash' THEN sp.amount_minor ELSE 0 END), 0) AS cash_minor,
+    COALESCE(SUM(CASE WHEN sp.payment_method = 'card' THEN sp.amount_minor ELSE 0 END), 0) AS card_minor,
+    SUM(CASE WHEN s.document_type = 'sale' THEN s.total_minor ELSE -s.total_minor END) AS total_minor
 FROM shifts sh
 JOIN users u ON u.id = sh.user_id
 JOIN sales s ON s.shift_id = sh.id
@@ -458,8 +450,8 @@ pub fn query_cashier_turnover(
 SELECT
     u.id,
     u.display_name,
-    SUM(CASE WHEN s.status = 'completed' THEN 1 ELSE 0 END) AS receipt_count,
-    SUM(CASE WHEN s.status = 'completed' THEN s.total_minor ELSE -s.total_minor END) AS total_minor
+    SUM(CASE WHEN s.document_type = 'sale' THEN 1 ELSE 0 END) AS receipt_count,
+    SUM(CASE WHEN s.document_type = 'sale' THEN s.total_minor ELSE -s.total_minor END) AS total_minor
 FROM users u
 JOIN sales s ON s.cashier_id = u.id
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
@@ -495,8 +487,8 @@ pub fn query_payment_methods(
         r#"
 SELECT
     sp.payment_method,
-    COUNT(DISTINCT CASE WHEN s.status = 'completed' THEN s.id END) AS receipt_count,
-    SUM(CASE WHEN s.status = 'completed' THEN sp.amount_minor ELSE -sp.amount_minor END) AS total_minor
+    COUNT(DISTINCT CASE WHEN s.document_type = 'sale' THEN s.id END) AS receipt_count,
+    SUM(sp.amount_minor) AS total_minor
 FROM sale_payments sp
 JOIN sales s ON s.id = sp.sale_id
 WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
@@ -533,13 +525,13 @@ SELECT
     si.product_id,
     si.product_name,
     si.product_sku,
-    SUM(CASE WHEN s.status = 'completed' THEN ABS(si.quantity_milli) ELSE -ABS(si.quantity_milli) END) AS quantity_milli,
-    SUM(CASE WHEN s.status = 'completed' THEN si.total_minor ELSE -si.total_minor END) AS revenue_minor,
-    SUM(CASE WHEN s.status = 'completed' THEN si.discount_minor ELSE -si.discount_minor END) AS discount_minor,
+    SUM(CASE WHEN s.document_type = 'sale' THEN ABS(si.quantity_milli) ELSE -ABS(si.quantity_milli) END) AS quantity_milli,
+    SUM(CASE WHEN s.document_type = 'sale' THEN si.total_minor ELSE -si.total_minor END) AS revenue_minor,
+    SUM(CASE WHEN s.document_type = 'sale' THEN si.discount_minor ELSE -si.discount_minor END) AS discount_minor,
     SUM(
-        CASE WHEN s.status = 'completed' THEN si.total_minor ELSE -si.total_minor END
+        CASE WHEN s.document_type = 'sale' THEN si.total_minor ELSE -si.total_minor END
         -
-        CASE WHEN s.status = 'completed'
+        CASE WHEN s.document_type = 'sale'
             THEN COALESCE(p.purchase_price_minor, 0) * ABS(si.quantity_milli) / 1000
             ELSE -(COALESCE(p.purchase_price_minor, 0) * ABS(si.quantity_milli) / 1000)
         END
@@ -593,13 +585,13 @@ pub fn query_category_sales(
 SELECT
     c.id,
     COALESCE(c.name, 'Bez kategorije') AS category_name,
-    SUM(CASE WHEN s.status = 'completed' THEN ABS(si.quantity_milli) ELSE -ABS(si.quantity_milli) END) AS quantity_milli,
-    SUM(CASE WHEN s.status = 'completed' THEN si.total_minor ELSE -si.total_minor END) AS revenue_minor,
-    SUM(CASE WHEN s.status = 'completed' THEN si.discount_minor ELSE -si.discount_minor END) AS discount_minor,
+    SUM(CASE WHEN s.document_type = 'sale' THEN ABS(si.quantity_milli) ELSE -ABS(si.quantity_milli) END) AS quantity_milli,
+    SUM(CASE WHEN s.document_type = 'sale' THEN si.total_minor ELSE -si.total_minor END) AS revenue_minor,
+    SUM(CASE WHEN s.document_type = 'sale' THEN si.discount_minor ELSE -si.discount_minor END) AS discount_minor,
     SUM(
-        CASE WHEN s.status = 'completed' THEN si.total_minor ELSE -si.total_minor END
+        CASE WHEN s.document_type = 'sale' THEN si.total_minor ELSE -si.total_minor END
         -
-        CASE WHEN s.status = 'completed'
+        CASE WHEN s.document_type = 'sale'
             THEN COALESCE(p.purchase_price_minor, 0) * ABS(si.quantity_milli) / 1000
             ELSE -(COALESCE(p.purchase_price_minor, 0) * ABS(si.quantity_milli) / 1000)
         END
@@ -1068,7 +1060,7 @@ mod tests {
             (
                 3,
                 "R-003",
-                "voided",
+                "completed",
                 3_000,
                 0,
                 500,
@@ -1157,6 +1149,37 @@ mod tests {
                 )
                 .expect("sale item should insert");
         }
+
+        // Sale 3 was rung, then fully voided: the original stays completed and the
+        // reversal is a void counter-document carrying a negative payment. This is the
+        // ledger model every money query now reads.
+        connection
+            .execute(
+                "INSERT INTO sales (
+                    id, local_receipt_number, shift_id, cashier_id, status, fiscal_status,
+                    document_type, original_sale_id, subtotal_minor, discount_minor, tax_minor,
+                    total_minor, created_at, updated_at)
+                 VALUES (4, 'STO-003', 1, 2, 'voided', 'not_fiscalized', 'void', 3, 3000, 0, 500,
+                    3000, '2026-06-17T11:05:00Z', '2026-06-17T11:05:00Z')",
+                [],
+            )
+            .expect("void document should insert");
+        connection
+            .execute(
+                "INSERT INTO sale_items (
+                    sale_id, product_id, product_name, product_sku, quantity_milli,
+                    unit_price_minor, discount_minor, tax_rate_basis_points, tax_minor, total_minor)
+                 VALUES (4, 2, 'Sok 1l', 'SOK-1L', -1000, 3000, 0, 2000, 500, 3000)",
+                [],
+            )
+            .expect("void item should insert");
+        connection
+            .execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (4, 'cash', -3000, '2026-06-17T11:05:00Z')",
+                [],
+            )
+            .expect("void refund payment should insert");
     }
 
     fn with_cross_cashier_reports_database(test_name: &str, test: impl FnOnce(&Connection)) {
@@ -1346,13 +1369,81 @@ mod tests {
                 .expect("daily turnover should query");
 
                 assert_eq!(report.rows.len(), 1);
-                assert_eq!(report.summary.total_minor, 12_000);
-                assert_eq!(report.summary.cash_minor, 8_000);
+                assert_eq!(report.summary.total_minor, 15_000);
+                assert_eq!(report.summary.cash_minor, 11_000);
                 assert_eq!(report.summary.card_minor, 4_000);
-                assert_eq!(report.summary.receipt_count, 2);
+                assert_eq!(report.summary.receipt_count, 3);
                 assert_eq!(report.rows[0].refunds_or_voids_minor, -3_000);
             },
         );
+    }
+
+    #[test]
+    fn daily_turnover_nets_a_return_document() {
+        let db_path = test_database_path("daily_turnover_nets_a_return_document");
+        {
+            let db = Db::new(&db_path).expect("database should initialize");
+            let connection = db.open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO users (id, username, display_name, role, created_at, updated_at)
+                     VALUES (2, 'mira', 'Mira Kasir', 'cashier', '2026-06-17T07:00:00Z', '2026-06-17T07:00:00Z')",
+                    [],
+                )
+                .expect("cashier should insert");
+            connection
+                .execute(
+                    "INSERT INTO shifts (id, user_id, opened_at, opening_cash_minor, expected_cash_minor, status, created_at, updated_at)
+                     VALUES (1, 2, '2026-06-17T07:30:00Z', 0, 0, 'open', '2026-06-17T07:30:00Z', '2026-06-17T07:30:00Z')",
+                    [],
+                )
+                .expect("shift should insert");
+            connection
+                .execute(
+                    "INSERT INTO sales (id, local_receipt_number, shift_id, cashier_id, status, fiscal_status, subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at)
+                     VALUES (1, 'R-1', 1, 2, 'completed', 'not_fiscalized', 1000, 0, 167, 1000, '2026-06-17T09:00:00Z', '2026-06-17T09:00:00Z')",
+                    [],
+                )
+                .expect("sale should insert");
+            connection
+                .execute(
+                    "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                     VALUES (1, 'cash', 1000, '2026-06-17T09:00:00Z')",
+                    [],
+                )
+                .expect("payment should insert");
+            connection
+                .execute(
+                    "INSERT INTO sales (id, local_receipt_number, shift_id, cashier_id, status, fiscal_status, document_type, original_sale_id, subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at)
+                     VALUES (2, 'POV-1', 1, 2, 'refunded', 'not_fiscalized', 'return', 1, 300, 0, 50, 300, '2026-06-17T09:30:00Z', '2026-06-17T09:30:00Z')",
+                    [],
+                )
+                .expect("return document should insert");
+            connection
+                .execute(
+                    "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                     VALUES (2, 'cash', -300, '2026-06-17T09:30:00Z')",
+                    [],
+                )
+                .expect("refund payment should insert");
+
+            let report = super::query_daily_turnover(
+                &connection,
+                &super::ReportDateQuery {
+                    from: "2026-06-17".to_string(),
+                    to: "2026-06-17".to_string(),
+                    shift_id: None,
+                    cashier_id: None,
+                },
+            )
+            .expect("daily turnover should query");
+            assert_eq!(report.summary.cash_minor, 700);
+            assert_eq!(report.summary.total_minor, 700);
+            assert_eq!(report.summary.receipt_count, 1);
+            assert_eq!(report.rows[0].refunds_or_voids_minor, -300);
+            assert_eq!(report.rows[0].refunds_or_voids_count, 1);
+        }
+        std::fs::remove_file(&db_path).expect("test database should be removed");
     }
 
     #[test]
@@ -1373,7 +1464,7 @@ mod tests {
 
                 assert_eq!(report.rows.len(), 2);
                 assert_eq!(report.rows[0].payment_method, "cash");
-                assert_eq!(report.rows[0].total_minor, 8_000);
+                assert_eq!(report.rows[0].total_minor, 11_000);
                 assert_eq!(report.rows[1].payment_method, "card");
                 assert_eq!(report.rows[1].total_minor, 4_000);
             },
@@ -1404,8 +1495,8 @@ mod tests {
                 assert_eq!(report.rows[0].revenue_minor, 12_000);
                 assert_eq!(report.rows[0].estimated_margin_minor, 11_160);
                 assert_eq!(report.rows[1].product_name, "Sok 1l");
-                assert_eq!(report.rows[1].quantity_milli, 1_000);
-                assert_eq!(report.rows[1].revenue_minor, 0);
+                assert_eq!(report.rows[1].quantity_milli, 2_000);
+                assert_eq!(report.rows[1].revenue_minor, 3_000);
             },
         );
     }
@@ -1525,8 +1616,8 @@ mod tests {
                 )
                 .expect("daily turnover should query");
                 assert_eq!(by_shift.rows.len(), 1);
-                assert_eq!(by_shift.summary.total_minor, 12_000);
-                assert_eq!(by_shift.summary.cash_minor, 8_000);
+                assert_eq!(by_shift.summary.total_minor, 15_000);
+                assert_eq!(by_shift.summary.cash_minor, 11_000);
                 assert_eq!(by_shift.summary.card_minor, 4_000);
 
                 let by_cashier = super::query_daily_turnover(
@@ -1540,7 +1631,7 @@ mod tests {
                 )
                 .expect("daily turnover should query");
                 assert_eq!(by_cashier.rows.len(), 1);
-                assert_eq!(by_cashier.summary.total_minor, 12_000);
+                assert_eq!(by_cashier.summary.total_minor, 15_000);
 
                 let unmatched_shift = super::query_daily_turnover(
                     connection,
@@ -1738,7 +1829,7 @@ mod tests {
                 let csv = fs::read_to_string(&exported.path).expect("csv should be readable");
                 assert!(csv
                     .starts_with("Dan,Broj racuna,Gotovina,Kartica,Ukupno,Povrati i storniranja"));
-                assert!(csv.contains("2026-06-17,2,8000,4000,12000,-3000"));
+                assert!(csv.contains("2026-06-17,3,11000,4000,15000,-3000"));
                 assert_eq!(exported.row_count, 1);
 
                 fs::remove_dir_all(export_dir).expect("export dir should be removed");
