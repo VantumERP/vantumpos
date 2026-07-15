@@ -4,6 +4,7 @@ import {
   LogInIcon,
   LogOutIcon,
   PlusIcon,
+  ShieldAlertIcon,
   StoreIcon,
   UserPlusIcon,
 } from "lucide-react";
@@ -377,7 +378,7 @@ function renderModule({
   }
 
   if (activeId === "register") {
-    return session.currentShift ? (
+    const registerContent = session.currentShift ? (
       <RegisterWithShiftPanel
         services={services}
         session={session}
@@ -389,6 +390,21 @@ function renderModule({
         session={session}
         onOpened={(shift) => onSessionChange({ ...session, currentShift: shift })}
       />
+    );
+
+    if (session.user.role !== "admin") {
+      return registerContent;
+    }
+
+    return (
+      <div className="flex flex-col gap-4">
+        {registerContent}
+        <AdminForceCloseShiftPanel
+          services={services}
+          session={session}
+          onSessionChange={onSessionChange}
+        />
+      </div>
     );
   }
 
@@ -880,6 +896,167 @@ function CloseShiftPanel({
           <AlertDialogFooter>
             <AlertDialogCancel disabled={submitting}>Odustani</AlertDialogCancel>
             <AlertDialogAction disabled={submitting} onClick={() => void closeShift()}>
+              {submitting ? (
+                <Spinner data-icon="inline-start" aria-hidden="true" />
+              ) : null}
+              Potvrdi zatvaranje
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </Card>
+  );
+}
+
+function AdminForceCloseShiftPanel({
+  services,
+  session,
+  onSessionChange,
+}: {
+  services: PosServices;
+  session: AppSession;
+  onSessionChange: (session: AppSession) => void;
+}) {
+  const [shiftId, setShiftId] = useState("");
+  const [countedCash, setCountedCash] = useState("");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<ShiftSummary | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  function requestClose(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setResult(null);
+
+    const parsedShiftId = Number.parseInt(shiftId, 10);
+    if (!Number.isInteger(parsedShiftId) || parsedShiftId <= 0) {
+      setError("Unesite ispravan broj smene.");
+      return;
+    }
+
+    try {
+      const parsedCash = parseRsdInput(countedCash);
+      if (parsedCash < 0) {
+        throw new Error("Iznos nije ispravan.");
+      }
+    } catch (parseError) {
+      setError(errorMessage(parseError, "Iznos nije ispravan."));
+      return;
+    }
+
+    setConfirmOpen(true);
+  }
+
+  async function forceClose() {
+    const parsedShiftId = Number.parseInt(shiftId, 10);
+    let countedMinor: number;
+    try {
+      countedMinor = parseRsdInput(countedCash);
+    } catch {
+      setConfirmOpen(false);
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const closed = await services.shifts.adminCloseShift({
+        shiftId: parsedShiftId,
+        countedCashMinor: countedMinor,
+        note: note.trim() || null,
+      });
+      setResult(closed);
+      setConfirmOpen(false);
+      setShiftId("");
+      setCountedCash("");
+      setNote("");
+
+      if (session.currentShift?.id === closed.id) {
+        onSessionChange({ ...session, currentShift: null });
+      }
+    } catch (closeError) {
+      setError(errorMessage(closeError, "Smena nije zatvorena."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Zatvori tuđu smenu</CardTitle>
+        <CardDescription>
+          Prinudno zatvorite zaboravljenu otvorenu smenu drugog korisnika.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="flex flex-col gap-4" onSubmit={requestClose}>
+          <FieldGroup>
+            {error ? (
+              <Alert variant="destructive">
+                <AlertCircleIcon aria-hidden="true" />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            ) : null}
+            {result ? (
+              <Alert>
+                <AlertDescription>
+                  Smena #{result.id} ({result.cashierName}) je zatvorena.
+                </AlertDescription>
+              </Alert>
+            ) : null}
+            <Field data-invalid={!!error}>
+              <FieldLabel htmlFor="admin-close-shift-id">Broj smene</FieldLabel>
+              <Input
+                id="admin-close-shift-id"
+                inputMode="numeric"
+                value={shiftId}
+                aria-invalid={!!error}
+                onChange={(event) => setShiftId(event.target.value)}
+              />
+            </Field>
+            <Field data-invalid={!!error}>
+              <FieldLabel htmlFor="admin-close-counted-cash">
+                Prebrojana gotovina
+              </FieldLabel>
+              <Input
+                id="admin-close-counted-cash"
+                inputMode="decimal"
+                value={countedCash}
+                aria-invalid={!!error}
+                onChange={(event) => setCountedCash(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="admin-close-note">Napomena</FieldLabel>
+              <Textarea
+                id="admin-close-note"
+                value={note}
+                onChange={(event) => setNote(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <Button type="submit" variant="destructive">
+                <ShieldAlertIcon data-icon="inline-start" />
+                Zatvori tuđu smenu
+              </Button>
+            </Field>
+          </FieldGroup>
+        </form>
+      </CardContent>
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Potvrdite prinudno zatvaranje</AlertDialogTitle>
+            <AlertDialogDescription>
+              Ova akcija zatvara otvorenu smenu drugog korisnika sa unetom prebrojanom
+              gotovinom, bez obzira ko ju je otvorio.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={submitting}>Odustani</AlertDialogCancel>
+            <AlertDialogAction disabled={submitting} onClick={() => void forceClose()}>
               {submitting ? (
                 <Spinner data-icon="inline-start" aria-hidden="true" />
               ) : null}

@@ -58,6 +58,23 @@ describe("local service adapter", () => {
             openingNote: null,
             closingNote: null,
           });
+        case "shift_admin_close":
+          return Promise.resolve({
+            id: 2,
+            userId: 2,
+            cashierName: "Marko Markovic",
+            openedAt: "2026-06-18T07:00:00Z",
+            closedAt: "2026-06-18T09:00:00Z",
+            openingCashMinor: 5000,
+            expectedCashMinor: 5000,
+            countedCashMinor: 5000,
+            cashSalesMinor: 0,
+            cardSalesMinor: 0,
+            differenceMinor: 0,
+            status: "closed",
+            openingNote: null,
+            closingNote: null,
+          });
         default:
           return Promise.resolve(undefined);
       }
@@ -72,6 +89,11 @@ describe("local service adapter", () => {
       openingCashMinor: 10000,
       note: null,
     });
+    await services.shifts.adminCloseShift({
+      shiftId: 2,
+      countedCashMinor: 5000,
+      note: null,
+    });
 
     expect(invoke).toHaveBeenCalledWith("auth_get_session");
     expect(invoke).toHaveBeenCalledWith("auth_login", {
@@ -80,6 +102,9 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenCalledWith("users_list");
     expect(invoke).toHaveBeenCalledWith("shift_open", {
       request: { openingCashMinor: 10000, note: null },
+    });
+    expect(invoke).toHaveBeenCalledWith("shift_admin_close", {
+      request: { shiftId: 2, countedCashMinor: 5000, note: null },
     });
   });
 

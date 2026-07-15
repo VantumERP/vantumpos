@@ -71,6 +71,48 @@ pub fn shift_close(
     close_shift_for_user(state.inner(), user_id, request)
 }
 
+#[tauri::command]
+pub fn shift_admin_close(
+    state: State<'_, AppState>,
+    request: CloseShiftRequest,
+) -> Result<ShiftSummary, CommandError> {
+    super::auth::require_admin(state.inner()).map_err(CommandError::from)?;
+    admin_close_shift(state.inner(), request)
+}
+
+pub fn admin_close_shift(
+    state: &AppState,
+    request: CloseShiftRequest,
+) -> Result<ShiftSummary, CommandError> {
+    let summary = shift_by_id(state, request.shift_id)?
+        .ok_or_else(|| CommandError::new("not_found", "Smena nije pronađena."))?;
+    if summary.status != "open" {
+        return Err(CommandError::new(
+            "not_found",
+            "Otvorena smena nije pronađena.",
+        ));
+    }
+    let now = utc_now().map_err(CommandError::from)?;
+    let note = normalized_note(request.note);
+    let conn = state.db().open().map_err(CommandError::from)?;
+    conn.execute(
+        "UPDATE shifts SET closed_at = ?1, expected_cash_minor = ?2, counted_cash_minor = ?3,
+             status = 'closed', closing_note = ?4, updated_at = ?1
+         WHERE id = ?5 AND status = 'open'",
+        params![
+            now,
+            summary.expected_cash_minor,
+            request.counted_cash_minor,
+            note,
+            request.shift_id
+        ],
+    )
+    .map_err(AppError::from)
+    .map_err(CommandError::from)?;
+    shift_by_id(state, request.shift_id)?
+        .ok_or_else(|| CommandError::new("not_found", "Smena nije pronađena."))
+}
+
 pub fn current_shift_for_user(
     state: &AppState,
     user_id: i64,
@@ -300,10 +342,11 @@ fn normalized_note(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use rusqlite::params;
+    use tauri::Manager;
 
     use super::{
-        close_shift_for_user, current_shift_for_user, open_shift_for_user, CloseShiftRequest,
-        OpenShiftRequest,
+        admin_close_shift, close_shift_for_user, current_shift_for_user, open_shift_for_user,
+        shift_admin_close, CloseShiftRequest, OpenShiftRequest,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -330,6 +373,27 @@ mod tests {
             )
             .expect("cashier should insert");
         connection.last_insert_rowid()
+    }
+
+    fn sign_in_admin(state: &AppState) -> i64 {
+        let admin_id: i64 = state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist");
+        state
+            .set_session_user_id(admin_id)
+            .expect("admin session should set");
+        admin_id
+    }
+
+    fn sign_in_cashier(state: &AppState, cashier_id: i64) {
+        state
+            .set_session_user_id(cashier_id)
+            .expect("cashier session should set");
     }
 
     fn seed_completed_sale(
@@ -493,5 +557,79 @@ mod tests {
             assert_eq!(summary.card_sales_minor, 0);
             assert_eq!(summary.expected_cash_minor, 700);
         });
+    }
+
+    #[test]
+    fn admin_close_shift_closes_any_open_shift() {
+        with_state("admin_close_shift_closes_any_open_shift", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("cashier's shift should open");
+
+            sign_in_admin(state);
+
+            let closed = admin_close_shift(
+                state,
+                CloseShiftRequest {
+                    shift_id: opened.id,
+                    counted_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("admin should force-close another user's open shift");
+
+            assert_eq!(closed.id, opened.id);
+            assert_eq!(closed.user_id, cashier_id);
+            assert_eq!(closed.status, "closed");
+            assert_eq!(closed.counted_cash_minor, Some(5000));
+        });
+    }
+
+    #[test]
+    fn shift_admin_close_rejected_for_cashier() {
+        let path = test_database_path("shift_admin_close_rejected_for_cashier");
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let state = AppState::new(db);
+            let cashier_id = seed_cashier(&state);
+            let opened = open_shift_for_user(
+                &state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("cashier's shift should open");
+
+            sign_in_cashier(&state, cashier_id);
+
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app should build");
+
+            let error = shift_admin_close(
+                app.state::<AppState>(),
+                CloseShiftRequest {
+                    shift_id: opened.id,
+                    counted_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect_err("cashier should not force-close a shift");
+
+            assert_eq!(error.code, "forbidden");
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
     }
 }

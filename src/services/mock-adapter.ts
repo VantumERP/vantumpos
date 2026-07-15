@@ -467,6 +467,39 @@ export function createMockServices(): PosServices {
         session = { ...session, currentShift: null };
         return closed;
       },
+      async adminCloseShift(request) {
+        if (session?.currentShift && session.currentShift.id === request.shiftId) {
+          const closed = {
+            ...session.currentShift,
+            closedAt: now,
+            countedCashMinor: request.countedCashMinor,
+            differenceMinor:
+              request.countedCashMinor - session.currentShift.expectedCashMinor,
+            status: "closed" as const,
+            closingNote: request.note ?? null,
+          };
+          currentShift = null;
+          session = { ...session, currentShift: null };
+          return closed;
+        }
+
+        return {
+          id: request.shiftId,
+          userId: 2,
+          cashierName: "Marko Markovic",
+          openedAt: now,
+          closedAt: now,
+          openingCashMinor: 0,
+          expectedCashMinor: request.countedCashMinor,
+          countedCashMinor: request.countedCashMinor,
+          cashSalesMinor: 0,
+          cardSalesMinor: 0,
+          differenceMinor: 0,
+          status: "closed" as const,
+          openingNote: null,
+          closingNote: request.note ?? null,
+        };
+      },
     },
     catalog: {
       async listProducts(query) {

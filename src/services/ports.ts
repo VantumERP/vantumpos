@@ -102,6 +102,7 @@ export interface ShiftService {
   getCurrentShift(): Promise<ShiftSummary | null>;
   openShift(request: OpenShiftRequest): Promise<ShiftSummary>;
   closeShift(request: CloseShiftRequest): Promise<ShiftSummary>;
+  adminCloseShift(request: CloseShiftRequest): Promise<ShiftSummary>;
 }
 
 export interface CatalogService {
