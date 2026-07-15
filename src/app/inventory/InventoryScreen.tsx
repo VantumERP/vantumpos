@@ -76,7 +76,6 @@ import type {
 
 interface InventoryScreenProps {
   services: PosServices;
-  userId: number;
   initialLedgerProductId?: number | null;
   onLedgerOpened?: () => void;
 }
@@ -100,7 +99,6 @@ const STOCK_FILTERS: Array<{
 
 export function InventoryScreen({
   services,
-  userId,
   initialLedgerProductId = null,
   onLedgerOpened,
 }: InventoryScreenProps) {
@@ -291,7 +289,6 @@ export function InventoryScreen({
       <InventoryAdjustmentDialog
         adjustment={adjustment}
         services={services}
-        userId={userId}
         onOpenChange={(open) => {
           if (!open) {
             setAdjustment(null);
@@ -444,13 +441,11 @@ function StockBadge({ item }: { item: StockListItem }) {
 function InventoryAdjustmentDialog({
   adjustment,
   services,
-  userId,
   onOpenChange,
   onSaved,
 }: {
   adjustment: AdjustmentState | null;
   services: PosServices;
-  userId: number;
   onOpenChange: (open: boolean) => void;
   onSaved: (productId: number) => Promise<void>;
 }) {
@@ -485,7 +480,6 @@ function InventoryAdjustmentDialog({
         productId: adjustment.item.productId,
         quantityMilli,
         reason,
-        userId,
       };
 
       if (adjustment.mode === "receive") {

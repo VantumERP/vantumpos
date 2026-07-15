@@ -6,12 +6,12 @@ import { InventoryScreen } from "./InventoryScreen";
 import { createMockServices } from "@/services/mock-adapter";
 
 describe("InventoryScreen", () => {
-  it("threads the session user id into the inventory movement", async () => {
+  it("submits product, quantity, and reason for the inventory movement", async () => {
     const user = userEvent.setup();
     const services = createMockServices();
     const receiveStock = vi.spyOn(services.inventory, "receiveStock");
 
-    render(<InventoryScreen services={services} userId={7} />);
+    render(<InventoryScreen services={services} />);
 
     await user.click(
       await screen.findByRole("button", { name: "Prijem robe za Mleko 1 l" }),
@@ -25,17 +25,17 @@ describe("InventoryScreen", () => {
 
     await waitFor(() =>
       expect(receiveStock).toHaveBeenCalledWith(
-        expect.objectContaining({ productId: 1, quantityMilli: 2000, userId: 7 }),
+        expect.objectContaining({ productId: 1, quantityMilli: 2000 }),
       ),
     );
   });
 
-  it("renders the backend error and still threads the operator on a failed write-off", async () => {
+  it("renders the backend error and still submits the write-off request", async () => {
     const user = userEvent.setup();
     const services = createMockServices();
     const writeOffStock = vi.spyOn(services.inventory, "writeOffStock");
 
-    render(<InventoryScreen services={services} userId={7} />);
+    render(<InventoryScreen services={services} />);
 
     await user.click(
       await screen.findByRole("button", { name: "Otpis za Mleko 1 l" }),
@@ -49,7 +49,7 @@ describe("InventoryScreen", () => {
 
     expect(await screen.findByText("Nema dovoljno zaliha.")).toBeInTheDocument();
     expect(writeOffStock).toHaveBeenCalledWith(
-      expect.objectContaining({ quantityMilli: 5000, userId: 7 }),
+      expect.objectContaining({ quantityMilli: 5000 }),
     );
   });
 });

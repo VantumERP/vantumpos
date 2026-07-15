@@ -359,7 +359,6 @@ export interface InventoryAdjustmentRequest {
   productId: number;
   quantityMilli: number;
   reason?: string | null;
-  userId?: number | null;
   purchasePriceMinor?: number | null;
   referenceType?: string | null;
   referenceId?: number | null;

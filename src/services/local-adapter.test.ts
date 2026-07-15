@@ -340,7 +340,6 @@ describe("local service adapter", () => {
       productId: 1,
       quantityMilli: 2000,
       reason: "Prijem robe",
-      userId: 1,
     });
     await services.inventory.getProductLedger(1);
 
@@ -349,7 +348,6 @@ describe("local service adapter", () => {
         productId: 1,
         quantityMilli: 2000,
         reason: "Prijem robe",
-        userId: 1,
       },
     });
     expect(invoke).toHaveBeenNthCalledWith(2, "inventory_get_product_ledger", {
@@ -589,7 +587,6 @@ describe("mock service adapter", () => {
       productId: lowStockItem?.productId ?? 0,
       quantityMilli: 2000,
       reason: "Prijem robe",
-      userId: 1,
     });
 
     const ledger = await services.inventory.getProductLedger(

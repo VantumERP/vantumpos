@@ -432,7 +432,6 @@ function renderModule({
     return (
       <InventoryScreen
         services={services}
-        userId={session.user.id}
         initialLedgerProductId={inventoryLedgerProductId}
         onLedgerOpened={onInventoryLedgerOpened}
       />

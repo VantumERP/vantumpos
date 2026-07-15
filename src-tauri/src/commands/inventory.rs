@@ -61,7 +61,6 @@ pub struct InventoryAdjustmentRequest {
     pub product_id: i64,
     pub quantity_milli: i64,
     pub reason: Option<String>,
-    pub user_id: Option<i64>,
     pub purchase_price_minor: Option<i64>,
     pub reference_type: Option<String>,
     pub reference_id: Option<i64>,
@@ -123,12 +122,14 @@ pub fn inventory_receive(
     state: State<'_, AppState>,
     request: InventoryAdjustmentRequest,
 ) -> Result<InventoryAdjustmentResult, CommandError> {
+    let acting_user_id = super::auth::require_session(state.inner())?;
     let mut connection = state.db().open()?;
     let created_at = now_utc_string()?;
     apply_inventory_adjustment(
         &mut connection,
         InventoryMovementType::Receive,
         request,
+        acting_user_id,
         &created_at,
     )
     .map_err(Into::into)
@@ -139,12 +140,15 @@ pub fn inventory_correct(
     state: State<'_, AppState>,
     request: InventoryAdjustmentRequest,
 ) -> Result<InventoryAdjustmentResult, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let acting_user_id = super::auth::require_session(state.inner())?;
     let mut connection = state.db().open()?;
     let created_at = now_utc_string()?;
     apply_inventory_adjustment(
         &mut connection,
         InventoryMovementType::Correction,
         request,
+        acting_user_id,
         &created_at,
     )
     .map_err(Into::into)
@@ -155,12 +159,15 @@ pub fn inventory_write_off(
     state: State<'_, AppState>,
     request: InventoryAdjustmentRequest,
 ) -> Result<InventoryAdjustmentResult, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let acting_user_id = super::auth::require_session(state.inner())?;
     let mut connection = state.db().open()?;
     let created_at = now_utc_string()?;
     apply_inventory_adjustment(
         &mut connection,
         InventoryMovementType::WriteOff,
         request,
+        acting_user_id,
         &created_at,
     )
     .map_err(Into::into)
@@ -408,6 +415,7 @@ pub fn apply_inventory_adjustment(
     connection: &mut Connection,
     movement_type: InventoryMovementType,
     request: InventoryAdjustmentRequest,
+    acting_user_id: i64,
     created_at: &str,
 ) -> Result<InventoryAdjustmentResult, AppError> {
     validate_adjustment_request(movement_type, &request)?;
@@ -439,7 +447,7 @@ pub fn apply_inventory_adjustment(
             reason: reason.as_deref(),
             reference_type: reference_type.as_deref(),
             reference_id: request.reference_id,
-            user_id: request.user_id,
+            user_id: Some(acting_user_id),
             created_at,
             allow_overselling: false,
         },
@@ -609,14 +617,16 @@ fn now_utc_string() -> Result<String, AppError> {
 #[cfg(test)]
 mod tests {
     use rusqlite::{params, Connection};
+    use tauri::Manager;
 
     use crate::app_error::CommandError;
     use crate::commands::inventory::{
-        apply_inventory_adjustment, get_product_ledger_for_connection, list_stock_for_connection,
-        write_stock_movement, InventoryAdjustmentRequest, InventoryMovementType, StockListQuery,
-        StockMovementWrite,
+        apply_inventory_adjustment, get_product_ledger_for_connection, inventory_correct,
+        inventory_receive, inventory_write_off, list_stock_for_connection, write_stock_movement,
+        InventoryAdjustmentRequest, InventoryMovementType, StockListQuery, StockMovementWrite,
     };
     use crate::db::{test_database_path, Db};
+    use crate::state::AppState;
 
     fn with_connection(test_name: &str, test: impl FnOnce(&mut Connection)) {
         let path = test_database_path(test_name);
@@ -634,6 +644,21 @@ mod tests {
                 path.display()
             )
         });
+    }
+
+    fn sign_in_cashier(state: &AppState) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, created_at, updated_at)
+                 VALUES ('marko', 'Marko Markovic', 'cashier', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("cashier should insert");
+        let cashier_id = connection.last_insert_rowid();
+        state
+            .set_session_user_id(cashier_id)
+            .expect("cashier session should set");
     }
 
     fn seed_required_data(connection: &mut Connection) {
@@ -698,12 +723,13 @@ mod tests {
             .expect("product should insert");
     }
 
+    const SEEDED_ADMIN_ID: i64 = 1;
+
     fn adjustment(quantity_milli: i64, reason: &str) -> InventoryAdjustmentRequest {
         InventoryAdjustmentRequest {
             product_id: 1,
             quantity_milli,
             reason: Some(reason.to_string()),
-            user_id: Some(1),
             purchase_price_minor: None,
             reference_type: None,
             reference_id: None,
@@ -729,6 +755,7 @@ mod tests {
                     connection,
                     InventoryMovementType::Receive,
                     adjustment(3000, "Prijem robe"),
+                    SEEDED_ADMIN_ID,
                     "2026-06-18T12:00:00Z",
                 )
                 .expect("receive should succeed");
@@ -855,6 +882,7 @@ mod tests {
                     connection,
                     InventoryMovementType::Receive,
                     adjustment(1000, "Pocetno stanje"),
+                    SEEDED_ADMIN_ID,
                     "2026-06-18T12:00:00Z",
                 )
                 .expect("receive should succeed");
@@ -863,6 +891,7 @@ mod tests {
                     connection,
                     InventoryMovementType::WriteOff,
                     adjustment(2000, "Lom"),
+                    SEEDED_ADMIN_ID,
                     "2026-06-18T13:00:00Z",
                 )
                 .expect_err("write-off should fail");
@@ -892,6 +921,7 @@ mod tests {
                     connection,
                     InventoryMovementType::Receive,
                     adjustment(3000, "Prijem robe"),
+                    SEEDED_ADMIN_ID,
                     "2026-06-18T12:00:00Z",
                 )
                 .expect("receive should succeed");
@@ -899,6 +929,7 @@ mod tests {
                     connection,
                     InventoryMovementType::Correction,
                     adjustment(-500, "Korekcija popisa"),
+                    SEEDED_ADMIN_ID,
                     "2026-06-18T13:00:00Z",
                 )
                 .expect("correction should succeed");
@@ -932,6 +963,7 @@ mod tests {
                 connection,
                 InventoryMovementType::Receive,
                 adjustment(3000, "Prijem robe"),
+                SEEDED_ADMIN_ID,
                 "2026-06-18T12:00:00Z",
             )
             .expect("receive should succeed");
@@ -949,6 +981,56 @@ mod tests {
             assert_eq!(stock.items.len(), 1);
             assert_eq!(stock.items[0].product_name, "Mleko 1 l");
             assert!(stock.items[0].low_stock);
+        });
+    }
+
+    #[test]
+    fn correct_and_write_off_reject_cashier_but_receive_stays_open() {
+        let path =
+            test_database_path("correct_and_write_off_reject_cashier_but_receive_stays_open");
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            {
+                let mut connection = db.open().expect("database should open");
+                seed_required_data(&mut connection);
+            }
+
+            let state = AppState::new(db);
+            sign_in_cashier(&state);
+
+            // inventory_correct/inventory_write_off take a Tauri `State`, so a
+            // headless mock app is needed to obtain a real managed state,
+            // mirroring the admin-gate test pattern used in reports.rs.
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app should build");
+
+            let correction_error = inventory_correct(
+                app.state::<AppState>(),
+                adjustment(-500, "Korekcija popisa"),
+            )
+            .expect_err("cashier should not correct stock");
+            assert_eq!(correction_error.code, "forbidden");
+
+            let write_off_error =
+                inventory_write_off(app.state::<AppState>(), adjustment(500, "Lom"))
+                    .expect_err("cashier should not write off stock");
+            assert_eq!(write_off_error.code, "forbidden");
+
+            // Receiving stays open to cashiers.
+            let receive_result =
+                inventory_receive(app.state::<AppState>(), adjustment(1000, "Prijem robe"))
+                    .expect("cashier should still be able to receive stock");
+            assert_eq!(receive_result.new_quantity_milli, 1000);
+        }
+
+        std::fs::remove_file(&path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                path.display()
+            )
         });
     }
 }
