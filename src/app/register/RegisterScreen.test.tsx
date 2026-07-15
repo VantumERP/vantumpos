@@ -212,6 +212,20 @@ describe("RegisterScreen", () => {
     );
   });
 
+  it("prefills only the cash still due after a card amount (no phantom change)", async () => {
+    const user = userEvent.setup();
+
+    await addProductToCart(user); // total 159.99, cash prefills to "159.99"
+    const cashField = screen.getByLabelText("Gotovina primljeno");
+    await waitFor(() => expect(cashField).toHaveValue("159.99"));
+
+    // Paying the whole amount by card should drop the prefilled cash to 0,
+    // so the change ("Kusur") stays 0 instead of the full total.
+    await user.type(screen.getByLabelText("Kartica"), "159.99");
+
+    await waitFor(() => expect(cashField).toHaveValue("0.00"));
+  });
+
   it("shows cash change from the current preview total", async () => {
     const user = userEvent.setup();
 

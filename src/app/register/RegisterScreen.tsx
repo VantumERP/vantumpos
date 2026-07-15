@@ -150,9 +150,12 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
 
   useEffect(() => {
     if (!cashTouched && previewTotalMinor !== undefined) {
-      setCashInput((previewTotalMinor / 100).toFixed(2));
+      // Prefill only the cash still due after any card amount, so a card-only
+      // sale prefills 0 and never shows phantom change.
+      const cashDueMinor = Math.max(0, previewTotalMinor - cardMinor);
+      setCashInput((cashDueMinor / 100).toFixed(2));
     }
-  }, [previewTotalMinor, cashTouched]);
+  }, [previewTotalMinor, cardMinor, cashTouched]);
 
   async function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -293,6 +296,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       });
       setCompletedSale(sale);
       setCart([]);
+      setPreviewState({ status: "idle" });
       setCashInput("");
       setCashTouched(false);
       setCardInput("");
