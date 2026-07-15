@@ -258,4 +258,61 @@ describe("RegisterScreen", () => {
       screen.queryByText("Pregled racuna nije moguc"),
     ).not.toBeInTheDocument();
   });
+
+  it("shows a picker for multiple matches and adds the chosen product", async () => {
+    const user = userEvent.setup();
+    const services = createRegisterServices();
+    const productA = { ...product, id: 10, name: "Kosulja plava", sku: "KOS-P", barcode: "111" };
+    const productB = { ...product, id: 11, name: "Kosulja bela", sku: "KOS-B", barcode: "222" };
+    services.catalog.searchProducts = async () => ({
+      items: [productA, productB],
+      categories: [],
+      taxRates: [],
+      total: 2,
+    });
+    render(<RegisterScreen services={services} />);
+
+    const box = screen.getByRole("searchbox");
+    await user.type(box, "kosulja{enter}");
+
+    await user.click(await screen.findByRole("button", { name: /Kosulja bela/ }));
+    expect(await screen.findByText("Kosulja bela")).toBeInTheDocument();
+  });
+
+  it("adds the exact barcode match instead of the first result", async () => {
+    const user = userEvent.setup();
+    const services = createRegisterServices();
+    const productA = { ...product, id: 10, name: "Kosulja plava", sku: "KOS-P", barcode: "1112223334445" };
+    const productB = { ...product, id: 11, name: "Kosulja bela", sku: "KOS-B", barcode: "2223334445556" };
+    services.catalog.searchProducts = async () => ({
+      items: [productA, productB],
+      categories: [],
+      taxRates: [],
+      total: 2,
+    });
+    render(<RegisterScreen services={services} />);
+
+    const box = screen.getByRole("searchbox");
+    await user.type(box, "2223334445556{enter}");
+
+    expect(await screen.findByText("Kosulja bela")).toBeInTheDocument();
+    expect(screen.queryByText("Kosulja plava")).toBeNull();
+  });
+
+  it("reports when nothing matches", async () => {
+    const user = userEvent.setup();
+    const services = createRegisterServices();
+    services.catalog.searchProducts = async () => ({
+      items: [],
+      categories: [],
+      taxRates: [],
+      total: 0,
+    });
+    render(<RegisterScreen services={services} />);
+
+    const box = screen.getByRole("searchbox");
+    await user.type(box, "nepostojece{enter}");
+
+    expect(await screen.findByText("Artikal nije pronadjen.")).toBeInTheDocument();
+  });
 });

@@ -78,6 +78,7 @@ type PreviewState =
 export function RegisterScreen({ services }: RegisterScreenProps) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState("");
+  const [matches, setMatches] = useState<ProductSummary[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [previewState, setPreviewState] = useState<PreviewState>({
     status: "idle",
@@ -158,15 +159,41 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       active: true,
       limit: 20,
     });
-    const product = result.items[0];
+    const items = result.items;
 
-    if (!product) {
+    if (items.length === 0) {
+      setMatches([]);
       setMessage("Artikal nije pronadjen.");
       return;
     }
 
-    addProduct(product);
+    const exact = items.find(
+      (item) =>
+        (item.barcode && item.barcode.toLowerCase() === query.toLowerCase()) ||
+        item.sku.toLowerCase() === query.toLowerCase(),
+    );
+
+    if (exact) {
+      addProduct(exact);
+      setSearch("");
+      setMatches([]);
+      return;
+    }
+
+    if (items.length === 1) {
+      addProduct(items[0]);
+      setSearch("");
+      setMatches([]);
+      return;
+    }
+
+    setMatches(items);
+  }
+
+  function chooseMatch(item: ProductSummary) {
+    addProduct(item);
     setSearch("");
+    setMatches([]);
   }
 
   function addProduct(product: ProductSummary) {
@@ -287,6 +314,29 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
           </InputGroupAddon>
         </InputGroup>
       </form>
+
+      {matches.length > 0 && (
+        <div
+          role="listbox"
+          aria-label="Rezultati pretrage"
+          className="divide-y rounded-md border bg-card"
+        >
+          {matches.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => chooseMatch(item)}
+              className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-accent"
+            >
+              <span className="min-w-0 truncate font-medium">{item.name}</span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatRsd(item.salePriceMinor)} ·{" "}
+                {formatQuantity(item.currentStockMilli)} {item.unitOfMeasure}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {message && (
         <Alert variant="destructive">
