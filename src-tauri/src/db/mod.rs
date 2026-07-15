@@ -3,6 +3,7 @@ mod migrations;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{params, Connection};
 
 use crate::app_error::AppError;
@@ -37,6 +38,12 @@ impl Db {
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 "#,
+        )?;
+        connection.create_scalar_function(
+            "fold",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(crate::text::fold_text(&ctx.get::<String>(0)?)),
         )?;
         Ok(connection)
     }

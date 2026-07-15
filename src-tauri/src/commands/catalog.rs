@@ -595,7 +595,7 @@ pub fn list_products_for_connection(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| format!("%{}%", value.to_lowercase()));
+        .map(|value| format!("%{}%", crate::text::fold_text(value)));
     let active = query.active.map(bool_to_i64);
     let low_stock = bool_to_i64(query.low_stock.unwrap_or(false));
     let missing_barcode = bool_to_i64(query.missing_barcode.unwrap_or(false));
@@ -630,9 +630,9 @@ pub fn list_products_for_connection(
          LEFT JOIN inventory_balances ib ON ib.product_id = p.id
          WHERE
              (?1 IS NULL
-              OR LOWER(p.name) LIKE ?1
-              OR LOWER(p.sku) LIKE ?1
-              OR LOWER(COALESCE(p.barcode, '')) LIKE ?1)
+              OR fold(p.name) LIKE ?1
+              OR fold(p.sku) LIKE ?1
+              OR fold(COALESCE(p.barcode, '')) LIKE ?1)
              AND (?2 IS NULL OR p.active = ?2)
              AND (?3 IS NULL OR p.category_id = ?3)
              AND (?4 IS NULL OR p.tax_rate_id = ?4)
@@ -1313,6 +1313,40 @@ mod tests {
             let command_error = CommandError::from(error);
 
             assert_eq!(command_error.code, "duplicate_barcode");
+        });
+    }
+
+    #[test]
+    fn search_products_folds_serbian_diacritics_and_case() {
+        with_catalog_database("search_folds_serbian", |db| {
+            db.open()
+                .expect("database should open")
+                .execute(
+                    "INSERT INTO products (
+                        name, sku, barcode, category_id, unit_of_measure, sale_price_minor,
+                        purchase_price_minor, tax_rate_id, minimum_stock_milli, active,
+                        created_at, updated_at)
+                     VALUES ('KOŠULJA', 'KOS-1', '8600000000099', 1, 'kom', 250000, 180000, 1, 0, 1,
+                        '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z')",
+                    [],
+                )
+                .expect("kosulja should insert");
+
+            for term in ["kosulja", "KOSULJA", "košulja", "KOŠULJA"] {
+                let result = search_products(
+                    db,
+                    ProductSearchQuery {
+                        search: Some(term.to_string()),
+                        active: Some(true),
+                        limit: Some(20),
+                    },
+                )
+                .expect("search should succeed");
+                assert!(
+                    result.items.iter().any(|p| p.name == "KOŠULJA"),
+                    "term {term} should find KOŠULJA"
+                );
+            }
         });
     }
 

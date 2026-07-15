@@ -5,6 +5,7 @@ mod db;
 mod importer;
 mod security;
 mod state;
+mod text;
 
 use db::Db;
 use state::{resolve_database_path, AppState};
