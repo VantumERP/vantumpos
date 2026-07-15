@@ -129,6 +129,14 @@ pub fn settings_save_tax_rate(
 }
 
 #[tauri::command]
+pub fn settings_seed_tax_rates(
+    state: State<'_, AppState>,
+    in_vat_system: bool,
+) -> Result<Vec<TaxRate>, CommandError> {
+    seed_tax_rates(state.inner(), in_vat_system).map_err(Into::into)
+}
+
+#[tauri::command]
 pub fn settings_get_receipt(state: State<'_, AppState>) -> Result<ReceiptSettings, CommandError> {
     load_receipt_settings(state.inner()).map_err(Into::into)
 }
@@ -269,6 +277,38 @@ pub fn save_tax_rate(state: &AppState, request: SaveTaxRateRequest) -> Result<Ta
 
     tx.commit()?;
     Ok(tax_rate)
+}
+
+pub fn seed_tax_rates(state: &AppState, in_vat_system: bool) -> Result<Vec<TaxRate>, AppError> {
+    super::auth::require_admin(state)?;
+    {
+        let mut conn = state.db().open()?;
+        let existing: i64 =
+            conn.query_row("SELECT COUNT(*) FROM tax_rates", [], |row| row.get(0))?;
+        if existing == 0 {
+            let tx = conn.transaction()?;
+            if in_vat_system {
+                tx.execute(
+                    "INSERT INTO tax_rates (name, rate_basis_points, active, created_at, updated_at)
+                     VALUES ('PDV 20%', 2000, 1, datetime('now'), datetime('now'))",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT INTO tax_rates (name, rate_basis_points, active, created_at, updated_at)
+                     VALUES ('PDV 10%', 1000, 1, datetime('now'), datetime('now'))",
+                    [],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO tax_rates (name, rate_basis_points, active, created_at, updated_at)
+                     VALUES ('Bez PDV-a', 0, 1, datetime('now'), datetime('now'))",
+                    [],
+                )?;
+            }
+            tx.commit()?;
+        }
+    }
+    list_tax_rates(state)
 }
 
 pub fn load_receipt_settings(state: &AppState) -> Result<ReceiptSettings, AppError> {
@@ -700,5 +740,45 @@ mod tests {
                 assert_eq!(error.code(), "unauthorized");
             },
         );
+    }
+
+    #[test]
+    fn seed_tax_rates_creates_vat_rates_when_in_system() {
+        with_state("seed_tax_rates_vat", |state| {
+            sign_in_admin(state);
+            let rates = super::seed_tax_rates(state, true).expect("seed should succeed");
+            assert_eq!(rates.len(), 2);
+            let bps: Vec<i64> = rates.iter().map(|r| r.rate_basis_points).collect();
+            assert!(bps.contains(&2000) && bps.contains(&1000), "got {bps:?}");
+        });
+    }
+
+    #[test]
+    fn seed_tax_rates_creates_single_zero_rate_when_not_in_system() {
+        with_state("seed_tax_rates_novat", |state| {
+            sign_in_admin(state);
+            let rates = super::seed_tax_rates(state, false).expect("seed should succeed");
+            assert_eq!(rates.len(), 1);
+            assert_eq!(rates[0].rate_basis_points, 0);
+        });
+    }
+
+    #[test]
+    fn seed_tax_rates_is_idempotent() {
+        with_state("seed_tax_rates_idempotent", |state| {
+            sign_in_admin(state);
+            super::seed_tax_rates(state, true).expect("first seed");
+            let rates = super::seed_tax_rates(state, false).expect("second seed is a no-op");
+            assert_eq!(rates.len(), 2, "existing rates must not be overwritten");
+        });
+    }
+
+    #[test]
+    fn seed_tax_rates_rejects_cashier() {
+        with_state("seed_tax_rates_forbidden", |state| {
+            sign_in_cashier(state);
+            let error = super::seed_tax_rates(state, true).expect_err("cashier is forbidden");
+            assert_eq!(error.code(), "forbidden");
+        });
     }
 }

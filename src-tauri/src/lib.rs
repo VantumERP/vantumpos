@@ -59,6 +59,7 @@ pub fn run() {
             commands::settings::settings_update_company,
             commands::settings::settings_list_tax_rates,
             commands::settings::settings_save_tax_rate,
+            commands::settings::settings_seed_tax_rates,
             commands::settings::settings_get_receipt,
             commands::settings::settings_update_receipt,
             commands::catalog::catalog_list_products,
