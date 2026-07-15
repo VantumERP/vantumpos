@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "vantumpos",
+  "productName": "VantumPOS",
   "version": "0.1.0",
-  "identifier": "com.adnan.vantumpos",
+  "identifier": "com.actaer.vantumpos",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "vantumpos",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "VantumPOS",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 720
       }
     ],
     "security": {
@@ -30,6 +33,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      }
+    }
   }
 }

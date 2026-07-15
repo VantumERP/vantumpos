@@ -37,6 +37,7 @@ impl Db {
             r#"
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+PRAGMA journal_mode = WAL;
 "#,
         )?;
         connection.create_scalar_function(
