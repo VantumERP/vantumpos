@@ -95,20 +95,29 @@ pub fn admin_close_shift(
     let now = utc_now().map_err(CommandError::from)?;
     let note = normalized_note(request.note);
     let conn = state.db().open().map_err(CommandError::from)?;
-    conn.execute(
-        "UPDATE shifts SET closed_at = ?1, expected_cash_minor = ?2, counted_cash_minor = ?3,
+    let changed = conn
+        .execute(
+            "UPDATE shifts SET closed_at = ?1, expected_cash_minor = ?2, counted_cash_minor = ?3,
              status = 'closed', closing_note = ?4, updated_at = ?1
          WHERE id = ?5 AND status = 'open'",
-        params![
-            now,
-            summary.expected_cash_minor,
-            request.counted_cash_minor,
-            note,
-            request.shift_id
-        ],
-    )
-    .map_err(AppError::from)
-    .map_err(CommandError::from)?;
+            params![
+                now,
+                summary.expected_cash_minor,
+                request.counted_cash_minor,
+                note,
+                request.shift_id
+            ],
+        )
+        .map_err(AppError::from)
+        .map_err(CommandError::from)?;
+
+    if changed == 0 {
+        return Err(CommandError::new(
+            "not_found",
+            "Otvorena smena nije pronađena.",
+        ));
+    }
+
     shift_by_id(state, request.shift_id)?
         .ok_or_else(|| CommandError::new("not_found", "Smena nije pronađena."))
 }
@@ -589,6 +598,47 @@ mod tests {
             assert_eq!(closed.user_id, cashier_id);
             assert_eq!(closed.status, "closed");
             assert_eq!(closed.counted_cash_minor, Some(5000));
+        });
+    }
+
+    #[test]
+    fn admin_close_shift_rejects_already_closed_shift() {
+        with_state("admin_close_shift_rejects_already_closed", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("cashier's shift should open");
+
+            close_shift_for_user(
+                state,
+                cashier_id,
+                CloseShiftRequest {
+                    shift_id: opened.id,
+                    counted_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("cashier's shift should close");
+
+            sign_in_admin(state);
+
+            let error = admin_close_shift(
+                state,
+                CloseShiftRequest {
+                    shift_id: opened.id,
+                    counted_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect_err("admin should not force-close an already-closed shift");
+
+            assert_eq!(error.code, "not_found");
         });
     }
 
