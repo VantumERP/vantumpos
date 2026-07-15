@@ -440,7 +440,9 @@ pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetai
 
         let original_payments: Vec<(String, i64)> = {
             let mut statement = tx
-                .prepare("SELECT payment_method, amount_minor FROM sale_payments WHERE sale_id = ?1")
+                .prepare(
+                    "SELECT payment_method, amount_minor FROM sale_payments WHERE sale_id = ?1",
+                )
                 .map_err(AppError::from)?;
             let mapped = statement
                 .query_map(params![request.receipt_id], |row| {
@@ -482,7 +484,11 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
     validate_user_id(request.user_id)?;
     let reason = require_reason(&request.reason, "reason")?;
     let requested = normalize_return_items(&request.items)?;
-    let refund_tender = request.refund_tender.as_deref().unwrap_or("cash").to_string();
+    let refund_tender = request
+        .refund_tender
+        .as_deref()
+        .unwrap_or("cash")
+        .to_string();
     validate_payment_method(&refund_tender)?;
     let now = utc_now()?;
     let mut connection = db.open()?;

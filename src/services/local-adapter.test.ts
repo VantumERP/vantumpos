@@ -375,6 +375,29 @@ describe("local service adapter", () => {
     });
   });
 
+  it("forwards refundTender through receipts_return_items", async () => {
+    const invoke = vi.fn().mockResolvedValue(null);
+    const services = createLocalServices(invoke);
+
+    await services.receipts.returnItems({
+      receiptId: 7,
+      userId: 1,
+      reason: "Zamena velicine",
+      items: [{ saleItemId: 3, quantityMilli: 1000 }],
+      refundTender: "card",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("receipts_return_items", {
+      request: {
+        receiptId: 7,
+        userId: 1,
+        reason: "Zamena velicine",
+        items: [{ saleItemId: 3, quantityMilli: 1000 }],
+        refundTender: "card",
+      },
+    });
+  });
+
   it("maps import service methods to stable Tauri command names", async () => {
     const invoke = vi
       .fn()

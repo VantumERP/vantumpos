@@ -64,6 +64,33 @@ describe("ReceiptsScreen", () => {
     );
   });
 
+  it("defaults the refund tender to cash and forwards it", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const returnItems = vi.spyOn(services.receipts, "returnItems");
+
+    render(<ReceiptsScreen receipts={services.receipts} userId={9} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Povrat artikala" }));
+
+    expect(await screen.findByLabelText("Nacin povrata")).toHaveValue("cash");
+
+    const quantity = await screen.findByLabelText("Kolicina za Kafa 200 g");
+    await user.clear(quantity);
+    await user.type(quantity, "1");
+    await user.type(screen.getByLabelText("Razlog povrata"), "Ostecen artikal");
+    await user.click(screen.getByRole("button", { name: "Sacuvaj povrat" }));
+
+    await waitFor(() =>
+      expect(returnItems).toHaveBeenCalledWith(
+        expect.objectContaining({ refundTender: "cash" }),
+      ),
+    );
+  });
+
   it("blocks the return and skips the service when no quantity is entered", async () => {
     const user = userEvent.setup();
     const services = createMockServices();

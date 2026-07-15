@@ -488,6 +488,7 @@ export interface ReturnItemsRequest {
   userId: number;
   reason: string;
   items: ReturnItemRequest[];
+  refundTender?: "cash" | "card";
 }
 
 export interface ReportDateQuery {

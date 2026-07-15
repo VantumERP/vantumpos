@@ -137,6 +137,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
   const [voidError, setVoidError] = useState<string | undefined>();
   const [returnOpen, setReturnOpen] = useState(false);
   const [returnReason, setReturnReason] = useState("");
+  const [refundTender, setRefundTender] = useState<"cash" | "card">("cash");
   const [returnQuantities, setReturnQuantities] = useState<Record<number, string>>({});
   const [returnError, setReturnError] = useState<string | undefined>();
   const [listStatus, setListStatus] = useState<"loading" | "ready" | "error">(
@@ -249,6 +250,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
     );
     setReturnQuantities(quantities);
     setReturnReason("");
+    setRefundTender("cash");
     setReturnError(undefined);
     setReturnOpen(true);
   }
@@ -281,6 +283,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
         userId,
         reason: returnReason,
         items,
+        refundTender,
       });
       setSelected(detail);
       setRows((current) =>
@@ -572,6 +575,20 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
                   />
                 </Field>
               ))}
+              <Field>
+                <FieldLabel htmlFor="return-tender">Nacin povrata</FieldLabel>
+                <NativeSelect
+                  id="return-tender"
+                  aria-label="Nacin povrata"
+                  value={refundTender}
+                  onChange={(event) =>
+                    setRefundTender(event.target.value as "cash" | "card")
+                  }
+                >
+                  <NativeSelectOption value="cash">Gotovina</NativeSelectOption>
+                  <NativeSelectOption value="card">Kartica</NativeSelectOption>
+                </NativeSelect>
+              </Field>
               <Field data-invalid={Boolean(returnError)}>
                 <FieldLabel htmlFor="return-reason">Razlog povrata</FieldLabel>
                 <Textarea
