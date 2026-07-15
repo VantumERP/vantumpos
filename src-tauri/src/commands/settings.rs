@@ -9,6 +9,7 @@ use crate::state::AppState;
 pub(crate) const COMPANY_SETTINGS_KEY: &str = "company";
 pub(crate) const RECEIPT_SETTINGS_KEY: &str = "receipt_numbering";
 pub(crate) const BACKUP_SETTINGS_KEY: &str = "backup";
+pub(crate) const SALES_SETTINGS_KEY: &str = "sales";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +103,19 @@ pub struct ReceiptSettingsRequest {
     pub next_sequence_number: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SalesSettings {
+    #[serde(default)]
+    pub allow_overselling: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SalesSettingsRequest {
+    pub allow_overselling: bool,
+}
+
 #[tauri::command]
 pub fn settings_get_company(state: State<'_, AppState>) -> Result<CompanySettings, CommandError> {
     load_company_settings(state.inner()).map_err(Into::into)
@@ -147,6 +161,19 @@ pub fn settings_update_receipt(
     request: ReceiptSettingsRequest,
 ) -> Result<ReceiptSettings, CommandError> {
     save_receipt_settings(state.inner(), request).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn settings_get_sales(state: State<'_, AppState>) -> Result<SalesSettings, CommandError> {
+    load_sales_settings(state.inner()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn settings_update_sales(
+    state: State<'_, AppState>,
+    request: SalesSettingsRequest,
+) -> Result<SalesSettings, CommandError> {
+    save_sales_settings(state.inner(), request).map_err(Into::into)
 }
 
 pub(crate) fn load_json_setting<T>(
@@ -329,6 +356,22 @@ pub fn save_receipt_settings(
     };
 
     save_json_setting(state, RECEIPT_SETTINGS_KEY, &settings)?;
+    Ok(settings)
+}
+
+pub fn load_sales_settings(state: &AppState) -> Result<SalesSettings, AppError> {
+    load_json_setting(state, SALES_SETTINGS_KEY, SalesSettings::default())
+}
+
+pub fn save_sales_settings(
+    state: &AppState,
+    request: SalesSettingsRequest,
+) -> Result<SalesSettings, AppError> {
+    super::auth::require_admin(state)?;
+    let settings = SalesSettings {
+        allow_overselling: request.allow_overselling,
+    };
+    save_json_setting(state, SALES_SETTINGS_KEY, &settings)?;
     Ok(settings)
 }
 

@@ -313,6 +313,10 @@ pub(crate) struct StockMovementWrite<'a> {
     pub reference_id: Option<i64>,
     pub user_id: Option<i64>,
     pub created_at: &'a str,
+    /// When true, the caller has already authorized selling below stock
+    /// (shop-level setting or a per-sale override), so the negative-stock guard
+    /// is bypassed even for a product without `allow_negative_stock`.
+    pub allow_overselling: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -348,7 +352,7 @@ WHERE p.id = ?1
         .checked_add(write.quantity_milli)
         .ok_or_else(quantity_overflow_error)?;
 
-    if new_quantity_milli < 0 && !allow_negative_stock {
+    if new_quantity_milli < 0 && !allow_negative_stock && !write.allow_overselling {
         return Err(AppError::business(
             "insufficient_stock",
             "Nema dovoljno zaliha.",
@@ -437,6 +441,7 @@ pub fn apply_inventory_adjustment(
             reference_id: request.reference_id,
             user_id: request.user_id,
             created_at,
+            allow_overselling: false,
         },
     )?;
 
@@ -777,6 +782,7 @@ mod tests {
                     reference_id: Some(7),
                     user_id: Some(1),
                     created_at: "2026-06-18T12:00:00Z",
+                    allow_overselling: false,
                 },
             )
             .expect("write should succeed");
@@ -821,6 +827,7 @@ mod tests {
                         reference_id: Some(42),
                         user_id: Some(1),
                         created_at: "2026-06-18T12:00:00Z",
+                        allow_overselling: false,
                     },
                 )
                 .expect_err("oversell should fail");

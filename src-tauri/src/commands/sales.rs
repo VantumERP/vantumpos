@@ -6,7 +6,9 @@ use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
 use crate::commands::inventory::{write_stock_movement, StockMovementWrite};
-use crate::commands::settings::{ReceiptSettings, RECEIPT_SETTINGS_KEY};
+use crate::commands::settings::{
+    ReceiptSettings, SalesSettings, RECEIPT_SETTINGS_KEY, SALES_SETTINGS_KEY,
+};
 use crate::db::Db;
 use crate::state::AppState;
 
@@ -63,6 +65,8 @@ pub struct CompleteSaleRequest {
     pub items: Vec<SaleDraftItem>,
     pub receipt_discount: Option<DiscountRequest>,
     pub payments: Vec<PaymentDraft>,
+    #[serde(default)]
+    pub allow_stock_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -188,6 +192,7 @@ pub fn complete_sale_transaction(
         items,
         receipt_discount,
         payments,
+        allow_stock_override,
     } = request;
     let draft = SaleDraftRequest {
         items,
@@ -195,7 +200,8 @@ pub fn complete_sale_transaction(
     };
     let shift = load_open_shift(&tx)?;
     let computation = compute_sale(&tx, &draft)?;
-    validate_stock(&computation.lines)?;
+    let overselling = load_allow_overselling(&tx)? || allow_stock_override.unwrap_or(false);
+    validate_stock(&computation.lines, overselling)?;
     let payment = validate_payments(&payments, computation.preview.total_minor)?;
     let created_at = current_timestamp(&tx)?;
     let local_receipt_number = take_next_receipt_number(&tx, &created_at)?;
@@ -270,6 +276,7 @@ pub fn complete_sale_transaction(
                 reference_id: Some(sale_id),
                 user_id: Some(shift.cashier_id),
                 created_at: &created_at,
+                allow_overselling: overselling,
             },
         )?;
     }
@@ -470,7 +477,23 @@ fn load_open_shift(connection: &Connection) -> Result<OpenShift, AppError> {
         .ok_or_else(|| AppError::business("shift_required", "Smena nije otvorena."))
 }
 
-fn validate_stock(lines: &[ComputedLine]) -> Result<(), AppError> {
+fn load_allow_overselling(connection: &Connection) -> Result<bool, AppError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![SALES_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(value) => Ok(serde_json::from_str::<SalesSettings>(&value)
+            .map(|settings| settings.allow_overselling)
+            .unwrap_or(false)),
+        None => Ok(false),
+    }
+}
+
+fn validate_stock(lines: &[ComputedLine], allow_overselling: bool) -> Result<(), AppError> {
     let mut required_by_product: HashMap<i64, (i64, i64, bool)> = HashMap::new();
 
     for line in lines {
@@ -483,7 +506,7 @@ fn validate_stock(lines: &[ComputedLine]) -> Result<(), AppError> {
     }
 
     for (product_id, (required, current, allow_negative)) in required_by_product {
-        if !allow_negative && current < required {
+        if !allow_negative && !allow_overselling && current < required {
             return Err(AppError::business_with_details(
                 "insufficient_stock",
                 "Nema dovoljno zaliha.",
@@ -877,6 +900,7 @@ mod tests {
                 method: PaymentMethod::Cash,
                 amount_minor: 30000,
             }],
+            allow_stock_override: None,
         };
 
         let completed =
@@ -925,6 +949,7 @@ mod tests {
                 method: PaymentMethod::Cash,
                 amount_minor: 12000,
             }],
+            allow_stock_override: None,
         };
 
         let error = complete_sale_transaction(&seeded.db, request)
@@ -945,6 +970,7 @@ mod tests {
                 method: PaymentMethod::Cash,
                 amount_minor: 24000,
             }],
+            allow_stock_override: None,
         };
 
         let error = complete_sale_transaction(&seeded.db, request)
@@ -971,6 +997,89 @@ mod tests {
     }
 
     #[test]
+    fn complete_sale_allows_oversell_with_per_sale_override() {
+        let seeded = seed_sale_data(1000, true);
+        let request = CompleteSaleRequest {
+            items: sale_draft(seeded.product_id, 2000).items,
+            receipt_discount: None,
+            payments: vec![PaymentDraft {
+                method: PaymentMethod::Cash,
+                amount_minor: 24000,
+            }],
+            allow_stock_override: Some(true),
+        };
+
+        complete_sale_transaction(&seeded.db, request).expect("oversell override should succeed");
+
+        let connection = seeded.db.open().expect("database should open");
+        let balance: i64 = connection
+            .query_row(
+                "SELECT quantity_milli FROM inventory_balances WHERE product_id = ?1",
+                params![seeded.product_id],
+                |row| row.get(0),
+            )
+            .expect("balance should query");
+        let sale_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0))
+            .expect("sale count should query");
+
+        assert_eq!(balance, -1000);
+        assert_eq!(sale_count, 1);
+
+        let _ = std::fs::remove_file(seeded.db_path);
+    }
+
+    #[test]
+    fn complete_sale_allows_oversell_when_shop_setting_enabled() {
+        let seeded = seed_sale_data(1000, true);
+        seeded
+            .db
+            .open()
+            .expect("database should open")
+            .execute(
+                "INSERT INTO settings (key, value_json, updated_at)
+                 VALUES ('sales', '{\"allowOverselling\":true}', '2026-06-18T10:00:00Z')",
+                [],
+            )
+            .expect("sales setting should insert");
+
+        let request = CompleteSaleRequest {
+            items: sale_draft(seeded.product_id, 2000).items,
+            receipt_discount: None,
+            payments: vec![PaymentDraft {
+                method: PaymentMethod::Cash,
+                amount_minor: 24000,
+            }],
+            allow_stock_override: None,
+        };
+
+        complete_sale_transaction(&seeded.db, request)
+            .expect("shop-enabled oversell should succeed");
+
+        let _ = std::fs::remove_file(seeded.db_path);
+    }
+
+    #[test]
+    fn complete_sale_still_blocks_oversell_by_default() {
+        let seeded = seed_sale_data(1000, true);
+        let request = CompleteSaleRequest {
+            items: sale_draft(seeded.product_id, 2000).items,
+            receipt_discount: None,
+            payments: vec![PaymentDraft {
+                method: PaymentMethod::Cash,
+                amount_minor: 24000,
+            }],
+            allow_stock_override: None,
+        };
+
+        let error = complete_sale_transaction(&seeded.db, request)
+            .expect_err("default should still block oversell");
+        assert_eq!(error.code(), "insufficient_stock");
+
+        let _ = std::fs::remove_file(seeded.db_path);
+    }
+
+    #[test]
     fn complete_sale_transaction_decrements_repeated_product_lines_consistently() {
         let seeded = seed_sale_data(5000, true);
         let request = CompleteSaleRequest {
@@ -991,6 +1100,7 @@ mod tests {
                 method: PaymentMethod::Cash,
                 amount_minor: 40000,
             }],
+            allow_stock_override: None,
         };
 
         complete_sale_transaction(&seeded.db, request).expect("sale should complete");
@@ -1033,6 +1143,7 @@ mod tests {
                     amount_minor: 14000,
                 },
             ],
+            allow_stock_override: None,
         };
 
         let completed =
@@ -1054,6 +1165,7 @@ mod tests {
                 method: PaymentMethod::Card,
                 amount_minor: 25000,
             }],
+            allow_stock_override: None,
         };
 
         let error = complete_sale_transaction(&seeded.db, request)
