@@ -182,6 +182,7 @@ pub fn catalog_create_product(
     state: State<'_, AppState>,
     request: SaveProductRequest,
 ) -> Result<ProductSummary, CommandError> {
+    super::auth::require_admin(state.inner())?;
     create_product(state.db(), request).map_err(Into::into)
 }
 
@@ -191,6 +192,7 @@ pub fn catalog_update_product(
     id: i64,
     request: SaveProductRequest,
 ) -> Result<ProductSummary, CommandError> {
+    super::auth::require_admin(state.inner())?;
     update_product(state.db(), id, request).map_err(Into::into)
 }
 
@@ -200,6 +202,7 @@ pub fn catalog_set_product_active(
     id: i64,
     active: bool,
 ) -> Result<ProductSummary, CommandError> {
+    super::auth::require_admin(state.inner())?;
     set_product_active(state.db(), id, active).map_err(Into::into)
 }
 
@@ -231,6 +234,7 @@ pub fn catalog_save_category(
     state: State<'_, AppState>,
     request: SaveCategoryRequest,
 ) -> Result<CategorySummary, CommandError> {
+    super::auth::require_admin(state.inner())?;
     save_category(state.db(), request).map_err(Into::into)
 }
 
@@ -1113,14 +1117,17 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use rusqlite::params;
+    use tauri::Manager;
 
     use crate::app_error::CommandError;
     use crate::commands::catalog::{
-        create_product, list_products, lookup_suggestion_from_open_food_facts_json, save_category,
-        search_products, set_product_active, update_product, ProductExternalSourceRequest,
-        ProductListQuery, ProductSearchQuery, SaveCategoryRequest, SaveProductRequest,
+        catalog_create_product, catalog_save_category, catalog_update_product, create_product,
+        list_products, lookup_suggestion_from_open_food_facts_json, save_category, search_products,
+        set_product_active, update_product, ProductExternalSourceRequest, ProductListQuery,
+        ProductSearchQuery, SaveCategoryRequest, SaveProductRequest,
     };
     use crate::db::{test_database_path, Db};
+    use crate::state::AppState;
 
     fn with_catalog_database(test_name: &str, test: impl FnOnce(&Db)) {
         let db_path = test_database_path(test_name);
@@ -1204,6 +1211,21 @@ mod tests {
                 params![],
             )
             .expect("inventory balance should insert");
+    }
+
+    fn sign_in_cashier(state: &AppState) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, created_at, updated_at)
+                 VALUES ('marko', 'Marko Markovic', 'cashier', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("cashier should insert");
+        let cashier_id = connection.last_insert_rowid();
+        state
+            .set_session_user_id(cashier_id)
+            .expect("cashier session should set");
     }
 
     fn product_request(sku: &str, barcode: Option<&str>) -> SaveProductRequest {
@@ -1456,6 +1478,110 @@ mod tests {
 
             assert_eq!(updated.name, "Bezalkoholna pica");
             assert!(!updated.active);
+        });
+    }
+
+    #[test]
+    fn catalog_create_product_rejected_for_cashier() {
+        let path = test_database_path("catalog_create_product_rejected_for_cashier");
+
+        {
+            let db = Db::new(path.clone()).expect("database should initialize");
+            seed_catalog(&db);
+            let state = AppState::new(db);
+            sign_in_cashier(&state);
+
+            // catalog_create_product takes a Tauri `State`, so a headless mock app
+            // is needed to obtain a real managed state, mirroring the admin-gate
+            // test pattern used in reports.rs/inventory.rs.
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app should build");
+
+            let error = catalog_create_product(
+                app.state::<AppState>(),
+                product_request("JOG-1L", Some("8600000000034")),
+            )
+            .expect_err("cashier should not create products");
+
+            assert_eq!(error.code, "forbidden");
+        }
+
+        std::fs::remove_file(&path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                path.display()
+            )
+        });
+    }
+
+    #[test]
+    fn catalog_update_product_rejected_for_cashier() {
+        let path = test_database_path("catalog_update_product_rejected_for_cashier");
+
+        {
+            let db = Db::new(path.clone()).expect("database should initialize");
+            seed_catalog(&db);
+            let state = AppState::new(db);
+            sign_in_cashier(&state);
+
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app should build");
+
+            let error = catalog_update_product(
+                app.state::<AppState>(),
+                1,
+                product_request("MLEKO-1L", Some("8600000000010")),
+            )
+            .expect_err("cashier should not update products");
+
+            assert_eq!(error.code, "forbidden");
+        }
+
+        std::fs::remove_file(&path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                path.display()
+            )
+        });
+    }
+
+    #[test]
+    fn catalog_save_category_rejected_for_cashier() {
+        let path = test_database_path("catalog_save_category_rejected_for_cashier");
+
+        {
+            let db = Db::new(path.clone()).expect("database should initialize");
+            seed_catalog(&db);
+            let state = AppState::new(db);
+            sign_in_cashier(&state);
+
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app should build");
+
+            let error = catalog_save_category(
+                app.state::<AppState>(),
+                SaveCategoryRequest {
+                    id: None,
+                    name: "Pica".to_string(),
+                    active: true,
+                },
+            )
+            .expect_err("cashier should not save categories");
+
+            assert_eq!(error.code, "forbidden");
+        }
+
+        std::fs::remove_file(&path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                path.display()
+            )
         });
     }
 }
