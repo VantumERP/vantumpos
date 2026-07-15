@@ -483,7 +483,6 @@ export interface ReceiptDetail extends ReceiptSummary {
 
 export interface VoidReceiptRequest {
   receiptId: number;
-  userId: number;
   reason: string;
 }
 
@@ -494,7 +493,6 @@ export interface ReturnItemRequest {
 
 export interface ReturnItemsRequest {
   receiptId: number;
-  userId: number;
   reason: string;
   items: ReturnItemRequest[];
   refundTender?: "cash" | "card";

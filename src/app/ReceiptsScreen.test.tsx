@@ -17,7 +17,7 @@ describe("ReceiptsScreen", () => {
     const services = createMockServices();
     const voidReceipt = vi.spyOn(services.receipts, "voidReceipt");
 
-    render(<ReceiptsScreen receipts={services.receipts} userId={9} />);
+    render(<ReceiptsScreen receipts={services.receipts} />);
 
     await user.click(
       await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),
@@ -29,7 +29,6 @@ describe("ReceiptsScreen", () => {
     await waitFor(() =>
       expect(voidReceipt).toHaveBeenCalledWith({
         receiptId: 1,
-        userId: 9,
         reason: "Greska kasira",
       }),
     );
@@ -40,7 +39,7 @@ describe("ReceiptsScreen", () => {
     const services = createMockServices();
     const returnItems = vi.spyOn(services.receipts, "returnItems");
 
-    render(<ReceiptsScreen receipts={services.receipts} userId={9} />);
+    render(<ReceiptsScreen receipts={services.receipts} />);
 
     await user.click(
       await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),
@@ -57,7 +56,6 @@ describe("ReceiptsScreen", () => {
       expect(returnItems).toHaveBeenCalledWith(
         expect.objectContaining({
           receiptId: 1,
-          userId: 9,
           items: [{ saleItemId: 1, quantityMilli: 1000 }],
         }),
       ),
@@ -69,7 +67,7 @@ describe("ReceiptsScreen", () => {
     const services = createMockServices();
     const returnItems = vi.spyOn(services.receipts, "returnItems");
 
-    render(<ReceiptsScreen receipts={services.receipts} userId={9} />);
+    render(<ReceiptsScreen receipts={services.receipts} />);
 
     await user.click(
       await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),
@@ -96,7 +94,7 @@ describe("ReceiptsScreen", () => {
     const services = createMockServices();
     const returnItems = vi.spyOn(services.receipts, "returnItems");
 
-    render(<ReceiptsScreen receipts={services.receipts} userId={9} />);
+    render(<ReceiptsScreen receipts={services.receipts} />);
 
     await user.click(
       await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),
@@ -185,7 +183,6 @@ describe("ReceiptsScreen states", () => {
     render(
       <ReceiptsScreen
         receipts={buildReceiptsService({ searchReceipts: () => pending.promise })}
-        userId={1}
       />,
     );
 
@@ -201,7 +198,6 @@ describe("ReceiptsScreen states", () => {
         receipts={buildReceiptsService({
           searchReceipts: async () => ({ receipts: [], total: 0 }),
         })}
-        userId={1}
       />,
     );
 
@@ -217,7 +213,6 @@ describe("ReceiptsScreen states", () => {
     render(
       <ReceiptsScreen
         receipts={buildReceiptsService({ searchReceipts })}
-        userId={1}
       />,
     );
 
@@ -233,7 +228,6 @@ describe("ReceiptsScreen states", () => {
     render(
       <ReceiptsScreen
         receipts={buildReceiptsService({ getReceipt })}
-        userId={1}
       />,
     );
 
@@ -246,7 +240,7 @@ describe("ReceiptsScreen states", () => {
 
   it("renders the persisted void reason in the detail panel", async () => {
     const user = userEvent.setup();
-    render(<ReceiptsScreen receipts={buildReceiptsService()} userId={1} />);
+    render(<ReceiptsScreen receipts={buildReceiptsService()} />);
 
     await user.click(
       await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),

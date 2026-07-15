@@ -440,7 +440,7 @@ function renderModule({
   }
 
   if (activeId === "receipts") {
-    return <ReceiptsScreen receipts={services.receipts} userId={session.user.id} />;
+    return <ReceiptsScreen receipts={services.receipts} />;
   }
 
   if (activeId === "import") {

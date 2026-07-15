@@ -116,7 +116,6 @@ pub struct ReceiptDetail {
 #[serde(rename_all = "camelCase")]
 pub struct VoidReceiptRequest {
     pub receipt_id: i64,
-    pub user_id: i64,
     pub reason: String,
 }
 
@@ -131,7 +130,6 @@ pub struct ReturnItemRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ReturnItemsRequest {
     pub receipt_id: i64,
-    pub user_id: i64,
     pub reason: String,
     pub items: Vec<ReturnItemRequest>,
     #[serde(default)]
@@ -203,7 +201,8 @@ pub fn receipts_void(
     state: State<'_, AppState>,
     request: VoidReceiptRequest,
 ) -> Result<ReceiptDetail, CommandError> {
-    void_receipt(state.db(), request)
+    let acting_user_id = super::auth::require_session(state.inner())?;
+    void_receipt(state.db(), request, acting_user_id)
 }
 
 #[tauri::command]
@@ -211,7 +210,8 @@ pub fn receipts_return_items(
     state: State<'_, AppState>,
     request: ReturnItemsRequest,
 ) -> Result<ReceiptDetail, CommandError> {
-    return_items(state.db(), request)
+    let acting_user_id = super::auth::require_session(state.inner())?;
+    return_items(state.db(), request, acting_user_id)
 }
 
 pub fn search_receipts(
@@ -335,9 +335,12 @@ fn current_open_shift_id(connection: &Connection) -> Result<i64, AppError> {
         .ok_or_else(|| AppError::business("shift_required", "Smena nije otvorena."))
 }
 
-pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetail, CommandError> {
+pub fn void_receipt(
+    db: &Db,
+    request: VoidReceiptRequest,
+    acting_user_id: i64,
+) -> Result<ReceiptDetail, CommandError> {
     validate_receipt_id(request.receipt_id)?;
-    validate_user_id(request.user_id)?;
     let reason = require_reason(&request.reason, "reason")?;
     let now = utc_now()?;
     let mut connection = db.open()?;
@@ -377,7 +380,7 @@ pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetai
             params![
                 linked_number,
                 shift_id,
-                request.user_id,
+                acting_user_id,
                 request.receipt_id,
                 header.subtotal_minor,
                 header.discount_minor,
@@ -433,7 +436,7 @@ pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetai
                 &reason,
                 "sale_void",
                 linked_sale_id,
-                request.user_id,
+                acting_user_id,
                 &now,
             )?;
         }
@@ -479,9 +482,12 @@ pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetai
     get_receipt_detail(db, request.receipt_id).map_err(Into::into)
 }
 
-pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetail, CommandError> {
+pub fn return_items(
+    db: &Db,
+    request: ReturnItemsRequest,
+    acting_user_id: i64,
+) -> Result<ReceiptDetail, CommandError> {
     validate_receipt_id(request.receipt_id)?;
-    validate_user_id(request.user_id)?;
     let reason = require_reason(&request.reason, "reason")?;
     let requested = normalize_return_items(&request.items)?;
     let refund_tender = request
@@ -569,7 +575,7 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
             params![
                 linked_number,
                 shift_id,
-                request.user_id,
+                acting_user_id,
                 request.receipt_id,
                 subtotal_minor,
                 discount_minor,
@@ -634,7 +640,7 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
                 &reason,
                 "sale_return",
                 linked_sale_id,
-                request.user_id,
+                acting_user_id,
                 &now,
             )?;
         }
@@ -1185,17 +1191,6 @@ fn validate_receipt_id(receipt_id: i64) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_user_id(user_id: i64) -> Result<(), AppError> {
-    if user_id <= 0 {
-        return Err(AppError::validation(
-            "Korisnik nije ispravan.",
-            serde_json::json!({ "field": "userId" }),
-        ));
-    }
-
-    Ok(())
-}
-
 fn require_reason(value: &str, field: &str) -> Result<String, AppError> {
     normalized_optional_text(Some(value)).ok_or_else(|| {
         AppError::validation("Razlog je obavezan.", serde_json::json!({ "field": field }))
@@ -1460,9 +1455,9 @@ mod tests {
                     db,
                     VoidReceiptRequest {
                         receipt_id: seed.sale_id,
-                        user_id: seed.user_id,
                         reason: "Greska u unosu".to_string(),
                     },
+                    seed.user_id,
                 )
                 .expect("receipt should void");
 
@@ -1490,9 +1485,9 @@ mod tests {
                 db,
                 VoidReceiptRequest {
                     receipt_id: seed.sale_id,
-                    user_id: seed.user_id,
                     reason: "Greska u unosu".to_string(),
                 },
+                seed.user_id,
             )
             .expect("first void should succeed");
 
@@ -1500,9 +1495,9 @@ mod tests {
                 db,
                 VoidReceiptRequest {
                     receipt_id: seed.sale_id,
-                    user_id: seed.user_id,
                     reason: "Ponovno storniranje".to_string(),
                 },
+                seed.user_id,
             )
             .expect_err("duplicate void should fail");
 
@@ -1519,7 +1514,6 @@ mod tests {
                     db,
                     ReturnItemsRequest {
                         receipt_id: seed.sale_id,
-                        user_id: seed.user_id,
                         reason: "Kupac vratio previse".to_string(),
                         items: vec![ReturnItemRequest {
                             sale_item_id: seed.sale_item_id,
@@ -1527,6 +1521,7 @@ mod tests {
                         }],
                         refund_tender: None,
                     },
+                    seed.user_id,
                 )
                 .expect_err("excessive return should fail");
 
@@ -1555,7 +1550,6 @@ mod tests {
                     db,
                     ReturnItemsRequest {
                         receipt_id: seed.sale_id,
-                        user_id: seed.user_id,
                         reason: "Kupac vratio jedan komad".to_string(),
                         items: vec![ReturnItemRequest {
                             sale_item_id: seed.sale_item_id,
@@ -1563,6 +1557,7 @@ mod tests {
                         }],
                         refund_tender: None,
                     },
+                    seed.user_id,
                 )
                 .expect("partial return should succeed");
 
@@ -1583,9 +1578,9 @@ mod tests {
                 db,
                 VoidReceiptRequest {
                     receipt_id: seeded.sale_id,
-                    user_id: seeded.user_id,
                     reason: "Greska na racunu".to_string(),
                 },
+                seeded.user_id,
             )
             .expect("void should succeed");
 
@@ -1666,9 +1661,9 @@ mod tests {
                 db,
                 VoidReceiptRequest {
                     receipt_id: sale2,
-                    user_id: seeded.user_id,
                     reason: "Greska".to_string(),
                 },
+                seeded.user_id,
             )
             .expect("void should succeed");
 
@@ -1710,9 +1705,9 @@ mod tests {
                 db,
                 VoidReceiptRequest {
                     receipt_id: seeded.sale_id,
-                    user_id: seeded.user_id,
                     reason: "Greska".to_string(),
                 },
+                seeded.user_id,
             )
             .expect_err("void without an open shift should fail");
             assert_eq!(error.code, "shift_required");
@@ -1737,7 +1732,6 @@ mod tests {
                 db,
                 ReturnItemsRequest {
                     receipt_id: seeded.sale_id,
-                    user_id: seeded.user_id,
                     reason: "Ostecen artikal".to_string(),
                     items: vec![ReturnItemRequest {
                         sale_item_id: seeded.sale_item_id,
@@ -1745,6 +1739,7 @@ mod tests {
                     }],
                     refund_tender: None,
                 },
+                seeded.user_id,
             )
             .expect("return should succeed");
 
@@ -1770,7 +1765,6 @@ mod tests {
                 db,
                 ReturnItemsRequest {
                     receipt_id: seeded.sale_id,
-                    user_id: seeded.user_id,
                     reason: "Zamena velicine".to_string(),
                     items: vec![ReturnItemRequest {
                         sale_item_id: seeded.sale_item_id,
@@ -1778,6 +1772,7 @@ mod tests {
                     }],
                     refund_tender: Some("card".to_string()),
                 },
+                seeded.user_id,
             )
             .expect("return should succeed");
 
@@ -1808,7 +1803,6 @@ mod tests {
                 db,
                 ReturnItemsRequest {
                     receipt_id: seeded.sale_id,
-                    user_id: seeded.user_id,
                     reason: "Ostecen".to_string(),
                     items: vec![ReturnItemRequest {
                         sale_item_id: seeded.sale_item_id,
@@ -1816,6 +1810,7 @@ mod tests {
                     }],
                     refund_tender: None,
                 },
+                seeded.user_id,
             )
             .expect_err("return without an open shift should fail");
             assert_eq!(error.code, "shift_required");
@@ -1829,7 +1824,6 @@ mod tests {
                 db,
                 ReturnItemsRequest {
                     receipt_id: seeded.sale_id,
-                    user_id: seeded.user_id,
                     reason: "Ostecen".to_string(),
                     items: vec![ReturnItemRequest {
                         sale_item_id: seeded.sale_item_id,
@@ -1837,6 +1831,7 @@ mod tests {
                     }],
                     refund_tender: Some("bitcoin".to_string()),
                 },
+                seeded.user_id,
             )
             .expect_err("invalid refund tender should fail");
             assert_eq!(error.code, "validation_error");
@@ -1850,7 +1845,6 @@ mod tests {
                 db,
                 ReturnItemsRequest {
                     receipt_id: seeded.sale_id,
-                    user_id: seeded.user_id,
                     reason: "Delimican povrat".to_string(),
                     items: vec![ReturnItemRequest {
                         sale_item_id: seeded.sale_item_id,
@@ -1858,6 +1852,7 @@ mod tests {
                     }],
                     refund_tender: None,
                 },
+                seeded.user_id,
             )
             .expect("partial return should succeed");
 
@@ -1865,12 +1860,36 @@ mod tests {
                 db,
                 VoidReceiptRequest {
                     receipt_id: seeded.sale_id,
-                    user_id: seeded.user_id,
                     reason: "Greska".to_string(),
                 },
+                seeded.user_id,
             )
             .expect_err("void after a return must stay blocked");
             assert_eq!(error.code, "invalid_receipt_state");
+        });
+    }
+
+    #[test]
+    fn void_attributes_the_session_user_not_the_client() {
+        with_receipt_database("void_attributes_session_user", |db, seeded| {
+            void_receipt(
+                db,
+                VoidReceiptRequest {
+                    receipt_id: seeded.sale_id,
+                    reason: "Greška".to_string(),
+                },
+                seeded.user_id,
+            )
+            .expect("void");
+            let connection = db.open().expect("db");
+            let cashier: i64 = connection
+                .query_row(
+                    "SELECT cashier_id FROM sales WHERE original_sale_id = ?1 AND document_type = 'void'",
+                    params![seeded.sale_id],
+                    |row| row.get(0),
+                )
+                .expect("void doc");
+            assert_eq!(cashier, seeded.user_id);
         });
     }
 }

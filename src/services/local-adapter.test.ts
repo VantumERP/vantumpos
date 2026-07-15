@@ -383,12 +383,10 @@ describe("local service adapter", () => {
     await services.receipts.getReceipt(7);
     await services.receipts.voidReceipt({
       receiptId: 7,
-      userId: 1,
       reason: "Greska u unosu",
     });
     await services.receipts.returnItems({
       receiptId: 7,
-      userId: 1,
       reason: "Kupac vratio artikal",
       items: [{ saleItemId: 3, quantityMilli: 1000 }],
     });
@@ -398,12 +396,11 @@ describe("local service adapter", () => {
     });
     expect(invoke).toHaveBeenNthCalledWith(2, "receipts_get", { id: 7 });
     expect(invoke).toHaveBeenNthCalledWith(3, "receipts_void", {
-      request: { receiptId: 7, userId: 1, reason: "Greska u unosu" },
+      request: { receiptId: 7, reason: "Greska u unosu" },
     });
     expect(invoke).toHaveBeenNthCalledWith(4, "receipts_return_items", {
       request: {
         receiptId: 7,
-        userId: 1,
         reason: "Kupac vratio artikal",
         items: [{ saleItemId: 3, quantityMilli: 1000 }],
       },
@@ -416,7 +413,6 @@ describe("local service adapter", () => {
 
     await services.receipts.returnItems({
       receiptId: 7,
-      userId: 1,
       reason: "Zamena velicine",
       items: [{ saleItemId: 3, quantityMilli: 1000 }],
       refundTender: "card",
@@ -425,7 +421,6 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenCalledWith("receipts_return_items", {
       request: {
         receiptId: 7,
-        userId: 1,
         reason: "Zamena velicine",
         items: [{ saleItemId: 3, quantityMilli: 1000 }],
         refundTender: "card",
@@ -621,7 +616,6 @@ describe("mock service adapter", () => {
 
     const detail = await services.receipts.returnItems({
       receiptId: search.receipts[0].id,
-      userId: 1,
       reason: "Kupac vratio jedan komad",
       items: [{ saleItemId: 1, quantityMilli: 1000 }],
     });
