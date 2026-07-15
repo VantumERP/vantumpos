@@ -319,6 +319,20 @@ pub fn get_receipt_detail(db: &Db, receipt_id: i64) -> Result<ReceiptDetail, App
     load_receipt_detail(&connection, receipt_id)
 }
 
+fn current_open_shift_id(connection: &Connection) -> Result<i64, AppError> {
+    connection
+        .query_row(
+            "SELECT id FROM shifts
+             WHERE status = 'open'
+             ORDER BY opened_at DESC, id DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::business("shift_required", "Smena nije otvorena."))
+}
+
 pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetail, CommandError> {
     validate_receipt_id(request.receipt_id)?;
     validate_user_id(request.user_id)?;
@@ -332,6 +346,7 @@ pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetai
             .ok_or_else(|| AppError::not_found("Racun nije pronadjen."))?;
 
         ensure_voidable(&tx, &header)?;
+        let shift_id = current_open_shift_id(&tx)?;
 
         let items = load_original_sale_items(&tx, request.receipt_id)?;
         if items.is_empty() {
@@ -359,7 +374,7 @@ pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetai
              VALUES (?1, ?2, ?3, 'voided', 'not_fiscalized', 'void', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
             params![
                 linked_number,
-                header.shift_id,
+                shift_id,
                 request.user_id,
                 request.receipt_id,
                 header.subtotal_minor,
@@ -419,6 +434,31 @@ pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetai
                 request.user_id,
                 &now,
             )?;
+        }
+
+        let original_payments: Vec<(String, i64)> = {
+            let mut statement = tx
+                .prepare("SELECT payment_method, amount_minor FROM sale_payments WHERE sale_id = ?1")
+                .map_err(AppError::from)?;
+            let mapped = statement
+                .query_map(params![request.receipt_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(AppError::from)?;
+            mapped
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(AppError::from)?
+        };
+        for (method, amount) in original_payments {
+            if amount == 0 {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![linked_sale_id, method, -amount, now],
+            )
+            .map_err(AppError::from)?;
         }
 
         tx.execute(
@@ -1512,5 +1552,159 @@ mod tests {
                 assert_eq!(balance_for(&connection, seed.product_id), 4000);
             },
         );
+    }
+
+    #[test]
+    fn void_records_negative_cash_payment_mirroring_original() {
+        with_receipt_database("void_records_negative_cash_payment", |db, seeded| {
+            void_receipt(
+                db,
+                VoidReceiptRequest {
+                    receipt_id: seeded.sale_id,
+                    user_id: seeded.user_id,
+                    reason: "Greska na racunu".to_string(),
+                },
+            )
+            .expect("void should succeed");
+
+            let connection = db.open().expect("database should open");
+            let (void_sale_id, void_shift_id): (i64, i64) = connection
+                .query_row(
+                    "SELECT id, shift_id FROM sales
+                     WHERE original_sale_id = ?1 AND document_type = 'void'",
+                    params![seeded.sale_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("void document should exist");
+            let refund: i64 = connection
+                .query_row(
+                    "SELECT amount_minor FROM sale_payments
+                     WHERE sale_id = ?1 AND payment_method = 'cash'",
+                    params![void_sale_id],
+                    |row| row.get(0),
+                )
+                .expect("mirrored cash refund should exist");
+            assert_eq!(refund, -100_000);
+
+            let open_shift: i64 = connection
+                .query_row(
+                    "SELECT id FROM shifts WHERE status = 'open'
+                     ORDER BY opened_at DESC, id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("open shift should exist");
+            assert_eq!(void_shift_id, open_shift);
+        });
+    }
+
+    #[test]
+    fn void_mirrors_split_cash_and_card_tenders() {
+        with_receipt_database("void_mirrors_split_tenders", |db, seeded| {
+            let connection = db.open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO sales (
+                        local_receipt_number, shift_id, cashier_id, status, fiscal_status,
+                        subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at)
+                     SELECT 'R-2026-0002', shift_id, cashier_id, 'completed', 'not_fiscalized',
+                        100000, 0, 16667, 100000, '2026-06-18T09:30:00Z', '2026-06-18T09:30:00Z'
+                     FROM sales WHERE id = ?1",
+                    params![seeded.sale_id],
+                )
+                .expect("second sale should insert");
+            let sale2 = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO sale_items (
+                        sale_id, product_id, product_name, product_sku, product_barcode,
+                        quantity_milli, unit_price_minor, discount_minor, tax_rate_basis_points,
+                        tax_minor, total_minor)
+                     VALUES (?1, ?2, 'Kafa 200 g', 'KAFA-200', '8600000000010', 2000, 50000, 0,
+                        2000, 16667, 100000)",
+                    params![sale2, seeded.product_id],
+                )
+                .expect("second sale item should insert");
+            connection
+                .execute(
+                    "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                     VALUES (?1, 'cash', 60000, '2026-06-18T09:30:00Z')",
+                    params![sale2],
+                )
+                .expect("cash payment should insert");
+            connection
+                .execute(
+                    "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                     VALUES (?1, 'card', 40000, '2026-06-18T09:30:00Z')",
+                    params![sale2],
+                )
+                .expect("card payment should insert");
+
+            void_receipt(
+                db,
+                VoidReceiptRequest {
+                    receipt_id: sale2,
+                    user_id: seeded.user_id,
+                    reason: "Greska".to_string(),
+                },
+            )
+            .expect("void should succeed");
+
+            let void_id: i64 = connection
+                .query_row(
+                    "SELECT id FROM sales WHERE original_sale_id = ?1 AND document_type = 'void'",
+                    params![sale2],
+                    |row| row.get(0),
+                )
+                .expect("void document should exist");
+            let cash: i64 = connection
+                .query_row(
+                    "SELECT amount_minor FROM sale_payments WHERE sale_id = ?1 AND payment_method = 'cash'",
+                    params![void_id],
+                    |row| row.get(0),
+                )
+                .expect("cash refund should exist");
+            let card: i64 = connection
+                .query_row(
+                    "SELECT amount_minor FROM sale_payments WHERE sale_id = ?1 AND payment_method = 'card'",
+                    params![void_id],
+                    |row| row.get(0),
+                )
+                .expect("card refund should exist");
+            assert_eq!(cash, -60_000);
+            assert_eq!(card, -40_000);
+        });
+    }
+
+    #[test]
+    fn void_requires_open_shift() {
+        with_receipt_database("void_requires_open_shift", |db, seeded| {
+            db.open()
+                .expect("database should open")
+                .execute("UPDATE shifts SET status = 'closed'", [])
+                .expect("shift should close");
+
+            let error = void_receipt(
+                db,
+                VoidReceiptRequest {
+                    receipt_id: seeded.sale_id,
+                    user_id: seeded.user_id,
+                    reason: "Greska".to_string(),
+                },
+            )
+            .expect_err("void without an open shift should fail");
+            assert_eq!(error.code, "shift_required");
+
+            let voids: i64 = db
+                .open()
+                .expect("database should open")
+                .query_row(
+                    "SELECT COUNT(*) FROM sales WHERE document_type = 'void'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count should query");
+            assert_eq!(voids, 0);
+        });
     }
 }
