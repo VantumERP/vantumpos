@@ -93,6 +93,8 @@ const adminSession: AppSession = {
     countedCashMinor: null,
     cashSalesMinor: 0,
     cardSalesMinor: 0,
+    paidInMinor: 0,
+    paidOutMinor: 0,
     differenceMinor: null,
     status: "open",
     openingNote: "Jutarnja smena",

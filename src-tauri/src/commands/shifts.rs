@@ -19,6 +19,8 @@ pub struct ShiftSummary {
     pub counted_cash_minor: Option<i64>,
     pub cash_sales_minor: i64,
     pub card_sales_minor: i64,
+    pub paid_in_minor: i64,
+    pub paid_out_minor: i64,
     pub difference_minor: Option<i64>,
     pub status: String,
     pub opening_note: Option<String>,
@@ -262,7 +264,9 @@ pub fn close_shift_for_user(
         ));
     }
 
-    let expected_cash_minor = shift.opening_cash_minor + shift.cash_sales_minor;
+    let expected_cash_minor =
+        shift.opening_cash_minor + shift.cash_sales_minor + shift.paid_in_minor
+            - shift.paid_out_minor;
     let now = utc_now().map_err(CommandError::from)?;
     let note = normalized_note(request.note);
     let conn = state.db().open().map_err(CommandError::from)?;
@@ -353,7 +357,9 @@ SELECT
     sh.opening_note,
     sh.closing_note,
     COALESCE(SUM(CASE WHEN sp.payment_method = 'cash' THEN sp.amount_minor ELSE 0 END), 0),
-    COALESCE(SUM(CASE WHEN sp.payment_method = 'card' THEN sp.amount_minor ELSE 0 END), 0)
+    COALESCE(SUM(CASE WHEN sp.payment_method = 'card' THEN sp.amount_minor ELSE 0 END), 0),
+    COALESCE((SELECT SUM(amount_minor) FROM cash_movements WHERE shift_id = sh.id AND movement_type = 'pay_in'), 0),
+    COALESCE((SELECT SUM(amount_minor) FROM cash_movements WHERE shift_id = sh.id AND movement_type = 'pay_out'), 0)
 FROM shifts sh
 JOIN users u ON u.id = sh.user_id
 LEFT JOIN sales s ON s.shift_id = sh.id
@@ -376,8 +382,10 @@ fn shift_summary_from_row(row: &Row<'_>) -> rusqlite::Result<ShiftSummary> {
     let counted_cash_minor: Option<i64> = row.get(7)?;
     let status: String = row.get(8)?;
     let cash_sales_minor: i64 = row.get(11)?;
+    let paid_in_minor: i64 = row.get(13)?;
+    let paid_out_minor: i64 = row.get(14)?;
     let expected_cash_minor = if status == "open" {
-        opening_cash_minor + cash_sales_minor
+        opening_cash_minor + cash_sales_minor + paid_in_minor - paid_out_minor
     } else {
         stored_expected_cash_minor
     };
@@ -394,6 +402,8 @@ fn shift_summary_from_row(row: &Row<'_>) -> rusqlite::Result<ShiftSummary> {
         counted_cash_minor,
         cash_sales_minor,
         card_sales_minor: row.get(12)?,
+        paid_in_minor,
+        paid_out_minor,
         difference_minor,
         status,
         opening_note: row.get(9)?,
@@ -877,6 +887,169 @@ mod tests {
             .expect_err("unknown direction should fail");
 
             assert_eq!(error.code, "validation_error");
+        });
+    }
+
+    #[test]
+    fn shift_summary_folds_cash_movements_into_expected_cash() {
+        with_state("shift_summary_folds_cash_movements", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            seed_completed_sale(state, opened.id, cashier_id, 1000, 200);
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_in".to_string(),
+                    amount_minor: 3000,
+                    reason: Some("Sitan novac".to_string()),
+                },
+            )
+            .expect("pay_in should record");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_out".to_string(),
+                    amount_minor: 1000,
+                    reason: Some("Isplata dobavljaču".to_string()),
+                },
+            )
+            .expect("pay_out should record");
+
+            let summary = current_shift_for_user(state, cashier_id)
+                .expect("summary should query")
+                .expect("open shift summary should exist");
+
+            assert_eq!(summary.paid_in_minor, 3000);
+            assert_eq!(summary.paid_out_minor, 1000);
+            assert_eq!(summary.expected_cash_minor, 5000 + 1000 + 3000 - 1000);
+        });
+    }
+
+    #[test]
+    fn close_shift_for_user_includes_cash_movements_in_expected_cash() {
+        with_state("close_shift_includes_cash_movements", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            seed_completed_sale(state, opened.id, cashier_id, 1000, 200);
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_in".to_string(),
+                    amount_minor: 3000,
+                    reason: None,
+                },
+            )
+            .expect("pay_in should record");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_out".to_string(),
+                    amount_minor: 1000,
+                    reason: None,
+                },
+            )
+            .expect("pay_out should record");
+
+            let expected_cash_minor = 5000 + 1000 + 3000 - 1000;
+
+            let closed = close_shift_for_user(
+                state,
+                cashier_id,
+                CloseShiftRequest {
+                    shift_id: opened.id,
+                    counted_cash_minor: expected_cash_minor,
+                    note: None,
+                },
+            )
+            .expect("shift should close");
+
+            assert_eq!(closed.expected_cash_minor, expected_cash_minor);
+            assert_eq!(closed.paid_in_minor, 3000);
+            assert_eq!(closed.paid_out_minor, 1000);
+            assert_eq!(closed.difference_minor, Some(0));
+        });
+    }
+
+    #[test]
+    fn admin_close_shift_includes_cash_movements_in_expected_cash() {
+        with_state("admin_close_includes_cash_movements", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 5000,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            seed_completed_sale(state, opened.id, cashier_id, 1000, 200);
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_in".to_string(),
+                    amount_minor: 3000,
+                    reason: None,
+                },
+            )
+            .expect("pay_in should record");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "pay_out".to_string(),
+                    amount_minor: 1000,
+                    reason: None,
+                },
+            )
+            .expect("pay_out should record");
+
+            let expected_cash_minor = 5000 + 1000 + 3000 - 1000;
+
+            sign_in_admin(state);
+
+            let closed = admin_close_shift(
+                state,
+                CloseShiftRequest {
+                    shift_id: opened.id,
+                    counted_cash_minor: expected_cash_minor,
+                    note: None,
+                },
+            )
+            .expect("admin should force-close with movement-inclusive expected cash");
+
+            assert_eq!(closed.expected_cash_minor, expected_cash_minor);
+            assert_eq!(closed.difference_minor, Some(0));
         });
     }
 }

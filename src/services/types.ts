@@ -127,6 +127,8 @@ export interface ShiftSummary {
   countedCashMinor: number | null;
   cashSalesMinor: number;
   cardSalesMinor: number;
+  paidInMinor: number;
+  paidOutMinor: number;
   differenceMinor: number | null;
   status: "open" | "closed";
   openingNote: string | null;
