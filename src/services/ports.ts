@@ -67,6 +67,7 @@ export interface SettingsService {
   updateCompanySettings(request: CompanySettingsRequest): Promise<CompanySettings>;
   listTaxRates(): Promise<TaxRate[]>;
   saveTaxRate(request: SaveTaxRateRequest): Promise<TaxRate>;
+  seedTaxRates(inVatSystem: boolean): Promise<TaxRate[]>;
   getReceiptSettings(): Promise<ReceiptSettings>;
   updateReceiptSettings(request: ReceiptSettingsRequest): Promise<ReceiptSettings>;
 }

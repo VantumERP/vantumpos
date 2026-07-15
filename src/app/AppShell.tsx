@@ -12,6 +12,7 @@ import type { FormEvent } from "react";
 
 import { BackendStatus } from "@/app/BackendStatus";
 import { CatalogModule } from "@/app/catalog/CatalogModule";
+import { FirstRunTaxSetup } from "@/app/FirstRunTaxSetup";
 import { ImportWizard } from "@/app/import/ImportWizard";
 import { InventoryScreen } from "@/app/inventory/InventoryScreen";
 import {
@@ -227,6 +228,7 @@ export function AppShell({ services }: AppShellProps) {
 
   return (
     <TooltipProvider>
+      <FirstRunTaxSetup settings={services.settings} role={session.user.role} />
       <SidebarProvider>
         <Sidebar collapsible="icon">
           <SidebarHeader>

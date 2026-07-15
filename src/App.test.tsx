@@ -30,6 +30,12 @@ function buildAuthServices(overrides: Record<string, unknown> = {}) {
     settings: {
       getHealth: vi.fn().mockResolvedValue(readyHealth),
       getCompanySettings: vi.fn().mockResolvedValue(readyCompany),
+      listTaxRates: vi
+        .fn()
+        .mockResolvedValue([
+          { id: 1, name: "PDV 20%", rateBasisPoints: 2000, active: true },
+        ]),
+      seedTaxRates: vi.fn().mockResolvedValue([]),
     },
     auth: {
       getSession: vi.fn().mockResolvedValue(null),
@@ -268,6 +274,12 @@ describe("AppShell", () => {
       settings: {
         getHealth: vi.fn().mockResolvedValue(readyHealth),
         getCompanySettings,
+        listTaxRates: vi
+          .fn()
+          .mockResolvedValue([
+            { id: 1, name: "PDV 20%", rateBasisPoints: 2000, active: true },
+          ]),
+        seedTaxRates: vi.fn().mockResolvedValue([]),
       },
     });
 

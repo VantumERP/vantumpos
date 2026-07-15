@@ -54,6 +54,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       listTaxRates: () => invoke<TaxRate[]>("settings_list_tax_rates"),
       saveTaxRate: (request) =>
         invoke<TaxRate>("settings_save_tax_rate", { request }),
+      seedTaxRates: (inVatSystem) =>
+        invoke<TaxRate[]>("settings_seed_tax_rates", { inVatSystem }),
       getReceiptSettings: () =>
         invoke<ReceiptSettings>("settings_get_receipt"),
       updateReceiptSettings: (request) =>

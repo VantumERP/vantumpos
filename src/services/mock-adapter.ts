@@ -233,6 +233,17 @@ export function createMockServices(): PosServices {
       async listTaxRates() {
         return taxRates;
       },
+      async seedTaxRates(inVatSystem: boolean) {
+        if (taxRates.length === 0) {
+          taxRates = inVatSystem
+            ? [
+                { id: 1, name: "PDV 20%", rateBasisPoints: 2000, active: true },
+                { id: 2, name: "PDV 10%", rateBasisPoints: 1000, active: true },
+              ]
+            : [{ id: 1, name: "Bez PDV-a", rateBasisPoints: 0, active: true }];
+        }
+        return taxRates;
+      },
       async saveTaxRate(request) {
         if (!request.name.trim()) {
           throw { code: "validation_error", message: "Naziv PDV stope je obavezan." };
