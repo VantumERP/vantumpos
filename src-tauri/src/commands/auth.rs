@@ -150,20 +150,28 @@ pub(crate) fn active_user_by_id(
     .map_err(Into::into)
 }
 
+/// The single authoritative session gate, shared by every command that needs
+/// the acting user. The acting user is derived from the server-side session,
+/// never from a client-supplied payload. A session pointing at a user that no
+/// longer exists or is inactive is treated as unauthenticated and cleared.
+pub(crate) fn require_session(state: &AppState) -> Result<i64, AppError> {
+    let user_id = state
+        .session_user_id()?
+        .ok_or_else(|| AppError::business("unauthorized", "Niste prijavljeni."))?;
+    if active_user_by_id(state, user_id)?.is_none() {
+        state.clear_session()?;
+        return Err(AppError::business("unauthorized", "Niste prijavljeni."));
+    }
+    Ok(user_id)
+}
+
 /// The single authoritative admin gate, shared by every admin-only command
 /// (Settings, Users, and later Reports). The acting user is derived from the
 /// server-side session, never from a client-supplied role.
 pub(crate) fn require_admin(state: &AppState) -> Result<UserAccount, AppError> {
-    let user_id = state
-        .session_user_id()?
+    let user_id = require_session(state)?;
+    let user = active_user_by_id(state, user_id)?
         .ok_or_else(|| AppError::business("unauthorized", "Niste prijavljeni."))?;
-
-    let Some(user) = active_user_by_id(state, user_id)? else {
-        // The session points at a user that no longer exists or is inactive;
-        // drop the stale session before reporting the failure.
-        state.clear_session()?;
-        return Err(AppError::business("unauthorized", "Niste prijavljeni."));
-    };
 
     if user.role != "admin" {
         return Err(AppError::business(
@@ -255,7 +263,7 @@ mod tests {
         admin_id
     }
 
-    fn seed_cashier_session(state: &AppState) {
+    fn seed_cashier_session(state: &AppState) -> i64 {
         let connection = state.db().open().expect("database should open");
         connection
             .execute(
@@ -268,6 +276,7 @@ mod tests {
         state
             .set_session_user_id(cashier_id)
             .expect("cashier session should set");
+        cashier_id
     }
 
     #[test]
@@ -324,6 +333,29 @@ mod tests {
                 "the stale session must be cleared",
             );
         });
+    }
+
+    #[test]
+    fn require_session_returns_signed_in_user_id() {
+        with_state("require_session_returns_signed_in_user_id", |state| {
+            let cashier_id = seed_cashier_session(state);
+
+            let user_id = require_session(state).expect("signed-in session should resolve");
+
+            assert_eq!(user_id, cashier_id);
+        });
+    }
+
+    #[test]
+    fn require_session_rejects_without_session_with_unauthorized() {
+        with_state(
+            "require_session_rejects_without_session_with_unauthorized",
+            |state| {
+                let error = require_session(state).expect_err("anonymous caller should be denied");
+
+                assert_eq!(error.code(), "unauthorized");
+            },
+        );
     }
 
     #[test]
