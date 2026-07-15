@@ -10,6 +10,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
+import { AppVersion } from "@/app/AppVersion";
 import { BackendStatus } from "@/app/BackendStatus";
 import { CatalogModule } from "@/app/catalog/CatalogModule";
 import { FirstRunTaxSetup } from "@/app/FirstRunTaxSetup";
@@ -290,6 +291,7 @@ export function AppShell({ services }: AppShellProps) {
               <div className="truncate px-2 text-xs text-sidebar-foreground/70">
                 {ROLE_LABELS[session.user.role]}
               </div>
+              <AppVersion settings={services.settings} />
               <Button
                 type="button"
                 variant="ghost"
