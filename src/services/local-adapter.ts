@@ -28,6 +28,7 @@ import type {
   ProductSummary,
   ReceiptDetail,
   ReceiptSettings,
+  SalesSettings,
   ReceiptSearchResult,
   SalePreview,
   ShiftListItem,
@@ -60,6 +61,9 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<ReceiptSettings>("settings_get_receipt"),
       updateReceiptSettings: (request) =>
         invoke<ReceiptSettings>("settings_update_receipt", { request }),
+      getSalesSettings: () => invoke<SalesSettings>("settings_get_sales"),
+      updateSalesSettings: (request) =>
+        invoke<SalesSettings>("settings_update_sales", { request }),
     },
     backup: {
       getBackupStatus: () => invoke<BackupStatus>("backup_get_status"),

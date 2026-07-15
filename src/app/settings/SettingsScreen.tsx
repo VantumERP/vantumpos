@@ -62,6 +62,7 @@ import type {
   BackupStatus,
   CompanySettings,
   ReceiptSettings,
+  SalesSettings,
   TaxRate,
 } from "@/services/types";
 
@@ -77,6 +78,7 @@ type LoadState =
       company: CompanySettings;
       taxRates: TaxRate[];
       receipt: ReceiptSettings;
+      sales: SalesSettings;
       backupStatus: BackupStatus;
       backupJobs: BackupJob[];
     }
@@ -94,15 +96,17 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       services.settings.getCompanySettings(),
       services.settings.listTaxRates(),
       services.settings.getReceiptSettings(),
+      services.settings.getSalesSettings(),
       services.backup.getBackupStatus(),
       services.backup.listBackupJobs(),
     ])
-      .then(([company, taxRates, receipt, backupStatus, backupJobs]) => {
+      .then(([company, taxRates, receipt, sales, backupStatus, backupJobs]) => {
         setState({
           status: "ready",
           company,
           taxRates,
           receipt,
+          sales,
           backupStatus,
           backupJobs,
         });
@@ -214,16 +218,42 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       ) : null}
 
       {activeTab === "receipts" ? (
-        <ReceiptSettingsPanel
-          settings={state.receipt}
-          onSave={async (request) => {
-            const receipt = await services.settings.updateReceiptSettings(request);
-            setState((current) =>
-              current.status === "ready" ? { ...current, receipt } : current,
-            );
-            toast.success("Numeracija racuna je sacuvana.");
-          }}
-        />
+        <div className="flex flex-col gap-6">
+          <ReceiptSettingsPanel
+            settings={state.receipt}
+            onSave={async (request) => {
+              const receipt =
+                await services.settings.updateReceiptSettings(request);
+              setState((current) =>
+                current.status === "ready" ? { ...current, receipt } : current,
+              );
+              toast.success("Numeracija racuna je sacuvana.");
+            }}
+          />
+          <div className="flex items-center justify-between rounded-md border p-4">
+            <div className="flex flex-col gap-1">
+              <span className="text-sm font-medium">
+                Dozvoli prodaju ispod stanja
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Kasir moze da proda i kada je stanje na kartici nedovoljno.
+              </span>
+            </div>
+            <Switch
+              aria-label="Dozvoli prodaju ispod stanja"
+              checked={state.sales.allowOverselling}
+              onCheckedChange={async (checked) => {
+                const sales = await services.settings.updateSalesSettings({
+                  allowOverselling: checked,
+                });
+                setState((current) =>
+                  current.status === "ready" ? { ...current, sales } : current,
+                );
+                toast.success("Podesavanje prodaje je sacuvano.");
+              }}
+            />
+          </div>
+        </div>
       ) : null}
 
       {activeTab === "users" ? usersPanel : null}

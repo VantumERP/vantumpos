@@ -54,6 +54,14 @@ export interface ReceiptSettingsRequest {
   nextSequenceNumber: number;
 }
 
+export interface SalesSettings {
+  allowOverselling: boolean;
+}
+
+export interface SalesSettingsRequest {
+  allowOverselling: boolean;
+}
+
 export interface BackupSettings {
   backupFolder: string;
   automaticBackupEnabled: boolean;
@@ -298,6 +306,7 @@ export interface SalePaymentDraft {
 
 export interface CompleteSaleRequest extends SaleDraftRequest {
   payments: SalePaymentDraft[];
+  allowStockOverride?: boolean;
 }
 
 export interface CompletedSale extends SalePreview {

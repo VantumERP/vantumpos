@@ -145,6 +145,7 @@ export function createMockServices(): PosServices {
     nextSequenceNumber: 1,
     resetPolicy: "none",
   };
+  let salesSettings = { allowOverselling: false };
   let backupSettings: BackupSettings = {
     backupFolder: "mock://backups",
     automaticBackupEnabled: true,
@@ -274,6 +275,20 @@ export function createMockServices(): PosServices {
 
         receiptSettings = { ...request, resetPolicy: "none" };
         return receiptSettings;
+      },
+      async getSalesSettings() {
+        return salesSettings;
+      },
+      async updateSalesSettings(request) {
+        if (session?.user.role !== "admin") {
+          throw {
+            code: "forbidden",
+            message: "Samo administrator moze da izvrsi ovu akciju.",
+          };
+        }
+
+        salesSettings = { ...request };
+        return salesSettings;
       },
     },
     backup: {

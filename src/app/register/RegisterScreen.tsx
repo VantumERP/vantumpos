@@ -89,6 +89,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   const [cardInput, setCardInput] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [isCompleting, setIsCompleting] = useState(false);
+  const [overrideOpen, setOverrideOpen] = useState(false);
   const [completedSale, setCompletedSale] = useState<CompletedSale | null>(null);
 
   useEffect(() => {
@@ -269,7 +270,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
     );
   }
 
-  async function completeSale() {
+  async function completeSale(allowStockOverride = false) {
     if (!preview) {
       return;
     }
@@ -288,6 +289,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
             ? [{ method: "card" as const, amountMinor: cardMinor }]
             : []),
         ],
+        ...(allowStockOverride ? { allowStockOverride: true } : {}),
       });
       setCompletedSale(sale);
       setCart([]);
@@ -295,8 +297,13 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       setCashTouched(false);
       setCardInput("");
       setReceiptDiscountInput("");
+      setOverrideOpen(false);
     } catch (error) {
-      setMessage(errorMessage(error));
+      if ((error as CommandError).code === "insufficient_stock") {
+        setOverrideOpen(true);
+      } else {
+        setMessage(errorMessage(error));
+      }
     } finally {
       setIsCompleting(false);
     }
@@ -574,7 +581,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
               className="flex-1"
               type="button"
               disabled={!preview || isCompleting}
-              onClick={completeSale}
+              onClick={() => completeSale()}
             >
               {isCompleting ? (
                 <Spinner data-icon="inline-start" />
@@ -586,6 +593,24 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
           </div>
         </aside>
       </div>
+
+      <AlertDialog open={overrideOpen} onOpenChange={setOverrideOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Nema dovoljno zaliha</AlertDialogTitle>
+            <AlertDialogDescription>
+              Stanje na kartici je manje od kolicine na racunu. Zelite li ipak da
+              prodate i pustite stanje u minus?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Odustani</AlertDialogCancel>
+            <AlertDialogAction onClick={() => completeSale(true)}>
+              Ipak prodaj
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog
         open={completedSale !== null}

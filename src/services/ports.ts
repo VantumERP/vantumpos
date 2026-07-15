@@ -39,6 +39,8 @@ import type {
   ReceiptDetail,
   ReceiptSettings,
   ReceiptSettingsRequest,
+  SalesSettings,
+  SalesSettingsRequest,
   ReceiptSearchQuery,
   ReceiptSearchResult,
   RestoreBackupRequest,
@@ -70,6 +72,8 @@ export interface SettingsService {
   seedTaxRates(inVatSystem: boolean): Promise<TaxRate[]>;
   getReceiptSettings(): Promise<ReceiptSettings>;
   updateReceiptSettings(request: ReceiptSettingsRequest): Promise<ReceiptSettings>;
+  getSalesSettings(): Promise<SalesSettings>;
+  updateSalesSettings(request: SalesSettingsRequest): Promise<SalesSettings>;
 }
 
 export interface BackupService {

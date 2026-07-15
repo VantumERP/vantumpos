@@ -245,8 +245,8 @@ describe("RegisterScreen", () => {
   it("keeps the cart intact when backend completion fails", async () => {
     const user = userEvent.setup();
     const completeSale = vi.fn().mockRejectedValue({
-      code: "insufficient_stock",
-      message: "Nema dovoljno zaliha.",
+      code: "payment_mismatch",
+      message: "Placanja se ne poklapaju.",
     });
 
     render(<RegisterScreen services={createRegisterServices(completeSale)} />);
@@ -260,8 +260,37 @@ describe("RegisterScreen", () => {
     await user.type(screen.getByLabelText("Gotovina primljeno"), "160");
     await user.click(screen.getByRole("button", { name: "Zavrsi prodaju" }));
 
-    expect(await screen.findByText("Nema dovoljno zaliha.")).toBeInTheDocument();
+    expect(await screen.findByText("Placanja se ne poklapaju.")).toBeInTheDocument();
     expect(screen.getByText("Mleko 1 l")).toBeInTheDocument();
+  });
+
+  it("offers an oversell confirm and retries with allowStockOverride", async () => {
+    const user = userEvent.setup();
+    const completeSale = vi.fn(createCompletedSale);
+    completeSale.mockRejectedValueOnce({
+      code: "insufficient_stock",
+      message: "Nema dovoljno zaliha.",
+    });
+
+    render(<RegisterScreen services={createRegisterServices(completeSale)} />);
+    await user.type(
+      screen.getByRole("searchbox", {
+        name: "Skeniraj barkod ili pretrazi artikal",
+      }),
+      "8600000000010{enter}",
+    );
+    expect(await screen.findByText("Mleko 1 l")).toBeInTheDocument();
+    const cashField = screen.getByLabelText("Gotovina primljeno");
+    await waitFor(() => expect(cashField).toHaveValue("159.99"));
+    await user.click(screen.getByRole("button", { name: "Zavrsi prodaju" }));
+
+    await user.click(await screen.findByRole("button", { name: "Ipak prodaj" }));
+
+    await waitFor(() =>
+      expect(completeSale).toHaveBeenLastCalledWith(
+        expect.objectContaining({ allowStockOverride: true }),
+      ),
+    );
   });
 
   it("renders the swallowed preview error and keeps the cart", async () => {

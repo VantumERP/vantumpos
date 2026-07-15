@@ -154,6 +154,19 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenNthCalledWith(11, "backup_list_jobs");
   });
 
+  it("maps sales settings to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockResolvedValue({ allowOverselling: false });
+    const services = createLocalServices(invoke);
+
+    await services.settings.getSalesSettings();
+    await services.settings.updateSalesSettings({ allowOverselling: true });
+
+    expect(invoke).toHaveBeenCalledWith("settings_get_sales");
+    expect(invoke).toHaveBeenCalledWith("settings_update_sales", {
+      request: { allowOverselling: true },
+    });
+  });
+
   it("maps seedTaxRates to settings_seed_tax_rates", async () => {
     const invoke = vi.fn().mockResolvedValue([]);
     const services = createLocalServices(invoke);
