@@ -123,7 +123,7 @@ pub fn update_user(
     ensure_unique_username(state, &normalized.username, Some(user_id))?;
 
     let existing = user_hashes(state, user_id)?
-        .ok_or_else(|| AppError::not_found("Korisnik nije pronadjen."))?;
+        .ok_or_else(|| AppError::not_found("Korisnik nije pronađen."))?;
     let pin_hash = match normalized.pin.as_deref() {
         Some(pin) => Some(hash_credential(pin)?),
         None => existing.pin_hash,
@@ -166,7 +166,7 @@ pub fn update_user(
     )?;
 
     if changed == 0 {
-        return Err(AppError::not_found("Korisnik nije pronadjen."));
+        return Err(AppError::not_found("Korisnik nije pronađen."));
     }
 
     user_by_id(state, user_id)
@@ -181,7 +181,7 @@ pub fn deactivate_user(state: &AppState, user_id: i64) -> Result<(), AppError> {
     )?;
 
     if changed == 0 {
-        return Err(AppError::not_found("Korisnik nije pronadjen."));
+        return Err(AppError::not_found("Korisnik nije pronađen."));
     }
 
     Ok(())
@@ -198,7 +198,7 @@ fn user_by_id(state: &AppState, user_id: i64) -> Result<UserAccount, AppError> {
         user_account_from_row,
     )
     .optional()?
-    .ok_or_else(|| AppError::not_found("Korisnik nije pronadjen."))
+    .ok_or_else(|| AppError::not_found("Korisnik nije pronađen."))
 }
 
 fn ensure_unique_username(
@@ -215,7 +215,7 @@ fn ensure_unique_username(
 
     if duplicate_count > 0 {
         return Err(AppError::validation(
-            "Korisnicko ime vec postoji.",
+            "Korisničko ime već postoji.",
             serde_json::json!({ "field": "username" }),
         ));
     }
@@ -252,7 +252,7 @@ fn normalize_request(request: SaveUserRequest) -> Result<SaveUserRequest, AppErr
 
     if username.is_empty() {
         return Err(AppError::validation(
-            "Korisnicko ime je obavezno.",
+            "Korisničko ime je obavezno.",
             serde_json::json!({ "field": "username" }),
         ));
     }

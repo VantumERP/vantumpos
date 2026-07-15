@@ -156,7 +156,7 @@ export function createMockServices(): PosServices {
     const product = products.find((item) => item.id === productId);
 
     if (!product) {
-      throw { code: "not_found", message: "Artikal nije pronadjen." };
+      throw { code: "not_found", message: "Artikal nije pronađen." };
     }
 
     return product;
@@ -269,7 +269,7 @@ export function createMockServices(): PosServices {
         if (session?.user.role !== "admin") {
           throw {
             code: "forbidden",
-            message: "Samo administrator moze da izvrsi ovu akciju.",
+            message: "Samo administrator može da izvrši ovu akciju.",
           };
         }
 
@@ -283,7 +283,7 @@ export function createMockServices(): PosServices {
         if (session?.user.role !== "admin") {
           throw {
             code: "forbidden",
-            message: "Samo administrator moze da izvrsi ovu akciju.",
+            message: "Samo administrator može da izvrši ovu akciju.",
           };
         }
 
@@ -364,7 +364,7 @@ export function createMockServices(): PosServices {
         if (!user || request.credential !== "1234") {
           throw {
             code: "invalid_credentials",
-            message: "Korisnicko ime ili lozinka nisu ispravni.",
+            message: "Korisničko ime ili lozinka nisu ispravni.",
           };
         }
 
@@ -401,7 +401,7 @@ export function createMockServices(): PosServices {
         const current = users.find((user) => user.id === id);
 
         if (!current) {
-          throw { code: "not_found", message: "Korisnik nije pronadjen." };
+          throw { code: "not_found", message: "Korisnik nije pronađen." };
         }
 
         const updated = {
@@ -452,7 +452,7 @@ export function createMockServices(): PosServices {
       },
       async closeShift(request) {
         if (!session?.currentShift || session.currentShift.id !== request.shiftId) {
-          throw { code: "not_found", message: "Smena nije pronadjena." };
+          throw { code: "not_found", message: "Smena nije pronađena." };
         }
 
         const closed = {
@@ -1007,7 +1007,7 @@ function rejectDuplicateProduct(
       (product) => product.id !== currentProductId && product.sku === sku,
     )
   ) {
-    throw { code: "duplicate_sku", message: "SKU/sifra vec postoji." };
+    throw { code: "duplicate_sku", message: "SKU/šifra već postoji." };
   }
 
   if (
@@ -1017,7 +1017,7 @@ function rejectDuplicateProduct(
         product.id !== currentProductId && product.barcode === barcode,
     )
   ) {
-    throw { code: "duplicate_barcode", message: "Barcode vec postoji." };
+    throw { code: "duplicate_barcode", message: "Barcode već postoji." };
   }
 }
 
@@ -1025,7 +1025,7 @@ function findTaxRate(taxRates: TaxRateSummary[], taxRateId: number) {
   const taxRate = taxRates.find((item) => item.id === taxRateId && item.active);
 
   if (!taxRate) {
-    throw { code: "validation_error", message: "Izaberite vazecu PDV stopu." };
+    throw { code: "validation_error", message: "Izaberite važeću PDV stopu." };
   }
 
   return taxRate;
@@ -1060,7 +1060,7 @@ function createSalePreview(
     const product = products.find((candidate) => candidate.id === item.productId);
 
     if (!product) {
-      throw { code: "not_found", message: "Artikal nije pronadjen." };
+      throw { code: "not_found", message: "Artikal nije pronađen." };
     }
 
     const grossMinor = Math.round(

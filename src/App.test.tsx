@@ -106,7 +106,7 @@ describe("AppShell", () => {
 
     expect(await screen.findByRole("heading", { name: "Prijava u kasu" }))
       .toBeInTheDocument();
-    expect(screen.getByLabelText("Korisnicko ime")).toBeInTheDocument();
+    expect(screen.getByLabelText("Korisničko ime")).toBeInTheDocument();
     expect(screen.getByLabelText("PIN ili lozinka")).toBeInTheDocument();
     expect(screen.queryByText("Admin")).not.toBeInTheDocument();
   });
@@ -124,7 +124,7 @@ describe("AppShell", () => {
 
     render(<AppShell services={services} />);
 
-    await user.type(await screen.findByLabelText("Korisnicko ime"), "marko");
+    await user.type(await screen.findByLabelText("Korisničko ime"), "marko");
     await user.type(screen.getByLabelText("PIN ili lozinka"), "1234");
     await user.click(screen.getByRole("button", { name: "Prijavi se" }));
 
@@ -167,7 +167,7 @@ describe("AppShell", () => {
     expect(await screen.findByRole("button", { name: "Kasa" })).toBeInTheDocument();
     expect(screen.getByText("@marko")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Podesavanja" }),
+      screen.queryByRole("button", { name: "Podešavanja" }),
     ).not.toBeInTheDocument();
   });
 
@@ -183,7 +183,7 @@ describe("AppShell", () => {
     render(<AppShell services={services} />);
 
     expect(
-      await screen.findByRole("button", { name: "Podesavanja" }),
+      await screen.findByRole("button", { name: "Podešavanja" }),
     ).toBeInTheDocument();
   });
 
@@ -193,7 +193,7 @@ describe("AppShell", () => {
         getSession: vi.fn().mockResolvedValue(null),
         login: vi.fn().mockRejectedValue({
           code: "invalid_credentials",
-          message: "Korisnicko ime ili lozinka nisu ispravni.",
+          message: "Korisničko ime ili lozinka nisu ispravni.",
         }),
         logout: vi.fn().mockResolvedValue(undefined),
       },
@@ -202,12 +202,12 @@ describe("AppShell", () => {
 
     render(<AppShell services={services} />);
 
-    await user.type(await screen.findByLabelText("Korisnicko ime"), "marko");
+    await user.type(await screen.findByLabelText("Korisničko ime"), "marko");
     await user.type(screen.getByLabelText("PIN ili lozinka"), "pogresno");
     await user.click(screen.getByRole("button", { name: "Prijavi se" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Korisnicko ime ili lozinka nisu ispravni.",
+      "Korisničko ime ili lozinka nisu ispravni.",
     );
     expect(screen.queryByText(/Error:/i)).not.toBeInTheDocument();
   });
@@ -230,7 +230,7 @@ describe("AppShell", () => {
 
     render(<AppShell services={services} />);
 
-    await user.type(await screen.findByLabelText("Pocetni novac"), "abc");
+    await user.type(await screen.findByLabelText("Početni novac"), "abc");
     await user.click(screen.getByRole("button", { name: "Otvori smenu" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -323,11 +323,11 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Podesavanja" }));
+    await user.click(await screen.findByRole("button", { name: "Podešavanja" }));
 
     expect(await screen.findByRole("tab", { name: "Radnja" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "PDV" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Racuni" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Računi" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Korisnici" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Backup" })).toBeInTheDocument();
     expect(await screen.findByLabelText("Naziv radnje")).toBeInTheDocument();
@@ -338,8 +338,8 @@ describe("AppShell", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "PDV 20" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Racuni" }));
-    expect(screen.getByLabelText("Prefiks racuna")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Računi" }));
+    expect(screen.getByLabelText("Prefiks računa")).toBeInTheDocument();
 
     await user.click(await screen.findByRole("tab", { name: "Backup" }));
     expect(await screen.findByRole("heading", { name: "Status backupa" }))
@@ -350,13 +350,13 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Podesavanja" }));
+    await user.click(await screen.findByRole("button", { name: "Podešavanja" }));
     await user.clear(await screen.findByLabelText("Naziv radnje"));
     await user.type(screen.getByLabelText("Naziv radnje"), "Vantum Market");
     await user.type(screen.getByLabelText("PIB"), "123456789");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj radnju" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj radnju" }));
 
-    expect(await screen.findByText("Podesavanja radnje su sacuvana."))
+    expect(await screen.findByText("Podešavanja radnje su sačuvana."))
       .toBeInTheDocument();
   });
 
@@ -364,10 +364,10 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Podesavanja" }));
+    await user.click(await screen.findByRole("button", { name: "Podešavanja" }));
     await user.click(screen.getByRole("tab", { name: "PDV" }));
     await user.click(screen.getByRole("button", { name: "Nova PDV stopa" }));
-    await user.click(screen.getByRole("button", { name: "Sacuvaj PDV stopu" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj PDV stopu" }));
 
     expect(await screen.findByText("Naziv PDV stope je obavezan."))
       .toBeInTheDocument();
@@ -379,7 +379,7 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Podesavanja" }));
+    await user.click(await screen.findByRole("button", { name: "Podešavanja" }));
     await user.click(screen.getByRole("tab", { name: "Backup" }));
 
     expect(await screen.findByText("Backup nije napravljen")).toBeInTheDocument();
@@ -395,7 +395,7 @@ describe("AppShell", () => {
     await user.type(screen.getByLabelText("Potvrda"), "VRATI PODATKE");
     await user.click(screen.getByRole("button", { name: "Potvrdi restore" }));
 
-    expect(await screen.findByText("Restore je zavrsen.")).toBeInTheDocument();
+    expect(await screen.findByText("Restore je završen.")).toBeInTheDocument();
   });
 
   it("opens the Artikli module with product filters and product rows", async () => {
@@ -414,7 +414,7 @@ describe("AppShell", () => {
       screen.getByRole("button", { name: "Novi artikal" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("columnheader", { name: "SKU/sifra" }),
+      screen.getByRole("columnheader", { name: "SKU/šifra" }),
     ).toBeInTheDocument();
     expect(await screen.findByRole("cell", { name: "MLEKO-1L" }))
       .toBeInTheDocument();
@@ -428,10 +428,10 @@ describe("AppShell", () => {
 
     await user.click(await screen.findByRole("button", { name: "Artikli" }));
     await user.click(screen.getByRole("button", { name: "Novi artikal" }));
-    await user.click(screen.getByRole("button", { name: "Sacuvaj artikal" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
 
     expect(screen.getByText("Naziv je obavezan.")).toBeInTheDocument();
-    expect(screen.getByText("SKU/sifra je obavezna.")).toBeInTheDocument();
+    expect(screen.getByText("SKU/šifra je obavezna.")).toBeInTheDocument();
   });
 
   it("opens product entry on the barcode scanner field first", async () => {
@@ -454,7 +454,7 @@ describe("AppShell", () => {
     duplicateServices.catalog.createProduct = () =>
       Promise.reject({
         code: "duplicate_sku",
-        message: "SKU/sifra vec postoji.",
+        message: "SKU/šifra već postoji.",
       });
 
     render(<AppShell services={duplicateServices} />);
@@ -462,17 +462,17 @@ describe("AppShell", () => {
     await user.click(await screen.findByRole("button", { name: "Artikli" }));
     await user.click(screen.getByRole("button", { name: "Novi artikal" }));
     await user.type(screen.getByLabelText("Naziv"), "Mleko 1 l");
-    await user.type(screen.getByLabelText("SKU/sifra"), "MLEKO-1L");
+    await user.type(screen.getByLabelText("SKU/šifra"), "MLEKO-1L");
     await user.type(screen.getByLabelText("Prodajna cena sa PDV"), "159,99");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj artikal" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
 
     const skuField = screen
-      .getByLabelText("SKU/sifra")
+      .getByLabelText("SKU/šifra")
       .closest('[data-slot="field"]');
 
     expect(skuField).not.toBeNull();
     expect(
-      within(skuField as HTMLElement).getByText("SKU/sifra vec postoji."),
+      within(skuField as HTMLElement).getByText("SKU/šifra već postoji."),
     ).toBeInTheDocument();
   });
 
@@ -487,7 +487,7 @@ describe("AppShell", () => {
     await user.click(screen.getByRole("button", { name: "Novi artikal" }));
     await user.type(screen.getByLabelText("Barcode / SKU"), "4008400320328");
     await user.click(
-      screen.getByRole("button", { name: "Pronadji podatke po barcode-u" }),
+      screen.getByRole("button", { name: "Pronađi podatke po barcode-u" }),
     );
 
     expect(await screen.findByText("Predlog sa Open Food Facts"))
@@ -500,9 +500,9 @@ describe("AppShell", () => {
     expect(screen.getByLabelText("Jedinica mere")).toHaveValue("kom");
     expect(screen.getByText("Open Food Facts")).toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("SKU/sifra"), "KINDER-BUENO");
+    await user.type(screen.getByLabelText("SKU/šifra"), "KINDER-BUENO");
     await user.type(screen.getByLabelText("Prodajna cena sa PDV"), "129,99");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj artikal" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
 
     const row = await screen.findByRole("row", { name: /Kinder Bueno/i });
     expect(within(row).getByText("Open Food Facts")).toBeInTheDocument();
@@ -528,7 +528,7 @@ describe("AppShell", () => {
       .toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Primeni javne podatke" }));
-    await user.type(screen.getByLabelText("SKU/sifra"), "KINDER-FAST");
+    await user.type(screen.getByLabelText("SKU/šifra"), "KINDER-FAST");
     await user.type(screen.getByLabelText("Prodajna cena sa PDV"), "129,99");
     await user.keyboard("{Control>}{Enter}{/Control}");
 
@@ -549,7 +549,7 @@ describe("AppShell", () => {
 
     await user.type(screen.getByLabelText("Barcode / SKU red 1"), "4008400320328");
     await user.click(
-      screen.getByRole("button", { name: "Pronadji javne podatke za red 1" }),
+      screen.getByRole("button", { name: "Pronađi javne podatke za red 1" }),
     );
 
     expect(await screen.findByLabelText("Naziv red 1")).toHaveValue(
@@ -557,11 +557,11 @@ describe("AppShell", () => {
     );
     expect(screen.getByText("Open Food Facts")).toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("SKU/sifra red 1"), "KINDER-BULK");
+    await user.type(screen.getByLabelText("SKU/šifra red 1"), "KINDER-BULK");
     await user.type(screen.getByLabelText("Cena red 1"), "129,99");
     await user.type(screen.getByLabelText("Barcode / SKU red 2"), "8600000000011");
     await user.type(screen.getByLabelText("Naziv red 2"), "Hleb beli");
-    await user.type(screen.getByLabelText("SKU/sifra red 2"), "HLEB-BELI");
+    await user.type(screen.getByLabelText("SKU/šifra red 2"), "HLEB-BELI");
     await user.type(screen.getByLabelText("Cena red 2"), "89,99");
     await user.keyboard("{Control>}{Enter}{/Control}");
 
@@ -638,10 +638,10 @@ describe("AppShell", () => {
     await user.click(
       screen.getByRole("button", { name: "Prijem robe za Mleko 1 l" }),
     );
-    await user.clear(screen.getByLabelText("Kolicina"));
-    await user.type(screen.getByLabelText("Kolicina"), "2");
+    await user.clear(screen.getByLabelText("Količina"));
+    await user.type(screen.getByLabelText("Količina"), "2");
     await user.type(screen.getByLabelText("Razlog"), "Prijem robe");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj prijem" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj prijem" }));
 
     expect(await screen.findByRole("cell", { name: "5 kom" })).toBeInTheDocument();
 
@@ -669,10 +669,10 @@ describe("AppShell", () => {
     await user.click(
       await screen.findByRole("button", { name: "Otpis za Mleko 1 l" }),
     );
-    await user.clear(screen.getByLabelText("Kolicina"));
-    await user.type(screen.getByLabelText("Kolicina"), "99");
+    await user.clear(screen.getByLabelText("Količina"));
+    await user.type(screen.getByLabelText("Količina"), "99");
     await user.type(screen.getByLabelText("Razlog"), "Lom");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj otpis" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj otpis" }));
 
     expect(await screen.findByText("Nema dovoljno zaliha.")).toBeInTheDocument();
   });
@@ -681,24 +681,24 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Racuni" }));
+    await user.click(await screen.findByRole("button", { name: "Računi" }));
 
     expect(
-      await screen.findByRole("heading", { name: "Pretraga racuna" }),
+      await screen.findByRole("heading", { name: "Pretraga računa" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Od datuma")).toBeInTheDocument();
     expect(screen.getByLabelText("Do datuma")).toBeInTheDocument();
-    expect(screen.getByLabelText("Broj racuna")).toBeInTheDocument();
+    expect(screen.getByLabelText("Broj računa")).toBeInTheDocument();
     expect(screen.getByLabelText("Kasir")).toBeInTheDocument();
     expect(screen.getByLabelText("Smena")).toBeInTheDocument();
-    expect(screen.getByLabelText("Nacin placanja")).toBeInTheDocument();
+    expect(screen.getByLabelText("Način plaćanja")).toBeInTheDocument();
     expect(screen.getByLabelText("Artikal")).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "R-2026-0001" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Detalji za R-2026-0001" }));
 
     expect(
-      await screen.findByRole("heading", { name: "Racun R-2026-0001" }),
+      await screen.findByRole("heading", { name: "Račun R-2026-0001" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "Kafa 200 g" })).toBeInTheDocument();
     expect(screen.getAllByText("Gotovina").length).toBeGreaterThan(0);
@@ -709,9 +709,9 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Racuni" }));
+    await user.click(await screen.findByRole("button", { name: "Računi" }));
     await user.click(await screen.findByRole("button", { name: "Detalji za R-2026-0001" }));
-    await user.click(screen.getByRole("button", { name: "Storniraj racun" }));
+    await user.click(screen.getByRole("button", { name: "Storniraj račun" }));
     await user.click(screen.getByRole("button", { name: "Potvrdi storniranje" }));
 
     expect(await screen.findByText("Unesite razlog storniranja.")).toBeInTheDocument();
@@ -721,16 +721,16 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);
 
-    await user.click(await screen.findByRole("button", { name: "Racuni" }));
+    await user.click(await screen.findByRole("button", { name: "Računi" }));
     await user.click(await screen.findByRole("button", { name: "Detalji za R-2026-0001" }));
     await user.click(screen.getByRole("button", { name: "Povrat artikala" }));
-    await user.clear(screen.getByLabelText("Kolicina za Kafa 200 g"));
-    await user.type(screen.getByLabelText("Kolicina za Kafa 200 g"), "1");
+    await user.clear(screen.getByLabelText("Količina za Kafa 200 g"));
+    await user.type(screen.getByLabelText("Količina za Kafa 200 g"), "1");
     await user.type(screen.getByLabelText("Razlog povrata"), "Kupac vratio jedan komad");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj povrat" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj povrat" }));
 
     expect(await screen.findByText("POV-R-2026-0001-1")).toBeInTheDocument();
-    expect(screen.getByText("Vracao 1 kom")).toBeInTheDocument();
+    expect(screen.getByText("Vraćao 1 kom")).toBeInTheDocument();
   });
 
   it("validates imported product rows before enabling commit", async () => {
@@ -761,7 +761,7 @@ describe("AppShell", () => {
     expect(await screen.findByText("Red 2")).toBeInTheDocument();
     expect(screen.getByText("Cena nije ispravna.")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Upisi import" }),
+      screen.getByRole("button", { name: "Upiši import" }),
     ).toBeDisabled();
   });
 
@@ -782,10 +782,10 @@ describe("AppShell", () => {
 
     expect(await screen.findByText("Dry run: 1 za kreiranje")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Upisi import" }));
+    await user.click(screen.getByRole("button", { name: "Upiši import" }));
     await user.click(screen.getByRole("button", { name: "Potvrdi upis" }));
 
-    expect(await screen.findByText("Import zavrsen")).toBeInTheDocument();
+    expect(await screen.findByText("Import završen")).toBeInTheDocument();
     expect(screen.getAllByText("artikli.csv")[0]).toBeInTheDocument();
   });
 
@@ -841,7 +841,7 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     const services = createMockServices();
     services.inventory.getProductLedger = () =>
-      Promise.reject({ code: "not_found", message: "Artikal nije pronadjen." });
+      Promise.reject({ code: "not_found", message: "Artikal nije pronađen." });
 
     render(<AppShell services={services} />);
 
@@ -859,7 +859,7 @@ describe("AppShell", () => {
       }),
     ).toBeInTheDocument();
     expect(
-      await screen.findByText("Artikal nije pronadjen."),
+      await screen.findByText("Artikal nije pronađen."),
     ).toBeInTheDocument();
   });
 });
@@ -868,11 +868,11 @@ async function openImportModule(user: UserEvent) {
   await waitFor(() => {
     expect(
       screen.queryByRole("button", { name: "Import" }) ??
-        screen.queryByLabelText("Korisnicko ime"),
+        screen.queryByLabelText("Korisničko ime"),
     ).toBeTruthy();
   });
 
-  const username = screen.queryByLabelText("Korisnicko ime");
+  const username = screen.queryByLabelText("Korisničko ime");
 
   if (username) {
     await user.type(username, "admin");

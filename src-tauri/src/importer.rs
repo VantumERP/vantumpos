@@ -215,7 +215,7 @@ impl ImportError {
 
 impl From<rusqlite::Error> for ImportError {
     fn from(error: rusqlite::Error) -> Self {
-        Self::new("database_error", format!("Greska baze podataka: {error}"))
+        Self::new("database_error", format!("Greška baze podataka: {error}"))
     }
 }
 
@@ -225,7 +225,7 @@ impl From<AppError> for ImportError {
             AppError::Database(source) => source.into(),
             AppError::Io(source) => Self::new(
                 "file_system_error",
-                format!("Greska fajl sistema: {source}"),
+                format!("Greška fajl sistema: {source}"),
             ),
             AppError::Validation { message, details } => Self {
                 code: "validation_error",
@@ -252,14 +252,14 @@ impl From<serde_json::Error> for ImportError {
     fn from(error: serde_json::Error) -> Self {
         Self::new(
             "serialization_error",
-            format!("Greska pripreme podataka: {error}"),
+            format!("Greška pripreme podataka: {error}"),
         )
     }
 }
 
 impl From<time::error::Format> for ImportError {
     fn from(error: time::error::Format) -> Self {
-        Self::new("time_error", format!("Greska vremena: {error}"))
+        Self::new("time_error", format!("Greška vremena: {error}"))
     }
 }
 
@@ -371,7 +371,7 @@ pub fn commit_import(
     if validation.error_count > 0 {
         return Err(ImportError::with_details(
             "import_row_errors",
-            "Import ima greske. Ispravite oznacene redove pre upisa.",
+            "Import ima greške. Ispravite označene redove pre upisa.",
             serde_json::to_value(&validation)?,
         ));
     }
@@ -470,7 +470,7 @@ pub fn get_import_job(db: &Db, id: i64) -> Result<ImportJobDetail, ImportError> 
             import_job_summary_from_row,
         )
         .optional()?
-        .ok_or_else(|| ImportError::new("not_found", "Import posao nije pronadjen."))?;
+        .ok_or_else(|| ImportError::new("not_found", "Import posao nije pronađen."))?;
 
     let mut statement = connection.prepare(
         "SELECT row_number, raw_json, status, message
@@ -529,7 +529,7 @@ fn validate_product_rows(
         || (missing(mapping, "sku") && missing(mapping, "barcode"))
     {
         return Ok(vec![mapping_error(
-            "Mapirajte prodajnu cenu, PDV stopu i sifru ili barcode.",
+            "Mapirajte prodajnu cenu, PDV stopu i šifru ili barcode.",
         )]);
     }
 
@@ -553,10 +553,10 @@ fn validate_product_rows(
             message = "Naziv je obavezan.".to_string();
         } else if sku.is_empty() && barcode.is_empty() {
             status = ImportRowStatus::Error;
-            message = "Unesite sifru ili barcode.".to_string();
+            message = "Unesite šifru ili barcode.".to_string();
         } else if !sku.is_empty() && !seen_skus.insert(normalize_key(&sku)) {
             status = ImportRowStatus::Error;
-            message = "Duplikat sifre u fajlu.".to_string();
+            message = "Duplikat šifre u fajlu.".to_string();
         } else if !barcode.is_empty() && !seen_barcodes.insert(normalize_key(&barcode)) {
             status = ImportRowStatus::Error;
             message = "Duplikat barcode-a u fajlu.".to_string();
@@ -571,7 +571,7 @@ fn validate_product_rows(
             message = "Minimalna zaliha nije ispravna.".to_string();
         } else if parse_optional_quantity(lookup, row, mapping, "initial_stock", true).is_err() {
             status = ImportRowStatus::Error;
-            message = "Pocetna zaliha nije ispravna.".to_string();
+            message = "Početna zaliha nije ispravna.".to_string();
         } else if find_tax_rate_id(
             connection,
             &required_value(lookup, row, mapping, "vat_rate"),
@@ -579,14 +579,14 @@ fn validate_product_rows(
         .is_none()
         {
             status = ImportRowStatus::Error;
-            message = "PDV stopa nije pronadjena.".to_string();
+            message = "PDV stopa nije pronađena.".to_string();
         } else if let Some(existing_id) = find_existing_product(connection, &sku, &barcode)? {
             status = ImportRowStatus::Warning;
             action = ImportRowAction::Update;
-            message = format!("Postojeci artikal #{existing_id} bice azuriran.");
+            message = format!("Postojeći artikal #{existing_id} biće ažuriran.");
         } else if product_name_exists(connection, &name)? {
             status = ImportRowStatus::Warning;
-            message = "Naziv vec postoji; proverite da nije duplikat.".to_string();
+            message = "Naziv već postoji; proverite da nije duplikat.".to_string();
         }
 
         rows.push(ImportRowResult {
@@ -629,7 +629,7 @@ fn validate_category_rows(
         } else if category_id_by_name(connection, &name)?.is_some() {
             status = ImportRowStatus::Warning;
             action = ImportRowAction::Update;
-            message = "Postojeca kategorija bice azurirana.".to_string();
+            message = "Postojeća kategorija biće ažurirana.".to_string();
         }
 
         rows.push(ImportRowResult {
@@ -652,7 +652,7 @@ fn validate_initial_stock_rows(
 ) -> Result<Vec<ImportRowResult>, ImportError> {
     if missing(mapping, "quantity") || (missing(mapping, "sku") && missing(mapping, "barcode")) {
         return Ok(vec![mapping_error(
-            "Mapirajte kolicinu i sifru ili barcode artikla.",
+            "Mapirajte količinu i šifru ili barcode artikla.",
         )]);
     }
 
@@ -668,13 +668,13 @@ fn validate_initial_stock_rows(
 
         if sku.is_empty() && barcode.is_empty() {
             status = ImportRowStatus::Error;
-            message = "Unesite sifru ili barcode.".to_string();
+            message = "Unesite šifru ili barcode.".to_string();
         } else if parse_quantity_milli(&quantity, false).is_err() {
             status = ImportRowStatus::Error;
-            message = "Kolicina nije ispravna.".to_string();
+            message = "Količina nije ispravna.".to_string();
         } else if find_existing_product(connection, &sku, &barcode)?.is_none() {
             status = ImportRowStatus::Error;
-            message = "Artikal nije pronadjen.".to_string();
+            message = "Artikal nije pronađen.".to_string();
         }
 
         rows.push(ImportRowResult {
@@ -715,7 +715,7 @@ fn commit_product_rows(
         let purchase_price =
             parse_optional_money(lookup, row, mapping, "purchase_price")?.unwrap_or(0);
         let tax_rate_id = find_tax_rate_id(tx, &required_value(lookup, row, mapping, "vat_rate"))?
-            .ok_or_else(|| ImportError::new("validation_error", "PDV stopa nije pronadjena."))?;
+            .ok_or_else(|| ImportError::new("validation_error", "PDV stopa nije pronađena."))?;
         let minimum_stock =
             parse_optional_quantity(lookup, row, mapping, "minimum_stock", true)?.unwrap_or(0);
         let unit = optional_value(lookup, row, mapping, "unit_of_measure");
@@ -792,7 +792,7 @@ fn commit_product_rows(
             parse_optional_quantity(lookup, row, mapping, "initial_stock", true)?
         {
             if initial_stock > 0 {
-                apply_stock_delta(tx, product_id, initial_stock, "Pocetno stanje iz importa")?;
+                apply_stock_delta(tx, product_id, initial_stock, "Početno stanje iz importa")?;
             }
         }
 
@@ -849,8 +849,8 @@ fn commit_initial_stock_rows(
             parse_quantity_milli(&required_value(lookup, row, mapping, "quantity"), false)?;
         let product_id = find_existing_product(tx, &sku, &barcode)
             .map_err(ImportError::from)?
-            .ok_or_else(|| ImportError::new("validation_error", "Artikal nije pronadjen."))?;
-        apply_stock_delta(tx, product_id, quantity, "Pocetno stanje iz importa")?;
+            .ok_or_else(|| ImportError::new("validation_error", "Artikal nije pronađen."))?;
+        apply_stock_delta(tx, product_id, quantity, "Početno stanje iz importa")?;
         insert_job_row(tx, job_id, &parsed.headers, row, &validated_rows[index])?;
     }
 
@@ -1159,7 +1159,7 @@ fn parse_quantity_milli(input: &str, allow_zero: bool) -> Result<i64, ImportErro
     if compact.is_empty() {
         return Err(ImportError::new(
             "validation_error",
-            "Kolicina nije ispravna.",
+            "Količina nije ispravna.",
         ));
     }
 
@@ -1169,7 +1169,7 @@ fn parse_quantity_milli(input: &str, allow_zero: bool) -> Result<i64, ImportErro
     if quantity < 0 || (!allow_zero && quantity == 0) {
         return Err(ImportError::new(
             "validation_error",
-            "Kolicina nije ispravna.",
+            "Količina nije ispravna.",
         ));
     }
 
@@ -1520,7 +1520,7 @@ mod tests {
                 assert_eq!(result.error_count, 1);
                 assert_eq!(
                     result.rows[0].message,
-                    "Mapirajte prodajnu cenu, PDV stopu i sifru ili barcode."
+                    "Mapirajte prodajnu cenu, PDV stopu i šifru ili barcode."
                 );
             },
         );
@@ -1716,7 +1716,7 @@ mod tests {
             assert_eq!(result.error_count, 1);
             assert_eq!(result.rows[0].row_number, 2);
             assert_eq!(result.rows[0].status, ImportRowStatus::Error);
-            assert_eq!(result.rows[0].message, "PDV stopa nije pronadjena.");
+            assert_eq!(result.rows[0].message, "PDV stopa nije pronađena.");
         });
     }
 
@@ -1761,7 +1761,7 @@ mod tests {
                 assert_eq!(result.error_count, 1);
                 assert_eq!(
                     result.rows[0].message,
-                    "Mapirajte kolicinu i sifru ili barcode artikla."
+                    "Mapirajte količinu i šifru ili barcode artikla."
                 );
             },
         );

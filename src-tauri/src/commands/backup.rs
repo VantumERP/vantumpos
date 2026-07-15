@@ -221,7 +221,7 @@ pub fn restore_backup(
 
     let source_path = PathBuf::from(request.path.trim());
     if !source_path.is_file() {
-        return Err(AppError::not_found("Backup fajl nije pronadjen."));
+        return Err(AppError::not_found("Backup fajl nije pronađen."));
     }
 
     let _pre_restore = create_backup(

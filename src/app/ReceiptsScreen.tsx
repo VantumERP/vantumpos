@@ -95,7 +95,7 @@ const emptyFilters: ReceiptFilters = {
 };
 
 const statusLabels = {
-  completed: "Zavrsen",
+  completed: "Završen",
   voided: "Storniran",
   refunded: "Refundiran",
 };
@@ -109,13 +109,13 @@ const documentLabels = {
 const fiscalLabels = {
   not_fiscalized: "Nije fiskalizovan",
   fiscalized: "Fiskalizovan",
-  failed: "Fiskalizacija neuspesna",
+  failed: "Fiskalizacija neuspešna",
 };
 
 const fiscalSummaryLabels = {
   not_fiscalized: "Bez fiskalizacije",
   fiscalized: "Fiskalizovan",
-  failed: "Fiskalna greska",
+  failed: "Fiskalna greška",
 };
 
 const paymentLabels = {
@@ -156,7 +156,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
       setListStatus("ready");
     } catch (error) {
       const commandError = error as CommandErrorShape;
-      setListError(commandError.message ?? "Ucitavanje racuna nije uspelo.");
+      setListError(commandError.message ?? "Učitavanje računa nije uspelo.");
       setListStatus("error");
     }
   }
@@ -178,7 +178,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
       .catch((error) => {
         if (!cancelled) {
           const commandError = error as CommandErrorShape;
-          setListError(commandError.message ?? "Ucitavanje racuna nije uspelo.");
+          setListError(commandError.message ?? "Učitavanje računa nije uspelo.");
           setListStatus("error");
         }
       });
@@ -195,7 +195,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
       setSelected(await receipts.getReceipt(id));
     } catch (error) {
       const commandError = error as CommandErrorShape;
-      setDetailError(commandError.message ?? "Ucitavanje detalja nije uspelo.");
+      setDetailError(commandError.message ?? "Učitavanje detalja nije uspelo.");
     }
   }
 
@@ -274,7 +274,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
         .filter((item) => item.quantityMilli > 0);
 
       if (items.length === 0) {
-        setReturnError("Unesite kolicinu za bar jedan artikal.");
+        setReturnError("Unesite količinu za bar jedan artikal.");
         return;
       }
 
@@ -300,7 +300,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
       setReturnOpen(false);
     } catch (error) {
       const commandError = error as CommandErrorShape;
-      setReturnError(commandError.message ?? "Povrat nije sacuvan.");
+      setReturnError(commandError.message ?? "Povrat nije sačuvan.");
     }
   }
 
@@ -308,7 +308,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
     <div className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(28rem,0.9fr)]">
       <section className="flex min-w-0 flex-col gap-4">
         <div className="flex flex-col gap-2">
-          <h2 className="text-base font-semibold">Pretraga racuna</h2>
+          <h2 className="text-base font-semibold">Pretraga računa</h2>
           <FieldGroup className="grid gap-3 md:grid-cols-4">
             <Field>
               <FieldLabel htmlFor="receipt-date-from">Od datuma</FieldLabel>
@@ -339,7 +339,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
               />
             </Field>
             <Field>
-              <FieldLabel htmlFor="receipt-number">Broj racuna</FieldLabel>
+              <FieldLabel htmlFor="receipt-number">Broj računa</FieldLabel>
               <InputGroup>
                 <InputGroupInput
                   id="receipt-number"
@@ -385,7 +385,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
             </Field>
             <Field>
               <FieldLabel htmlFor="receipt-payment-method">
-                Nacin placanja
+                Način plaćanja
               </FieldLabel>
               <NativeSelect
                 id="receipt-payment-method"
@@ -399,7 +399,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
               >
                 <NativeSelectOption value="">Svi</NativeSelectOption>
                 <NativeSelectOption value="cash">
-                  Gotovinsko placanje
+                  Gotovinsko plaćanje
                 </NativeSelectOption>
                 <NativeSelectOption value="card">Kartica</NativeSelectOption>
               </NativeSelect>
@@ -420,7 +420,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
             <Field className="justify-end">
               <Button type="button" onClick={submitSearch}>
                 <SearchIcon data-icon="inline-start" />
-                Pretrazi
+                Pretraži
               </Button>
             </Field>
           </FieldGroup>
@@ -429,11 +429,11 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
         {listStatus === "loading" ? (
           <div className="flex items-center gap-2 rounded-md border border-border p-4 text-sm text-muted-foreground">
             <Spinner aria-hidden="true" />
-            Ucitavanje racuna...
+            Učitavanje računa...
           </div>
         ) : listStatus === "error" ? (
           <Alert variant="destructive">
-            <AlertTitle>Racuni nisu ucitani</AlertTitle>
+            <AlertTitle>Računi nisu učitani</AlertTitle>
             <AlertDescription>{listError}</AlertDescription>
           </Alert>
         ) : rows.length === 0 ? (
@@ -442,7 +442,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
               <EmptyMedia variant="icon">
                 <FileTextIcon aria-hidden="true" />
               </EmptyMedia>
-              <EmptyTitle>Nema racuna za izabrane filtere</EmptyTitle>
+              <EmptyTitle>Nema računa za izabrane filtere</EmptyTitle>
               <EmptyDescription>
                 Promenite filtere ili napravite novu prodaju.
               </EmptyDescription>
@@ -457,7 +457,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
                 <TableHead>Kasir</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Fiskalno</TableHead>
-                <TableHead>Placanje</TableHead>
+                <TableHead>Plaćanje</TableHead>
                 <TableHead>Ukupno</TableHead>
                 <TableHead>Akcije</TableHead>
               </TableRow>
@@ -501,7 +501,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
       <section className="flex min-w-0 flex-col gap-4">
         {detailError ? (
           <Alert variant="destructive">
-            <AlertTitle>Detalji nisu ucitani</AlertTitle>
+            <AlertTitle>Detalji nisu učitani</AlertTitle>
             <AlertDescription>{detailError}</AlertDescription>
           </Alert>
         ) : null}
@@ -517,7 +517,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
           />
         ) : (
           <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">
-            Izaberite racun za detalje.
+            Izaberite račun za detalje.
           </div>
         )}
       </section>
@@ -525,9 +525,9 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
       <AlertDialog open={voidOpen} onOpenChange={setVoidOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Storniranje racuna</AlertDialogTitle>
+            <AlertDialogTitle>Storniranje računa</AlertDialogTitle>
             <AlertDialogDescription>
-              Storno pravi novi povezani dokument i vraca robu na lager.
+              Storno pravi novi povezani dokument i vraća robu na lager.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <Field data-invalid={Boolean(voidError)}>
@@ -560,7 +560,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
               {(selected?.items ?? []).map((item) => (
                 <Field key={item.id}>
                   <FieldLabel htmlFor={`return-item-${item.id}`}>
-                    Kolicina za {item.productName}
+                    Količina za {item.productName}
                   </FieldLabel>
                   <Input
                     id={`return-item-${item.id}`}
@@ -576,10 +576,10 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
                 </Field>
               ))}
               <Field>
-                <FieldLabel htmlFor="return-tender">Nacin povrata</FieldLabel>
+                <FieldLabel htmlFor="return-tender">Način povrata</FieldLabel>
                 <NativeSelect
                   id="return-tender"
-                  aria-label="Nacin povrata"
+                  aria-label="Način povrata"
                   value={refundTender}
                   onChange={(event) =>
                     setRefundTender(event.target.value as "cash" | "card")
@@ -603,7 +603,7 @@ export function ReceiptsScreen({ receipts, userId }: ReceiptsScreenProps) {
           </div>
           <SheetFooter>
             <Button type="button" onClick={submitReturn}>
-              Sacuvaj povrat
+              Sačuvaj povrat
             </Button>
           </SheetFooter>
         </SheetContent>
@@ -623,7 +623,7 @@ function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProp
     <div className="flex flex-col gap-4 rounded-md border border-border p-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
-          <h2 className="text-base font-semibold">Racun {detail.receiptNumber}</h2>
+          <h2 className="text-base font-semibold">Račun {detail.receiptNumber}</h2>
           <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
             <span>{formatDateTime(detail.createdAt)}</span>
             <span>{detail.cashierName}</span>
@@ -640,7 +640,7 @@ function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProp
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="destructive" disabled={!detail.canVoid} onClick={onVoid}>
           <Undo2Icon data-icon="inline-start" />
-          Storniraj racun
+          Storniraj račun
         </Button>
         <Button type="button" variant="outline" disabled={!detail.canReturn} onClick={onReturn}>
           <RotateCcwIcon data-icon="inline-start" />
@@ -655,8 +655,8 @@ function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProp
           <TableRow>
             <TableHead>Artikal</TableHead>
             <TableHead>SKU</TableHead>
-            <TableHead>Kolicina</TableHead>
-            <TableHead>Vracao</TableHead>
+            <TableHead>Količina</TableHead>
+            <TableHead>Vraćao</TableHead>
             <TableHead>Cena</TableHead>
             <TableHead>PDV</TableHead>
             <TableHead>Ukupno</TableHead>
@@ -670,7 +670,7 @@ function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProp
               <TableCell>{formatQuantity(item.quantityMilli)}</TableCell>
               <TableCell>
                 {item.returnedQuantityMilli > 0
-                  ? `Vracao ${formatQuantity(item.returnedQuantityMilli)}`
+                  ? `Vraćao ${formatQuantity(item.returnedQuantityMilli)}`
                   : "-"}
               </TableCell>
               <TableCell>{formatRsd(item.unitPriceMinor)}</TableCell>
@@ -683,11 +683,11 @@ function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProp
 
       <div className="grid gap-4 md:grid-cols-2">
         <div className="flex flex-col gap-2">
-          <h3 className="text-sm font-medium">Placanja</h3>
+          <h3 className="text-sm font-medium">Plaćanja</h3>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Nacin</TableHead>
+                <TableHead>Način</TableHead>
                 <TableHead>Iznos</TableHead>
               </TableRow>
             </TableHeader>

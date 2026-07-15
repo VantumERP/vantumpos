@@ -161,7 +161,7 @@ async function addProductToCart(user: ReturnType<typeof userEvent.setup>) {
 
   await user.type(
     screen.getByRole("searchbox", {
-      name: "Skeniraj barkod ili pretrazi artikal",
+      name: "Skeniraj barkod ili pretraži artikal",
     }),
     "8600000000010{enter}",
   );
@@ -183,8 +183,8 @@ describe("RegisterScreen", () => {
     const user = userEvent.setup();
 
     await addProductToCart(user);
-    await user.clear(screen.getByLabelText("Kolicina za Mleko 1 l"));
-    await user.type(screen.getByLabelText("Kolicina za Mleko 1 l"), "2");
+    await user.clear(screen.getByLabelText("Količina za Mleko 1 l"));
+    await user.type(screen.getByLabelText("Količina za Mleko 1 l"), "2");
     await user.clear(screen.getByLabelText("Popust za Mleko 1 l"));
     await user.type(screen.getByLabelText("Popust za Mleko 1 l"), "10");
 
@@ -233,12 +233,12 @@ describe("RegisterScreen", () => {
     await waitFor(() => expect(cashField).toHaveValue("159.99"));
     await user.clear(cashField);
     await user.type(cashField, "160");
-    await user.click(screen.getByRole("button", { name: "Zavrsi prodaju" }));
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
 
     const dialog = await screen.findByRole("dialog", {
-      name: "Racun VP-000001",
+      name: "Račun VP-000001",
     });
-    expect(within(dialog).getByText("Lokalni racun")).toBeInTheDocument();
+    expect(within(dialog).getByText("Lokalni račun")).toBeInTheDocument();
     expect(screen.queryByText(/fiskal/i)).not.toBeInTheDocument();
   });
 
@@ -246,21 +246,21 @@ describe("RegisterScreen", () => {
     const user = userEvent.setup();
     const completeSale = vi.fn().mockRejectedValue({
       code: "payment_mismatch",
-      message: "Placanja se ne poklapaju.",
+      message: "Plaćanja se ne poklapaju.",
     });
 
     render(<RegisterScreen services={createRegisterServices(completeSale)} />);
     await user.type(
       screen.getByRole("searchbox", {
-        name: "Skeniraj barkod ili pretrazi artikal",
+        name: "Skeniraj barkod ili pretraži artikal",
       }),
       "Mleko{enter}",
     );
     await user.clear(screen.getByLabelText("Gotovina primljeno"));
     await user.type(screen.getByLabelText("Gotovina primljeno"), "160");
-    await user.click(screen.getByRole("button", { name: "Zavrsi prodaju" }));
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
 
-    expect(await screen.findByText("Placanja se ne poklapaju.")).toBeInTheDocument();
+    expect(await screen.findByText("Plaćanja se ne poklapaju.")).toBeInTheDocument();
     expect(screen.getByText("Mleko 1 l")).toBeInTheDocument();
   });
 
@@ -275,14 +275,14 @@ describe("RegisterScreen", () => {
     render(<RegisterScreen services={createRegisterServices(completeSale)} />);
     await user.type(
       screen.getByRole("searchbox", {
-        name: "Skeniraj barkod ili pretrazi artikal",
+        name: "Skeniraj barkod ili pretraži artikal",
       }),
       "8600000000010{enter}",
     );
     expect(await screen.findByText("Mleko 1 l")).toBeInTheDocument();
     const cashField = screen.getByLabelText("Gotovina primljeno");
     await waitFor(() => expect(cashField).toHaveValue("159.99"));
-    await user.click(screen.getByRole("button", { name: "Zavrsi prodaju" }));
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
 
     await user.click(await screen.findByRole("button", { name: "Ipak prodaj" }));
 
@@ -298,19 +298,19 @@ describe("RegisterScreen", () => {
     const services = createRegisterServices();
     services.sales.createSalePreview = vi.fn().mockRejectedValue({
       code: "validation_error",
-      message: "Popust ne moze biti veci od iznosa.",
+      message: "Popust ne može biti veći od iznosa.",
     });
 
     render(<RegisterScreen services={services} />);
     await user.type(
       screen.getByRole("searchbox", {
-        name: "Skeniraj barkod ili pretrazi artikal",
+        name: "Skeniraj barkod ili pretraži artikal",
       }),
       "Mleko{enter}",
     );
 
     expect(
-      await screen.findByText("Popust ne moze biti veci od iznosa."),
+      await screen.findByText("Popust ne može biti veći od iznosa."),
     ).toBeInTheDocument();
     expect(screen.getByText("Mleko 1 l")).toBeInTheDocument();
   });
@@ -321,7 +321,7 @@ describe("RegisterScreen", () => {
     await addProductToCart(user);
 
     expect(
-      screen.queryByText("Pregled racuna nije moguc"),
+      screen.queryByText("Pregled računa nije moguć"),
     ).not.toBeInTheDocument();
   });
 
@@ -379,6 +379,6 @@ describe("RegisterScreen", () => {
     const box = screen.getByRole("searchbox");
     await user.type(box, "nepostojece{enter}");
 
-    expect(await screen.findByText("Artikal nije pronadjen.")).toBeInTheDocument();
+    expect(await screen.findByText("Artikal nije pronađen.")).toBeInTheDocument();
   });
 });

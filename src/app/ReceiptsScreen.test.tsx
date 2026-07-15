@@ -22,7 +22,7 @@ describe("ReceiptsScreen", () => {
     await user.click(
       await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),
     );
-    await user.click(await screen.findByRole("button", { name: "Storniraj racun" }));
+    await user.click(await screen.findByRole("button", { name: "Storniraj račun" }));
     await user.type(screen.getByLabelText("Razlog"), "Greska kasira");
     await user.click(screen.getByRole("button", { name: "Potvrdi storniranje" }));
 
@@ -47,11 +47,11 @@ describe("ReceiptsScreen", () => {
     );
     await user.click(await screen.findByRole("button", { name: "Povrat artikala" }));
 
-    const quantity = await screen.findByLabelText("Kolicina za Kafa 200 g");
+    const quantity = await screen.findByLabelText("Količina za Kafa 200 g");
     await user.clear(quantity);
     await user.type(quantity, "1");
     await user.type(screen.getByLabelText("Razlog povrata"), "Ostecen artikal");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj povrat" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj povrat" }));
 
     await waitFor(() =>
       expect(returnItems).toHaveBeenCalledWith(
@@ -76,13 +76,13 @@ describe("ReceiptsScreen", () => {
     );
     await user.click(await screen.findByRole("button", { name: "Povrat artikala" }));
 
-    expect(await screen.findByLabelText("Nacin povrata")).toHaveValue("cash");
+    expect(await screen.findByLabelText("Način povrata")).toHaveValue("cash");
 
-    const quantity = await screen.findByLabelText("Kolicina za Kafa 200 g");
+    const quantity = await screen.findByLabelText("Količina za Kafa 200 g");
     await user.clear(quantity);
     await user.type(quantity, "1");
     await user.type(screen.getByLabelText("Razlog povrata"), "Ostecen artikal");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj povrat" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj povrat" }));
 
     await waitFor(() =>
       expect(returnItems).toHaveBeenCalledWith(
@@ -103,10 +103,10 @@ describe("ReceiptsScreen", () => {
     );
     await user.click(await screen.findByRole("button", { name: "Povrat artikala" }));
     await user.type(screen.getByLabelText("Razlog povrata"), "Ostecen artikal");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj povrat" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj povrat" }));
 
     expect(
-      await screen.findByText("Unesite kolicinu za bar jedan artikal."),
+      await screen.findByText("Unesite količinu za bar jedan artikal."),
     ).toBeInTheDocument();
     expect(returnItems).not.toHaveBeenCalled();
   });
@@ -189,7 +189,7 @@ describe("ReceiptsScreen states", () => {
       />,
     );
 
-    expect(await screen.findByText("Ucitavanje racuna...")).toBeInTheDocument();
+    expect(await screen.findByText("Učitavanje računa...")).toBeInTheDocument();
 
     pending.resolve({ receipts: [summary], total: 1 });
     expect(await screen.findByText("R-2026-0001")).toBeInTheDocument();
@@ -206,7 +206,7 @@ describe("ReceiptsScreen states", () => {
     );
 
     expect(
-      await screen.findByText("Nema racuna za izabrane filtere"),
+      await screen.findByText("Nema računa za izabrane filtere"),
     ).toBeInTheDocument();
   });
 

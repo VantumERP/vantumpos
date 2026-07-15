@@ -332,7 +332,7 @@ pub fn create_product(db: &Db, request: SaveProductRequest) -> Result<ProductSum
     )?;
     let product_id = tx.last_insert_rowid();
     let product = product_by_id_for_connection(&tx, product_id)?
-        .ok_or_else(|| AppError::not_found("Artikal nije pronadjen."))?;
+        .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     tx.commit()?;
     Ok(product)
@@ -419,7 +419,7 @@ pub fn update_product(
     )?;
 
     let product = product_by_id_for_connection(&tx, id)?
-        .ok_or_else(|| AppError::not_found("Artikal nije pronadjen."))?;
+        .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     tx.commit()?;
     Ok(product)
@@ -441,11 +441,11 @@ pub fn set_product_active(db: &Db, id: i64, active: bool) -> Result<ProductSumma
     )?;
 
     if changed == 0 {
-        return Err(AppError::not_found("Artikal nije pronadjen."));
+        return Err(AppError::not_found("Artikal nije pronađen."));
     }
 
     let product = product_by_id_for_connection(&tx, id)?
-        .ok_or_else(|| AppError::not_found("Artikal nije pronadjen."))?;
+        .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     tx.commit()?;
     Ok(product)
@@ -479,7 +479,7 @@ pub fn save_category(db: &Db, request: SaveCategoryRequest) -> Result<CategorySu
         )?;
 
         if changed == 0 {
-            return Err(AppError::not_found("Kategorija nije pronadjena."));
+            return Err(AppError::not_found("Kategorija nije pronađena."));
         }
 
         id
@@ -493,7 +493,7 @@ pub fn save_category(db: &Db, request: SaveCategoryRequest) -> Result<CategorySu
     };
 
     let category = category_by_id_for_connection(&tx, category_id)?
-        .ok_or_else(|| AppError::not_found("Kategorija nije pronadjena."))?;
+        .ok_or_else(|| AppError::not_found("Kategorija nije pronađena."))?;
 
     tx.commit()?;
     Ok(category)
@@ -518,7 +518,7 @@ pub fn lookup_product_by_barcode(
     match response {
         Ok(response) => {
             let body = response.into_string().map_err(|source| {
-                AppError::InvalidState(format!("Odgovor izvora nije citljiv: {source}"))
+                AppError::InvalidState(format!("Odgovor izvora nije čitljiv: {source}"))
             })?;
 
             lookup_suggestion_from_open_food_facts_json(&barcode, &body, &fetched_at)
@@ -754,7 +754,7 @@ fn ensure_product_exists(connection: &Connection, id: i64) -> Result<(), AppErro
         .optional()?;
 
     if exists.is_none() {
-        return Err(AppError::not_found("Artikal nije pronadjen."));
+        return Err(AppError::not_found("Artikal nije pronađen."));
     }
 
     Ok(())
@@ -777,10 +777,7 @@ fn ensure_category_exists(
         .optional()?;
 
     if exists.is_none() {
-        return Err(validation_error(
-            "Kategorija nije pronadjena.",
-            "categoryId",
-        ));
+        return Err(validation_error("Kategorija nije pronađena.", "categoryId"));
     }
 
     Ok(())
@@ -799,7 +796,7 @@ fn ensure_active_tax_rate_exists(
         .optional()?;
 
     if exists.is_none() {
-        return Err(validation_error("Izaberite vazecu PDV stopu.", "taxRateId"));
+        return Err(validation_error("Izaberite važeću PDV stopu.", "taxRateId"));
     }
 
     Ok(())
@@ -826,7 +823,7 @@ fn ensure_unique_product(
     if duplicate_sku.is_some() {
         return Err(AppError::business(
             "duplicate_sku",
-            "SKU/sifra vec postoji.",
+            "SKU/šifra već postoji.",
         ));
     }
 
@@ -846,7 +843,7 @@ fn ensure_unique_product(
         if duplicate_barcode.is_some() {
             return Err(AppError::business(
                 "duplicate_barcode",
-                "Barcode vec postoji.",
+                "Barcode već postoji.",
             ));
         }
     }
@@ -874,7 +871,7 @@ fn ensure_unique_category(
     if duplicate.is_some() {
         return Err(AppError::business(
             "duplicate_category",
-            "Kategorija vec postoji.",
+            "Kategorija već postoji.",
         ));
     }
 
@@ -895,7 +892,7 @@ fn normalize_product_request(
     }
 
     if sku.is_empty() {
-        return Err(validation_error("SKU/sifra je obavezna.", "sku"));
+        return Err(validation_error("SKU/šifra je obavezna.", "sku"));
     }
 
     if unit_of_measure.is_empty() {
@@ -911,14 +908,14 @@ fn normalize_product_request(
 
     if request.sale_price_minor < 0 {
         return Err(validation_error(
-            "Prodajna cena ne moze biti negativna.",
+            "Prodajna cena ne može biti negativna.",
             "salePriceMinor",
         ));
     }
 
     if request.purchase_price_minor < 0 {
         return Err(validation_error(
-            "Nabavna cena ne moze biti negativna.",
+            "Nabavna cena ne može biti negativna.",
             "purchasePriceMinor",
         ));
     }
@@ -929,7 +926,7 @@ fn normalize_product_request(
 
     if request.minimum_stock_milli < 0 {
         return Err(validation_error(
-            "Minimalni lager ne moze biti negativan.",
+            "Minimalni lager ne može biti negativan.",
             "minimumStockMilli",
         ));
     }
@@ -1065,7 +1062,7 @@ fn external_source_accepted_fields_json(
     source
         .map(|source| {
             serde_json::to_string(&source.accepted_fields).map_err(|error| {
-                AppError::InvalidState(format!("Izvor javnih podataka nije sacuvan: {error}"))
+                AppError::InvalidState(format!("Izvor javnih podataka nije sačuvan: {error}"))
             })
         })
         .transpose()
@@ -1080,7 +1077,7 @@ fn normalize_lookup_barcode(barcode: &str) -> Result<String, AppError> {
 
     if !barcode.chars().all(|character| character.is_ascii_digit()) {
         return Err(validation_error(
-            "Barcode moze da sadrzi samo cifre.",
+            "Barcode može da sadrži samo cifre.",
             "barcode",
         ));
     }

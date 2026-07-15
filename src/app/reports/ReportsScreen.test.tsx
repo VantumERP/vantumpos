@@ -397,7 +397,7 @@ describe("ReportsScreen", () => {
     const reports = renderReports(buildReportsService(), cashierUser);
 
     expect(
-      screen.getByText("Samo administrator moze da vidi izvestaje."),
+      screen.getByText("Samo administrator može da vidi izveštaje."),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Dnevni promet" }),
@@ -415,7 +415,7 @@ describe("ReportsScreen", () => {
     await user.click(screen.getByRole("button", { name: "Primeni filtere" }));
 
     expect(
-      screen.getByText("Pocetni datum ne sme biti posle krajnjeg datuma."),
+      screen.getByText("Početni datum ne sme biti posle krajnjeg datuma."),
     ).toBeInTheDocument();
     expect(reports.getDailyTurnover).toHaveBeenCalledTimes(1);
   });

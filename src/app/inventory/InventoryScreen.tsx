@@ -258,7 +258,7 @@ export function InventoryScreen({
 
       {error ? (
         <Alert variant="destructive">
-          <AlertTitle>Lager nije ucitan</AlertTitle>
+          <AlertTitle>Lager nije učitan</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
@@ -312,7 +312,7 @@ export function InventoryScreen({
             {ledgerLoading ? (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Spinner />
-                Ucitavanje kartice
+                Učitavanje kartice
               </div>
             ) : ledger ? (
               <ProductLedgerView ledger={ledger} />
@@ -526,7 +526,7 @@ function InventoryAdjustmentDialog({
             <FieldGroup>
               <Field>
                 <FieldLabel htmlFor="inventory-adjustment-quantity">
-                  Kolicina
+                  Količina
                 </FieldLabel>
                 <Input
                   id="inventory-adjustment-quantity"
@@ -536,7 +536,7 @@ function InventoryAdjustmentDialog({
                   aria-invalid={error ? true : undefined}
                 />
                 <FieldDescription>
-                  Unesite kolicinu u osnovnoj jedinici artikla.
+                  Unesite količinu u osnovnoj jedinici artikla.
                 </FieldDescription>
               </Field>
               <Field>
@@ -635,21 +635,21 @@ function adjustmentCopy(mode: AdjustmentMode) {
     case "receive":
       return {
         title: "Prijem robe",
-        submit: "Sacuvaj prijem",
+        submit: "Sačuvaj prijem",
         success: "Prijem robe je upisan.",
         icon: <PackagePlusIcon data-icon="inline-start" />,
       };
     case "correction":
       return {
         title: "Korekcija lagera",
-        submit: "Sacuvaj korekciju",
+        submit: "Sačuvaj korekciju",
         success: "Korekcija je upisana.",
         icon: <PencilIcon data-icon="inline-start" />,
       };
     case "write_off":
       return {
         title: "Otpis robe",
-        submit: "Sacuvaj otpis",
+        submit: "Sačuvaj otpis",
         success: "Otpis je upisan.",
         icon: <PackageMinusIcon data-icon="inline-start" />,
       };
@@ -659,7 +659,7 @@ function adjustmentCopy(mode: AdjustmentMode) {
 function parseQuantityInput(input: string): number {
   const normalized = input.trim().replace(",", ".");
   if (!/^-?\d+(\.\d{1,3})?$/.test(normalized)) {
-    throw new Error("Kolicina nije ispravna.");
+    throw new Error("Količina nije ispravna.");
   }
 
   const [whole, fractional = ""] = normalized.split(".");
@@ -669,7 +669,7 @@ function parseQuantityInput(input: string): number {
     Number(wholeDigits) * 1000 + Number(fractional.padEnd(3, "0"));
 
   if (!Number.isSafeInteger(milli)) {
-    throw new Error("Kolicina nije ispravna.");
+    throw new Error("Količina nije ispravna.");
   }
 
   return sign * milli;

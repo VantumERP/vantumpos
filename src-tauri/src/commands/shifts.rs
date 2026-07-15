@@ -91,14 +91,14 @@ pub fn open_shift_for_user(
     if request.opening_cash_minor < 0 {
         return Err(CommandError::new(
             "validation_error",
-            "Pocetni novac ne moze biti negativan.",
+            "Početni novac ne može biti negativan.",
         ));
     }
 
     if current_shift_for_user(state, user_id)?.is_some() {
         return Err(CommandError::new(
             "validation_error",
-            "Korisnik vec ima otvorenu smenu.",
+            "Korisnik već ima otvorenu smenu.",
         ));
     }
 
@@ -126,7 +126,7 @@ pub fn open_shift_for_user(
     let shift_id = conn.last_insert_rowid();
 
     shift_by_id(state, shift_id)?
-        .ok_or_else(|| CommandError::new("not_found", "Smena nije pronadjena posle otvaranja."))
+        .ok_or_else(|| CommandError::new("not_found", "Smena nije pronađena posle otvaranja."))
 }
 
 pub fn close_shift_for_user(
@@ -137,17 +137,17 @@ pub fn close_shift_for_user(
     if request.counted_cash_minor < 0 {
         return Err(CommandError::new(
             "validation_error",
-            "Prebrojana gotovina ne moze biti negativna.",
+            "Prebrojana gotovina ne može biti negativna.",
         ));
     }
 
     let shift = shift_by_id(state, request.shift_id)?
-        .ok_or_else(|| CommandError::new("not_found", "Smena nije pronadjena."))?;
+        .ok_or_else(|| CommandError::new("not_found", "Smena nije pronađena."))?;
 
     if shift.user_id != user_id || shift.status != "open" {
         return Err(CommandError::new(
             "not_found",
-            "Otvorena smena nije pronadjena.",
+            "Otvorena smena nije pronađena.",
         ));
     }
 
@@ -180,12 +180,12 @@ pub fn close_shift_for_user(
     if changed == 0 {
         return Err(CommandError::new(
             "not_found",
-            "Otvorena smena nije pronadjena.",
+            "Otvorena smena nije pronađena.",
         ));
     }
 
     shift_by_id(state, request.shift_id)?
-        .ok_or_else(|| CommandError::new("not_found", "Smena nije pronadjena."))
+        .ok_or_else(|| CommandError::new("not_found", "Smena nije pronađena."))
 }
 
 fn current_user_id(state: &AppState) -> Result<i64, CommandError> {
@@ -433,7 +433,7 @@ mod tests {
             .expect_err("second shift should fail");
 
             assert_eq!(error.code, "validation_error");
-            assert_eq!(error.message, "Korisnik vec ima otvorenu smenu.");
+            assert_eq!(error.message, "Korisnik već ima otvorenu smenu.");
         });
     }
 

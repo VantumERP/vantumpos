@@ -168,7 +168,7 @@ pub(crate) fn require_admin(state: &AppState) -> Result<UserAccount, AppError> {
     if user.role != "admin" {
         return Err(AppError::business(
             "forbidden",
-            "Samo administrator moze da izvrsi ovu akciju.",
+            "Samo administrator može da izvrši ovu akciju.",
         ));
     }
 
@@ -218,7 +218,7 @@ fn credential_matches(user: &CredentialUser, credential: &str) -> bool {
 fn invalid_credentials_error() -> CommandError {
     CommandError::new(
         "invalid_credentials",
-        "Korisnicko ime ili lozinka nisu ispravni.",
+        "Korisničko ime ili lozinka nisu ispravni.",
     )
 }
 

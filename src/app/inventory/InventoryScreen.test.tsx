@@ -17,11 +17,11 @@ describe("InventoryScreen", () => {
       await screen.findByRole("button", { name: "Prijem robe za Mleko 1 l" }),
     );
 
-    const quantity = await screen.findByLabelText("Kolicina");
+    const quantity = await screen.findByLabelText("Količina");
     await user.clear(quantity);
     await user.type(quantity, "2");
     await user.type(screen.getByLabelText("Razlog"), "Dostava");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj prijem" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj prijem" }));
 
     await waitFor(() =>
       expect(receiveStock).toHaveBeenCalledWith(
@@ -41,11 +41,11 @@ describe("InventoryScreen", () => {
       await screen.findByRole("button", { name: "Otpis za Mleko 1 l" }),
     );
 
-    const quantity = await screen.findByLabelText("Kolicina");
+    const quantity = await screen.findByLabelText("Količina");
     await user.clear(quantity);
     await user.type(quantity, "5");
     await user.type(screen.getByLabelText("Razlog"), "Lom");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj otpis" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj otpis" }));
 
     expect(await screen.findByText("Nema dovoljno zaliha.")).toBeInTheDocument();
     expect(writeOffStock).toHaveBeenCalledWith(

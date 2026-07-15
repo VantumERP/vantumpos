@@ -51,7 +51,7 @@ export function FirstRunTaxSetup({ settings, role }: FirstRunTaxSetupProps) {
       await settings.seedTaxRates(inVatSystem);
       setOpen(false);
     } catch (caught) {
-      setError((caught as { message?: string }).message ?? "Cuvanje nije uspelo.");
+      setError((caught as { message?: string }).message ?? "Čuvanje nije uspelo.");
     } finally {
       setBusy(false);
     }
@@ -67,8 +67,8 @@ export function FirstRunTaxSetup({ settings, role }: FirstRunTaxSetupProps) {
         <AlertDialogHeader>
           <AlertDialogTitle>Da li ste u PDV sistemu?</AlertDialogTitle>
           <AlertDialogDescription>
-            Podesite pocetne poreske stope. Ovo mozete kasnije promeniti u
-            Podesavanjima.
+            Podesite početne poreske stope. Ovo možete kasnije promeniti u
+            Podešavanjima.
           </AlertDialogDescription>
         </AlertDialogHeader>
         {error && (

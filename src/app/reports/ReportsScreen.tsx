@@ -259,9 +259,9 @@ export function ReportsScreen({
   if (currentUser.role !== "admin") {
     return (
       <Alert>
-        <AlertTitle>Izvestaji</AlertTitle>
+        <AlertTitle>Izveštaji</AlertTitle>
         <AlertDescription>
-          Samo administrator moze da vidi izvestaje.
+          Samo administrator može da vidi izveštaje.
         </AlertDescription>
       </Alert>
     );
@@ -394,7 +394,7 @@ export function ReportsScreen({
             />
             <ExportAction
               title="Prodaja artikala"
-              description="Kolicina, promet, popust i procena marze."
+              description="Količina, promet, popust i procena marže."
               buttonLabel="Izvezi artikle"
               onExport={() => void exportCsv("productSales")}
             />
@@ -457,9 +457,9 @@ function DailyTurnoverSection({ report }: { report: DailyTurnoverReport }) {
         <MetricCard title="Ukupan promet" value={formatRsd(report.summary.totalMinor)} />
         <MetricCard title="Gotovina" value={formatRsd(report.summary.cashMinor)} />
         <MetricCard title="Kartica" value={formatRsd(report.summary.cardMinor)} />
-        <MetricCard title="Racuni" value={report.summary.receiptCount.toString()} />
+        <MetricCard title="Računi" value={report.summary.receiptCount.toString()} />
         <MetricCard
-          title="Prosecan racun"
+          title="Prosečan račun"
           value={formatRsd(report.summary.averageReceiptMinor)}
         />
       </div>
@@ -523,7 +523,7 @@ function DailyTurnoverSection({ report }: { report: DailyTurnoverReport }) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Dan</TableHead>
-                  <TableHead className="text-right">Broj racuna</TableHead>
+                  <TableHead className="text-right">Broj računa</TableHead>
                   <TableHead className="text-right">Gotovina</TableHead>
                   <TableHead className="text-right">Kartica</TableHead>
                   <TableHead className="text-right">Ukupno</TableHead>
@@ -586,7 +586,7 @@ function TurnoverBreakdownSection({
         </CardHeader>
         <CardContent>
           <CompactTable
-            headers={["Kasir", "Racuni", "Ukupno"]}
+            headers={["Kasir", "Računi", "Ukupno"]}
             rows={cashierTurnover.rows.map((row) => [
               row.cashierName,
               row.receiptCount.toString(),
@@ -597,12 +597,12 @@ function TurnoverBreakdownSection({
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>Placanja</CardTitle>
-          <CardDescription>Gotovina i kartica kroz racune.</CardDescription>
+          <CardTitle>Plaćanja</CardTitle>
+          <CardDescription>Gotovina i kartica kroz račune.</CardDescription>
         </CardHeader>
         <CardContent>
           <CompactTable
-            headers={["Nacin", "Racuni", "Ukupno"]}
+            headers={["Način", "Računi", "Ukupno"]}
             rows={paymentMethods.rows.map((row) => [
               paymentMethodLabel(row.paymentMethod),
               row.receiptCount.toString(),
@@ -620,7 +620,7 @@ function ProductSalesTable({ report }: { report: ProductSalesReport }) {
     <Card>
       <CardHeader>
         <CardTitle>Prodaja artikala</CardTitle>
-        <CardDescription>Marza je procena na osnovu nabavne cene.</CardDescription>
+        <CardDescription>Marža je procena na osnovu nabavne cene.</CardDescription>
       </CardHeader>
       <CardContent>
         <Table>
@@ -628,10 +628,10 @@ function ProductSalesTable({ report }: { report: ProductSalesReport }) {
             <TableRow>
               <TableHead>Artikal</TableHead>
               <TableHead>SKU</TableHead>
-              <TableHead className="text-right">Kolicina</TableHead>
+              <TableHead className="text-right">Količina</TableHead>
               <TableHead className="text-right">Promet</TableHead>
               <TableHead className="text-right">Popust</TableHead>
-              <TableHead className="text-right">Procena marze</TableHead>
+              <TableHead className="text-right">Procena marže</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -668,10 +668,10 @@ function CategorySalesTable({ report }: { report: CategorySalesReport }) {
           <TableHeader>
             <TableRow>
               <TableHead>Kategorija</TableHead>
-              <TableHead className="text-right">Kolicina</TableHead>
+              <TableHead className="text-right">Količina</TableHead>
               <TableHead className="text-right">Promet</TableHead>
               <TableHead className="text-right">Popust</TableHead>
-              <TableHead className="text-right">Procena marze</TableHead>
+              <TableHead className="text-right">Procena marže</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -848,10 +848,10 @@ function todayQuery(): ReportDateQuery {
 
 function validateDateRange(query: ReportDateQuery): string | null {
   if (!query.from || !query.to) {
-    return "Izaberite pocetni i krajnji datum.";
+    return "Izaberite početni i krajnji datum.";
   }
   if (query.from > query.to) {
-    return "Pocetni datum ne sme biti posle krajnjeg datuma.";
+    return "Početni datum ne sme biti posle krajnjeg datuma.";
   }
   return null;
 }
@@ -883,5 +883,5 @@ function errorToMessage(error: unknown): string {
     return error.message;
   }
 
-  return "Izvestaj trenutno nije dostupan.";
+  return "Izveštaj trenutno nije dostupan.";
 }

@@ -221,7 +221,7 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
       setCategories(result.categories ?? []);
       setTaxRates(result.taxRates ?? []);
     } catch (error) {
-      setLoadError(commandMessage(error, "Artikli nisu ucitani."));
+      setLoadError(commandMessage(error, "Artikli nisu učitani."));
     } finally {
       setLoading(false);
     }
@@ -658,7 +658,7 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
       );
       setCategorySheetOpen(false);
     } catch (error) {
-      setCategoryError(commandMessage(error, "Kategorija nije sacuvana."));
+      setCategoryError(commandMessage(error, "Kategorija nije sačuvana."));
     } finally {
       setSavingCategory(false);
     }
@@ -701,7 +701,7 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
           ) : loading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Spinner data-icon="inline-start" />
-              Ucitavanje artikala
+              Učitavanje artikala
             </div>
           ) : products.length === 0 ? (
             <Empty>
@@ -845,7 +845,7 @@ function ProductFilters({
             id="catalog-search"
             aria-label="Pretraga artikala"
             type="search"
-            placeholder="Naziv, SKU/sifra ili barcode"
+            placeholder="Naziv, SKU/šifra ili barcode"
             value={search}
             onChange={(event) => onSearchChange(event.target.value)}
           />
@@ -914,7 +914,7 @@ function ProductTable({
         <TableHeader>
           <TableRow>
             <TableHead>Naziv</TableHead>
-            <TableHead>SKU/sifra</TableHead>
+            <TableHead>SKU/šifra</TableHead>
             <TableHead>Barcode</TableHead>
             <TableHead>Kategorija</TableHead>
             <TableHead>Cena sa PDV</TableHead>
@@ -1216,7 +1216,7 @@ function ProductSheet({
         <SheetHeader>
           <SheetTitle>{title}</SheetTitle>
           <SheetDescription>
-            Podaci se koriste za kasu, lager i kasnije racune.
+            Podaci se koriste za kasu, lager i kasnije račune.
           </SheetDescription>
         </SheetHeader>
         <Tabs
@@ -1265,7 +1265,7 @@ function ProductSheet({
                     />
                     <InputGroupAddon align="inline-end">
                       <InputGroupButton
-                        aria-label="Pronadji podatke po barcode-u"
+                        aria-label="Pronađi podatke po barcode-u"
                         disabled={lookupLoading}
                         size="sm"
                         type="button"
@@ -1276,7 +1276,7 @@ function ProductSheet({
                         ) : (
                           <SearchIcon data-icon="inline-start" />
                         )}
-                        Pronadji
+                        Pronađi
                       </InputGroupButton>
                     </InputGroupAddon>
                   </InputGroup>
@@ -1299,7 +1299,7 @@ function ProductSheet({
                   <TextField
                     error={errors.sku}
                     id="product-sku"
-                    label="SKU/sifra"
+                    label="SKU/šifra"
                     value={form.sku}
                     onChange={(value) => onFormChange({ ...form, sku: value })}
                   />
@@ -1338,7 +1338,7 @@ function ProductSheet({
                 </div>
                 <div className="rounded-md border p-3">
                   <div className="mb-3 text-sm font-medium">
-                    Dodatna podesavanja
+                    Dodatna podešavanja
                   </div>
                   <FieldGroup>
                     <div className="grid gap-3 md:grid-cols-2">
@@ -1402,7 +1402,7 @@ function ProductSheet({
               <SheetFooter className="px-0">
                 <Button type="submit" disabled={saving}>
                   {saving ? <Spinner data-icon="inline-start" /> : null}
-                  Sacuvaj artikal
+                  Sačuvaj artikal
                 </Button>
                 <Button
                   type="button"
@@ -1487,7 +1487,7 @@ function BulkProductEntry({
               <TableHead className="w-12">Red</TableHead>
               <TableHead>Barcode / SKU</TableHead>
               <TableHead>Naziv</TableHead>
-              <TableHead>SKU/sifra</TableHead>
+              <TableHead>SKU/šifra</TableHead>
               <TableHead>Cena</TableHead>
               <TableHead>PDV</TableHead>
               <TableHead>Kategorija</TableHead>
@@ -1525,7 +1525,7 @@ function BulkProductEntry({
                       />
                       <InputGroupAddon align="inline-end">
                         <InputGroupButton
-                          aria-label={`Pronadji javne podatke za red ${rowNumber}`}
+                          aria-label={`Pronađi javne podatke za red ${rowNumber}`}
                           disabled={row.lookupLoading}
                           size="icon-sm"
                           type="button"
@@ -1554,7 +1554,7 @@ function BulkProductEntry({
                   </TableCell>
                   <TableCell className="min-w-40 align-top">
                     <Input
-                      aria-label={`SKU/sifra red ${rowNumber}`}
+                      aria-label={`SKU/šifra red ${rowNumber}`}
                       aria-invalid={row.fieldErrors.sku ? true : undefined}
                       value={row.sku}
                       onChange={(event) =>
@@ -1637,7 +1637,7 @@ function BulkProductEntry({
         </Button>
         <Button type="submit" disabled={saving}>
           {saving ? <Spinner data-icon="inline-start" /> : null}
-          Sacuvaj sve artikle
+          Sačuvaj sve artikle
         </Button>
       </SheetFooter>
     </form>
@@ -1719,7 +1719,7 @@ function CategorySheet({
       <SheetContent>
         <SheetHeader>
           <SheetTitle>{form.id ? "Izmena kategorije" : "Nova kategorija"}</SheetTitle>
-          <SheetDescription>Kategorije pomazu filtriranje artikala.</SheetDescription>
+          <SheetDescription>Kategorije pomažu filtriranje artikala.</SheetDescription>
         </SheetHeader>
         <form className="flex flex-1 flex-col gap-4 px-6" onSubmit={onSubmit}>
           <FieldGroup>
@@ -1749,7 +1749,7 @@ function CategorySheet({
           <SheetFooter className="px-0">
             <Button type="submit" disabled={saving}>
               {saving ? <Spinner data-icon="inline-start" /> : null}
-              Sacuvaj kategoriju
+              Sačuvaj kategoriju
             </Button>
             <Button
               type="button"
@@ -1860,7 +1860,7 @@ function validateProductForm(form: ProductFormState): ProductFieldErrors {
   }
 
   if (!form.sku.trim()) {
-    errors.sku = "SKU/sifra je obavezna.";
+    errors.sku = "SKU/šifra je obavezna.";
   }
 
   if (!form.taxRateId) {
@@ -1869,7 +1869,7 @@ function validateProductForm(form: ProductFormState): ProductFieldErrors {
 
   try {
     if (parseRsdInput(form.salePrice) < 0) {
-      errors.salePrice = "Prodajna cena ne moze biti negativna.";
+      errors.salePrice = "Prodajna cena ne može biti negativna.";
     }
   } catch (error) {
     errors.salePrice = commandMessage(error, "Prodajna cena nije ispravna.");
@@ -1878,7 +1878,7 @@ function validateProductForm(form: ProductFormState): ProductFieldErrors {
   if (form.purchasePrice.trim()) {
     try {
       if (parseRsdInput(form.purchasePrice) < 0) {
-        errors.purchasePrice = "Nabavna cena ne moze biti negativna.";
+        errors.purchasePrice = "Nabavna cena ne može biti negativna.";
       }
     } catch (error) {
       errors.purchasePrice = commandMessage(
@@ -1890,7 +1890,7 @@ function validateProductForm(form: ProductFormState): ProductFieldErrors {
 
   try {
     if (parseQuantityInput(form.minimumStock) < 0) {
-      errors.minimumStock = "Minimalni lager ne moze biti negativan.";
+      errors.minimumStock = "Minimalni lager ne može biti negativan.";
     }
   } catch (error) {
     errors.minimumStock = commandMessage(error, "Minimalni lager nije ispravan.");
@@ -2036,7 +2036,7 @@ function validateBulkProductRow(row: BulkProductRowState) {
   }
 
   if (!row.sku.trim()) {
-    errors.sku = "SKU/sifra je obavezna.";
+    errors.sku = "SKU/šifra je obavezna.";
   }
 
   if (!row.taxRateId) {
@@ -2048,7 +2048,7 @@ function validateBulkProductRow(row: BulkProductRowState) {
   } else {
     try {
       if (parseRsdInput(row.salePrice) < 0) {
-        errors.salePrice = "Prodajna cena ne moze biti negativna.";
+        errors.salePrice = "Prodajna cena ne može biti negativna.";
       }
     } catch (error) {
       errors.salePrice = commandMessage(error, "Prodajna cena nije ispravna.");
@@ -2092,7 +2092,7 @@ function commandFieldErrors(error: unknown): ProductFieldErrors {
     return { form: error.message };
   }
 
-  return { form: "Artikal nije sacuvan." };
+  return { form: "Artikal nije sačuvan." };
 }
 
 function bulkCommandFieldErrors(error: unknown): BulkProductFieldErrors {
@@ -2108,7 +2108,7 @@ function bulkCommandFieldErrors(error: unknown): BulkProductFieldErrors {
     return { form: error.message };
   }
 
-  return { form: "Artikal nije sacuvan." };
+  return { form: "Artikal nije sačuvan." };
 }
 
 function commandMessage(error: unknown, fallback: string) {
@@ -2139,7 +2139,7 @@ function parseQuantityInput(input: string) {
   const parsed = Number(input.trim().replace(",", "."));
 
   if (!Number.isFinite(parsed)) {
-    throw new Error("Kolicina nije ispravna.");
+    throw new Error("Količina nije ispravna.");
   }
 
   return Math.round(parsed * 1000);

@@ -99,11 +99,11 @@ impl From<AppError> for CommandError {
     fn from(error: AppError) -> Self {
         match error {
             AppError::Database(source) => {
-                Self::new("database_error", format!("Greska baze podataka: {source}"))
+                Self::new("database_error", format!("Greška baze podataka: {source}"))
             }
             AppError::Io(source) => Self::new(
                 "file_system_error",
-                format!("Greska fajl sistema: {source}"),
+                format!("Greška fajl sistema: {source}"),
             ),
             AppError::Validation { message, details } => Self {
                 code: "validation_error",
@@ -132,11 +132,11 @@ mod tests {
 
     #[test]
     fn new_uses_static_code_and_json_details_shape() {
-        let command_error = CommandError::new("invalid_state", "Operacija nije moguca.");
+        let command_error = CommandError::new("invalid_state", "Operacija nije moguća.");
 
         let details: Option<serde_json::Value> = command_error.details;
         assert_eq!(command_error.code, "invalid_state");
-        assert_eq!(command_error.message, "Operacija nije moguca.");
+        assert_eq!(command_error.message, "Operacija nije moguća.");
         assert_eq!(details, None);
     }
 }

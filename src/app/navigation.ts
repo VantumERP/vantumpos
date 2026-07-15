@@ -35,12 +35,12 @@ export const navigationItems = [
   },
   {
     id: "receipts",
-    label: "Racuni",
+    label: "Računi",
     icon: ReceiptTextIcon,
   },
   {
     id: "reports",
-    label: "Izvestaji",
+    label: "Izveštaji",
     icon: BarChart3Icon,
     adminOnly: true,
   },
@@ -51,7 +51,7 @@ export const navigationItems = [
   },
   {
     id: "settings",
-    label: "Podesavanja",
+    label: "Podešavanja",
     icon: SettingsIcon,
     adminOnly: true,
   },
@@ -68,7 +68,7 @@ export interface FoundationCard {
 export const foundationCards = [
   {
     title: "Lokalna kasa",
-    description: "Prodaja, artikli i racuni ostaju vezani za ovu kasu.",
+    description: "Prodaja, artikli i računi ostaju vezani za ovu kasu.",
     icon: FileSpreadsheetIcon,
   },
   {
@@ -78,7 +78,7 @@ export const foundationCards = [
   },
   {
     title: "Dnevni rad",
-    description: "Osnovni statusi za prodaju, lager i izvestaje su spremni.",
+    description: "Osnovni statusi za prodaju, lager i izveštaje su spremni.",
     icon: SettingsIcon,
   },
 ] as const satisfies readonly FoundationCard[];

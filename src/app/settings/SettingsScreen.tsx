@@ -114,7 +114,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       .catch((error) => {
         setState({
           status: "error",
-          message: errorMessage(error, "Podesavanja nisu ucitana."),
+          message: errorMessage(error, "Podešavanja nisu učitana."),
         });
       });
   };
@@ -128,7 +128,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
     return (
       <Badge variant="outline" className="w-fit">
         <Spinner data-icon="inline-start" aria-hidden="true" />
-        Ucitavanje podesavanja
+        Učitavanje podešavanja
       </Badge>
     );
   }
@@ -137,7 +137,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
     return (
       <Alert variant="destructive">
         <ShieldAlertIcon aria-hidden="true" />
-        <AlertTitle>Podesavanja nisu dostupna</AlertTitle>
+        <AlertTitle>Podešavanja nisu dostupna</AlertTitle>
         <AlertDescription>{state.message}</AlertDescription>
       </Alert>
     );
@@ -147,7 +147,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
     <div className="flex flex-col gap-4">
       <div
         role="tablist"
-        aria-label="Podesavanja"
+        aria-label="Podešavanja"
         className="inline-flex w-fit items-center justify-center gap-1 rounded-lg bg-muted p-1 text-muted-foreground"
       >
         <SettingsTabButton
@@ -166,7 +166,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           active={activeTab === "receipts"}
           onSelect={() => setActiveTab("receipts")}
         >
-          Racuni
+          Računi
         </SettingsTabButton>
         <SettingsTabButton
           active={activeTab === "users"}
@@ -190,7 +190,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
             setState((current) =>
               current.status === "ready" ? { ...current, company } : current,
             );
-            toast.success("Podesavanja radnje su sacuvana.");
+            toast.success("Podešavanja radnje su sačuvana.");
           }}
         />
       ) : null}
@@ -212,7 +212,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
 
               return { ...current, taxRates };
             });
-            toast.success("PDV stopa je sacuvana.");
+            toast.success("PDV stopa je sačuvana.");
           }}
         />
       ) : null}
@@ -227,7 +227,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
               setState((current) =>
                 current.status === "ready" ? { ...current, receipt } : current,
               );
-              toast.success("Numeracija racuna je sacuvana.");
+              toast.success("Numeracija računa je sačuvana.");
             }}
           />
           <div className="flex items-center justify-between rounded-md border p-4">
@@ -236,7 +236,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
                 Dozvoli prodaju ispod stanja
               </span>
               <span className="text-xs text-muted-foreground">
-                Kasir moze da proda i kada je stanje na kartici nedovoljno.
+                Kasir može da proda i kada je stanje na kartici nedovoljno.
               </span>
             </div>
             <Switch
@@ -249,7 +249,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
                 setState((current) =>
                   current.status === "ready" ? { ...current, sales } : current,
                 );
-                toast.success("Podesavanje prodaje je sacuvano.");
+                toast.success("Podešavanje prodaje je sačuvano.");
               }}
             />
           </div>
@@ -268,7 +268,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
             setState((current) =>
               current.status === "ready" ? { ...current, backupStatus } : current,
             );
-            toast.success("Backup podesavanja su sacuvana.");
+            toast.success("Backup podešavanja su sačuvana.");
           }}
           onCreateBackup={async (backupFolder) => {
             const job = await services.backup.createBackup({ backupFolder });
@@ -299,7 +299,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
                   }
                 : current,
             );
-            toast.success("Restore je zavrsen.");
+            toast.success("Restore je završen.");
           }}
         />
       ) : null}
@@ -380,7 +380,7 @@ function CompanySettingsPanel({
         currency: form.currency,
       });
     } catch (saveError) {
-      setError(errorMessage(saveError, "Podesavanja radnje nisu sacuvana."));
+      setError(errorMessage(saveError, "Podešavanja radnje nisu sačuvana."));
     } finally {
       setSaving(false);
     }
@@ -392,7 +392,7 @@ function CompanySettingsPanel({
         <CardTitle role="heading" aria-level={2}>
           Radnja
         </CardTitle>
-        <CardDescription>Podaci koji se koriste na lokalnim racunima.</CardDescription>
+        <CardDescription>Podaci koji se koriste na lokalnim računima.</CardDescription>
       </CardHeader>
       <CardContent>
         <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
@@ -424,7 +424,7 @@ function CompanySettingsPanel({
                 />
               </Field>
               <Field>
-                <FieldLabel htmlFor="company-registration">Maticni broj</FieldLabel>
+                <FieldLabel htmlFor="company-registration">Matični broj</FieldLabel>
                 <Input
                   id="company-registration"
                   value={form.registrationNumber}
@@ -468,7 +468,7 @@ function CompanySettingsPanel({
                 ) : (
                   <SaveIcon data-icon="inline-start" />
                 )}
-                Sacuvaj radnju
+                Sačuvaj radnju
               </Button>
             </Field>
           </FieldGroup>
@@ -501,7 +501,7 @@ function TaxRatesPanel({
             <CardTitle role="heading" aria-level={2}>
               PDV stope
             </CardTitle>
-            <CardDescription>Stope se deaktiviraju kada vise nisu u upotrebi.</CardDescription>
+            <CardDescription>Stope se deaktiviraju kada više nisu u upotrebi.</CardDescription>
           </div>
           <Button
             type="button"
@@ -639,7 +639,7 @@ function TaxRateDialog({
         active,
       });
     } catch (saveError) {
-      setError(errorMessage(saveError, "PDV stopa nije sacuvana."));
+      setError(errorMessage(saveError, "PDV stopa nije sačuvana."));
     }
   }
 
@@ -684,7 +684,7 @@ function TaxRateDialog({
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Odustani
             </Button>
-            <Button type="submit">Sacuvaj PDV stopu</Button>
+            <Button type="submit">Sačuvaj PDV stopu</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -715,7 +715,7 @@ function ReceiptSettingsPanel({
     const parsedSequence = Number(nextSequenceNumber);
 
     if (!prefix.trim() || !Number.isInteger(parsedSequence) || parsedSequence <= 0) {
-      setError("Unesite prefiks i sledeci broj racuna.");
+      setError("Unesite prefiks i sledeći broj računa.");
       return;
     }
 
@@ -726,7 +726,7 @@ function ReceiptSettingsPanel({
       });
       setError(null);
     } catch (saveError) {
-      setError(errorMessage(saveError, "Numeracija nije sacuvana."));
+      setError(errorMessage(saveError, "Numeracija nije sačuvana."));
     }
   }
 
@@ -734,16 +734,16 @@ function ReceiptSettingsPanel({
     <Card>
       <CardHeader>
         <CardTitle role="heading" aria-level={2}>
-          Racuni
+          Računi
         </CardTitle>
-        <CardDescription>Automatski reset nije ukljucen za MVP.</CardDescription>
+        <CardDescription>Automatski reset nije uključen za MVP.</CardDescription>
       </CardHeader>
       <CardContent>
         <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
           <FieldGroup>
             {error ? <FieldError>{error}</FieldError> : null}
             <Field>
-              <FieldLabel htmlFor="receipt-prefix">Prefiks racuna</FieldLabel>
+              <FieldLabel htmlFor="receipt-prefix">Prefiks računa</FieldLabel>
               <Input
                 id="receipt-prefix"
                 value={prefix}
@@ -751,7 +751,7 @@ function ReceiptSettingsPanel({
               />
             </Field>
             <Field>
-              <FieldLabel htmlFor="receipt-next">Sledeci broj</FieldLabel>
+              <FieldLabel htmlFor="receipt-next">Sledeći broj</FieldLabel>
               <Input
                 id="receipt-next"
                 inputMode="numeric"
@@ -763,7 +763,7 @@ function ReceiptSettingsPanel({
             <Field>
               <Button type="submit">
                 <SaveIcon data-icon="inline-start" />
-                Sacuvaj numeraciju
+                Sačuvaj numeraciju
               </Button>
             </Field>
           </FieldGroup>
@@ -810,7 +810,7 @@ function BackupPanel({
     try {
       await onSaveSettings({ backupFolder, automaticBackupEnabled });
     } catch (saveError) {
-      setError(errorMessage(saveError, "Backup podesavanja nisu sacuvana."));
+      setError(errorMessage(saveError, "Backup podešavanja nisu sačuvana."));
     }
   }
 
@@ -849,7 +849,7 @@ function BackupPanel({
               <ShieldAlertIcon aria-hidden="true" />
               <AlertTitle>Backup nije napravljen</AlertTitle>
               <AlertDescription>
-                Napravite rucni backup pre zavrsetka rada.
+                Napravite ručni backup pre završetka rada.
               </AlertDescription>
             </Alert>
           ) : (
@@ -890,7 +890,7 @@ function BackupPanel({
               <div className="flex flex-wrap gap-2">
                 <Button type="submit" variant="outline">
                   <SaveIcon data-icon="inline-start" />
-                  Sacuvaj backup podesavanja
+                  Sačuvaj backup podešavanja
                 </Button>
                 <Button type="button" onClick={() => void createBackup()}>
                   <DatabaseBackupIcon data-icon="inline-start" />
@@ -931,7 +931,7 @@ function BackupPanel({
           <CardTitle role="heading" aria-level={2}>
             Istorija backupa
           </CardTitle>
-          <CardDescription>Rucni, automatski i restore poslovi.</CardDescription>
+          <CardDescription>Ručni, automatski i restore poslovi.</CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
@@ -953,7 +953,7 @@ function BackupPanel({
                     <TableCell>{backupTypeLabel(job.backupType)}</TableCell>
                     <TableCell>
                       <Badge variant={job.status === "completed" ? "secondary" : "destructive"}>
-                        {job.status === "completed" ? "Zavrsen" : "Neuspesan"}
+                        {job.status === "completed" ? "Završen" : "Neuspešan"}
                       </Badge>
                     </TableCell>
                     <TableCell>{job.path}</TableCell>
@@ -1015,7 +1015,7 @@ function backupTypeLabel(value: BackupJob["backupType"]) {
     case "pre_restore":
       return "Pre restore";
     case "manual":
-      return "Rucni";
+      return "Ručni";
   }
 }
 
@@ -1063,10 +1063,10 @@ function GoLiveResetCard({
   return (
     <Card className="border-destructive/40">
       <CardHeader>
-        <CardTitle>Priprema za pocetak rada</CardTitle>
+        <CardTitle>Priprema za početak rada</CardTitle>
         <CardDescription>
-          Obrisi probne racune i vrati brojac racuna na 1. Katalog, korisnici i
-          podesavanja ostaju. Pravi se sigurnosna kopija pre brisanja.
+          Obriši probne račune i vrati brojač računa na 1. Katalog, korisnici i
+          podešavanja ostaju. Pravi se sigurnosna kopija pre brisanja.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -1075,7 +1075,7 @@ function GoLiveResetCard({
           variant="destructive"
           onClick={() => setOpen(true)}
         >
-          Obrisi probne podatke
+          Obriši probne podatke
         </Button>
         <AlertDialog open={open} onOpenChange={setOpen}>
           <AlertDialogContent>
@@ -1104,7 +1104,7 @@ function GoLiveResetCard({
                 disabled={busy || confirmationText !== "OBRISI PODATKE"}
                 onClick={submit}
               >
-                Obrisi
+                Obriši
               </Button>
             </AlertDialogFooter>
           </AlertDialogContent>

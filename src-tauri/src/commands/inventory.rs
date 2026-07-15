@@ -240,7 +240,7 @@ pub fn get_product_ledger_for_connection(
     product_id: i64,
 ) -> Result<ProductLedger, AppError> {
     let product = get_stock_item_for_product(connection, product_id)?
-        .ok_or_else(|| AppError::not_found("Artikal nije pronadjen."))?;
+        .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
     let mut statement = connection.prepare(
         r#"
 SELECT
@@ -346,7 +346,7 @@ WHERE p.id = ?1
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
-        .ok_or_else(|| AppError::not_found("Artikal nije pronadjen."))?;
+        .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     let new_quantity_milli = previous_quantity_milli
         .checked_add(write.quantity_milli)
@@ -536,7 +536,7 @@ fn validate_adjustment_request(
     }
 
     if request.quantity_milli == 0 {
-        return Err(validation_error("Kolicina je obavezna.", "quantityMilli"));
+        return Err(validation_error("Količina je obavezna.", "quantityMilli"));
     }
 
     if matches!(
@@ -545,7 +545,7 @@ fn validate_adjustment_request(
     ) && request.quantity_milli < 0
     {
         return Err(validation_error(
-            "Kolicina mora biti pozitivna.",
+            "Količina mora biti pozitivna.",
             "quantityMilli",
         ));
     }
@@ -597,7 +597,7 @@ fn validation_error(message: &str, field: &str) -> AppError {
 }
 
 fn quantity_overflow_error() -> AppError {
-    validation_error("Kolicina nije ispravna.", "quantityMilli")
+    validation_error("Količina nije ispravna.", "quantityMilli")
 }
 
 fn now_utc_string() -> Result<String, AppError> {

@@ -153,7 +153,7 @@ export function AppShell({ services }: AppShellProps) {
         if (!ignore) {
           setSessionState({
             status: "error",
-            message: "Sesija nije dostupna. Pokusajte ponovo.",
+            message: "Sesija nije dostupna. Pokušajte ponovo.",
           });
         }
       });
@@ -194,7 +194,7 @@ export function AppShell({ services }: AppShellProps) {
       <main className="flex min-h-svh items-center justify-center bg-background p-6">
         <Badge variant="outline">
           <Spinner data-icon="inline-start" aria-hidden="true" />
-          Ucitavanje radne sesije
+          Učitavanje radne sesije
         </Badge>
       </main>
     );
@@ -402,9 +402,9 @@ function renderModule({
     if (session.user.role !== "admin") {
       return (
         <Alert>
-          <AlertTitle>Podesavanja</AlertTitle>
+          <AlertTitle>Podešavanja</AlertTitle>
           <AlertDescription>
-            Samo administrator moze da menja podesavanja.
+            Samo administrator može da menja podešavanja.
           </AlertDescription>
         </Alert>
       );
@@ -491,7 +491,7 @@ function ShellBackupStatus({ services }: { services: PosServices }) {
     return (
       <Badge variant="destructive">
         <DatabaseBackupIcon data-icon="inline-start" />
-        Backup greska
+        Backup greška
       </Badge>
     );
   }
@@ -561,7 +561,7 @@ function LoginScreen({
             <div className="flex flex-col gap-1">
               <h1 className="text-2xl font-semibold">Prijava u kasu</h1>
               <p className="text-sm text-muted-foreground">
-                Unesite korisnicko ime i PIN ili lozinku.
+                Unesite korisničko ime i PIN ili lozinku.
               </p>
             </div>
             {error ? (
@@ -572,7 +572,7 @@ function LoginScreen({
               </Alert>
             ) : null}
             <Field>
-              <FieldLabel htmlFor="login-username">Korisnicko ime</FieldLabel>
+              <FieldLabel htmlFor="login-username">Korisničko ime</FieldLabel>
               <Input
                 id="login-username"
                 value={username}
@@ -692,7 +692,7 @@ function OpenShiftScreen({
                 </Alert>
               ) : null}
               <Field data-invalid={!!error}>
-                <FieldLabel htmlFor="opening-cash">Pocetni novac</FieldLabel>
+                <FieldLabel htmlFor="opening-cash">Početni novac</FieldLabel>
                 <Input
                   id="opening-cash"
                   inputMode="decimal"
@@ -728,7 +728,7 @@ function OpenShiftScreen({
         <CardHeader>
           <CardTitle>Status rada</CardTitle>
           <CardDescription>
-            Prodaja se moze zavrsiti tek kada je smena otvorena.
+            Prodaja se može završiti tek kada je smena otvorena.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
@@ -839,7 +839,7 @@ function CloseShiftPanel({
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             ) : null}
-            <StatusRow label="Ocekivana gotovina" value={formatRsd(shift.expectedCashMinor)} />
+            <StatusRow label="Očekivana gotovina" value={formatRsd(shift.expectedCashMinor)} />
             <StatusRow label="Kartice" value={formatRsd(shift.cardSalesMinor)} />
             <Field data-invalid={!!error}>
               <FieldLabel htmlFor="counted-cash">Prebrojana gotovina</FieldLabel>
@@ -875,7 +875,7 @@ function CloseShiftPanel({
           <AlertDialogHeader>
             <AlertDialogTitle>Potvrdite zatvaranje smene</AlertDialogTitle>
             <AlertDialogDescription>
-              Zatvaranje ce upisati prebrojanu gotovinu i razliku za ovu smenu.
+              Zatvaranje će upisati prebrojanu gotovinu i razliku za ovu smenu.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -920,7 +920,7 @@ function UsersScreen({
       })
       .catch((loadError) => {
         if (!ignore) {
-          setError(errorMessage(loadError, "Korisnici nisu ucitani."));
+          setError(errorMessage(loadError, "Korisnici nisu učitani."));
         }
       })
       .finally(() => {
@@ -939,7 +939,7 @@ function UsersScreen({
       <Alert>
         <AlertTitle>Korisnici</AlertTitle>
         <AlertDescription>
-          Samo administrator moze da uredjuje korisnike.
+          Samo administrator može da uređuje korisnike.
         </AlertDescription>
       </Alert>
     );
@@ -979,7 +979,7 @@ function UsersScreen({
             <div className="p-4">
               <Badge variant="outline">
                 <Spinner data-icon="inline-start" aria-hidden="true" />
-                Ucitavanje korisnika
+                Učitavanje korisnika
               </Badge>
             </div>
           ) : (
@@ -1124,7 +1124,7 @@ function UserDialog({
     setError(null);
 
     if (!username.trim()) {
-      setError("Korisnicko ime je obavezno.");
+      setError("Korisničko ime je obavezno.");
       return;
     }
 
@@ -1149,7 +1149,7 @@ function UserDialog({
         password: password.trim() || null,
       });
     } catch (saveError) {
-      setError(errorMessage(saveError, "Korisnik nije sacuvan."));
+      setError(errorMessage(saveError, "Korisnik nije sačuvan."));
     } finally {
       setSubmitting(false);
     }
@@ -1161,14 +1161,14 @@ function UserDialog({
         <DialogHeader>
           <DialogTitle>{user ? "Uredi korisnika" : "Novi korisnik"}</DialogTitle>
           <DialogDescription>
-            Nalog vazi samo na ovoj lokalnoj kasi.
+            Nalog važi samo na ovoj lokalnoj kasi.
           </DialogDescription>
         </DialogHeader>
         <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
           <FieldGroup>
             {error ? <FieldError>{error}</FieldError> : null}
             <Field>
-              <FieldLabel htmlFor="user-username">Korisnicko ime</FieldLabel>
+              <FieldLabel htmlFor="user-username">Korisničko ime</FieldLabel>
               <Input
                 id="user-username"
                 value={username}
@@ -1238,7 +1238,7 @@ function UserDialog({
               {submitting ? (
                 <Spinner data-icon="inline-start" aria-hidden="true" />
               ) : null}
-              Sacuvaj korisnika
+              Sačuvaj korisnika
             </Button>
           </DialogFooter>
         </form>

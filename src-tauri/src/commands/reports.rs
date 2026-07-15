@@ -730,7 +730,7 @@ fn build_report_csv(
             let report = query_daily_turnover(connection, &request.query.date_query())?;
             let mut lines = vec![csv_line(&[
                 "Dan",
-                "Broj racuna",
+                "Broj računa",
                 "Gotovina",
                 "Kartica",
                 "Ukupno",
@@ -756,7 +756,7 @@ fn build_report_csv(
                 "Smena",
                 "Otvorena",
                 "Kasir",
-                "Broj racuna",
+                "Broj računa",
                 "Gotovina",
                 "Kartica",
                 "Ukupno",
@@ -778,7 +778,7 @@ fn build_report_csv(
         }
         ExportReportType::CashierTurnover => {
             let report = query_cashier_turnover(connection, &request.query.date_query())?;
-            let mut lines = vec![csv_line(&["Kasir", "Broj racuna", "Ukupno"])];
+            let mut lines = vec![csv_line(&["Kasir", "Broj računa", "Ukupno"])];
 
             for row in &report.rows {
                 lines.push(csv_line(&[
@@ -792,7 +792,7 @@ fn build_report_csv(
         }
         ExportReportType::PaymentMethods => {
             let report = query_payment_methods(connection, &request.query.date_query())?;
-            let mut lines = vec![csv_line(&["Nacin placanja", "Broj racuna", "Ukupno"])];
+            let mut lines = vec![csv_line(&["Način plaćanja", "Broj računa", "Ukupno"])];
 
             for row in &report.rows {
                 lines.push(csv_line(&[
@@ -809,10 +809,10 @@ fn build_report_csv(
             let mut lines = vec![csv_line(&[
                 "Artikal",
                 "SKU",
-                "Kolicina",
+                "Količina",
                 "Promet",
                 "Popust",
-                "Procena marze",
+                "Procena marže",
             ])];
 
             for row in &report.rows {
@@ -832,10 +832,10 @@ fn build_report_csv(
             let report = query_category_sales(connection, &request.query.date_query())?;
             let mut lines = vec![csv_line(&[
                 "Kategorija",
-                "Kolicina",
+                "Količina",
                 "Promet",
                 "Popust",
-                "Procena marze",
+                "Procena marže",
             ])];
 
             for row in &report.rows {
@@ -1828,7 +1828,7 @@ mod tests {
 
                 let csv = fs::read_to_string(&exported.path).expect("csv should be readable");
                 assert!(csv
-                    .starts_with("Dan,Broj racuna,Gotovina,Kartica,Ukupno,Povrati i storniranja"));
+                    .starts_with("Dan,Broj računa,Gotovina,Kartica,Ukupno,Povrati i storniranja"));
                 assert!(csv.contains("2026-06-17,3,11000,4000,15000,-3000"));
                 assert_eq!(exported.row_count, 1);
 

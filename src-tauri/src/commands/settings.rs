@@ -195,7 +195,7 @@ where
 
     match stored {
         Some(value) => serde_json::from_str(&value).map_err(|source| {
-            AppError::InvalidState(format!("Podesavanja nisu ispravna: {source}"))
+            AppError::InvalidState(format!("Podešavanja nisu ispravna: {source}"))
         }),
         None => Ok(default_value),
     }
@@ -206,7 +206,7 @@ where
     T: Serialize,
 {
     let value_json = serde_json::to_string(value)
-        .map_err(|source| AppError::InvalidState(format!("Podesavanja nisu ispravna: {source}")))?;
+        .map_err(|source| AppError::InvalidState(format!("Podešavanja nisu ispravna: {source}")))?;
     let mut conn = state.db().open()?;
     let tx = conn.transaction()?;
 
@@ -283,7 +283,7 @@ pub fn save_tax_rate(state: &AppState, request: SaveTaxRateRequest) -> Result<Ta
         )?;
 
         if changed == 0 {
-            return Err(AppError::not_found("PDV stopa nije pronadjena."));
+            return Err(AppError::not_found("PDV stopa nije pronađena."));
         }
 
         id
@@ -411,7 +411,7 @@ fn validate_tax_rate_request(request: &SaveTaxRateRequest) -> Result<(), AppErro
 
     if !(0..=10_000).contains(&request.rate_basis_points) {
         return Err(AppError::validation(
-            "PDV stopa mora biti izmedju 0 i 100%.",
+            "PDV stopa mora biti između 0 i 100%.",
             serde_json::json!({ "field": "rateBasisPoints" }),
         ));
     }
@@ -422,14 +422,14 @@ fn validate_tax_rate_request(request: &SaveTaxRateRequest) -> Result<(), AppErro
 fn validate_receipt_request(request: &ReceiptSettingsRequest) -> Result<(), AppError> {
     if request.prefix.trim().is_empty() {
         return Err(AppError::validation(
-            "Prefiks racuna je obavezan.",
+            "Prefiks računa je obavezan.",
             serde_json::json!({ "field": "prefix" }),
         ));
     }
 
     if request.next_sequence_number <= 0 {
         return Err(AppError::validation(
-            "Sledeci broj racuna mora biti veci od nule.",
+            "Sledeći broj računa mora biti veći od nule.",
             serde_json::json!({ "field": "nextSequenceNumber" }),
         ));
     }

@@ -345,14 +345,14 @@ pub fn void_receipt(db: &Db, request: VoidReceiptRequest) -> Result<ReceiptDetai
     {
         let tx = connection.transaction().map_err(AppError::from)?;
         let header = load_receipt_header(&tx, request.receipt_id)?
-            .ok_or_else(|| AppError::not_found("Racun nije pronadjen."))?;
+            .ok_or_else(|| AppError::not_found("Račun nije pronađen."))?;
 
         ensure_voidable(&tx, &header)?;
         let shift_id = current_open_shift_id(&tx)?;
 
         let items = load_original_sale_items(&tx, request.receipt_id)?;
         if items.is_empty() {
-            return Err(AppError::business("invalid_receipt_state", "Racun nema stavke.").into());
+            return Err(AppError::business("invalid_receipt_state", "Račun nema stavke.").into());
         }
 
         let linked_number = next_linked_receipt_number(&tx, request.receipt_id, "STO", &header)?;
@@ -496,7 +496,7 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
     {
         let tx = connection.transaction().map_err(AppError::from)?;
         let header = load_receipt_header(&tx, request.receipt_id)?
-            .ok_or_else(|| AppError::not_found("Racun nije pronadjen."))?;
+            .ok_or_else(|| AppError::not_found("Račun nije pronađen."))?;
 
         ensure_returnable(&tx, &header)?;
         let shift_id = current_open_shift_id(&tx)?;
@@ -504,7 +504,7 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
         let mut return_items = Vec::<(OriginalSaleItem, i64)>::new();
         for (sale_item_id, quantity_milli) in requested {
             let item = load_original_sale_item(&tx, request.receipt_id, sale_item_id)?
-                .ok_or_else(|| AppError::not_found("Stavka racuna nije pronadjena."))?;
+                .ok_or_else(|| AppError::not_found("Stavka računa nije pronađena."))?;
             let already_returned = returned_quantity_for_item(&tx, item.id)?;
             let original_quantity = item.quantity_milli.abs();
             let remaining = original_quantity.saturating_sub(already_returned);
@@ -512,7 +512,7 @@ pub fn return_items(db: &Db, request: ReturnItemsRequest) -> Result<ReceiptDetai
             if quantity_milli > remaining {
                 return Err(AppError::business_with_details(
                     "return_quantity_exceeded",
-                    "Kolicina za povrat je veca od raspolozive kolicine.",
+                    "Količina za povrat je veća od raspoložive količine.",
                     serde_json::json!({
                         "saleItemId": item.id,
                         "remainingQuantityMilli": remaining
@@ -668,7 +668,7 @@ fn load_receipt_detail(
 ) -> Result<ReceiptDetail, AppError> {
     validate_receipt_id(receipt_id)?;
     let header = load_receipt_header(connection, receipt_id)?
-        .ok_or_else(|| AppError::not_found("Racun nije pronadjen."))?;
+        .ok_or_else(|| AppError::not_found("Račun nije pronađen."))?;
     let items = load_receipt_items(connection, receipt_id)?;
     let payments = load_receipt_payments(connection, receipt_id)?;
     let linked_documents = load_linked_documents(connection, receipt_id)?;
@@ -974,21 +974,21 @@ fn ensure_voidable(connection: &Connection, header: &ReceiptHeader) -> Result<()
     if header.document_type != "sale" {
         return Err(AppError::business(
             "invalid_receipt_state",
-            "Samo originalni racun moze da se stornira.",
+            "Samo originalni račun može da se stornira.",
         ));
     }
 
     if header.status == "voided" || has_linked_document(connection, header.id, "void")? {
         return Err(AppError::business(
             "duplicate_void",
-            "Racun je vec storniran.",
+            "Račun je već storniran.",
         ));
     }
 
     if header.status != "completed" {
         return Err(AppError::business(
             "invalid_receipt_state",
-            "Storniranje je moguce samo za zavrsen racun bez povrata.",
+            "Storniranje je moguće samo za završen račun bez povrata.",
         ));
     }
 
@@ -999,14 +999,14 @@ fn ensure_returnable(connection: &Connection, header: &ReceiptHeader) -> Result<
     if header.document_type != "sale" {
         return Err(AppError::business(
             "invalid_receipt_state",
-            "Povrat je moguc samo za originalni racun.",
+            "Povrat je moguć samo za originalni račun.",
         ));
     }
 
     if header.status == "voided" || has_linked_document(connection, header.id, "void")? {
         return Err(AppError::business(
             "invalid_receipt_state",
-            "Povrat nije moguc za storniran racun.",
+            "Povrat nije moguć za storniran račun.",
         ));
     }
 
@@ -1059,7 +1059,7 @@ fn restore_inventory(
 
     if quantity_milli <= 0 {
         return Err(AppError::validation(
-            "Kolicina za lager nije ispravna.",
+            "Količina za lager nije ispravna.",
             serde_json::json!({ "field": "quantityMilli" }),
         ));
     }
@@ -1076,7 +1076,7 @@ fn restore_inventory(
         .checked_add(quantity_milli)
         .ok_or_else(|| {
             AppError::validation(
-                "Kolicina nije ispravna.",
+                "Količina nije ispravna.",
                 serde_json::json!({ "field": "quantityMilli" }),
             )
         })?;
@@ -1143,14 +1143,14 @@ fn normalize_return_items(items: &[ReturnItemRequest]) -> Result<BTreeMap<i64, i
     for item in items {
         if item.sale_item_id <= 0 {
             return Err(AppError::validation(
-                "Stavka racuna nije ispravna.",
+                "Stavka računa nije ispravna.",
                 serde_json::json!({ "field": "saleItemId" }),
             ));
         }
 
         if item.quantity_milli <= 0 {
             return Err(AppError::validation(
-                "Kolicina za povrat mora biti pozitivna.",
+                "Količina za povrat mora biti pozitivna.",
                 serde_json::json!({ "field": "quantityMilli" }),
             ));
         }
@@ -1177,7 +1177,7 @@ fn proportional_amount(amount_minor: i64, quantity_milli: i64, base_quantity_mil
 fn validate_receipt_id(receipt_id: i64) -> Result<(), AppError> {
     if receipt_id <= 0 {
         return Err(AppError::validation(
-            "Racun nije ispravan.",
+            "Račun nije ispravan.",
             serde_json::json!({ "field": "receiptId" }),
         ));
     }
@@ -1208,7 +1208,7 @@ fn validate_payment_method(value: &str) -> Result<(), AppError> {
     }
 
     Err(AppError::validation(
-        "Nacin placanja nije ispravan.",
+        "Način plaćanja nije ispravan.",
         serde_json::json!({ "field": "paymentMethod" }),
     ))
 }

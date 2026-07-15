@@ -16,7 +16,7 @@ export function parseQuantityInput(value: string): number {
   const normalized = value.trim().replace(",", ".");
 
   if (!/^\d+(\.\d{1,3})?$/.test(normalized)) {
-    throw new Error("Kolicina nije ispravna.");
+    throw new Error("Količina nije ispravna.");
   }
 
   const [whole, fraction = ""] = normalized.split(".");

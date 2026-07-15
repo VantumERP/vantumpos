@@ -338,7 +338,7 @@ fn compute_sale(
         if item.quantity_milli <= 0 {
             return Err(AppError::business(
                 "invalid_quantity",
-                "Kolicina mora biti veca od nule.",
+                "Količina mora biti veća od nule.",
             ));
         }
 
@@ -452,7 +452,7 @@ fn load_sale_product(connection: &Connection, product_id: i64) -> Result<SalePro
             },
         )
         .optional()?
-        .ok_or_else(|| AppError::not_found("Artikal nije pronadjen."))
+        .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))
 }
 
 fn load_open_shift(connection: &Connection) -> Result<OpenShift, AppError> {
@@ -533,7 +533,7 @@ fn validate_payments(
         if payment.amount_minor < 0 {
             return Err(AppError::business(
                 "payment_mismatch",
-                "Placanja se ne poklapaju sa ukupnim iznosom.",
+                "Plaćanja se ne poklapaju sa ukupnim iznosom.",
             ));
         }
 
@@ -552,7 +552,7 @@ fn validate_payments(
     if card_minor > total_minor || tendered_minor < total_minor {
         return Err(AppError::business(
             "payment_mismatch",
-            "Placanja se ne poklapaju sa ukupnim iznosom.",
+            "Plaćanja se ne poklapaju sa ukupnim iznosom.",
         ));
     }
 
@@ -613,7 +613,7 @@ fn take_next_receipt_number(connection: &Connection, updated_at: &str) -> Result
         .optional()?;
     let settings = match stored {
         Some(value) => serde_json::from_str::<ReceiptSettings>(&value).map_err(|source| {
-            AppError::InvalidState(format!("Podesavanja racuna nisu ispravna: {source}"))
+            AppError::InvalidState(format!("Podešavanja računa nisu ispravna: {source}"))
         })?,
         None => ReceiptSettings::default(),
     };
@@ -623,7 +623,7 @@ fn take_next_receipt_number(connection: &Connection, updated_at: &str) -> Result
         ..settings
     };
     let value_json = serde_json::to_string(&next_settings).map_err(|source| {
-        AppError::InvalidState(format!("Podesavanja racuna nisu ispravna: {source}"))
+        AppError::InvalidState(format!("Podešavanja računa nisu ispravna: {source}"))
     })?;
 
     connection.execute(
@@ -666,7 +666,7 @@ fn discount_amount(total_minor: i64, discount: Option<&DiscountRequest>) -> Resu
             if !(0..=10_000).contains(basis_points) {
                 return Err(AppError::business(
                     "invalid_discount",
-                    "Procenat popusta mora biti izmedju 0 i 100%.",
+                    "Procenat popusta mora biti između 0 i 100%.",
                 ));
             }
 
@@ -677,7 +677,7 @@ fn discount_amount(total_minor: i64, discount: Option<&DiscountRequest>) -> Resu
     if amount > total_minor {
         return Err(AppError::business(
             "invalid_discount",
-            "Popust ne moze biti veci od iznosa.",
+            "Popust ne može biti veći od iznosa.",
         ));
     }
 
@@ -746,18 +746,18 @@ fn included_tax(total_minor: i64, rate_basis_points: i64) -> Result<i64, AppErro
 fn rounded_div(numerator: i128, denominator: i128) -> Result<i64, AppError> {
     if denominator <= 0 || numerator < 0 {
         return Err(AppError::InvalidState(
-            "Obracun prodaje nije ispravan.".to_string(),
+            "Obračun prodaje nije ispravan.".to_string(),
         ));
     }
 
     let value = (numerator + denominator / 2) / denominator;
     i64::try_from(value)
-        .map_err(|_| AppError::InvalidState("Obracun prodaje je prevelik za upis.".to_string()))
+        .map_err(|_| AppError::InvalidState("Obračun prodaje je prevelik za upis.".to_string()))
 }
 
 fn checked_add(left: i64, right: i64) -> Result<i64, AppError> {
     left.checked_add(right)
-        .ok_or_else(|| AppError::InvalidState("Obracun prodaje je prevelik za upis.".to_string()))
+        .ok_or_else(|| AppError::InvalidState("Obračun prodaje je prevelik za upis.".to_string()))
 }
 
 fn quantity_label(quantity_milli: i64, unit: &str) -> String {

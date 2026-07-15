@@ -172,7 +172,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
 
     if (items.length === 0) {
       setMatches([]);
-      setMessage("Artikal nije pronadjen.");
+      setMessage("Artikal nije pronađen.");
       return;
     }
 
@@ -320,8 +320,8 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
             ref={searchInputRef}
             type="search"
             role="searchbox"
-            aria-label="Skeniraj barkod ili pretrazi artikal"
-            placeholder="Skeniraj barkod ili pretrazi artikal"
+            aria-label="Skeniraj barkod ili pretraži artikal"
+            placeholder="Skeniraj barkod ili pretraži artikal"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
@@ -356,14 +356,14 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
 
       {message && (
         <Alert variant="destructive">
-          <AlertTitle>Prodaja nije zavrsena</AlertTitle>
+          <AlertTitle>Prodaja nije završena</AlertTitle>
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       )}
 
       {previewState.status === "error" && (
         <Alert variant="destructive">
-          <AlertTitle>Pregled racuna nije moguc</AlertTitle>
+          <AlertTitle>Pregled računa nije moguć</AlertTitle>
           <AlertDescription>{previewState.message}</AlertDescription>
         </Alert>
       )}
@@ -377,7 +377,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
               </EmptyHeader>
               <EmptyContent>
                 <p className="text-xs text-muted-foreground">
-                  Skenirajte barkod ili pretrazite artikal.
+                  Skenirajte barkod ili pretražite artikal.
                 </p>
               </EmptyContent>
             </Empty>
@@ -387,7 +387,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                 <TableRow>
                   <TableHead>Artikal</TableHead>
                   <TableHead>SKU/barcode</TableHead>
-                  <TableHead>Kolicina</TableHead>
+                  <TableHead>Količina</TableHead>
                   <TableHead>Cena</TableHead>
                   <TableHead>Popust</TableHead>
                   <TableHead>Ukupno</TableHead>
@@ -424,7 +424,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                             type="button"
                             variant="outline"
                             size="icon-sm"
-                            aria-label={`Smanji kolicinu za ${item.product.name}`}
+                            aria-label={`Smanji količinu za ${item.product.name}`}
                             onClick={() =>
                               updateQuantity(
                                 item.product.id,
@@ -437,7 +437,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                             <MinusIcon />
                           </Button>
                           <input
-                            aria-label={`Kolicina za ${item.product.name}`}
+                            aria-label={`Količina za ${item.product.name}`}
                             className="h-8 w-20 rounded-md border bg-background px-2 text-center text-sm"
                             inputMode="decimal"
                             value={item.quantityInput}
@@ -449,7 +449,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                             type="button"
                             variant="outline"
                             size="icon-sm"
-                            aria-label={`Povecaj kolicinu za ${item.product.name}`}
+                            aria-label={`Povećaj količinu za ${item.product.name}`}
                             onClick={() =>
                               updateQuantity(
                                 item.product.id,
@@ -505,7 +505,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
           <Separator />
           <FieldGroup>
             <Field>
-              <FieldLabel htmlFor="receipt-discount">Popust na racun</FieldLabel>
+              <FieldLabel htmlFor="receipt-discount">Popust na račun</FieldLabel>
               <InputGroup>
                 <InputGroupInput
                   id="receipt-discount"
@@ -560,7 +560,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                 <AlertDialogHeader>
                   <AlertDialogTitle>Isprazniti korpu?</AlertDialogTitle>
                   <AlertDialogDescription>
-                    Stavke u korpi ce biti uklonjene.
+                    Stavke u korpi će biti uklonjene.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -588,7 +588,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
               ) : (
                 <ReceiptTextIcon data-icon="inline-start" />
               )}
-              Zavrsi prodaju
+              Završi prodaju
             </Button>
           </div>
         </aside>
@@ -599,7 +599,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
           <AlertDialogHeader>
             <AlertDialogTitle>Nema dovoljno zaliha</AlertDialogTitle>
             <AlertDialogDescription>
-              Stanje na kartici je manje od kolicine na racunu. Zelite li ipak da
+              Stanje na kartici je manje od količine na računu. Želite li ipak da
               prodate i pustite stanje u minus?
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -624,8 +624,8 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
           {completedSale && (
             <>
               <DialogHeader>
-                <DialogTitle>Racun {completedSale.localReceiptNumber}</DialogTitle>
-                <DialogDescription>Lokalni racun</DialogDescription>
+                <DialogTitle>Račun {completedSale.localReceiptNumber}</DialogTitle>
+                <DialogDescription>Lokalni račun</DialogDescription>
               </DialogHeader>
               <div className="flex flex-col gap-3">
                 <div className="flex justify-between">
@@ -668,7 +668,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
 function Totals({ preview }: { preview?: SalePreview }) {
   return (
     <div className="flex flex-col gap-2 text-sm">
-      <TotalRow label="Medjuzbir" value={preview?.subtotalMinor ?? 0} />
+      <TotalRow label="Međuzbir" value={preview?.subtotalMinor ?? 0} />
       <TotalRow label="Popust" value={preview?.discountMinor ?? 0} />
       <TotalRow label="PDV" value={preview?.taxMinor ?? 0} />
       <Separator />

@@ -32,8 +32,8 @@ describe("SettingsScreen", () => {
       await screen.findByRole("heading", { name: "PDV stope" }),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Racuni" }));
-    expect(screen.getByLabelText("Prefiks racuna")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Računi" }));
+    expect(screen.getByLabelText("Prefiks računa")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Korisnici" }));
     expect(screen.getByText("Korisnici panel")).toBeInTheDocument();
@@ -50,10 +50,10 @@ describe("SettingsScreen", () => {
 
     await user.clear(await screen.findByLabelText("Naziv radnje"));
     await user.type(screen.getByLabelText("Naziv radnje"), "Vantum Market");
-    await user.click(screen.getByRole("button", { name: "Sacuvaj radnju" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj radnju" }));
 
     expect(
-      await screen.findByText("Podesavanja radnje su sacuvana."),
+      await screen.findByText("Podešavanja radnje su sačuvana."),
     ).toBeInTheDocument();
   });
 
@@ -63,7 +63,7 @@ describe("SettingsScreen", () => {
 
     await user.click(await screen.findByRole("tab", { name: "PDV" }));
     await user.click(await screen.findByRole("button", { name: "Nova PDV stopa" }));
-    await user.click(screen.getByRole("button", { name: "Sacuvaj PDV stopu" }));
+    await user.click(screen.getByRole("button", { name: "Sačuvaj PDV stopu" }));
 
     expect(
       await screen.findByText("Naziv PDV stope je obavezan."),
@@ -103,7 +103,7 @@ describe("SettingsScreen", () => {
     const historyRow = screen.getByText(failedJob.path).closest("tr");
     expect(historyRow).not.toBeNull();
     expect(
-      within(historyRow as HTMLElement).getByText("Neuspesan"),
+      within(historyRow as HTMLElement).getByText("Neuspešan"),
     ).toBeInTheDocument();
   });
 
@@ -145,7 +145,7 @@ describe("SettingsScreen VAT rates", () => {
 
     await user.clear(nameInput);
     await user.type(nameInput, "PDV 20 standard");
-    await user.click(within(dialog).getByRole("button", { name: "Sacuvaj PDV stopu" }));
+    await user.click(within(dialog).getByRole("button", { name: "Sačuvaj PDV stopu" }));
 
     await waitFor(() =>
       expect(saveTaxRate).toHaveBeenCalledWith({
@@ -197,7 +197,7 @@ describe("SettingsScreen VAT rates", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "PDV stopa" });
     await user.clear(within(dialog).getByLabelText("Naziv"));
-    await user.click(within(dialog).getByRole("button", { name: "Sacuvaj PDV stopu" }));
+    await user.click(within(dialog).getByRole("button", { name: "Sačuvaj PDV stopu" }));
 
     expect(
       await within(dialog).findByText("Naziv PDV stope je obavezan."),

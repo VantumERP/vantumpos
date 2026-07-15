@@ -90,7 +90,7 @@ interface ImportWizardProps {
 const IMPORT_TYPE_LABELS: Record<ImportType, string> = {
   products: "Artikli",
   categories: "Kategorije",
-  initial_stock: "Pocetno stanje",
+  initial_stock: "Početno stanje",
 };
 
 const MAPPING_FIELDS: Record<
@@ -101,22 +101,22 @@ const MAPPING_FIELDS: Record<
     { key: "name", label: "Naziv", required: true },
     { key: "sale_price", label: "Prodajna cena", required: true },
     { key: "vat_rate", label: "PDV stopa", required: true },
-    { key: "sku", label: "SKU/sifra", required: false },
+    { key: "sku", label: "SKU/šifra", required: false },
     { key: "barcode", label: "Barcode", required: false },
     { key: "category", label: "Kategorija", required: false },
     { key: "purchase_price", label: "Nabavna cena", required: false },
     { key: "minimum_stock", label: "Minimalna zaliha", required: false },
     { key: "unit_of_measure", label: "Jedinica mere", required: false },
-    { key: "initial_stock", label: "Pocetna zaliha", required: false },
+    { key: "initial_stock", label: "Početna zaliha", required: false },
   ],
   categories: [
     { key: "name", label: "Naziv", required: true },
     { key: "active", label: "Aktivna", required: false },
   ],
   initial_stock: [
-    { key: "sku", label: "SKU/sifra", required: false },
+    { key: "sku", label: "SKU/šifra", required: false },
     { key: "barcode", label: "Barcode", required: false },
-    { key: "quantity", label: "Kolicina", required: true },
+    { key: "quantity", label: "Količina", required: true },
   ],
 };
 
@@ -308,7 +308,7 @@ export function ImportWizard({ services }: ImportWizardProps) {
             Import podataka
           </CardTitle>
           <CardDescription>
-            CSV migracija artikala, kategorija i pocetnog stanja.
+            CSV migracija artikala, kategorija i početnog stanja.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -328,7 +328,7 @@ export function ImportWizard({ services }: ImportWizardProps) {
           {committedJob ? (
             <Alert>
               <CheckIcon aria-hidden="true" />
-              <AlertTitle>Import zavrsen</AlertTitle>
+              <AlertTitle>Import završen</AlertTitle>
               <AlertDescription>
                 {committedJob.fileName} je upisan sa {committedJob.totalRows} redova.
               </AlertDescription>
@@ -365,7 +365,7 @@ export function ImportWizard({ services }: ImportWizardProps) {
                 onChange={handleFileChange}
               />
               <FieldDescription>
-                Fajl se cita lokalno i salje backend validaciji pre upisa.
+                Fajl se čita lokalno i šalje backend validaciji pre upisa.
               </FieldDescription>
             </Field>
           </FieldGroup>
@@ -447,14 +447,14 @@ export function ImportWizard({ services }: ImportWizardProps) {
                 onClick={() => setConfirmOpen(true)}
               >
                 <UploadIcon data-icon="inline-start" />
-                Upisi import
+                Upiši import
               </Button>
               <AlertDialogContent>
                 <AlertDialogHeader>
                   <AlertDialogTitle>Potvrdi upis</AlertDialogTitle>
                   <AlertDialogDescription>
-                    Upis ce biti izvrsen u jednoj transakciji. Ako bilo koji red
-                    ne prodje proveru, podaci se ne upisuju.
+                    Upis će biti izvršen u jednoj transakciji. Ako bilo koji red
+                    ne prođe proveru, podaci se ne upisuju.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -487,7 +487,7 @@ function ValidationPanel({
         <CardTitle>Dry run rezultat</CardTitle>
         <CardDescription>
           Dry run: {validation.summary.create} za kreiranje
-          {validation.summary.update ? `, ${validation.summary.update} za azuriranje` : ""}
+          {validation.summary.update ? `, ${validation.summary.update} za ažuriranje` : ""}
           {validation.summary.skip ? `, ${validation.summary.skip} za preskakanje` : ""}
         </CardDescription>
       </CardHeader>
@@ -495,9 +495,9 @@ function ValidationPanel({
         {validation.errorCount > 0 ? (
           <Alert variant="destructive">
             <AlertCircleIcon aria-hidden="true" />
-            <AlertTitle>Import ima greske</AlertTitle>
+            <AlertTitle>Import ima greške</AlertTitle>
             <AlertDescription>
-              Ispravite oznacene redove pre upisa.
+              Ispravite označene redove pre upisa.
             </AlertDescription>
           </Alert>
         ) : (
@@ -505,7 +505,7 @@ function ValidationPanel({
             <CheckIcon aria-hidden="true" />
             <AlertTitle>CSV je spreman za upis</AlertTitle>
             <AlertDescription>
-              Backend validacija nije pronasla greske.
+              Backend validacija nije pronašla greške.
             </AlertDescription>
           </Alert>
         )}
@@ -541,7 +541,7 @@ function ValidationPanel({
               <EmptyMedia variant="icon">
                 <CheckIcon aria-hidden="true" />
               </EmptyMedia>
-              <EmptyTitle>Nema redova sa greskom</EmptyTitle>
+              <EmptyTitle>Nema redova sa greškom</EmptyTitle>
               <EmptyDescription>Svi redovi su spremni za upis.</EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -623,7 +623,7 @@ function ImportHistory({
                   <TableCell>{IMPORT_TYPE_LABELS[job.importType]}</TableCell>
                   <TableCell>
                     <Badge variant={job.status === "failed" ? "destructive" : "outline"}>
-                      {job.status === "completed" ? "Zavrsen" : job.status}
+                      {job.status === "completed" ? "Završen" : job.status}
                     </Badge>
                   </TableCell>
                   <TableCell>{job.totalRows}</TableCell>
@@ -639,7 +639,7 @@ function ImportHistory({
               </EmptyMedia>
               <EmptyTitle>Nema prethodnih import poslova</EmptyTitle>
               <EmptyDescription>
-                Prvi uspesan upis ce se pojaviti ovde.
+                Prvi uspešan upis će se pojaviti ovde.
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent />
@@ -713,7 +713,7 @@ function ImportJobDetailDialog({
               <EmptyMedia variant="icon">
                 <FileTextIcon aria-hidden="true" />
               </EmptyMedia>
-              <EmptyTitle>Nema sacuvanih redova</EmptyTitle>
+              <EmptyTitle>Nema sačuvanih redova</EmptyTitle>
               <EmptyDescription>Ovaj posao nema redove za prikaz.</EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -763,7 +763,7 @@ function normalizeHeader(value: string) {
 
 function statusLabel(status: string) {
   if (status === "error") {
-    return "Greska";
+    return "Greška";
   }
 
   if (status === "warning") {
@@ -779,11 +779,11 @@ function statusLabel(status: string) {
 
 function actionLabel(action: string) {
   if (action === "update") {
-    return "Azuriranje";
+    return "Ažuriranje";
   }
 
   if (action === "skip") {
-    return "Preskace se";
+    return "Preskače se";
   }
 
   return "Kreiranje";
@@ -794,5 +794,5 @@ function messageFromError(error: unknown) {
     return String((error as { message: unknown }).message);
   }
 
-  return "Import trenutno nije moguc.";
+  return "Import trenutno nije moguć.";
 }
