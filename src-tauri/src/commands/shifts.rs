@@ -245,7 +245,7 @@ SELECT
     COALESCE(SUM(CASE WHEN sp.payment_method = 'card' THEN sp.amount_minor ELSE 0 END), 0)
 FROM shifts sh
 JOIN users u ON u.id = sh.user_id
-LEFT JOIN sales s ON s.shift_id = sh.id AND s.status = 'completed'
+LEFT JOIN sales s ON s.shift_id = sh.id
 LEFT JOIN sale_payments sp ON sp.sale_id = s.id
 {predicate}
 GROUP BY sh.id
@@ -301,7 +301,10 @@ fn normalized_note(value: Option<String>) -> Option<String> {
 mod tests {
     use rusqlite::params;
 
-    use super::{close_shift_for_user, open_shift_for_user, CloseShiftRequest, OpenShiftRequest};
+    use super::{
+        close_shift_for_user, current_shift_for_user, open_shift_for_user, CloseShiftRequest,
+        OpenShiftRequest,
+    };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
 
@@ -431,6 +434,64 @@ mod tests {
 
             assert_eq!(error.code, "validation_error");
             assert_eq!(error.message, "Korisnik vec ima otvorenu smenu.");
+        });
+    }
+
+    #[test]
+    fn shift_summary_nets_returns_against_cash_sales() {
+        with_state("shift_summary_nets_returns", |state| {
+            let user_id = seed_cashier(state);
+            open_shift_for_user(
+                state,
+                user_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 0,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            let conn = state.db().open().expect("database should open");
+            let shift_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM shifts WHERE user_id = ?1 AND status = 'open'",
+                    params![user_id],
+                    |row| row.get(0),
+                )
+                .expect("open shift id should load");
+            conn.execute(
+                "INSERT INTO sales (local_receipt_number, shift_id, cashier_id, status, fiscal_status, subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at)
+                 VALUES ('R-1', ?1, ?2, 'completed', 'not_fiscalized', 1000, 0, 167, 1000, '2026-06-18T09:00:00Z', '2026-06-18T09:00:00Z')",
+                params![shift_id, user_id],
+            )
+            .expect("sale should insert");
+            let sale_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, 'cash', 1000, '2026-06-18T09:00:00Z')",
+                params![sale_id],
+            )
+            .expect("payment should insert");
+            conn.execute(
+                "INSERT INTO sales (local_receipt_number, shift_id, cashier_id, status, fiscal_status, document_type, original_sale_id, subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at)
+                 VALUES ('POV-1', ?1, ?2, 'refunded', 'not_fiscalized', 'return', ?3, 300, 0, 50, 300, '2026-06-18T09:30:00Z', '2026-06-18T09:30:00Z')",
+                params![shift_id, user_id, sale_id],
+            )
+            .expect("return document should insert");
+            let return_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, 'cash', -300, '2026-06-18T09:30:00Z')",
+                params![return_id],
+            )
+            .expect("refund payment should insert");
+
+            let summary = current_shift_for_user(state, user_id)
+                .expect("summary should query")
+                .expect("open shift summary should exist");
+            assert_eq!(summary.cash_sales_minor, 700);
+            assert_eq!(summary.card_sales_minor, 0);
+            assert_eq!(summary.expected_cash_minor, 700);
         });
     }
 }
