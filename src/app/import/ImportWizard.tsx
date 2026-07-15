@@ -55,6 +55,7 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { decodeCsv, type CsvEncoding } from "@/lib/encoding";
 import {
   NativeSelect,
   NativeSelectOption,
@@ -137,6 +138,10 @@ const FIELD_ALIASES: Record<string, string[]> = {
 export function ImportWizard({ services }: ImportWizardProps) {
   const [importType, setImportType] = useState<ImportType>("products");
   const [csvText, setCsvText] = useState("");
+  const [fileBytes, setFileBytes] = useState<ArrayBuffer | null>(null);
+  const [encodingChoice, setEncodingChoice] = useState<"auto" | CsvEncoding>(
+    "auto",
+  );
   const [fileName, setFileName] = useState("");
   const [headers, setHeaders] = useState<ImportHeaders | null>(null);
   const [mapping, setMapping] = useState<ImportMapping>({});
@@ -189,6 +194,35 @@ export function ImportWizard({ services }: ImportWizardProps) {
     [fields, mapping],
   );
 
+  async function loadCsv(
+    bytes: ArrayBuffer,
+    name: string,
+    choice: "auto" | CsvEncoding,
+  ) {
+    setIsBusy(true);
+    setError(null);
+    setValidation(null);
+    setCommittedJob(null);
+
+    try {
+      const { text } = decodeCsv(bytes, choice === "auto" ? undefined : choice);
+      const nextHeaders = await services.imports.readImportHeaders({
+        importType,
+        fileName: name,
+        csvText: text,
+      });
+
+      setCsvText(text);
+      setFileName(name);
+      setHeaders(nextHeaders);
+      setMapping(autoMapHeaders(importType, nextHeaders.headers));
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
 
@@ -196,28 +230,15 @@ export function ImportWizard({ services }: ImportWizardProps) {
       return;
     }
 
-    setIsBusy(true);
-    setError(null);
-    setValidation(null);
-    setCommittedJob(null);
+    const bytes = await file.arrayBuffer();
+    setFileBytes(bytes);
+    await loadCsv(bytes, file.name, encodingChoice);
+  }
 
-    try {
-      const text = await file.text();
-      const request = {
-        importType,
-        fileName: file.name,
-        csvText: text,
-      };
-      const nextHeaders = await services.imports.readImportHeaders(request);
-
-      setCsvText(text);
-      setFileName(file.name);
-      setHeaders(nextHeaders);
-      setMapping(autoMapHeaders(importType, nextHeaders.headers));
-    } catch (caught) {
-      setError(messageFromError(caught));
-    } finally {
-      setIsBusy(false);
+  async function handleEncodingChange(next: "auto" | CsvEncoding) {
+    setEncodingChoice(next);
+    if (fileBytes) {
+      await loadCsv(fileBytes, fileName, next);
     }
   }
 
@@ -269,6 +290,8 @@ export function ImportWizard({ services }: ImportWizardProps) {
   function changeImportType(nextType: ImportType) {
     setImportType(nextType);
     setCsvText("");
+    setFileBytes(null);
+    setEncodingChoice("auto");
     setFileName("");
     setHeaders(null);
     setMapping({});
@@ -358,6 +381,24 @@ export function ImportWizard({ services }: ImportWizardProps) {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
+            <Field className="max-w-xs">
+              <FieldLabel htmlFor="import-encoding">Kodni raspored</FieldLabel>
+              <NativeSelect
+                id="import-encoding"
+                value={encodingChoice}
+                onChange={(event) =>
+                  void handleEncodingChange(
+                    event.currentTarget.value as "auto" | CsvEncoding,
+                  )
+                }
+              >
+                <NativeSelectOption value="auto">Automatski</NativeSelectOption>
+                <NativeSelectOption value="utf-8">UTF-8</NativeSelectOption>
+                <NativeSelectOption value="windows-1250">
+                  Windows-1250
+                </NativeSelectOption>
+              </NativeSelect>
+            </Field>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {mappedLabels.map((field) => (
                 <Field key={field.key} data-invalid={field.required && !field.header}>
