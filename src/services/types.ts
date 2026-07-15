@@ -160,6 +160,12 @@ export interface CloseShiftRequest {
   note?: string | null;
 }
 
+export interface CashMovementRequest {
+  direction: "pay_in" | "pay_out";
+  amountMinor: number;
+  reason?: string | null;
+}
+
 export interface SaveUserRequest {
   username: string;
   displayName: string;

@@ -112,6 +112,42 @@ describe("local service adapter", () => {
     });
   });
 
+  it("maps shiftCashMovement to shift_cash_movement", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      id: 1,
+      userId: 1,
+      cashierName: "Administrator",
+      openedAt: "2026-06-18T09:00:00Z",
+      closedAt: null,
+      openingCashMinor: 10000,
+      expectedCashMinor: 5000,
+      countedCashMinor: null,
+      cashSalesMinor: 0,
+      cardSalesMinor: 0,
+      paidInMinor: 0,
+      paidOutMinor: 5000,
+      differenceMinor: null,
+      status: "open",
+      openingNote: null,
+      closingNote: null,
+    });
+    const services = createLocalServices(invoke);
+
+    await services.shifts.shiftCashMovement({
+      direction: "pay_out",
+      amountMinor: 5000,
+      reason: "Pazar u banku",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("shift_cash_movement", {
+      request: {
+        direction: "pay_out",
+        amountMinor: 5000,
+        reason: "Pazar u banku",
+      },
+    });
+  });
+
   it("maps settings and backup services to stable Tauri command names", async () => {
     const invoke = vi.fn().mockResolvedValue({});
     const services = createLocalServices(invoke);
@@ -562,6 +598,50 @@ describe("mock service adapter", () => {
         expect.objectContaining({ username: "admin", role: "admin" }),
       ]),
     );
+  });
+
+  it("applies cash in/out to expected cash and running totals in mock services", async () => {
+    const services = createMockServices();
+    const opening = await services.shifts.getCurrentShift();
+
+    const afterPayIn = await services.shifts.shiftCashMovement({
+      direction: "pay_in",
+      amountMinor: 3000,
+      reason: "Sitan novac",
+    });
+    expect(afterPayIn.paidInMinor).toBe(3000);
+    expect(afterPayIn.paidOutMinor).toBe(0);
+    expect(afterPayIn.expectedCashMinor).toBe(
+      (opening?.expectedCashMinor ?? 0) + 3000,
+    );
+
+    const afterPayOut = await services.shifts.shiftCashMovement({
+      direction: "pay_out",
+      amountMinor: 1000,
+      reason: "Pazar u banku",
+    });
+    expect(afterPayOut.paidInMinor).toBe(3000);
+    expect(afterPayOut.paidOutMinor).toBe(1000);
+    expect(afterPayOut.expectedCashMinor).toBe(
+      (opening?.expectedCashMinor ?? 0) + 3000 - 1000,
+    );
+
+    await expect(services.shifts.getCurrentShift()).resolves.toMatchObject({
+      paidInMinor: 3000,
+      paidOutMinor: 1000,
+    });
+  });
+
+  it("rejects non-positive cash movement amounts in mock services", async () => {
+    const services = createMockServices();
+
+    await expect(
+      services.shifts.shiftCashMovement({
+        direction: "pay_in",
+        amountMinor: 0,
+        reason: null,
+      }),
+    ).rejects.toMatchObject({ code: "validation_error" });
   });
 
   it("persists settings, tax rates, receipt numbering, and backup jobs in mock services", async () => {

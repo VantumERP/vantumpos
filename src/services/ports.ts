@@ -5,6 +5,7 @@ import type {
   BackupSettings,
   BackupStatus,
   CashierTurnoverReport,
+  CashMovementRequest,
   CategorySummary,
   CategorySalesReport,
   CloseShiftRequest,
@@ -103,6 +104,7 @@ export interface ShiftService {
   openShift(request: OpenShiftRequest): Promise<ShiftSummary>;
   closeShift(request: CloseShiftRequest): Promise<ShiftSummary>;
   adminCloseShift(request: CloseShiftRequest): Promise<ShiftSummary>;
+  shiftCashMovement(request: CashMovementRequest): Promise<ShiftSummary>;
 }
 
 export interface CatalogService {

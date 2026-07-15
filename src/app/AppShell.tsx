@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import { toast } from "sonner";
 
 import { AppVersion } from "@/app/AppVersion";
 import { BackendStatus } from "@/app/BackendStatus";
@@ -382,6 +383,7 @@ function renderModule({
       <RegisterWithShiftPanel
         services={services}
         session={session}
+        onSessionChange={onSessionChange}
         onClosed={() => onSessionChange({ ...session, currentShift: null })}
       />
     ) : (
@@ -759,10 +761,12 @@ function OpenShiftScreen({
 function RegisterWithShiftPanel({
   services,
   session,
+  onSessionChange,
   onClosed,
 }: {
   services: PosServices;
   session: AppSession;
+  onSessionChange: (session: AppSession) => void;
   onClosed: () => void;
 }) {
   const shift = session.currentShift;
@@ -776,7 +780,14 @@ function RegisterWithShiftPanel({
       <div className="min-w-0">
         <RegisterScreen services={services} />
       </div>
-      <CloseShiftPanel services={services} shift={shift} onClosed={onClosed} />
+      <CloseShiftPanel
+        services={services}
+        shift={shift}
+        onClosed={onClosed}
+        onShiftUpdate={(nextShift) =>
+          onSessionChange({ ...session, currentShift: nextShift })
+        }
+      />
     </section>
   );
 }
@@ -785,10 +796,12 @@ function CloseShiftPanel({
   services,
   shift,
   onClosed,
+  onShiftUpdate,
 }: {
   services: PosServices;
   shift: ShiftSummary;
   onClosed: () => void;
+  onShiftUpdate: (shift: ShiftSummary) => void;
 }) {
   const [countedCash, setCountedCash] = useState("");
   const [note, setNote] = useState("");
@@ -845,7 +858,16 @@ function CloseShiftPanel({
         <CardTitle>Zatvori smenu</CardTitle>
         <CardDescription>Prebrojte gotovinu pre zatvaranja.</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <div className="grid gap-3">
+          <StatusRow label="Očekivana gotovina" value={formatRsd(shift.expectedCashMinor)} />
+          <StatusRow label="Kartice" value={formatRsd(shift.cardSalesMinor)} />
+          <StatusRow label="Uplate u kasu" value={formatRsd(shift.paidInMinor)} />
+          <StatusRow label="Isplate iz kase" value={formatRsd(shift.paidOutMinor)} />
+        </div>
+        <Separator />
+        <CashMovementForm services={services} onShiftUpdate={onShiftUpdate} />
+        <Separator />
         <form className="flex flex-col gap-4" onSubmit={requestClose}>
           <FieldGroup>
             {error ? (
@@ -854,8 +876,6 @@ function CloseShiftPanel({
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             ) : null}
-            <StatusRow label="Očekivana gotovina" value={formatRsd(shift.expectedCashMinor)} />
-            <StatusRow label="Kartice" value={formatRsd(shift.cardSalesMinor)} />
             <Field data-invalid={!!error}>
               <FieldLabel htmlFor="counted-cash">Prebrojana gotovina</FieldLabel>
               <Input
@@ -905,6 +925,112 @@ function CloseShiftPanel({
         </AlertDialogContent>
       </AlertDialog>
     </Card>
+  );
+}
+
+function CashMovementForm({
+  services,
+  onShiftUpdate,
+}: {
+  services: PosServices;
+  onShiftUpdate: (shift: ShiftSummary) => void;
+}) {
+  const [direction, setDirection] = useState<"pay_in" | "pay_out">("pay_in");
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+
+    let amountMinor: number;
+    try {
+      amountMinor = parseRsdInput(amount);
+      if (amountMinor <= 0) {
+        throw new Error("Iznos mora biti veći od nule.");
+      }
+    } catch (parseError) {
+      setError(errorMessage(parseError, "Iznos nije ispravan."));
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const updated = await services.shifts.shiftCashMovement({
+        direction,
+        amountMinor,
+        reason: reason.trim() || null,
+      });
+      onShiftUpdate(updated);
+      setAmount("");
+      setReason("");
+      toast.success(
+        direction === "pay_in"
+          ? "Uplata u kasu je zabeležena."
+          : "Isplata iz kase je zabeležena.",
+      );
+    } catch (movementError) {
+      setError(errorMessage(movementError, "Transakcija nije izvršena."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+      <FieldGroup>
+        {error ? (
+          <Alert variant="destructive">
+            <AlertCircleIcon aria-hidden="true" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
+        <Field>
+          <FieldLabel htmlFor="cash-movement-direction">
+            Vrsta transakcije
+          </FieldLabel>
+          <NativeSelect
+            id="cash-movement-direction"
+            value={direction}
+            className="w-full"
+            onChange={(event) =>
+              setDirection(event.target.value as "pay_in" | "pay_out")
+            }
+          >
+            <NativeSelectOption value="pay_in">Uplata u kasu</NativeSelectOption>
+            <NativeSelectOption value="pay_out">Isplata iz kase</NativeSelectOption>
+          </NativeSelect>
+        </Field>
+        <Field data-invalid={!!error}>
+          <FieldLabel htmlFor="cash-movement-amount">Iznos</FieldLabel>
+          <Input
+            id="cash-movement-amount"
+            inputMode="decimal"
+            value={amount}
+            aria-invalid={!!error}
+            onChange={(event) => setAmount(event.target.value)}
+          />
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="cash-movement-reason">Razlog</FieldLabel>
+          <Input
+            id="cash-movement-reason"
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </Field>
+        <Field>
+          <Button type="submit" variant="outline" disabled={submitting}>
+            {submitting ? (
+              <Spinner data-icon="inline-start" aria-hidden="true" />
+            ) : null}
+            {direction === "pay_in" ? "Uplata u kasu" : "Isplata iz kase"}
+          </Button>
+        </Field>
+      </FieldGroup>
+    </form>
   );
 }
 

@@ -95,6 +95,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       closeShift: (request) => invoke<ShiftSummary>("shift_close", { request }),
       adminCloseShift: (request) =>
         invoke<ShiftSummary>("shift_admin_close", { request }),
+      shiftCashMovement: (request) =>
+        invoke<ShiftSummary>("shift_cash_movement", { request }),
     },
     catalog: {
       listProducts: (query) =>

@@ -506,6 +506,36 @@ export function createMockServices(): PosServices {
           closingNote: request.note ?? null,
         };
       },
+      async shiftCashMovement(request) {
+        if (!session?.currentShift) {
+          throw { code: "shift_required", message: "Smena nije otvorena." };
+        }
+
+        if (request.amountMinor <= 0) {
+          throw {
+            code: "validation_error",
+            message: "Iznos mora biti veći od nule.",
+          };
+        }
+
+        const delta =
+          request.direction === "pay_in"
+            ? request.amountMinor
+            : -request.amountMinor;
+        const updated: ShiftSummary = {
+          ...session.currentShift,
+          expectedCashMinor: session.currentShift.expectedCashMinor + delta,
+          paidInMinor:
+            session.currentShift.paidInMinor +
+            (request.direction === "pay_in" ? request.amountMinor : 0),
+          paidOutMinor:
+            session.currentShift.paidOutMinor +
+            (request.direction === "pay_out" ? request.amountMinor : 0),
+        };
+        currentShift = updated;
+        session = { ...session, currentShift: updated };
+        return updated;
+      },
     },
     catalog: {
       async listProducts(query) {
