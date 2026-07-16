@@ -175,22 +175,45 @@ pub fn create_backup(
         .to_string();
     validate_backup_type(&backup_type)?;
 
+    perform_backup(state, request.backup_folder.as_deref(), &backup_type)
+}
+
+/// Resolves the backup folder, copies the live database into it, and records
+/// the resulting job. Deliberately auth-free: callers (the `backup_create`
+/// command, restore's pre-restore snapshot, go-live reset's safety backup)
+/// are each responsible for their own admin gate before reaching here. On a
+/// copy failure a `"failed"` backup_job is recorded before the error is
+/// propagated, so the "last failed backup" status has something to surface.
+pub fn perform_backup(
+    state: &AppState,
+    backup_folder: Option<&str>,
+    backup_type: &str,
+) -> Result<BackupJob, AppError> {
     let mut settings = load_backup_settings(state)?;
-    let backup_folder = request
-        .backup_folder
-        .as_deref()
+    let backup_folder = backup_folder
         .map(str::trim)
         .filter(|folder| !folder.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| settings.backup_folder.clone());
 
-    let backup_path = build_backup_path(&backup_folder, &backup_type)?;
+    let backup_path = build_backup_path(&backup_folder, backup_type)?;
     std::fs::create_dir_all(&backup_folder)?;
 
     let source = state.db().open()?;
     source
         .backup(DatabaseName::Main, &backup_path, None)
-        .map_err(|source| AppError::BackupFailed(format!("Backup nije uspeo: {source}")))?;
+        .map_err(|source| {
+            let message = format!("Backup nije uspeo: {source}");
+            let _ = insert_backup_job(
+                state,
+                backup_type,
+                &backup_path,
+                "failed",
+                Some(&message),
+                None,
+            );
+            AppError::BackupFailed(message)
+        })?;
 
     let file_size_bytes = checked_file_size(&backup_path)?;
     settings.backup_folder = backup_folder;
@@ -198,7 +221,7 @@ pub fn create_backup(
 
     insert_backup_job(
         state,
-        &backup_type,
+        backup_type,
         &backup_path,
         "completed",
         None,
@@ -653,6 +676,48 @@ INSERT INTO settings (key, value_json, updated_at)
                 assert_eq!(job.status, "completed");
                 assert!(std::path::Path::new(&job.path).exists());
                 assert!(job.file_size_bytes.expect("backup should record size") > 0);
+            },
+        );
+    }
+
+    // Unix-only: relies on directory write permission bits to force the
+    // `.backup()` copy itself to fail (the folder is created successfully,
+    // so `create_dir_all` is not the failure point) without needing admin
+    // auth, since `perform_backup` is intentionally auth-free.
+    #[cfg(unix)]
+    #[test]
+    fn perform_backup_records_failed_job_when_copy_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_state(
+            "perform_backup_records_failed_job_when_copy_fails",
+            |state| {
+                let folder = test_backup_dir("vantumpos-perform-backup-unwritable");
+
+                // Directory exists and is readable/executable, so `create_dir_all`
+                // is a no-op success — but it is not writable, so SQLite's
+                // `.backup()` cannot create the destination file inside it.
+                std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500))
+                    .expect("read-only permissions should set");
+
+                let result = perform_backup(state, Some(&folder.display().to_string()), "manual");
+
+                // Restore write access so the temp directory can be cleaned up.
+                std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+                    .expect("permissions should restore");
+
+                let error = result.expect_err("backup copy should fail into a read-only folder");
+                assert_eq!(error.code(), "backup_failed");
+
+                let conn = state.db().open().expect("database should open");
+                let status: String = conn
+                    .query_row(
+                        "SELECT status FROM backup_jobs ORDER BY id DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("failed backup job should be recorded");
+                assert_eq!(status, "failed");
             },
         );
     }
