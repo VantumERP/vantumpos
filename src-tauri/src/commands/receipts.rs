@@ -105,6 +105,7 @@ pub struct ReceiptDetail {
     pub original_receipt_number: Option<String>,
     pub void_reason: Option<String>,
     pub return_reason: Option<String>,
+    pub esir_receipt_number: Option<String>,
     pub items: Vec<ReceiptItem>,
     pub payments: Vec<ReceiptPayment>,
     pub linked_documents: Vec<ReceiptLink>,
@@ -154,6 +155,7 @@ struct ReceiptHeader {
     original_receipt_number: Option<String>,
     void_reason: Option<String>,
     return_reason: Option<String>,
+    esir_receipt_number: Option<String>,
     payment_methods: Vec<String>,
 }
 
@@ -668,6 +670,55 @@ pub fn return_items(
     get_receipt_detail(db, request.receipt_id).map_err(Into::into)
 }
 
+pub fn set_esir_number(
+    db: &Db,
+    receipt_id: i64,
+    esir_receipt_number: String,
+    _acting_user_id: i64,
+) -> Result<ReceiptDetail, AppError> {
+    let connection = db.open()?;
+
+    let document_type: Option<String> = connection
+        .query_row(
+            "SELECT document_type FROM sales WHERE id = ?1",
+            params![receipt_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let document_type = document_type.ok_or_else(|| AppError::not_found("Račun nije pronađen."))?;
+    if document_type != "sale" {
+        return Err(AppError::validation(
+            "Broj fiskalnog računa se može upisati samo na prodajni dokument.",
+            serde_json::json!({ "field": "esirReceiptNumber" }),
+        ));
+    }
+
+    let trimmed = esir_receipt_number.trim();
+    let value: Option<&str> = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    };
+
+    connection.execute(
+        "UPDATE sales SET esir_receipt_number = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![value, receipt_id],
+    )?;
+
+    load_receipt_detail(&connection, receipt_id)
+}
+
+#[tauri::command]
+pub fn receipts_set_esir_number(
+    state: State<'_, AppState>,
+    receipt_id: i64,
+    esir_receipt_number: String,
+) -> Result<ReceiptDetail, CommandError> {
+    let acting_user_id = super::auth::require_session(state.inner())?;
+    set_esir_number(state.db(), receipt_id, esir_receipt_number, acting_user_id).map_err(Into::into)
+}
+
 fn load_receipt_detail(
     connection: &Connection,
     receipt_id: i64,
@@ -708,6 +759,7 @@ fn load_receipt_detail(
         original_receipt_number: header.original_receipt_number,
         void_reason: header.void_reason,
         return_reason: header.return_reason,
+        esir_receipt_number: header.esir_receipt_number,
         items,
         payments,
         linked_documents,
@@ -740,6 +792,7 @@ SELECT
     original.local_receipt_number,
     s.void_reason,
     s.return_reason,
+    s.esir_receipt_number,
     COALESCE((
         SELECT GROUP_CONCAT(DISTINCT sp.payment_method)
         FROM sale_payments sp
@@ -769,7 +822,8 @@ WHERE s.id = ?1
                     original_receipt_number: row.get(13)?,
                     void_reason: row.get(14)?,
                     return_reason: row.get(15)?,
-                    payment_methods: parse_payment_methods(row.get::<_, String>(16)?),
+                    esir_receipt_number: row.get(16)?,
+                    payment_methods: parse_payment_methods(row.get::<_, String>(17)?),
                 })
             },
         )
@@ -1235,8 +1289,8 @@ mod tests {
     use crate::db::{test_database_path, Db};
 
     use super::{
-        get_receipt_detail, return_items, search_receipts, void_receipt, ReceiptSearchQuery,
-        ReturnItemRequest, ReturnItemsRequest, VoidReceiptRequest,
+        get_receipt_detail, return_items, search_receipts, set_esir_number, void_receipt,
+        ReceiptSearchQuery, ReturnItemRequest, ReturnItemsRequest, VoidReceiptRequest,
     };
 
     struct SeededReceipt {
@@ -1980,6 +2034,47 @@ mod tests {
                 )
                 .expect("void doc");
             assert_eq!(cashier, seeded.user_id);
+        });
+    }
+
+    #[test]
+    fn set_esir_number_stores_and_clears_on_a_sale() {
+        with_receipt_database("set_esir_number_stores_and_clears_on_a_sale", |db, seed| {
+            let detail = set_esir_number(db, seed.sale_id, "  ФБ123-1  ".to_string(), seed.user_id)
+                .expect("set should succeed");
+            assert_eq!(detail.esir_receipt_number.as_deref(), Some("ФБ123-1"));
+
+            let cleared = set_esir_number(db, seed.sale_id, "   ".to_string(), seed.user_id)
+                .expect("clear should succeed");
+            assert_eq!(cleared.esir_receipt_number, None);
+        });
+    }
+
+    #[test]
+    fn set_esir_number_rejects_non_sale_document() {
+        with_receipt_database("set_esir_number_rejects_non_sale_document", |db, seed| {
+            // Void the sale, then try to stamp the VOID document (not a 'sale').
+            void_receipt(
+                db,
+                VoidReceiptRequest {
+                    receipt_id: seed.sale_id,
+                    reason: "x".into(),
+                },
+                seed.user_id,
+            )
+            .expect("void");
+            let void_id: i64 = db
+                .open()
+                .unwrap()
+                .query_row(
+                    "SELECT id FROM sales WHERE original_sale_id = ?1 AND document_type = 'void'",
+                    params![seed.sale_id],
+                    |r| r.get(0),
+                )
+                .expect("void doc id");
+            let err = set_esir_number(db, void_id, "X".into(), seed.user_id)
+                .expect_err("must reject non-sale");
+            assert_eq!(err.code(), "validation_error");
         });
     }
 }

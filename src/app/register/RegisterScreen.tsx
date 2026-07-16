@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/dialog";
 import { Empty, EmptyContent, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import {
   InputGroup,
   InputGroupAddon,
@@ -91,10 +92,15 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   const [isCompleting, setIsCompleting] = useState(false);
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [completedSale, setCompletedSale] = useState<CompletedSale | null>(null);
+  const [esirNumber, setEsirNumberValue] = useState("");
 
   useEffect(() => {
     searchInputRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    setEsirNumberValue("");
+  }, [completedSale]);
 
   const receiptDiscount = useMemo(
     () => moneyDiscountFromInput(receiptDiscountInput),
@@ -662,6 +668,36 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                 <div className="flex justify-between text-sm">
                   <span>Kusur</span>
                   <span>{formatRsd(completedSale.changeDueMinor)}</span>
+                </div>
+              </div>
+              <div className="rounded-md bg-muted p-3 text-sm">
+                <p className="font-medium">Izdajte fiskalni račun na ESIR-u</p>
+                <p className="text-muted-foreground">
+                  Ovaj interni račun ne zamenjuje fiskalni račun.
+                </p>
+                <div className="mt-2 flex items-end gap-2">
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="esir-number" className="text-xs">
+                      Broj fiskalnog računa (ESIR)
+                    </label>
+                    <Input
+                      id="esir-number"
+                      value={esirNumber}
+                      onChange={(e) => setEsirNumberValue(e.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => {
+                      void services.receipts.setEsirNumber(
+                        completedSale.id,
+                        esirNumber,
+                      );
+                    }}
+                  >
+                    Sačuvaj broj
+                  </Button>
                 </div>
               </div>
               <NonFiscalBanner />

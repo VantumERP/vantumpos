@@ -141,6 +141,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       voidReceipt: (request) => invoke<ReceiptDetail>("receipts_void", { request }),
       returnItems: (request) =>
         invoke<ReceiptDetail>("receipts_return_items", { request }),
+      setEsirNumber: (receiptId, esirReceiptNumber) =>
+        invoke<ReceiptDetail>("receipts_set_esir_number", { receiptId, esirReceiptNumber }),
     },
     imports: {
       readImportHeaders: (request) =>

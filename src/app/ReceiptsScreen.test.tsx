@@ -173,6 +173,7 @@ function buildReceiptsService(
     getReceipt: vi.fn(async () => detail),
     voidReceipt: vi.fn(async () => detail),
     returnItems: vi.fn(async () => detail),
+    setEsirNumber: vi.fn(async () => detail),
     ...overrides,
   };
 }

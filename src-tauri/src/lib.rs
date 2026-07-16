@@ -91,6 +91,7 @@ pub fn run() {
             commands::receipts::receipts_get,
             commands::receipts::receipts_void,
             commands::receipts::receipts_return_items,
+            commands::receipts::receipts_set_esir_number,
             commands::imports::import_read_headers,
             commands::imports::import_validate,
             commands::imports::import_commit,

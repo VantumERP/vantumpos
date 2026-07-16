@@ -481,6 +481,7 @@ export interface ReceiptDetail extends ReceiptSummary {
   originalReceiptNumber?: string | null;
   voidReason?: string | null;
   returnReason?: string | null;
+  esirReceiptNumber?: string | null;
   items: ReceiptItem[];
   payments: ReceiptPayment[];
   linkedDocuments: ReceiptLink[];

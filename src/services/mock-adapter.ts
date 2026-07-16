@@ -752,6 +752,11 @@ export function createMockServices(): PosServices {
         receipt.canVoid = false;
         return receipt;
       },
+      async setEsirNumber(_receiptId, esirReceiptNumber) {
+        const trimmed = esirReceiptNumber.trim();
+        receipt.esirReceiptNumber = trimmed.length > 0 ? trimmed : null;
+        return receipt;
+      },
     },
     imports: {
       async readImportHeaders(request) {

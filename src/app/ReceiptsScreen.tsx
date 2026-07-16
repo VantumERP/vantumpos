@@ -637,6 +637,9 @@ function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProp
           <Badge variant="secondary">{documentLabels[detail.documentType]}</Badge>
           <Badge variant="outline">{statusLabels[detail.status]}</Badge>
           <Badge variant="outline">{fiscalLabels[detail.fiscalStatus]}</Badge>
+          {detail.esirReceiptNumber ? (
+            <Badge variant="outline">ESIR: {detail.esirReceiptNumber}</Badge>
+          ) : null}
         </div>
       </div>
 

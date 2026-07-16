@@ -137,6 +137,7 @@ export interface ReceiptsService {
   getReceipt(id: number): Promise<ReceiptDetail | null>;
   voidReceipt(request: VoidReceiptRequest): Promise<ReceiptDetail>;
   returnItems(request: ReturnItemsRequest): Promise<ReceiptDetail>;
+  setEsirNumber(receiptId: number, esirReceiptNumber: string): Promise<ReceiptDetail>;
 }
 
 export interface ImportService {

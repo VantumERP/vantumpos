@@ -398,6 +398,42 @@ describe("RegisterScreen", () => {
     expect(screen.queryByText("Kosulja plava")).toBeNull();
   });
 
+  it("nudges ESIR issuance and saves the entered fiscal number", async () => {
+    const user = userEvent.setup();
+    const setEsirNumber = vi.fn().mockResolvedValue({});
+    const services = createRegisterServices();
+    (
+      services as unknown as {
+        receipts: { setEsirNumber: typeof setEsirNumber };
+      }
+    ).receipts = { setEsirNumber };
+
+    render(<RegisterScreen services={services} />);
+    await user.type(
+      screen.getByRole("searchbox", {
+        name: "Skeniraj barkod ili pretraži artikal",
+      }),
+      "8600000000010{enter}",
+    );
+    expect(await screen.findByText("Mleko 1 l")).toBeInTheDocument();
+    const cashField = screen.getByLabelText("Gotovina primljeno");
+    await waitFor(() => expect(cashField).toHaveValue("159.99"));
+    await user.clear(cashField);
+    await user.type(cashField, "160");
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
+
+    await screen.findByRole("dialog", { name: "Račun VP-000001" });
+    expect(
+      screen.getByText(/Izdajte fiskalni račun na ESIR-u/i),
+    ).toBeInTheDocument();
+    await user.type(
+      screen.getByLabelText(/Broj fiskalnog računa/i),
+      "ФБ12-1",
+    );
+    await user.click(screen.getByRole("button", { name: /Sačuvaj broj/i }));
+    expect(setEsirNumber).toHaveBeenCalledWith(expect.any(Number), "ФБ12-1");
+  });
+
   it("reports when nothing matches", async () => {
     const user = userEvent.setup();
     const services = createRegisterServices();
