@@ -1085,6 +1085,12 @@ function GoLiveResetCard({
                 Ova radnja je nepovratna. Unesite OBRISI PODATKE za potvrdu.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            <p className="text-sm text-muted-foreground">
+              Zakon zahteva čuvanje evidencija do 10 godina (ZoRač čl. 28; ZPDV
+              čl. 47). Pre brisanja se obavezno pravi rezervna kopija — čuvajte je
+              trajno. Pravna lica ne smeju uništavati dokumentarni materijal bez
+              pismenog odobrenja arhiva.
+            </p>
             <Input
               aria-label="Potvrda brisanja"
               value={confirmationText}

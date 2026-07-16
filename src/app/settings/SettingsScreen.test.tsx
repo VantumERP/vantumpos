@@ -126,6 +126,20 @@ describe("SettingsScreen", () => {
     await user.type(screen.getByLabelText("Potvrda"), "VRATI PODATKE");
     expect(screen.getByRole("button", { name: "Potvrdi restore" })).toBeEnabled();
   });
+
+  it("shows the 10-year retention warning in the reset dialog", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Backup" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Obriši probne podatke" }),
+    );
+
+    expect(
+      await screen.findByText(/do 10 godina/i),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("SettingsScreen VAT rates", () => {

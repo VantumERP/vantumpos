@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, DatabaseName, OptionalExtension, Row};
+use rusqlite::{params, Connection, DatabaseName, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -255,7 +255,7 @@ pub fn restore_backup(
     state: &AppState,
     request: RestoreBackupRequest,
 ) -> Result<BackupJob, AppError> {
-    super::auth::require_admin(state)?;
+    let acting = super::auth::require_admin(state)?;
 
     if request.confirmation_text.trim() != RESTORE_CONFIRMATION {
         return Err(AppError::validation(
@@ -290,6 +290,13 @@ pub fn restore_backup(
     state.db().migrate()?;
     let file_size_bytes = checked_file_size(&source_path)?;
 
+    {
+        let conn = state.db().open()?;
+        let detail =
+            serde_json::json!({ "source_path": source_path.display().to_string() }).to_string();
+        insert_compliance_event(&conn, "backup_restored", &detail, Some(acting.id))?;
+    }
+
     insert_backup_job(
         state,
         "restore",
@@ -306,7 +313,7 @@ const RESET_CONFIRMATION: &str = "OBRISI PODATKE";
 /// counter so a shop can go live on a clean slate, keeping catalog/users/settings.
 /// Takes a safety backup first and requires exact typed confirmation.
 pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(), AppError> {
-    super::auth::require_admin(state)?;
+    let acting = super::auth::require_admin(state)?;
 
     if confirmation_text.trim() != RESET_CONFIRMATION {
         return Err(AppError::validation(
@@ -343,6 +350,12 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
          WHERE key = 'receipt_numbering'",
         [],
     )?;
+    let detail = serde_json::json!({
+        "note": "Go-live reset (SW-3).",
+        "retention": "10y (ZoRač čl. 28; ZPDV čl. 47)",
+    })
+    .to_string();
+    insert_compliance_event(&tx, "trading_data_reset", &detail, Some(acting.id))?;
     tx.commit()?;
     Ok(())
 }
@@ -383,6 +396,23 @@ fn query_latest_backup_job(
     conn.query_row(&sql, [], backup_job_from_row)
         .optional()
         .map_err(Into::into)
+}
+
+/// Appends an audit row to the never-deleted `compliance_log`. Takes a live
+/// connection/transaction so callers can write the event inside the same
+/// atomic unit as the operation it records (e.g. the reset wipe).
+fn insert_compliance_event(
+    conn: &Connection,
+    event_type: &str,
+    detail_json: &str,
+    user_id: Option<i64>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO compliance_log (event_type, detail_json, user_id, created_at)
+         VALUES (?1, ?2, ?3, datetime('now'))",
+        params![event_type, detail_json, user_id],
+    )?;
+    Ok(())
 }
 
 fn insert_backup_job(
@@ -661,6 +691,84 @@ INSERT INTO settings (key, value_json, updated_at)
             assert_eq!(count(state, "products"), 1);
             assert_eq!(count(state, "tax_rates"), 1);
             assert!(count(state, "users") >= 1);
+        });
+    }
+
+    #[test]
+    fn reset_trading_data_writes_compliance_tombstone_that_survives_wipe() {
+        with_state("reset_writes_compliance_tombstone", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-tombstone");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            seed_trading_data(state);
+
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            assert_eq!(count(state, "sales"), 0);
+            assert_eq!(count(state, "compliance_log"), 1);
+
+            let conn = state.db().open().expect("database should open");
+            let event_type: String = conn
+                .query_row(
+                    "SELECT event_type FROM compliance_log ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("compliance event should exist");
+            assert_eq!(event_type, "trading_data_reset");
+        });
+    }
+
+    #[test]
+    fn restore_backup_writes_compliance_event() {
+        with_state("restore_writes_compliance_event", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-restore-compliance");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+
+            // Make a real backup file to restore from.
+            let job = create_backup(
+                state,
+                CreateBackupRequest {
+                    backup_folder: Some(folder.display().to_string()),
+                    backup_type: None,
+                },
+            )
+            .expect("backup should succeed");
+
+            restore_backup(
+                state,
+                RestoreBackupRequest {
+                    path: job.path.clone(),
+                    confirmation_text: "VRATI PODATKE".to_string(),
+                },
+            )
+            .expect("restore should succeed");
+
+            assert_eq!(count(state, "compliance_log"), 1);
+            let conn = state.db().open().expect("database should open");
+            let event_type: String = conn
+                .query_row(
+                    "SELECT event_type FROM compliance_log ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("compliance event should exist");
+            assert_eq!(event_type, "backup_restored");
         });
     }
 
