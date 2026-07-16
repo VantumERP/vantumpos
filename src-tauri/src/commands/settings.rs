@@ -9,6 +9,7 @@ use crate::state::AppState;
 pub(crate) const COMPANY_SETTINGS_KEY: &str = "company";
 pub(crate) const RECEIPT_SETTINGS_KEY: &str = "receipt_numbering";
 pub(crate) const BACKUP_SETTINGS_KEY: &str = "backup";
+pub(crate) const BACKUP_ENCRYPTION_KEY: &str = "backup_encryption";
 pub(crate) const SALES_SETTINGS_KEY: &str = "sales";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

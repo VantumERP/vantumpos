@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
-use crate::commands::settings::{load_json_setting, save_json_setting, BACKUP_SETTINGS_KEY};
+use crate::commands::backup_crypto;
+use crate::commands::settings::{
+    load_json_setting, save_json_setting, BACKUP_ENCRYPTION_KEY, BACKUP_SETTINGS_KEY,
+};
 use crate::state::AppState;
 
 const RESTORE_CONFIRMATION: &str = "VRATI PODATKE";
@@ -38,6 +41,7 @@ pub struct BackupStatus {
     pub backup_folder: String,
     pub automatic_backup_enabled: bool,
     pub stale: bool,
+    pub encryption_configured: bool,
     pub last_successful_backup: Option<BackupJob>,
     pub last_failed_backup: Option<BackupJob>,
 }
@@ -67,6 +71,8 @@ pub struct CreateBackupRequest {
 pub struct RestoreBackupRequest {
     pub path: String,
     pub confirmation_text: String,
+    #[serde(default)]
+    pub passphrase: Option<String>,
 }
 
 #[tauri::command]
@@ -103,6 +109,45 @@ pub fn backup_list_jobs(state: State<'_, AppState>) -> Result<Vec<BackupJob>, Co
     list_backup_jobs(state.inner()).map_err(Into::into)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupEncryption {
+    salt: Vec<u8>,
+    wrap_nonce: Vec<u8>,
+    wrapped_data_key: Vec<u8>,
+    data_key: Vec<u8>,
+}
+
+fn load_backup_encryption(state: &AppState) -> Result<Option<BackupEncryption>, AppError> {
+    load_json_setting::<Option<BackupEncryption>>(state, BACKUP_ENCRYPTION_KEY, None)
+}
+
+pub fn set_backup_passphrase(state: &AppState, passphrase: &str) -> Result<(), AppError> {
+    super::auth::require_admin(state)?;
+    if passphrase.trim().len() < 8 {
+        return Err(AppError::validation(
+            "Lozinka za šifrovanje mora imati najmanje 8 znakova.",
+            serde_json::json!({ "field": "passphrase" }),
+        ));
+    }
+    let km = backup_crypto::derive_new_key_material(passphrase)?;
+    let stored = BackupEncryption {
+        salt: km.salt,
+        wrap_nonce: km.wrap_nonce,
+        wrapped_data_key: km.wrapped_data_key,
+        data_key: km.data_key.to_vec(),
+    };
+    save_json_setting(state, BACKUP_ENCRYPTION_KEY, &stored)
+}
+
+#[tauri::command]
+pub fn backup_set_passphrase(
+    state: State<'_, AppState>,
+    passphrase: String,
+) -> Result<(), CommandError> {
+    set_backup_passphrase(state.inner(), &passphrase).map_err(Into::into)
+}
+
 pub fn load_backup_settings(state: &AppState) -> Result<BackupSettings, AppError> {
     load_json_setting(state, BACKUP_SETTINGS_KEY, default_backup_settings(state))
 }
@@ -137,11 +182,13 @@ pub fn load_backup_status(state: &AppState) -> Result<BackupStatus, AppError> {
     )?;
     let last_failed_backup = query_latest_backup_job(state, "status = 'failed'")?;
     let stale = is_backup_stale(state)?;
+    let encryption_configured = load_backup_encryption(state)?.is_some();
 
     Ok(BackupStatus {
         backup_folder: settings.backup_folder,
         automatic_backup_enabled: settings.automatic_backup_enabled,
         stale,
+        encryption_configured,
         last_successful_backup,
         last_failed_backup,
     })
@@ -203,9 +250,13 @@ pub fn perform_backup(
     let backup_path = build_backup_path(&backup_folder, backup_type)?;
     std::fs::create_dir_all(&backup_folder)?;
 
+    let encryption = load_backup_encryption(state)?;
+
+    // Always snapshot to a temp plaintext file first via SQLite's online backup.
+    let temp_path = backup_path.with_extension("sqlite3.tmp");
     let source = state.db().open()?;
     source
-        .backup(DatabaseName::Main, &backup_path, None)
+        .backup(DatabaseName::Main, &temp_path, None)
         .map_err(|source| {
             let message = format!("Backup nije uspeo: {source}");
             let _ = insert_backup_job(
@@ -219,6 +270,25 @@ pub fn perform_backup(
             AppError::BackupFailed(message)
         })?;
 
+    let final_path = if let Some(enc) = encryption {
+        let plaintext = std::fs::read(&temp_path)?;
+        let km = backup_crypto::BackupKeyMaterial {
+            salt: enc.salt,
+            wrap_nonce: enc.wrap_nonce,
+            wrapped_data_key: enc.wrapped_data_key,
+            data_key: to_key_array(&enc.data_key)?,
+        };
+        let ciphertext = backup_crypto::encrypt_snapshot(&plaintext, &km)?;
+        let encrypted_path = backup_path.with_extension("vpbk");
+        std::fs::write(&encrypted_path, &ciphertext)?;
+        let _ = std::fs::remove_file(&temp_path);
+        encrypted_path
+    } else {
+        std::fs::rename(&temp_path, &backup_path)?;
+        backup_path
+    };
+
+    let backup_path = final_path;
     let file_size_bytes = checked_file_size(&backup_path)?;
     settings.backup_folder = backup_folder;
     save_json_setting(state, BACKUP_SETTINGS_KEY, &settings)?;
@@ -277,7 +347,29 @@ pub fn restore_backup(
         },
     )?;
 
-    {
+    let file_bytes = std::fs::read(&source_path)?;
+    if backup_crypto::is_encrypted(&file_bytes) {
+        let local_key = load_backup_encryption(state)?
+            .map(|enc| to_key_array(&enc.data_key))
+            .transpose()?;
+        let plaintext = backup_crypto::decrypt_snapshot(
+            &file_bytes,
+            local_key.as_ref(),
+            request.passphrase.as_deref(),
+        )?;
+        let temp_plain = source_path.with_extension("restore.tmp");
+        std::fs::write(&temp_plain, &plaintext)?;
+        {
+            let mut conn = state.db().open()?;
+            conn.restore(
+                DatabaseName::Main,
+                &temp_plain,
+                Option::<fn(rusqlite::backup::Progress)>::None,
+            )
+            .map_err(|source| AppError::BackupFailed(format!("Restore nije uspeo: {source}")))?;
+        }
+        let _ = std::fs::remove_file(&temp_plain);
+    } else {
         let mut conn = state.db().open()?;
         conn.restore(
             DatabaseName::Main,
@@ -506,6 +598,11 @@ fn timestamp_token() -> Result<String, AppError> {
         .map_err(|error| AppError::InvalidState(format!("Vreme sistema nije ispravno: {error}")))?;
 
     Ok(elapsed.as_millis().to_string())
+}
+
+fn to_key_array(bytes: &[u8]) -> Result<[u8; 32], AppError> {
+    <[u8; 32]>::try_from(bytes)
+        .map_err(|_| AppError::InvalidState("Ključ šifrovanja je oštećen.".to_string()))
 }
 
 fn checked_file_size(path: &Path) -> Result<i64, AppError> {
@@ -785,6 +882,7 @@ INSERT INTO settings (key, value_json, updated_at)
                 RestoreBackupRequest {
                     path: job.path.clone(),
                     confirmation_text: "VRATI PODATKE".to_string(),
+                    passphrase: None,
                 },
             )
             .expect("restore should succeed");
@@ -896,6 +994,7 @@ INSERT INTO settings (key, value_json, updated_at)
                     RestoreBackupRequest {
                         path: missing.display().to_string(),
                         confirmation_text: "VRATI PODATKE".to_string(),
+                        passphrase: None,
                     },
                 )
                 .expect_err("missing restore file should be rejected");
@@ -917,6 +1016,7 @@ INSERT INTO settings (key, value_json, updated_at)
                 RestoreBackupRequest {
                     path: "C:/backup.sqlite3".to_string(),
                     confirmation_text: "vrati".to_string(),
+                    passphrase: None,
                 },
             )
             .expect_err("restore should require exact confirmation");
@@ -1079,6 +1179,92 @@ INSERT INTO settings (key, value_json, updated_at)
     }
 
     #[test]
+    fn backup_is_encrypted_when_passphrase_set_and_restores_locally() {
+        with_state("backup_encrypted_round_trip", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-encrypted-backup");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+
+            set_backup_passphrase(state, "tajna-lozinka-123").expect("passphrase should set");
+
+            let job = create_backup(
+                state,
+                CreateBackupRequest {
+                    backup_folder: Some(folder.display().to_string()),
+                    backup_type: None,
+                },
+            )
+            .expect("encrypted backup should succeed");
+
+            assert!(
+                job.path.ends_with(".vpbk"),
+                "encrypted backup must use .vpbk: {}",
+                job.path
+            );
+            let head = std::fs::read(&job.path).expect("read backup");
+            assert_eq!(&head[..5], b"VPBK1");
+
+            // Restore the encrypted file on the same machine (local data key path).
+            restore_backup(
+                state,
+                RestoreBackupRequest {
+                    path: job.path.clone(),
+                    confirmation_text: "VRATI PODATKE".to_string(),
+                    passphrase: None,
+                },
+            )
+            .expect("local restore of encrypted backup should succeed");
+
+            let status = load_backup_status(state).expect("status");
+            assert!(status.encryption_configured);
+        });
+    }
+
+    #[test]
+    fn legacy_plaintext_backup_still_restores() {
+        with_state("legacy_plaintext_restore", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-legacy-restore");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+
+            // No passphrase set → plaintext .sqlite3 (current behavior).
+            let job = create_backup(
+                state,
+                CreateBackupRequest {
+                    backup_folder: Some(folder.display().to_string()),
+                    backup_type: None,
+                },
+            )
+            .expect("plaintext backup");
+            assert!(job.path.ends_with(".sqlite3"));
+
+            restore_backup(
+                state,
+                RestoreBackupRequest {
+                    path: job.path.clone(),
+                    confirmation_text: "VRATI PODATKE".to_string(),
+                    passphrase: None,
+                },
+            )
+            .expect("legacy restore should succeed");
+        });
+    }
+
+    #[test]
     fn restore_backup_rejected_for_cashier() {
         with_state("restore_backup_rejected_for_cashier", |state| {
             sign_in_cashier(state);
@@ -1088,6 +1274,7 @@ INSERT INTO settings (key, value_json, updated_at)
                 RestoreBackupRequest {
                     path: "C:/backup.sqlite3".to_string(),
                     confirmation_text: "VRATI PODATKE".to_string(),
+                    passphrase: None,
                 },
             )
             .expect_err("cashier should not restore a backup");

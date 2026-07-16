@@ -122,7 +122,8 @@ pub fn run() {
             commands::backup::backup_create,
             commands::backup::backup_restore,
             commands::backup::backup_reset_trading_data,
-            commands::backup::backup_list_jobs
+            commands::backup::backup_list_jobs,
+            commands::backup::backup_set_passphrase
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
