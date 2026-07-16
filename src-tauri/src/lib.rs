@@ -37,6 +37,26 @@ pub fn run() {
             let db_path = resolve_database_path(app.handle())?;
             let db = Db::new(db_path)?;
             app.manage(AppState::new(db));
+
+            // Best-effort automatic backup: a failure here is already
+            // recorded as a failed backup_job and must never prevent the
+            // app from opening.
+            let state_for_launch = app.state::<AppState>().inner().clone();
+            let _ = commands::backup::auto_backup_if_due(&state_for_launch);
+
+            // Periodic re-check on a plain OS thread. `tokio` is only a
+            // transitive dependency (pulled in by `tauri` itself) and is not
+            // declared directly in Cargo.toml, so `tokio::time::sleep` is not
+            // reachable from this crate without adding a new dependency;
+            // `std::thread` + `std::thread::sleep` needs nothing async and
+            // suits an infrequent (every 6h), fire-and-forget check like
+            // this one.
+            let state_for_timer = state_for_launch.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(commands::backup::AUTO_BACKUP_INTERVAL);
+                let _ = commands::backup::auto_backup_if_due(&state_for_timer);
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

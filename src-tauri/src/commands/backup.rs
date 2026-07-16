@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, DatabaseName, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,10 @@ use crate::state::AppState;
 
 const RESTORE_CONFIRMATION: &str = "VRATI PODATKE";
 const BACKUP_STALE_AFTER_HOURS: i64 = 24;
+
+/// How often the background timer (started in `lib.rs::setup`) re-checks
+/// whether an automatic backup is due.
+pub const AUTO_BACKUP_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -227,6 +231,24 @@ pub fn perform_backup(
         None,
         Some(file_size_bytes),
     )
+}
+
+/// Best-effort automatic backup check, run once at app launch and then on a
+/// recurring timer (see `lib.rs::setup`). Deliberately auth-free like
+/// `perform_backup` — it runs unattended in the background, not on behalf of
+/// a signed-in user. Does nothing unless automatic backups are enabled in
+/// settings AND the last successful backup is stale; a failed attempt is
+/// still recorded as a `"failed"` backup_job by `perform_backup` itself, so
+/// callers are expected to ignore the `Err` here rather than let it block
+/// startup.
+pub fn auto_backup_if_due(state: &AppState) -> Result<(), AppError> {
+    let settings = load_backup_settings(state)?;
+    if !settings.automatic_backup_enabled || !is_backup_stale(state)? {
+        return Ok(());
+    }
+
+    perform_backup(state, None, "automatic")?;
+    Ok(())
 }
 
 pub fn restore_backup(
@@ -859,6 +881,63 @@ INSERT INTO settings (key, value_json, updated_at)
 
             assert_eq!(error.code(), "forbidden");
         });
+    }
+
+    #[test]
+    fn auto_backup_if_due_skips_when_automatic_backup_disabled() {
+        with_state(
+            "auto_backup_if_due_skips_when_automatic_backup_disabled",
+            |state| {
+                sign_in_admin(state);
+                let folder = test_backup_dir("vantumpos-auto-backup-disabled");
+                save_backup_settings(
+                    state,
+                    BackupSettingsRequest {
+                        backup_folder: folder.display().to_string(),
+                        automatic_backup_enabled: false,
+                    },
+                )
+                .expect("backup settings should save");
+
+                auto_backup_if_due(state).expect("disabled auto backup check should not error");
+
+                assert_eq!(count(state, "backup_jobs"), 0);
+            },
+        );
+    }
+
+    #[test]
+    fn auto_backup_if_due_runs_backup_when_enabled_and_stale() {
+        with_state(
+            "auto_backup_if_due_runs_backup_when_enabled_and_stale",
+            |state| {
+                sign_in_admin(state);
+                let folder = test_backup_dir("vantumpos-auto-backup-enabled-stale");
+                save_backup_settings(
+                    state,
+                    BackupSettingsRequest {
+                        backup_folder: folder.display().to_string(),
+                        automatic_backup_enabled: true,
+                    },
+                )
+                .expect("backup settings should save");
+
+                // No prior backup_jobs rows exist, so the backup is stale by definition.
+                auto_backup_if_due(state).expect("due auto backup should succeed");
+
+                assert_eq!(count(state, "backup_jobs"), 1);
+                let conn = state.db().open().expect("database should open");
+                let (backup_type, status): (String, String) = conn
+                    .query_row(
+                        "SELECT backup_type, status FROM backup_jobs ORDER BY id DESC LIMIT 1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("backup job should be recorded");
+                assert_eq!(backup_type, "automatic");
+                assert_eq!(status, "completed");
+            },
+        );
     }
 
     #[test]
