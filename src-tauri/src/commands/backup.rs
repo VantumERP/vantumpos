@@ -695,6 +695,36 @@ INSERT INTO settings (key, value_json, updated_at)
     }
 
     #[test]
+    fn reset_requires_backup_and_tombstone_together() {
+        with_state("reset_requires_backup_and_tombstone", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-invariant");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            seed_trading_data(state);
+
+            let backups_before = count(state, "backup_jobs");
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            assert!(
+                count(state, "backup_jobs") > backups_before,
+                "reset must take a safety backup first"
+            );
+            assert_eq!(
+                count(state, "compliance_log"),
+                1,
+                "reset must leave a tombstone"
+            );
+        });
+    }
+
+    #[test]
     fn reset_trading_data_writes_compliance_tombstone_that_survives_wipe() {
         with_state("reset_writes_compliance_tombstone", |state| {
             sign_in_admin(state);

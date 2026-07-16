@@ -1413,6 +1413,24 @@ mod tests {
             .expect("balance should query")
     }
 
+    fn count_sales(db: &Db) -> i64 {
+        db.open()
+            .expect("db open")
+            .query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))
+            .expect("count sales")
+    }
+
+    fn load_sale_money(db: &Db, sale_id: i64) -> (i64, i64, i64, i64) {
+        db.open()
+            .expect("db open")
+            .query_row(
+                "SELECT subtotal_minor, discount_minor, tax_minor, total_minor FROM sales WHERE id = ?1",
+                params![sale_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("load sale money")
+    }
+
     #[test]
     fn search_receipts_returns_completed_sale() {
         with_receipt_database("search_receipts_returns_completed_sale", |db, _seed| {
@@ -1474,6 +1492,78 @@ mod tests {
                 assert_eq!(detail.linked_documents[0].document_type, "void");
                 assert_eq!(balance_for(&connection, seed.product_id), 5000);
                 assert_eq!(movement_count, 1);
+            },
+        );
+    }
+
+    #[test]
+    fn void_is_append_only_and_preserves_original_monetary_row() {
+        // Ledger append-only invariant (ZPPPA čl. 175b): a void adds a
+        // counter-document and never deletes or monetarily mutates the original.
+        with_receipt_database(
+            "void_is_append_only_and_preserves_original_monetary_row",
+            |db, seed| {
+                let before_rows = count_sales(db);
+                let before = load_sale_money(db, seed.sale_id);
+
+                void_receipt(
+                    db,
+                    VoidReceiptRequest {
+                        receipt_id: seed.sale_id,
+                        reason: "Greška".into(),
+                    },
+                    seed.user_id,
+                )
+                .expect("void should succeed");
+
+                let after_rows = count_sales(db);
+                let after = load_sale_money(db, seed.sale_id);
+
+                assert!(after_rows > before_rows, "void must ADD a counter-document");
+                assert_eq!(
+                    before, after,
+                    "original sale monetary columns must be unchanged"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn return_is_append_only_and_preserves_original() {
+        // Ledger append-only invariant (ZPPPA čl. 175b): a return adds a
+        // counter-document and never deletes or monetarily mutates the original.
+        with_receipt_database(
+            "return_is_append_only_and_preserves_original",
+            |db, seed| {
+                let before_rows = count_sales(db);
+                let before = load_sale_money(db, seed.sale_id);
+
+                return_items(
+                    db,
+                    ReturnItemsRequest {
+                        receipt_id: seed.sale_id,
+                        reason: "Delimičan povraćaj".to_string(),
+                        items: vec![ReturnItemRequest {
+                            sale_item_id: seed.sale_item_id,
+                            quantity_milli: 1000,
+                        }],
+                        refund_tender: None,
+                    },
+                    seed.user_id,
+                )
+                .expect("partial return should succeed");
+
+                let after_rows = count_sales(db);
+                let after = load_sale_money(db, seed.sale_id);
+
+                assert!(
+                    after_rows > before_rows,
+                    "return must ADD a counter-document"
+                );
+                assert_eq!(
+                    before, after,
+                    "original sale monetary columns must be unchanged"
+                );
             },
         );
     }
