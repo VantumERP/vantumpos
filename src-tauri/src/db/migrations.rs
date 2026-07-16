@@ -287,6 +287,22 @@ CREATE TABLE cash_movements (
 CREATE INDEX idx_cash_movements_shift ON cash_movements(shift_id);
 "#,
     },
+    Migration {
+        version: 8,
+        name: "compliance_log_and_esir_receipt_number",
+        sql: r#"
+CREATE TABLE compliance_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL CHECK (event_type IN ('trading_data_reset', 'backup_restored')),
+    detail_json TEXT,
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_compliance_log_created_at ON compliance_log(created_at);
+
+ALTER TABLE sales ADD COLUMN esir_receipt_number TEXT;
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {

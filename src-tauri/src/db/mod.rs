@@ -123,6 +123,7 @@ mod tests {
         "import_job_rows",
         "backup_jobs",
         "cash_movements",
+        "compliance_log",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -139,6 +140,7 @@ mod tests {
         "idx_import_job_rows_job",
         "idx_backup_jobs_created_at",
         "idx_cash_movements_shift",
+        "idx_compliance_log_created_at",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -364,6 +366,39 @@ mod tests {
     }
 
     #[test]
+    fn migration_v8_adds_compliance_log_and_esir_column() {
+        with_test_database("migration_v8_compliance_and_esir", |db| {
+            let connection = db.open().expect("database should open");
+
+            assert!(
+                schema_object_exists(&connection, "table", "compliance_log"),
+                "expected compliance_log table"
+            );
+
+            let esir_exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('sales') WHERE name = 'esir_receipt_number'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("column metadata should query");
+            assert_eq!(esir_exists, 1, "expected sales.esir_receipt_number");
+
+            let schema: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='compliance_log'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("compliance_log schema should load");
+            assert!(
+                schema.contains("trading_data_reset") && schema.contains("backup_restored"),
+                "expected event_type CHECK, schema was: {schema}"
+            );
+        });
+    }
+
+    #[test]
     fn sales_reject_negative_money_fields() {
         with_test_database("sales_reject_negative_money_fields", |db| {
             let connection = db.open().expect("database should open");
@@ -493,7 +528,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 7);
+                assert_eq!(migration_count, 8);
             },
         );
     }
