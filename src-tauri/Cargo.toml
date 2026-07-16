@@ -30,6 +30,8 @@ thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 argon2 = { version = "0.5", features = ["std"] }
 password-hash = { version = "0.5", features = ["rand_core"] }
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
 ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
