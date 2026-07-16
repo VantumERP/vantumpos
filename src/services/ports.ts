@@ -83,6 +83,7 @@ export interface BackupService {
   createBackup(request: CreateBackupRequest): Promise<BackupJob>;
   restoreBackup(request: RestoreBackupRequest): Promise<BackupJob>;
   listBackupJobs(): Promise<BackupJob[]>;
+  setBackupPassphrase(passphrase: string): Promise<void>;
   resetTradingData(confirmationText: string): Promise<void>;
 }
 

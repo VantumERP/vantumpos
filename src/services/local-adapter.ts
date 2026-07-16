@@ -74,6 +74,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       restoreBackup: (request) =>
         invoke<BackupJob>("backup_restore", { request }),
       listBackupJobs: () => invoke<BackupJob[]>("backup_list_jobs"),
+      setBackupPassphrase: (passphrase) =>
+        invoke<void>("backup_set_passphrase", { passphrase }),
       resetTradingData: (confirmationText) =>
         invoke<void>("backup_reset_trading_data", { confirmationText }),
     },

@@ -284,10 +284,11 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
             );
             toast.success("Backup je napravljen.");
           }}
-          onRestore={async (path, confirmationText) => {
+          onRestore={async (path, confirmationText, passphrase) => {
             const job = await services.backup.restoreBackup({
               path,
               confirmationText,
+              passphrase,
             });
             const backupStatus = await services.backup.getBackupStatus();
             setState((current) =>
@@ -300,6 +301,13 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
                 : current,
             );
             toast.success("Restore je završen.");
+          }}
+          onSetPassphrase={async (passphrase) => {
+            await services.backup.setBackupPassphrase(passphrase);
+            const backupStatus = await services.backup.getBackupStatus();
+            setState((current) =>
+              current.status === "ready" ? { ...current, backupStatus } : current,
+            );
           }}
         />
       ) : null}
@@ -779,6 +787,7 @@ function BackupPanel({
   onSaveSettings,
   onCreateBackup,
   onRestore,
+  onSetPassphrase,
 }: {
   status: BackupStatus;
   jobs: BackupJob[];
@@ -787,7 +796,12 @@ function BackupPanel({
     automaticBackupEnabled: boolean;
   }) => Promise<void>;
   onCreateBackup: (backupFolder: string) => Promise<void>;
-  onRestore: (path: string, confirmationText: string) => Promise<void>;
+  onRestore: (
+    path: string,
+    confirmationText: string,
+    passphrase: string | null,
+  ) => Promise<void>;
+  onSetPassphrase: (passphrase: string) => Promise<void>;
 }) {
   const [backupFolder, setBackupFolder] = useState(status.backupFolder);
   const [automaticBackupEnabled, setAutomaticBackupEnabled] = useState(
@@ -796,6 +810,8 @@ function BackupPanel({
   const [restorePath, setRestorePath] = useState("");
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [confirmationText, setConfirmationText] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [restorePassphrase, setRestorePassphrase] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -826,11 +842,23 @@ function BackupPanel({
   async function restore() {
     setError(null);
     try {
-      await onRestore(restorePath, confirmationText);
+      await onRestore(restorePath, confirmationText, restorePassphrase || null);
       setRestoreOpen(false);
       setConfirmationText("");
+      setRestorePassphrase("");
     } catch (restoreError) {
       setError(errorMessage(restoreError, "Restore nije uspeo."));
+    }
+  }
+
+  async function setBackupPassphrase() {
+    setError(null);
+    try {
+      await onSetPassphrase(passphrase);
+      setPassphrase("");
+      toast.success("Lozinka za šifrovanje je postavljena.");
+    } catch (passphraseError) {
+      setError(errorMessage(passphraseError, "Lozinka nije postavljena."));
     }
   }
 
@@ -868,6 +896,36 @@ function BackupPanel({
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           ) : null}
+
+          {!status.encryptionConfigured ? (
+            <div
+              role="alert"
+              className="rounded-md border-2 border-destructive bg-destructive/10 p-3 text-sm text-destructive"
+            >
+              Rezervne kopije nisu šifrovane — postavite lozinku za šifrovanje.
+            </div>
+          ) : null}
+
+          <div className="flex flex-col gap-2">
+            <label htmlFor="backup-passphrase" className="text-sm font-medium">
+              Lozinka za šifrovanje
+            </label>
+            <Input
+              id="backup-passphrase"
+              type="password"
+              value={passphrase}
+              onChange={(event) => setPassphrase(event.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Ako izgubite lozinku, šifrovane rezervne kopije su NEPOVRATNO
+              nečitljive na drugom računaru.
+            </p>
+            <Button type="button" onClick={() => void setBackupPassphrase()}>
+              Postavi lozinku
+            </Button>
+          </div>
+
+          <Separator />
 
           <form className="flex flex-col gap-4" onSubmit={saveSettings}>
             <FieldGroup>
@@ -983,6 +1041,20 @@ function BackupPanel({
                 onChange={(event) => setConfirmationText(event.target.value)}
               />
               <FieldDescription>Unesite VRATI PODATKE.</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="restore-passphrase">
+                Lozinka (za šifrovane kopije)
+              </FieldLabel>
+              <Input
+                id="restore-passphrase"
+                type="password"
+                value={restorePassphrase}
+                onChange={(event) => setRestorePassphrase(event.target.value)}
+              />
+              <FieldDescription>
+                Ostavite prazno za lokalne (nešifrovane) kopije.
+              </FieldDescription>
             </Field>
           </FieldGroup>
           <AlertDialogFooter>

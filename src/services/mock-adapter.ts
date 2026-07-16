@@ -307,6 +307,7 @@ export function createMockServices(): PosServices {
         return {
           ...backupSettings,
           stale: !lastSuccessfulBackup,
+          encryptionConfigured: false,
           lastSuccessfulBackup,
           lastFailedBackup,
         };
@@ -345,6 +346,7 @@ export function createMockServices(): PosServices {
       async listBackupJobs() {
         return backupJobs;
       },
+      async setBackupPassphrase() {},
       async resetTradingData(confirmationText: string) {
         if (confirmationText !== "OBRISI PODATKE") {
           throw {

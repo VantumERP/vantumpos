@@ -88,6 +88,7 @@ describe("SettingsScreen", () => {
       backupFolder: "D:/backups",
       automaticBackupEnabled: true,
       stale: true,
+      encryptionConfigured: true,
       lastSuccessfulBackup: null,
       lastFailedBackup: failedJob,
     };
@@ -125,6 +126,29 @@ describe("SettingsScreen", () => {
 
     await user.type(screen.getByLabelText("Potvrda"), "VRATI PODATKE");
     expect(screen.getByRole("button", { name: "Potvrdi restore" })).toBeEnabled();
+  });
+
+  it("warns when backups are unencrypted and lets an admin set a passphrase", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const setBackupPassphrase = vi.fn().mockResolvedValue(undefined);
+    services.backup.setBackupPassphrase = setBackupPassphrase;
+
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Backup" }));
+
+    expect(
+      await screen.findByText(/Rezervne kopije nisu šifrovane/i),
+    ).toBeInTheDocument();
+
+    await user.type(
+      screen.getByLabelText(/Lozinka za šifrovanje/i),
+      "tajna-lozinka",
+    );
+    await user.click(screen.getByRole("button", { name: /Postavi lozinku/i }));
+
+    expect(setBackupPassphrase).toHaveBeenCalledWith("tajna-lozinka");
   });
 
   it("shows the 10-year retention warning in the reset dialog", async () => {

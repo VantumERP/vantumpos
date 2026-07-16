@@ -75,6 +75,7 @@ export interface CreateBackupRequest {
 export interface RestoreBackupRequest {
   path: string;
   confirmationText: string;
+  passphrase?: string | null;
 }
 
 export interface BackupJob {
@@ -90,6 +91,7 @@ export interface BackupJob {
 
 export interface BackupStatus extends BackupSettings {
   stale: boolean;
+  encryptionConfigured: boolean;
   lastSuccessfulBackup: BackupJob | null;
   lastFailedBackup: BackupJob | null;
 }
