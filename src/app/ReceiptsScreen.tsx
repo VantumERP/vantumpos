@@ -618,6 +618,12 @@ interface ReceiptDetailPanelProps {
 function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProps) {
   return (
     <div className="flex flex-col gap-4 rounded-md border border-border p-4">
+      <div
+        role="note"
+        className="rounded-md border-2 border-destructive bg-destructive/10 px-3 py-2 text-center text-xl font-bold uppercase tracking-wide text-destructive"
+      >
+        OVO NIJE FISKALNI RAČUN
+      </div>
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
           <h2 className="text-base font-semibold">Račun {detail.receiptNumber}</h2>

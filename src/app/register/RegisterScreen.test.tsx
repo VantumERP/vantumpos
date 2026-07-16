@@ -252,8 +252,27 @@ describe("RegisterScreen", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Račun VP-000001",
     });
-    expect(within(dialog).getByText("Lokalni račun")).toBeInTheDocument();
-    expect(screen.queryByText(/fiskal/i)).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Interni pregled prodaje — nije fiskalni račun"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getAllByText("OVO NIJE FISKALNI RAČUN").length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("shows the non-fiscal banner in the completed-sale dialog", async () => {
+    const user = userEvent.setup();
+
+    await addProductToCart(user);
+    const cashField = screen.getByLabelText("Gotovina primljeno");
+    await waitFor(() => expect(cashField).toHaveValue("159.99"));
+    await user.clear(cashField);
+    await user.type(cashField, "160");
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
+
+    await screen.findByRole("dialog", { name: "Račun VP-000001" });
+    const banners = await screen.findAllByText("OVO NIJE FISKALNI RAČUN");
+    expect(banners.length).toBeGreaterThanOrEqual(2); // top and bottom
   });
 
   it("keeps the cart intact when backend completion fails", async () => {

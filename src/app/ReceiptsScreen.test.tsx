@@ -249,4 +249,17 @@ describe("ReceiptsScreen states", () => {
     expect(await screen.findByText("Razlog storniranja")).toBeInTheDocument();
     expect(screen.getByText("Pogresna stavka")).toBeInTheDocument();
   });
+
+  it("shows the non-fiscal banner in the receipt detail", async () => {
+    const user = userEvent.setup();
+    render(<ReceiptsScreen receipts={buildReceiptsService()} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),
+    );
+
+    expect(
+      await screen.findByText("OVO NIJE FISKALNI RAČUN"),
+    ).toBeInTheDocument();
+  });
 });

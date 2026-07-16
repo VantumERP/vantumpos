@@ -629,8 +629,11 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
             <>
               <DialogHeader>
                 <DialogTitle>Račun {completedSale.localReceiptNumber}</DialogTitle>
-                <DialogDescription>Lokalni račun</DialogDescription>
+                <DialogDescription>
+                  Interni pregled prodaje — nije fiskalni račun
+                </DialogDescription>
               </DialogHeader>
+              <NonFiscalBanner />
               <div className="flex flex-col gap-3">
                 <div className="flex justify-between">
                   <span>Kasir</span>
@@ -661,6 +664,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                   <span>{formatRsd(completedSale.changeDueMinor)}</span>
                 </div>
               </div>
+              <NonFiscalBanner />
             </>
           )}
         </DialogContent>
@@ -766,5 +770,19 @@ function isCommandError(error: unknown): error is CommandError {
     error !== null &&
     "message" in error &&
     typeof (error as CommandError).message === "string"
+  );
+}
+
+function NonFiscalBanner() {
+  // Legal: PVFR čl. 2 st. 8–10 — any sale-itemizing surface must be
+  // unmistakably NON-fiscal. Never add a QR code, "FISKALNI RAČUN" heading,
+  // or PIB/PFR/brojač block to this or any future receipt export.
+  return (
+    <div
+      role="note"
+      className="rounded-md border-2 border-destructive bg-destructive/10 px-3 py-2 text-center text-2xl font-bold uppercase tracking-wide text-destructive"
+    >
+      OVO NIJE FISKALNI RAČUN
+    </div>
   );
 }
