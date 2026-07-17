@@ -2139,6 +2139,67 @@ mod tests {
     // across markdown steps 9.900 → 8.900 → 7.500. Both named wrong
     // implementations must be impossible: 12.900 ("price at first reduction")
     // and lazy recompute (which would yield 9.900 at step 2).
+    /// Design §7's mandated invariant, pinned directly rather than relying on
+    /// worked_example_b's incidental coverage: once a campaign is activated its
+    /// announced prethodna cena is frozen (čl. 37 st. 5). Lazy recompute is the
+    /// exact manipulation that stav exists to prevent, so this test drives every
+    /// post-activation mutation at an activated campaign and asserts the column
+    /// never moves — a guard-rail against a future code path, not today's code.
+    #[test]
+    fn activated_campaign_anchor_is_immutable_across_every_mutation() {
+        with_campaign_db_mut("anchor_immutable", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.starts_on = "2026-07-05T00:00:00Z".to_string();
+            input.ends_on = Some("2026-07-20T00:00:00Z".to_string());
+            input.items[0].campaign_price_minor = 900000;
+
+            let created = create_campaign(conn, &input, 1, "2026-07-04T00:00:00Z").expect("create");
+            activate_campaign(conn, created.id, 1, "2026-07-05T00:00:00Z").expect("activate");
+
+            let anchor_at_activation: Option<i64> = conn
+                .query_row(
+                    "SELECT prethodna_cena_minor FROM campaign_items WHERE campaign_id = ?1",
+                    params![created.id],
+                    |row| row.get(0),
+                )
+                .expect("anchor should read");
+            assert_eq!(anchor_at_activation, Some(1000000));
+
+            // A cheaper price appears in the window AFTER activation. A lazy
+            // recompute would drag the announced anchor down to it.
+            conn.execute(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-06-25T00:00:00Z', 700000, 'update', '2026-06-25T00:00:00Z')",
+                [],
+            )
+            .expect("late history row");
+
+            // update_campaign is refused outright on an activated campaign.
+            let error = update_campaign(conn, created.id, &input, "2026-07-06T00:00:00Z")
+                .expect_err("activated campaign must not be editable");
+            assert_eq!(error.code(), "invalid_state");
+
+            // A markdown step and the end both leave the anchor untouched.
+            adjust_item_price(conn, created.id, 1, 800000, 1, "2026-07-07T00:00:00Z")
+                .expect("step");
+            end_campaign(conn, created.id, &[], 1, "2026-07-20T00:00:00Z").expect("end");
+
+            let anchor_after: Option<i64> = conn
+                .query_row(
+                    "SELECT prethodna_cena_minor FROM campaign_items WHERE campaign_id = ?1",
+                    params![created.id],
+                    |row| row.get(0),
+                )
+                .expect("anchor should read");
+            assert_eq!(
+                anchor_after, anchor_at_activation,
+                "the announced prethodna cena must never move once activated (čl. 37 st. 5)"
+            );
+        });
+    }
+
     #[test]
     fn worked_example_b_progressive_anchor_snapshots_and_freezes_at_11900() {
         with_campaign_db_mut("worked_example_b", |conn| {

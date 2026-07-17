@@ -442,6 +442,14 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
          WHERE key = 'receipt_numbering'",
         [],
     )?;
+    // Campaigns hold a MATERIALIZED copy of the prethodna cena in
+    // campaign_items.prethodna_cena_minor, so wiping price_history alone would
+    // leave a practice-derived anchor intact and drive a real sniženje from
+    // prices no consumer was ever offered. A practice rasprodaja left active
+    // would also keep blocking goods receipt (čl. 37 st. 7) on real stock.
+    // Delete rather than re-snapshot: rewriting an activated campaign's anchor
+    // is exactly what čl. 37 st. 5 forbids. campaign_items cascades.
+    tx.execute("DELETE FROM campaigns", [])?;
     // Price history is normally append-only and retained ~5 years. The go-live
     // reset is the one exception: practice prices were never offered to a
     // consumer, so leaving them in would let training data drive a real
@@ -739,6 +747,62 @@ INSERT INTO settings (key, value_json, updated_at)
 "#,
         )
         .expect("trading data should seed");
+    }
+
+    /// A campaign built while the shop was practising, with an anchor derived
+    /// from practice prices and an active rasprodaja blocking goods receipt.
+    fn seed_practice_campaign(state: &AppState) {
+        let conn = state.db().open().expect("database should open");
+        conn.execute_batch(
+            r#"
+INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode,
+                       rasprodaja_ground, separation_attested, activated_at, created_at, updated_at)
+    VALUES (1, 'rasprodaja', 'active', '2026-06-20T00:00:00Z', NULL, 'two_prices',
+            'prestanak_prodaje_robe', 1, '2026-06-20T08:00:00Z', '2026-06-19T00:00:00Z', '2026-06-20T08:00:00Z');
+INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor,
+                            anchor_status, anchor_window_days, pre_campaign_price_minor)
+    VALUES (1, 1, 9000, 12000, 'computed', 30, 12000);
+"#,
+        )
+        .expect("practice campaign should seed");
+    }
+
+    #[test]
+    fn reset_trading_data_clears_practice_campaigns() {
+        with_state("reset_clears_campaigns", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-campaigns");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            seed_trading_data(state);
+            seed_practice_campaign(state);
+
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            // A practice campaign carries a materialized anchor computed from
+            // prices no consumer was ever offered. Wiping price_history without
+            // it would leave that figure driving a real sniženje — the exact
+            // harm the reset exists to prevent.
+            assert_eq!(
+                count(state, "campaigns"),
+                0,
+                "practice campaigns must not survive go-live"
+            );
+            assert_eq!(
+                count(state, "campaign_items"),
+                0,
+                "campaign_items must cascade with their campaign"
+            );
+            // The catalog survives, so the re-seeded price log still has its row.
+            assert_eq!(count(state, "products"), 1);
+            assert_eq!(count(state, "price_history"), 1);
+        });
     }
 
     fn count(state: &AppState, table: &str) -> i64 {
