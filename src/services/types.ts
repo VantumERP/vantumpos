@@ -224,6 +224,8 @@ export interface ProductSummary {
   currentStockMilli: number;
   allowNegativeStock: boolean;
   active: boolean;
+  perishable: boolean;
+  perishableJustification?: string | null;
   externalSource: ProductExternalSource | null;
 }
 
@@ -261,6 +263,11 @@ export interface SaveProductRequest {
   minimumStockMilli: number;
   allowNegativeStock: boolean;
   active: boolean;
+  /** Lako kvarljiva roba. Suppresses the čl. 37 st. 3 computation: the price
+   *  log of a perishable records end-of-life markdowns, not the „najniža cena"
+   *  a shopper compares against, so campaigns demand a manual anchor instead. */
+  perishable: boolean;
+  perishableJustification?: string | null;
   externalSource?: ProductExternalSource | null;
 }
 
@@ -281,6 +288,123 @@ export interface PrethodnaCenaDto {
   truncated: boolean;
   reason: "too_new_in_assortment" | "not_offered_in_window" | "no_history" | null;
   ageDays: number | null;
+}
+
+/** Mirrors `crate::campaigns` — every field name here is the serde camelCase
+ *  rendering of the Rust struct it carries. Nothing in this contract asserts
+ *  that a campaign is lawful: `hard` being empty means only that no
+ *  mechanically checkable rule was broken (čl. 38 st. 4 stays open). */
+export type CampaignType =
+  | "rasprodaja"
+  | "sezonsko_snizenje"
+  | "akcijska_prodaja"
+  | "promotivna_prodaja";
+export type CampaignStatus = "draft" | "active" | "ended" | "cancelled";
+export type CampaignDisplayMode = "two_prices" | "percentage";
+export type RasprodajaGround =
+  | "prestanak_poslovanja"
+  | "prestanak_u_objektu"
+  | "prestanak_prodaje_robe";
+export type CampaignAnchorStatus = "computed" | "manual" | "none";
+
+export interface CampaignItemInput {
+  productId: number;
+  campaignPriceMinor: number;
+  manualPrethodnaMinor?: number | null;
+  anchorJustification?: string | null;
+  futureRegularPriceMinor?: number | null;
+}
+
+export interface CampaignInput {
+  campaignType: CampaignType;
+  /** Calendar date, `YYYY-MM-DD`. */
+  startsOn: string;
+  /** `null` only for rasprodaja — „dok traju zalihe". */
+  endsOn?: string | null;
+  displayMode: CampaignDisplayMode;
+  headlinePercent?: number | null;
+  rasprodajaGround?: RasprodajaGround | null;
+  specialConditions?: string | null;
+  reducedUtilityReason?: string | null;
+  marketingLabel?: string | null;
+  seasonAttested: boolean;
+  separationAttested: boolean;
+  items: CampaignItemInput[];
+}
+
+export interface CampaignViolation {
+  code: string;
+  message: string;
+  productId: number | null;
+}
+
+export interface CampaignItemAnchor {
+  productId: number;
+  anchorStatus: CampaignAnchorStatus;
+  prethodnaCenaMinor: number | null;
+  anchorWindowDays: number | null;
+  anchorTruncated: boolean;
+  anchorReason: string | null;
+  anchorJustification: string | null;
+}
+
+export interface CampaignValidationReport {
+  hard: CampaignViolation[];
+  warnings: CampaignViolation[];
+  anchors: CampaignItemAnchor[];
+}
+
+export interface CampaignItemView {
+  productId: number;
+  productName: string;
+  sku: string;
+  campaignPriceMinor: number;
+  prethodnaCenaMinor: number | null;
+  anchorStatus: CampaignAnchorStatus;
+  anchorWindowDays: number | null;
+  anchorTruncated: boolean;
+  anchorReason: string | null;
+  anchorJustification: string | null;
+  futureRegularPriceMinor: number | null;
+  preCampaignPriceMinor: number | null;
+}
+
+export interface CampaignView {
+  id: number;
+  campaignType: CampaignType;
+  status: CampaignStatus;
+  startsOn: string;
+  endsOn: string | null;
+  displayMode: CampaignDisplayMode;
+  headlinePercent: number | null;
+  rasprodajaGround: RasprodajaGround | null;
+  specialConditions: string | null;
+  reducedUtilityReason: string | null;
+  marketingLabel: string | null;
+  seasonAttested: boolean;
+  separationAttested: boolean;
+  /** RFC3339. Once set the anchor is frozen — no path re-snapshots it. */
+  activatedAt: string | null;
+  endedAt: string | null;
+  overdue: boolean;
+  items: CampaignItemView[];
+  warnings: CampaignViolation[];
+}
+
+export interface CampaignSummary {
+  id: number;
+  campaignType: CampaignType;
+  status: CampaignStatus;
+  startsOn: string;
+  endsOn: string | null;
+  marketingLabel: string | null;
+  itemCount: number;
+  overdue: boolean;
+}
+
+export interface EndCampaignOverride {
+  productId: number;
+  returnPriceMinor: number;
 }
 
 export type DiscountDraft =

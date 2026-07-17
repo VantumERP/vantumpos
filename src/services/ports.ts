@@ -4,6 +4,10 @@ import type {
   BackupJob,
   BackupSettings,
   BackupStatus,
+  CampaignInput,
+  CampaignSummary,
+  CampaignValidationReport,
+  CampaignView,
   CashierTurnoverReport,
   CashMovementRequest,
   CategorySummary,
@@ -16,6 +20,7 @@ import type {
   CompanySettingsRequest,
   CreateBackupRequest,
   DailyTurnoverReport,
+  EndCampaignOverride,
   ExportedFile,
   ExportReportRequest,
   ImportHeaders,
@@ -151,6 +156,27 @@ export interface ImportService {
   getImportJob(id: number): Promise<ImportJobDetail | null>;
 }
 
+export interface CampaignsService {
+  listCampaigns(): Promise<CampaignSummary[]>;
+  getCampaign(id: number): Promise<CampaignView>;
+  /** Dry run for the wizard's live feedback. Persists nothing. */
+  validateCampaign(input: CampaignInput): Promise<CampaignValidationReport>;
+  createCampaign(input: CampaignInput): Promise<CampaignView>;
+  /** Draft-only: an activated campaign's anchor never moves. */
+  updateCampaign(id: number, input: CampaignInput): Promise<CampaignView>;
+  activateCampaign(id: number): Promise<CampaignView>;
+  adjustItemPrice(
+    campaignId: number,
+    productId: number,
+    newPriceMinor: number,
+  ): Promise<CampaignView>;
+  endCampaign(
+    id: number,
+    overrides: EndCampaignOverride[],
+  ): Promise<CampaignView>;
+  cancelCampaign(id: number): Promise<CampaignView>;
+}
+
 export interface ReportsService {
   getDailyTurnover(query: ReportDateQuery): Promise<DailyTurnoverReport>;
   getShiftTurnover(query: ReportDateQuery): Promise<ShiftTurnoverReport>;
@@ -175,4 +201,5 @@ export interface PosServices {
   receipts: ReceiptsService;
   imports: ImportService;
   reports: ReportsService;
+  campaigns: CampaignsService;
 }

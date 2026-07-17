@@ -2028,6 +2028,10 @@ function productRequest(form: ProductFormState): SaveProductRequest {
     minimumStockMilli: parseQuantityInput(form.minimumStock),
     allowNegativeStock: form.allowNegativeStock,
     active: form.active,
+    // The form controls arrive in the catalog perishable UI task; until then
+    // the request carries the backend's own default explicitly.
+    perishable: false,
+    perishableJustification: null,
     externalSource: form.externalSource,
   };
 }
@@ -2189,6 +2193,8 @@ function bulkProductRequest(row: BulkProductRowState): SaveProductRequest {
     minimumStockMilli: 0,
     allowNegativeStock: false,
     active: true,
+    perishable: false,
+    perishableJustification: null,
     externalSource: row.externalSource,
   };
 }

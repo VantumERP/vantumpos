@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createLocalServices } from "./local-adapter";
 import { createMockServices } from "./mock-adapter";
+import type { CampaignInput } from "./types";
 
 describe("local service adapter", () => {
   it("calls the Tauri health command through the injected invoker", async () => {
@@ -273,6 +274,8 @@ describe("local service adapter", () => {
       minimumStockMilli: 5000,
       allowNegativeStock: false,
       active: true,
+      perishable: false,
+      perishableJustification: null,
     });
     await services.catalog.updateProduct(7, {
       name: "Mleko 1 l",
@@ -286,6 +289,8 @@ describe("local service adapter", () => {
       minimumStockMilli: 5000,
       allowNegativeStock: false,
       active: true,
+      perishable: false,
+      perishableJustification: null,
     });
     await services.catalog.setProductActive(7, false);
     await services.catalog.listCategories();
@@ -565,6 +570,75 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenNthCalledWith(4, "import_list_jobs");
     expect(invoke).toHaveBeenNthCalledWith(5, "import_get_job", { id: 1 });
   });
+
+  it("maps campaign service methods to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "campaigns_list":
+          return Promise.resolve([]);
+        case "campaigns_validate":
+          return Promise.resolve({ hard: [], warnings: [], anchors: [] });
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    const input: CampaignInput = {
+      campaignType: "sezonsko_snizenje",
+      startsOn: "2026-07-01",
+      endsOn: "2026-07-31",
+      displayMode: "two_prices",
+      headlinePercent: null,
+      rasprodajaGround: null,
+      specialConditions: null,
+      reducedUtilityReason: null,
+      marketingLabel: "Letnje sniženje",
+      seasonAttested: true,
+      separationAttested: false,
+      items: [
+        {
+          productId: 1,
+          campaignPriceMinor: 1290000,
+          manualPrethodnaMinor: null,
+          anchorJustification: null,
+          futureRegularPriceMinor: null,
+        },
+      ],
+    };
+
+    await services.campaigns.listCampaigns();
+    await services.campaigns.getCampaign(7);
+    await services.campaigns.validateCampaign(input);
+    await services.campaigns.createCampaign(input);
+    await services.campaigns.updateCampaign(7, input);
+    await services.campaigns.activateCampaign(7);
+    await services.campaigns.adjustItemPrice(7, 1, 990000);
+    await services.campaigns.endCampaign(7, [
+      { productId: 1, returnPriceMinor: 1590000 },
+    ]);
+    await services.campaigns.cancelCampaign(7);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "campaigns_list");
+    expect(invoke).toHaveBeenNthCalledWith(2, "campaigns_get", { id: 7 });
+    expect(invoke).toHaveBeenNthCalledWith(3, "campaigns_validate", { input });
+    expect(invoke).toHaveBeenNthCalledWith(4, "campaigns_create", { input });
+    expect(invoke).toHaveBeenNthCalledWith(5, "campaigns_update", {
+      id: 7,
+      input,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(6, "campaigns_activate", { id: 7 });
+    expect(invoke).toHaveBeenNthCalledWith(7, "campaigns_adjust_item_price", {
+      campaignId: 7,
+      productId: 1,
+      newPriceMinor: 990000,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(8, "campaigns_end", {
+      id: 7,
+      overrides: [{ productId: 1, returnPriceMinor: 1590000 }],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(9, "campaigns_cancel", { id: 7 });
+  });
 });
 
 describe("mock service adapter", () => {
@@ -732,4 +806,72 @@ describe("mock service adapter", () => {
       "return",
     ]);
   });
+
+  it("carries a campaign draft through activate and end at mock fidelity", async () => {
+    const services = createMockServices();
+
+    const report = await services.campaigns.validateCampaign(campaignInput());
+    expect(report).toEqual({ hard: [], warnings: [], anchors: [] });
+
+    const created = await services.campaigns.createCampaign(campaignInput());
+    expect(created.id).toBeGreaterThan(0);
+    expect(created.status).toBe("draft");
+    expect(created.activatedAt).toBeNull();
+    expect(created.items[0]).toMatchObject({
+      productId: 1,
+      campaignPriceMinor: 1290000,
+    });
+
+    await expect(services.campaigns.listCampaigns()).resolves.toMatchObject([
+      { id: created.id, status: "draft", itemCount: 1 },
+    ]);
+    await expect(services.campaigns.getCampaign(created.id)).resolves.toEqual(
+      created,
+    );
+
+    const active = await services.campaigns.activateCampaign(created.id);
+    expect(active.status).toBe("active");
+    expect(active.activatedAt).not.toBeNull();
+
+    const ended = await services.campaigns.endCampaign(created.id, [
+      { productId: 1, returnPriceMinor: 1590000 },
+    ]);
+    expect(ended.status).toBe("ended");
+    expect(ended.endedAt).not.toBeNull();
+  });
+
+  it("marks a cancelled mock campaign without ending it", async () => {
+    const services = createMockServices();
+
+    const created = await services.campaigns.createCampaign(campaignInput());
+    const cancelled = await services.campaigns.cancelCampaign(created.id);
+
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.activatedAt).toBeNull();
+  });
 });
+
+function campaignInput(): CampaignInput {
+  return {
+    campaignType: "sezonsko_snizenje",
+    startsOn: "2026-07-01",
+    endsOn: "2026-07-31",
+    displayMode: "two_prices",
+    headlinePercent: null,
+    rasprodajaGround: null,
+    specialConditions: null,
+    reducedUtilityReason: null,
+    marketingLabel: "Letnje sniženje",
+    seasonAttested: true,
+    separationAttested: false,
+    items: [
+      {
+        productId: 1,
+        campaignPriceMinor: 1290000,
+        manualPrethodnaMinor: null,
+        anchorJustification: null,
+        futureRegularPriceMinor: null,
+      },
+    ],
+  };
+}

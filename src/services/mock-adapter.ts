@@ -3,6 +3,9 @@ import type {
   AuthSession,
   BackupJob,
   BackupSettings,
+  CampaignInput,
+  CampaignItemView,
+  CampaignView,
   CategorySummary,
   CompanySettings,
   CreateBackupRequest,
@@ -54,6 +57,8 @@ export function createMockServices(): PosServices {
       currentStockMilli: 3000,
       allowNegativeStock: false,
       active: true,
+      perishable: false,
+      perishableJustification: null,
       externalSource: null,
     },
     {
@@ -73,10 +78,13 @@ export function createMockServices(): PosServices {
       currentStockMilli: 3000,
       allowNegativeStock: false,
       active: true,
+      perishable: false,
+      perishableJustification: null,
       externalSource: null,
     },
   ];
   const ledgerMovements = new Map<number, ProductLedgerMovement[]>();
+  const campaigns: CampaignView[] = [];
   const receipt = createReceiptDetail();
   let users: UserAccount[] = [
     {
@@ -985,9 +993,145 @@ export function createMockServices(): PosServices {
         };
       },
     },
+    campaigns: {
+      async listCampaigns() {
+        return campaigns.map((campaign) => ({
+          id: campaign.id,
+          campaignType: campaign.campaignType,
+          status: campaign.status,
+          startsOn: campaign.startsOn,
+          endsOn: campaign.endsOn,
+          marketingLabel: campaign.marketingLabel,
+          itemCount: campaign.items.length,
+          overdue: campaign.overdue,
+        }));
+      },
+      async getCampaign(id) {
+        return findCampaign(campaigns, id);
+      },
+      // Mock fidelity only: the real report is computed in `crate::campaigns`
+      // against the price log. An empty report here is the absence of a
+      // verdict, not a finding that the campaign is lawful.
+      async validateCampaign() {
+        return { hard: [], warnings: [], anchors: [] };
+      },
+      async createCampaign(input) {
+        const campaign = mockCampaignView(
+          Math.max(0, ...campaigns.map((item) => item.id)) + 1,
+          input,
+          products,
+        );
+        campaigns.push(campaign);
+        return campaign;
+      },
+      async updateCampaign(id, input) {
+        const existing = findCampaign(campaigns, id);
+        if (existing.status !== "draft") {
+          throw new Error("Samo nacrt kampanje može da se izmeni.");
+        }
+        const updated = mockCampaignView(id, input, products);
+        campaigns[campaigns.indexOf(existing)] = updated;
+        return updated;
+      },
+      async activateCampaign(id) {
+        const campaign = findCampaign(campaigns, id);
+        campaign.status = "active";
+        campaign.activatedAt = now;
+        return campaign;
+      },
+      async adjustItemPrice(campaignId, productId, newPriceMinor) {
+        const campaign = findCampaign(campaigns, campaignId);
+        const item = campaign.items.find(
+          (candidate) => candidate.productId === productId,
+        );
+        if (!item) {
+          throw new Error("Artikal nije u kampanji.");
+        }
+        item.campaignPriceMinor = newPriceMinor;
+        return campaign;
+      },
+      async endCampaign(id, overrides) {
+        const campaign = findCampaign(campaigns, id);
+        for (const override of overrides) {
+          const product = products.find(
+            (candidate) => candidate.id === override.productId,
+          );
+          if (product) {
+            product.salePriceMinor = override.returnPriceMinor;
+          }
+        }
+        campaign.status = "ended";
+        campaign.endedAt = now;
+        campaign.overdue = false;
+        return campaign;
+      },
+      async cancelCampaign(id) {
+        const campaign = findCampaign(campaigns, id);
+        campaign.status = "cancelled";
+        return campaign;
+      },
+    },
   };
 
   return services;
+}
+
+function findCampaign(campaigns: CampaignView[], id: number): CampaignView {
+  const campaign = campaigns.find((candidate) => candidate.id === id);
+  if (!campaign) {
+    throw new Error("Kampanja nije pronađena.");
+  }
+
+  return campaign;
+}
+
+function mockCampaignView(
+  id: number,
+  input: CampaignInput,
+  products: ProductSummary[],
+): CampaignView {
+  const items: CampaignItemView[] = input.items.map((item) => {
+    const product = products.find(
+      (candidate) => candidate.id === item.productId,
+    );
+
+    return {
+      productId: item.productId,
+      productName: product?.name ?? `Artikal ${item.productId}`,
+      sku: product?.sku ?? "",
+      campaignPriceMinor: item.campaignPriceMinor,
+      prethodnaCenaMinor:
+        item.manualPrethodnaMinor ?? product?.salePriceMinor ?? null,
+      anchorStatus: item.manualPrethodnaMinor == null ? "computed" : "manual",
+      anchorWindowDays: item.manualPrethodnaMinor == null ? 30 : null,
+      anchorTruncated: false,
+      anchorReason: null,
+      anchorJustification: item.anchorJustification ?? null,
+      futureRegularPriceMinor: item.futureRegularPriceMinor ?? null,
+      preCampaignPriceMinor: product?.salePriceMinor ?? null,
+    };
+  });
+
+  return {
+    id,
+    campaignType: input.campaignType,
+    status: "draft",
+    startsOn: input.startsOn,
+    endsOn: input.endsOn ?? null,
+    displayMode: input.displayMode,
+    headlinePercent: input.headlinePercent ?? null,
+    rasprodajaGround: input.rasprodajaGround ?? null,
+    specialConditions: input.specialConditions ?? null,
+    reducedUtilityReason: input.reducedUtilityReason ?? null,
+    marketingLabel: input.marketingLabel ?? null,
+    seasonAttested: input.seasonAttested,
+    separationAttested: input.separationAttested,
+    activatedAt: null,
+    endedAt: null,
+    overdue: false,
+    items,
+    warnings: [],
+  };
 }
 
 function mockBarcodeLookup(barcode: string): ProductLookupSuggestion | null {

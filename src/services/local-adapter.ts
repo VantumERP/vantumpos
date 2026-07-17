@@ -7,6 +7,9 @@ import type {
   BackupJob,
   BackupSettings,
   BackupStatus,
+  CampaignSummary,
+  CampaignValidationReport,
+  CampaignView,
   CashierTurnoverReport,
   CategorySummary,
   CategorySalesReport,
@@ -175,6 +178,27 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       listShifts: () => invoke<ShiftListItem[]>("reports_list_shifts"),
       exportReportCsv: (request) =>
         invoke<ExportedFile>("reports_export_csv", { request }),
+    },
+    campaigns: {
+      listCampaigns: () => invoke<CampaignSummary[]>("campaigns_list"),
+      getCampaign: (id) => invoke<CampaignView>("campaigns_get", { id }),
+      validateCampaign: (input) =>
+        invoke<CampaignValidationReport>("campaigns_validate", { input }),
+      createCampaign: (input) =>
+        invoke<CampaignView>("campaigns_create", { input }),
+      updateCampaign: (id, input) =>
+        invoke<CampaignView>("campaigns_update", { id, input }),
+      activateCampaign: (id) =>
+        invoke<CampaignView>("campaigns_activate", { id }),
+      adjustItemPrice: (campaignId, productId, newPriceMinor) =>
+        invoke<CampaignView>("campaigns_adjust_item_price", {
+          campaignId,
+          productId,
+          newPriceMinor,
+        }),
+      endCampaign: (id, overrides) =>
+        invoke<CampaignView>("campaigns_end", { id, overrides }),
+      cancelCampaign: (id) => invoke<CampaignView>("campaigns_cancel", { id }),
     },
   };
 }

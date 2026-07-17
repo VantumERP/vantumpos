@@ -29,6 +29,8 @@ const product: ProductSummary = {
   currentStockMilli: 3000,
   allowNegativeStock: false,
   active: true,
+  perishable: false,
+  perishableJustification: null,
   externalSource: null,
 };
 
