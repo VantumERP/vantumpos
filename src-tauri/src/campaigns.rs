@@ -77,6 +77,32 @@ const MSG_H14D: &str = "Kampanja mora imati bar jedan artikal.";
 const MSG_H14E: &str = "Način isticanja nije ispravan.";
 const MSG_H14F: &str = "Artikal nije pronađen.";
 
+// Warnings are ADVISORY. Not one of them blocks a save, and their absence is
+// never a finding that a promotion is lawful — čl. 38 st. 4 is an open standard
+// („zanemarljivo kratak period", „prividno sniženje") that no query settles.
+// Every message therefore names the risk and leaves the judgement to the user.
+const MSG_W1: &str = "Prethodna cena je važila kraće od 3 dana u referentnom periodu — rizik „zanemarljivo kratkog perioda\" (čl. 38 st. 4).";
+const MSG_W2: &str = "Artikal je bio u drugoj kampanji koja je počela u poslednjih 30 dana — ponovljene akcije obaraju prethodnu cenu.";
+const MSG_W3: &str =
+    "Istaknuti procenat važi za manje od petine aktivnog asortimana (čl. 38 st. 2).";
+const MSG_W4: &str = "Evidencija cena ne pokriva ceo referentni period — proverite podatke.";
+const MSG_W5: &str = "Na kasi je zabeležena cena niža od izračunate prethodne cene — strože tumačenje „primenjivao\" može zahtevati nižu prethodnu cenu.";
+const MSG_W6: &str = "Kampanja je prošla deklarisani datum isteka — završite je i vratite cene.";
+
+/// čl. 38 st. 4 names „zanemarljivo kratak period" and defines nothing. The
+/// memo (§5 „Warnings") reads the risk zone as an anchor in force for only 1–2
+/// days, so three full days inside the window is the first period we stay quiet
+/// about. This is a HEURISTIC for a warning, never a rule: it may not block,
+/// and a longer period is not a defence.
+const TOKEN_PERIOD_DAYS: i64 = 3;
+
+/// The čl. 37 st. 3 window is 30 days, so a campaign that started within 30 days
+/// either side has already pushed this product's offered prices down inside it.
+const REPEAT_CAMPAIGN_RADIUS_DAYS: i64 = 30;
+
+/// čl. 38 st. 2: „najmanje jednu petinu robe u asortimanu".
+const ASSORTMENT_FRACTION: i64 = 5;
+
 const MSG_CAMPAIGN_INVALID: &str = "Kampanja nije ispravna.";
 const MSG_CAMPAIGN_NOT_FOUND: &str = "Kampanja nije pronađena.";
 const MSG_DRAFT_ONLY_UPDATE: &str = "Samo nacrt kampanje može da se menja.";
@@ -556,6 +582,314 @@ pub fn validate_campaign(
         exclude_campaign_id,
     )?);
     Ok((anchors, violations))
+}
+
+/// The čl. 37 st. 3–4 reference window for one item, exactly as
+/// `compute_prethodna_cena` framed it: `from` inclusive, `to` exclusive.
+struct AnchorWindow {
+    from: String,
+    to: String,
+}
+
+/// Rebuilds the window the anchor was computed over — the SAME interval logic,
+/// re-derived from the stored `anchor_window_days` rather than guessed at.
+/// Recomputing the window length here would be a second implementation of st.
+/// 3–4 to get wrong, and it would drift from the anchor it is supposed to
+/// describe. Only a computed anchor HAS a window: a manual one is a human
+/// figure with a justification, and promotivna has no anchor at all.
+fn anchor_window(
+    input: &CampaignInput,
+    anchor: &ItemAnchor,
+) -> Result<Option<AnchorWindow>, AppError> {
+    if anchor.anchor_status != "computed" {
+        return Ok(None);
+    }
+    let Some(window_days) = anchor.anchor_window_days else {
+        return Ok(None);
+    };
+    let start = parse_rfc3339(&input.starts_on, "startsOn")?;
+    let from = (start - Duration::days(window_days))
+        .format(&Rfc3339)
+        .map_err(|source| AppError::InvalidState(format!("Vreme nije dostupno: {source}")))?;
+    Ok(Some(AnchorWindow {
+        from,
+        to: input.starts_on.clone(),
+    }))
+}
+
+/// How long the anchor price was actually in force INSIDE the window.
+///
+/// Reads the same LEAD timeline the MIN came from, but fetches the intervals
+/// into Rust: the clipping is date arithmetic, and date arithmetic lives in the
+/// `time` crate, never in SQL. Time outside the window does not count — an
+/// anchor that held for months before the window and two days inside it was, as
+/// far as čl. 37 st. 3 is concerned, a two-day price.
+fn anchor_in_force(
+    conn: &Connection,
+    anchor: &ItemAnchor,
+    anchor_price_minor: i64,
+    window: &AnchorWindow,
+) -> Result<Duration, AppError> {
+    let mut statement = conn.prepare(
+        "WITH timeline AS (
+            SELECT price_minor,
+                   effective_from AS valid_from,
+                   LEAD(effective_from) OVER (
+                       PARTITION BY product_id ORDER BY effective_from, id
+                   ) AS valid_to
+            FROM price_history
+            WHERE product_id = ?1
+         )
+         SELECT valid_from, valid_to
+         FROM timeline
+         WHERE price_minor = ?2
+           AND valid_from < ?4
+           AND (valid_to IS NULL OR valid_to > ?3)",
+    )?;
+    let intervals = statement
+        .query_map(
+            params![
+                anchor.product_id,
+                anchor_price_minor,
+                window.from,
+                window.to
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let window_from = parse_rfc3339(&window.from, "windowFrom")?;
+    let window_to = parse_rfc3339(&window.to, "windowTo")?;
+    let mut total = Duration::ZERO;
+    for (valid_from, valid_to) in intervals {
+        let from = parse_rfc3339(&valid_from, "effectiveFrom")?.max(window_from);
+        let to = match valid_to {
+            Some(valid_to) => parse_rfc3339(&valid_to, "effectiveFrom")?.min(window_to),
+            None => window_to,
+        };
+        if to > from {
+            total += to - from;
+        }
+    }
+    Ok(total)
+}
+
+/// The lowest per-unit price the till actually charged for this product inside
+/// the window, in minor units.
+///
+/// LINE-LEVEL ONLY, and that is the whole caveat: the discount is spread back
+/// over the line's quantity, so a one-off manual rebate on a single receipt is
+/// indistinguishable here from a genuinely lower offered price. That is why w5
+/// hedges („strože tumačenje… može zahtevati") instead of asserting that the
+/// anchor is wrong. Voids and returns carry their own `document_type` and are
+/// excluded — they are not offers.
+fn lowest_till_unit_price(
+    conn: &Connection,
+    product_id: i64,
+    window: &AnchorWindow,
+) -> Result<Option<i64>, AppError> {
+    let lowest: Option<i64> = conn.query_row(
+        "SELECT MIN((si.unit_price_minor * si.quantity_milli - si.discount_minor * 1000)
+                    / si.quantity_milli)
+         FROM sale_items si
+         JOIN sales s ON s.id = si.sale_id
+         WHERE si.product_id = ?1
+           AND s.document_type = 'sale'
+           AND s.created_at >= ?2
+           AND s.created_at < ?3",
+        params![product_id, window.from, window.to],
+        |row| row.get(0),
+    )?;
+    Ok(lowest)
+}
+
+/// w2 — another campaign on the same product that started within 30 days.
+///
+/// Cancelled campaigns are excluded: a cancelled campaign was never announced
+/// and never moved a price, so it cannot have depressed anything. Drafts stay
+/// in — the point is to warn BEFORE the two campaigns collide. The radius is
+/// built in Rust and compared lexicographically against RFC3339.
+fn has_recent_campaign(
+    conn: &Connection,
+    product_id: i64,
+    input: &CampaignInput,
+    exclude_campaign_id: Option<i64>,
+) -> Result<bool, AppError> {
+    let start = parse_rfc3339(&input.starts_on, "startsOn")?;
+    let format_bound = |moment: OffsetDateTime| {
+        moment
+            .format(&Rfc3339)
+            .map_err(|source| AppError::InvalidState(format!("Vreme nije dostupno: {source}")))
+    };
+    let from = format_bound(start - Duration::days(REPEAT_CAMPAIGN_RADIUS_DAYS))?;
+    let to = format_bound(start + Duration::days(REPEAT_CAMPAIGN_RADIUS_DAYS))?;
+
+    let exists: i64 = conn.query_row(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM campaign_items
+            JOIN campaigns ON campaigns.id = campaign_items.campaign_id
+            WHERE campaign_items.product_id = ?1
+              AND campaigns.status != 'cancelled'
+              AND campaigns.id != COALESCE(?2, -1)
+              AND campaigns.starts_on >= ?3
+              AND campaigns.starts_on <= ?4
+         )",
+        params![product_id, exclude_campaign_id, from, to],
+        |row| row.get(0),
+    )?;
+    Ok(exists == 1)
+}
+
+/// w3 — čl. 38 st. 2: the headline percent must reach „najmanje jednu petinu
+/// robe u asortimanu". Integer arithmetic throughout: the per-item discount is
+/// floored, and the fifth is tested as `reaching * 5 < assortment` rather than
+/// through a float ratio. It is a CAMPAIGN-level finding — no single item is at
+/// fault for the size of the assortment — so `product_id` stays `None`.
+///
+/// The denominator is the ACTIVE assortment: goods not on offer are not „roba u
+/// asortimanu" the shopper can be steered toward.
+fn headline_misses_a_fifth(
+    conn: &Connection,
+    input: &CampaignInput,
+    anchors: &[ItemAnchor],
+    headline_percent: i64,
+) -> Result<bool, AppError> {
+    let mut reaching: i64 = 0;
+    for item in &input.items {
+        let anchor_price = anchors
+            .iter()
+            .find(|anchor| anchor.product_id == item.product_id)
+            .and_then(|anchor| anchor.prethodna_cena_minor)
+            .filter(|price| *price > 0);
+        // No anchor means no percentage can be claimed for this item at all, so
+        // it cannot help carry the headline.
+        let Some(anchor_price) = anchor_price else {
+            continue;
+        };
+        let discount_percent = (anchor_price - item.campaign_price_minor) * 100 / anchor_price;
+        if discount_percent >= headline_percent {
+            reaching += 1;
+        }
+    }
+
+    let assortment: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM products WHERE active = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(reaching * ASSORTMENT_FRACTION < assortment)
+}
+
+/// The advisory half of the rule set (W1–W6).
+///
+/// Warnings NEVER block: every one of them points at a standard the software
+/// cannot decide (čl. 38 st. 4's „zanemarljivo kratak period", the reach of
+/// „primenjivao", the completeness of the trader's own records). An empty list
+/// means nothing we mechanically check flagged — it is not a legal clearance.
+///
+/// `anchors` are supplied by the caller and are never re-derived here: the
+/// detail view passes the FROZEN snapshot (čl. 37 st. 5) while the wizard's
+/// dry-run passes a fresh draft snapshot. `exclude_campaign_id` names the
+/// campaign this input belongs to — it keeps a campaign from reading as its own
+/// repeat (w2), and it is what `now` is measured against (w6): only a campaign
+/// that already exists can be past its declared expiry.
+pub fn compute_warnings(
+    conn: &Connection,
+    input: &CampaignInput,
+    anchors: &[ItemAnchor],
+    exclude_campaign_id: Option<i64>,
+    now: &str,
+) -> Result<Vec<Violation>, AppError> {
+    let mut warnings = Vec::new();
+
+    for anchor in anchors {
+        // w4 — say the record is short; never silently compute over the gap.
+        if anchor.anchor_truncated {
+            warnings.push(Violation::for_product("w4", MSG_W4, anchor.product_id));
+        }
+
+        if has_recent_campaign(conn, anchor.product_id, input, exclude_campaign_id)? {
+            warnings.push(Violation::for_product("w2", MSG_W2, anchor.product_id));
+        }
+
+        // w1 and w5 both speak about the reference window, so they only apply
+        // where one exists — i.e. to a computed anchor.
+        let (Some(window), Some(anchor_price)) =
+            (anchor_window(input, anchor)?, anchor.prethodna_cena_minor)
+        else {
+            continue;
+        };
+
+        if anchor_in_force(conn, anchor, anchor_price, &window)? < Duration::days(TOKEN_PERIOD_DAYS)
+        {
+            warnings.push(Violation::for_product("w1", MSG_W1, anchor.product_id));
+        }
+
+        if lowest_till_unit_price(conn, anchor.product_id, &window)?
+            .is_some_and(|charged| charged < anchor_price)
+        {
+            warnings.push(Violation::for_product("w5", MSG_W5, anchor.product_id));
+        }
+    }
+
+    // w3 — only a claimed headline percent can miss the fifth.
+    if let Some(headline_percent) = input.headline_percent {
+        if headline_misses_a_fifth(conn, input, anchors, headline_percent)? {
+            warnings.push(Violation::new("w3", MSG_W3));
+        }
+    }
+
+    // w6 — reuses `is_overdue`, the one predicate that decides what „past the
+    // declared expiry" means, so the warning and the view flag cannot disagree.
+    if let Some(id) = exclude_campaign_id {
+        let stored: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT status, ends_on FROM campaigns WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((status, ends_on)) = stored {
+            if is_overdue(&status, ends_on.as_deref(), now) {
+                warnings.push(Violation::new("w6", MSG_W6));
+            }
+        }
+    }
+
+    Ok(warnings)
+}
+
+/// Everything the wizard needs to decide, in one pass: what blocks (`hard`),
+/// what merely deserves a second look (`warnings`), and the snapshot both were
+/// judged against (`anchors`).
+///
+/// The split is the point. `hard` is empty ⇒ no rule we can mechanically check
+/// was broken. It is NOT „this promotion is legal".
+#[derive(Debug, Clone)]
+pub struct ValidationReport {
+    pub hard: Vec<Violation>,
+    pub warnings: Vec<Violation>,
+    pub anchors: Vec<ItemAnchor>,
+}
+
+/// The dry run behind the wizard's live feedback. Takes a FRESH snapshot, so it
+/// is only ever valid for a draft or an unsaved input — never for an activated
+/// campaign, whose anchor is frozen (čl. 37 st. 5). The detail view reads the
+/// stored snapshot instead; see `get_campaign`.
+pub fn validation_report(
+    conn: &Connection,
+    input: &CampaignInput,
+    exclude_campaign_id: Option<i64>,
+    now: &str,
+) -> Result<ValidationReport, AppError> {
+    let (anchors, hard) = validate_campaign(conn, input, exclude_campaign_id)?;
+    let warnings = compute_warnings(conn, input, &anchors, exclude_campaign_id, now)?;
+    Ok(ValidationReport {
+        hard,
+        warnings,
+        anchors,
+    })
 }
 
 /// One item as the wizard and the detail view see it: the stored snapshot plus
@@ -1216,8 +1550,40 @@ pub fn get_campaign(conn: &Connection, id: i64, now: &str) -> Result<CampaignVie
         .optional()?;
     let mut view = view.ok_or_else(|| AppError::not_found(MSG_CAMPAIGN_NOT_FOUND))?;
     view.items = load_items(conn, id)?;
+    // The warnings are computed against the STORED anchors, never a fresh
+    // snapshot: čl. 37 st. 5 freezes the anchor at activation, and merely
+    // OPENING the campaign must not be able to move it. After activation the
+    // offered price IS the campaign price, so a re-snapshot here would anchor
+    // the campaign on itself and quietly report a 0% discount as fine.
+    let anchors = stored_anchors(&view.items);
+    view.warnings = compute_warnings(conn, &load_input(conn, id)?, &anchors, Some(id), now)?;
 
     Ok(view)
+}
+
+/// Reads the frozen snapshot back out of `campaign_items` in the shape the
+/// warning pass expects. This is a projection, not a computation — nothing here
+/// may consult `price_history`.
+fn stored_anchors(items: &[CampaignItemView]) -> Vec<ItemAnchor> {
+    items
+        .iter()
+        .map(|item| ItemAnchor {
+            product_id: item.product_id,
+            // `campaign_items.anchor_status` is CHECK-constrained to exactly
+            // these three, so the fallback is unreachable; „none" is the
+            // conservative one — it claims no window and no anchor.
+            anchor_status: match item.anchor_status.as_str() {
+                "computed" => "computed",
+                "manual" => "manual",
+                _ => "none",
+            },
+            prethodna_cena_minor: item.prethodna_cena_minor,
+            anchor_window_days: item.anchor_window_days,
+            anchor_truncated: item.anchor_truncated,
+            anchor_reason: item.anchor_reason.clone(),
+            anchor_justification: item.anchor_justification.clone(),
+        })
+        .collect()
 }
 
 pub fn list_campaigns(conn: &Connection, now: &str) -> Result<Vec<CampaignSummary>, AppError> {
@@ -1954,6 +2320,313 @@ mod tests {
                 )
                 .expect("count");
             assert_eq!(starts, 0, "activation must be all-or-nothing");
+        });
+    }
+
+    // ---- Warnings W1–W6 -------------------------------------------------
+    //
+    // Advisory only. A warning never blocks a save, and their ABSENCE is never
+    // a finding that the promotion is lawful — čl. 38 st. 4 is an open standard
+    // no query can settle.
+
+    fn item(product_id: i64, campaign_price_minor: i64) -> CampaignItemInput {
+        CampaignItemInput {
+            product_id,
+            campaign_price_minor,
+            manual_prethodna_minor: None,
+            anchor_justification: None,
+            future_regular_price_minor: None,
+        }
+    }
+
+    fn warnings_with(warnings: &[Violation], code: &str) -> Vec<Option<i64>> {
+        warnings
+            .iter()
+            .filter(|warning| warning.code == code)
+            .map(|warning| warning.product_id)
+            .collect()
+    }
+
+    #[test]
+    fn w1_flags_anchor_in_force_under_three_days() {
+        with_campaign_db_mut("w1_token_period", |conn| {
+            // 1.000 for months, then 800 for exactly 2 days inside the window, back to 1.000.
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at) VALUES
+                 (1, '2026-06-20T00:00:00Z', 800000, 'update', '2026-06-20T00:00:00Z'),
+                 (1, '2026-06-22T00:00:00Z', 1000000, 'update', '2026-06-22T00:00:00Z');",
+            )
+            .expect("timeline");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 700000;
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(report.hard.is_empty(), "{:?}", report.hard);
+            // Anchor is 800000 (the MIN) but held only 2 days -> w1. Pinning it
+            // is what makes the w1 assertion mean anything: against a 1.000.000
+            // anchor the in-force sum would be ~28 days and w1 would be right
+            // to stay silent. The report must hand back the snapshot its
+            // findings were judged against.
+            assert_eq!(
+                report.anchors[0].prethodna_cena_minor,
+                Some(800000),
+                "the token-period warning must be about the MIN, not the regular price"
+            );
+            assert_eq!(warnings_with(&report.warnings, "w1"), vec![Some(1)]);
+        });
+    }
+
+    /// The boundary is the memo's „1–2 days" reading: three full days inside the
+    /// window is a period, not a token. Warning on it would train the user to
+    /// dismiss the flag that čl. 38 st. 4 actually needs them to read.
+    #[test]
+    fn w1_silent_when_the_anchor_held_three_full_days() {
+        with_campaign_db_mut("w1_real_period", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at) VALUES
+                 (1, '2026-06-20T00:00:00Z', 800000, 'update', '2026-06-20T00:00:00Z'),
+                 (1, '2026-06-23T00:00:00Z', 1000000, 'update', '2026-06-23T00:00:00Z');",
+            )
+            .expect("timeline");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 700000;
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(report.hard.is_empty(), "{:?}", report.hard);
+            assert!(warnings_with(&report.warnings, "w1").is_empty());
+        });
+    }
+
+    #[test]
+    fn w2_flags_repeat_campaign_within_30_days() {
+        with_campaign_db_mut("w2_repeat", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            // A campaign on the same product that started 10 days earlier.
+            conn.execute_batch(
+                "INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, created_at, updated_at)
+                 VALUES (99, 'akcijska_prodaja', 'ended', '2026-06-25T00:00:00Z', '2026-06-27T00:00:00Z', 'two_prices', '2026-06-25T00:00:00Z', '2026-06-25T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, anchor_status)
+                 VALUES (99, 1, 900000, 'computed');",
+            )
+            .expect("neighbouring campaign");
+
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 700000;
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(report.hard.is_empty(), "{:?}", report.hard);
+            assert_eq!(warnings_with(&report.warnings, "w2"), vec![Some(1)]);
+
+            // Outside the 30-day radius -> silent.
+            conn.execute(
+                "UPDATE campaigns SET starts_on = '2026-05-20T00:00:00Z' WHERE id = 99",
+                [],
+            )
+            .expect("move the neighbour back");
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(warnings_with(&report.warnings, "w2").is_empty());
+
+            // A cancelled campaign was never announced, so it never depressed
+            // anything — it must not raise the repeat flag.
+            conn.execute(
+                "UPDATE campaigns SET starts_on = '2026-06-25T00:00:00Z', status = 'cancelled' WHERE id = 99",
+                [],
+            )
+            .expect("cancel the neighbour");
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(warnings_with(&report.warnings, "w2").is_empty());
+        });
+    }
+
+    #[test]
+    fn w3_flags_headline_percent_under_one_fifth_of_assortment() {
+        with_campaign_db_mut("w3_assortment", |conn| {
+            for id in 1..=10 {
+                seed_product(conn, id, 1000000, true, "2026-01-01T00:00:00Z");
+            }
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.headline_percent = Some(50);
+            input.items = vec![item(1, 500000)];
+
+            // 1 of 10 reaches the headline -> 1*5 < 10 -> under one fifth.
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(report.hard.is_empty(), "{:?}", report.hard);
+            assert_eq!(
+                warnings_with(&report.warnings, "w3"),
+                vec![None],
+                "čl. 38 st. 2 is about the assortment, not about one item"
+            );
+
+            // 2 of 10 is exactly one fifth, and st. 2 says „najmanje jednu petinu".
+            input.items.push(item(2, 500000));
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(warnings_with(&report.warnings, "w3").is_empty());
+        });
+    }
+
+    /// Only items that actually REACH the headline count toward the fifth: a
+    /// 30% markdown is not evidence for a „do 50%" claim.
+    #[test]
+    fn w3_counts_only_items_reaching_the_headline_percent() {
+        with_campaign_db_mut("w3_headline_reach", |conn| {
+            for id in 1..=10 {
+                seed_product(conn, id, 1000000, true, "2026-01-01T00:00:00Z");
+            }
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.headline_percent = Some(50);
+            // Two items, but one is only 30% off -> numerator 1, not 2.
+            input.items = vec![item(1, 500000), item(2, 700000)];
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert_eq!(warnings_with(&report.warnings, "w3"), vec![None]);
+        });
+    }
+
+    #[test]
+    fn w4_flags_truncated_anchor() {
+        with_campaign_db_mut("w4_truncated", |conn| {
+            // Product 1 predates its own log (the v9 backfill case): the log
+            // opens INSIDE the 30-day window, so the MIN covers only part of it.
+            seed_product(conn, 1, 1000000, false, "2026-01-01T00:00:00Z");
+            conn.execute_batch(
+                "UPDATE products SET active = 1 WHERE id = 1;
+                 INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-06-20T00:00:00Z', 1000000, 'seed', '2026-06-20T00:00:00Z');",
+            )
+            .expect("partial history");
+            // Product 2's log covers the whole window.
+            seed_product(conn, 2, 1000000, true, "2026-01-01T00:00:00Z");
+
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items = vec![item(1, 700000), item(2, 700000)];
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(report.hard.is_empty(), "{:?}", report.hard);
+            assert_eq!(
+                warnings_with(&report.warnings, "w4"),
+                vec![Some(1)],
+                "only the item whose log falls short of the window"
+            );
+        });
+    }
+
+    #[test]
+    fn w5_flags_till_price_below_anchor() {
+        with_campaign_db_mut("w5_till_divergence", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            // A till line inside the anchor window at 700 while the OFFERED
+            // price logged for that day was 1.000.
+            conn.execute_batch(
+                "INSERT INTO shifts (id, user_id, opened_at, opening_cash_minor, expected_cash_minor, status, created_at, updated_at)
+                 VALUES (1, 1, '2026-06-15T08:00:00Z', 0, 0, 'open', '2026-06-15T08:00:00Z', '2026-06-15T08:00:00Z');
+                 INSERT INTO sales (id, local_receipt_number, shift_id, cashier_id, status, fiscal_status, subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at)
+                 VALUES (1, 'VP-000001', 1, 1, 'completed', 'not_fiscalized', 700000, 0, 0, 700000, '2026-06-15T09:00:00Z', '2026-06-15T09:00:00Z');
+                 INSERT INTO sale_items (id, sale_id, product_id, product_name, product_sku, quantity_milli, unit_price_minor, discount_minor, tax_rate_basis_points, tax_minor, total_minor)
+                 VALUES (1, 1, 1, 'P1', 'P1', 1000, 700000, 0, 2000, 0, 700000);",
+            )
+            .expect("till line");
+
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 600000;
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(report.hard.is_empty(), "{:?}", report.hard);
+            assert_eq!(warnings_with(&report.warnings, "w5"), vec![Some(1)]);
+            // The finding is LINE-level: it cannot tell a per-line rebate from a
+            // lower offered price, so the copy must hedge rather than assert.
+            let message = &report
+                .warnings
+                .iter()
+                .find(|warning| warning.code == "w5")
+                .expect("w5")
+                .message;
+            assert!(
+                message.contains("strože tumačenje"),
+                "w5 must carry its own limitation: {message}"
+            );
+
+            // The same line at the offered price is no divergence.
+            conn.execute(
+                "UPDATE sale_items SET unit_price_minor = 1000000, total_minor = 1000000 WHERE id = 1",
+                [],
+            )
+            .expect("realign the line");
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(warnings_with(&report.warnings, "w5").is_empty());
+        });
+    }
+
+    /// Sales OUTSIDE the anchor window say nothing about the anchor: the window
+    /// here must be the same one `compute_prethodna_cena` used.
+    #[test]
+    fn w5_ignores_sales_outside_the_anchor_window() {
+        with_campaign_db_mut("w5_outside_window", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO shifts (id, user_id, opened_at, opening_cash_minor, expected_cash_minor, status, created_at, updated_at)
+                 VALUES (1, 1, '2026-03-01T08:00:00Z', 0, 0, 'open', '2026-03-01T08:00:00Z', '2026-03-01T08:00:00Z');
+                 INSERT INTO sales (id, local_receipt_number, shift_id, cashier_id, status, fiscal_status, subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at)
+                 VALUES (1, 'VP-000001', 1, 1, 'completed', 'not_fiscalized', 700000, 0, 0, 700000, '2026-03-01T09:00:00Z', '2026-03-01T09:00:00Z');
+                 INSERT INTO sale_items (id, sale_id, product_id, product_name, product_sku, quantity_milli, unit_price_minor, discount_minor, tax_rate_basis_points, tax_minor, total_minor)
+                 VALUES (1, 1, 1, 'P1', 'P1', 1000, 700000, 0, 2000, 0, 700000);",
+            )
+            .expect("old till line");
+
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 600000;
+            let report =
+                validation_report(conn, &input, None, "2026-07-01T00:00:00Z").expect("report");
+            assert!(warnings_with(&report.warnings, "w5").is_empty());
+        });
+    }
+
+    #[test]
+    fn w6_appears_on_overdue_campaign_view() {
+        with_campaign_db_mut("w6_overdue", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 700000;
+            let created = create_campaign(conn, &input, 1, "2026-07-01T00:00:00Z").expect("create");
+            activate_campaign(conn, created.id, 1, "2026-07-05T00:00:00Z").expect("activate");
+
+            // Declared end is 20.07 and it is inclusive — still lawfully running.
+            let view = get_campaign(conn, created.id, "2026-07-20T12:00:00Z").expect("get");
+            assert!(!view.overdue);
+            assert!(warnings_with(&view.warnings, "w6").is_empty());
+
+            let view = get_campaign(conn, created.id, "2026-07-21T00:00:00Z").expect("get");
+            assert!(view.overdue);
+            assert_eq!(warnings_with(&view.warnings, "w6"), vec![None]);
+        });
+    }
+
+    /// The detail view must read the FROZEN anchor (čl. 37 st. 5), never take a
+    /// fresh one. Activation moves the offered price to 700.000, so a warning
+    /// pass that re-snapshotted would anchor on 700.000 and silently agree with
+    /// the campaign's own price.
+    #[test]
+    fn campaign_view_warnings_use_the_frozen_anchor() {
+        with_campaign_db_mut("w_view_frozen_anchor", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 700000;
+            let created = create_campaign(conn, &input, 1, "2026-07-01T00:00:00Z").expect("create");
+            activate_campaign(conn, created.id, 1, "2026-07-05T00:00:00Z").expect("activate");
+
+            let view = get_campaign(conn, created.id, "2026-07-06T00:00:00Z").expect("get");
+            assert_eq!(view.items[0].prethodna_cena_minor, Some(1000000));
+            // Its OWN campaign_items row must not raise the repeat flag.
+            assert!(
+                warnings_with(&view.warnings, "w2").is_empty(),
+                "a campaign is not its own repeat"
+            );
         });
     }
 }
