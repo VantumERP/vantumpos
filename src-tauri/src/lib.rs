@@ -1,4 +1,5 @@
 mod app_error;
+mod campaigns;
 mod clock;
 mod commands;
 mod db;
