@@ -18,6 +18,8 @@
 //! was broken", never "this is legal".
 
 use crate::app_error::AppError;
+use crate::price_history::{compute_prethodna_cena, IncomputableReason, PrethodnaCenaResult};
+use rusqlite::{params, Connection, OptionalExtension};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime};
 
@@ -49,16 +51,32 @@ const MSG_H2: &str =
 const MSG_H4: &str = "Sezonsko sniženje može trajati najviše 60 dana (čl. 37 st. 9 u vezi st. 8).";
 const MSG_H5: &str = "Akcijska prodaja može trajati najviše 31 dan (čl. 37 st. 10).";
 const MSG_H6: &str = "Isticanje samo procenta je dozvoljeno isključivo za akcijsku prodaju sa rokom važenja do 3 dana (čl. 37 st. 11).";
+const MSG_H7A: &str = "Promotivna prodaja je samo za robu koja se prvi put uvodi u ponudu — artikal je već bio u ponudi (čl. 36 st. 9).";
+const MSG_H7B: &str =
+    "Za promotivnu prodaju unesite redovnu cenu koja će važiti nakon isteka (čl. 36 st. 9).";
+const MSG_H7C: &str =
+    "Artikal za promotivnu prodaju ne sme biti aktivan pre početka — ponudu započinje aktivacija kampanje.";
 const MSG_H7D: &str = "Promotivna prodaja može trajati najviše 60 dana (čl. 36 st. 9).";
+const MSG_H9: &str = "Snižena cena mora biti niža od prethodne cene (čl. 37 st. 6/8/10).";
 const MSG_H10: &str = "Za rasprodaju izaberite jedan od tri zakonska osnova (čl. 37 st. 6).";
 const MSG_H12A: &str = "Potvrdite da je sezona protekla (čl. 37 st. 8).";
 const MSG_H12B: &str = "Potvrdite da je roba na rasprodaji fizički izdvojena (čl. 37 st. 7).";
+const MSG_H13A: &str = "Za ovaj artikal prethodna cena mora biti uneta ručno uz obrazloženje.";
+const MSG_H13B: &str = "Artikal nije u ponudi — sniženje je moguće samo za aktivne artikle.";
 const MSG_H14A: &str = "Datum početka nije ispravan.";
 const MSG_H14B: &str =
     "Datum isteka je obavezan (osim za rasprodaju — „dok traju zalihe\") (čl. 36 st. 2 t. 3).";
 const MSG_H14C: &str = "Datum isteka mora biti posle datuma početka.";
 const MSG_H14D: &str = "Kampanja mora imati bar jedan artikal.";
 const MSG_H14E: &str = "Način isticanja nije ispravan.";
+const MSG_H14F: &str = "Artikal nije pronađen.";
+
+/// čl. 37 st. 8 caps sezonsko at two per calendar year, counted by START date.
+fn msg_h3(year: i32) -> String {
+    format!(
+        "Sezonsko sniženje je dozvoljeno najviše dva puta godišnje — u {year}. su već održana dva (čl. 37 st. 8; broji se po datumu početka u kalendarskoj godini)."
+    )
+}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +132,29 @@ impl Violation {
             product_id: None,
         }
     }
+
+    fn for_product(code: &'static str, message: &str, product_id: i64) -> Self {
+        Self {
+            code,
+            message: message.to_string(),
+            product_id: Some(product_id),
+        }
+    }
+}
+
+/// The čl. 37 st. 5 anchor as captured for one item. `anchor_status` is
+/// `"none"` ONLY for promotivna prodaja (čl. 36 st. 9 defines it against a
+/// *future* regular price, so it has no prethodna cena to anchor against and
+/// must never pass through the st. 3–4 validator).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemAnchor {
+    pub product_id: i64,
+    pub anchor_status: &'static str,
+    pub prethodna_cena_minor: Option<i64>,
+    pub anchor_window_days: Option<i64>,
+    pub anchor_truncated: bool,
+    pub anchor_reason: Option<String>,
+    pub anchor_justification: Option<String>,
 }
 
 fn parse_rfc3339(value: &str, field: &str) -> Result<OffsetDateTime, AppError> {
@@ -261,9 +302,290 @@ pub fn validate_shape(input: &CampaignInput) -> Result<Vec<Violation>, AppError>
     Ok(violations)
 }
 
+/// The manual branch of H13a. Reached when the anchor cannot be *computed*
+/// lawfully — perishable goods, or any `IncomputableReason`. The duty to
+/// display a prethodna cena is never suppressed by the software's inability to
+/// derive one: we demand a human figure plus a written justification instead.
+fn manual_anchor(
+    item: &CampaignItemInput,
+    reason: &'static str,
+    violations: &mut Vec<Violation>,
+) -> ItemAnchor {
+    let justification = item
+        .anchor_justification
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    match (item.manual_prethodna_minor, justification) {
+        (Some(price_minor), Some(text)) => ItemAnchor {
+            product_id: item.product_id,
+            anchor_status: "manual",
+            prethodna_cena_minor: Some(price_minor),
+            anchor_window_days: None,
+            anchor_truncated: false,
+            anchor_reason: Some(reason.to_string()),
+            anchor_justification: Some(text.to_string()),
+        },
+        _ => {
+            violations.push(Violation::for_product("h13a", MSG_H13A, item.product_id));
+            ItemAnchor {
+                product_id: item.product_id,
+                anchor_status: "manual",
+                prethodna_cena_minor: None,
+                anchor_window_days: None,
+                anchor_truncated: false,
+                anchor_reason: Some(reason.to_string()),
+                anchor_justification: None,
+            }
+        }
+    }
+}
+
+/// Captures the čl. 37 st. 5 anchor for every item, as of `input.starts_on`.
+///
+/// This is the DRAFT-time snapshot. St. 5 freezes the anchor at activation, so
+/// callers must never re-run this against a campaign whose `activated_at` is
+/// set — a draft is unannounced and may be re-snapshotted freely.
+pub fn snapshot_anchors(
+    conn: &Connection,
+    input: &CampaignInput,
+) -> Result<(Vec<ItemAnchor>, Vec<Violation>), AppError> {
+    let mut anchors = Vec::new();
+    let mut violations = Vec::new();
+
+    for item in &input.items {
+        let perishable: Option<i64> = conn
+            .query_row(
+                "SELECT perishable FROM products WHERE id = ?1",
+                params![item.product_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(perishable) = perishable else {
+            violations.push(Violation::for_product("h14f", MSG_H14F, item.product_id));
+            continue;
+        };
+
+        // čl. 36 st. 9: promotivna prodaja is not a sniženje. It has no
+        // prethodna cena at all — computing one would invent a comparison the
+        // statute does not make.
+        if input.campaign_type == TYPE_PROMOTIVNA {
+            anchors.push(ItemAnchor {
+                product_id: item.product_id,
+                anchor_status: "none",
+                prethodna_cena_minor: None,
+                anchor_window_days: None,
+                anchor_truncated: false,
+                anchor_reason: None,
+                anchor_justification: None,
+            });
+            continue;
+        }
+
+        // Perishability short-circuits the computation even when a window
+        // price exists: the log's price for perishable goods reflects
+        // end-of-life markdowns, not the st. 3 „najniža cena" the shopper is
+        // being invited to compare against.
+        if perishable == 1 {
+            anchors.push(manual_anchor(item, "perishable", &mut violations));
+            continue;
+        }
+
+        match compute_prethodna_cena(conn, item.product_id, &input.starts_on)? {
+            PrethodnaCenaResult::Computed(computed) => anchors.push(ItemAnchor {
+                product_id: item.product_id,
+                anchor_status: "computed",
+                prethodna_cena_minor: Some(computed.price_minor),
+                anchor_window_days: Some(computed.window_days),
+                anchor_truncated: computed.truncated,
+                anchor_reason: None,
+                anchor_justification: None,
+            }),
+            PrethodnaCenaResult::Incomputable(reason) => {
+                let reason = match reason {
+                    IncomputableReason::TooNewInAssortment { .. } => "too_new_in_assortment",
+                    IncomputableReason::NotOfferedInWindow => "not_offered_in_window",
+                    IncomputableReason::NoHistory => "no_history",
+                };
+                anchors.push(manual_anchor(item, reason, &mut violations));
+            }
+        }
+    }
+
+    Ok((anchors, violations))
+}
+
+/// The rules that need the database: the sezonsko quota, promotivna's
+/// never-before-offered gate, and the below-the-anchor rule.
+///
+/// `exclude_campaign_id` lets a campaign re-validate without counting itself.
+pub fn validate_against_db(
+    conn: &Connection,
+    input: &CampaignInput,
+    anchors: &[ItemAnchor],
+    exclude_campaign_id: Option<i64>,
+) -> Result<Vec<Violation>, AppError> {
+    let mut violations = Vec::new();
+
+    // h3 — čl. 37 st. 8: at most two sezonska sniženja per calendar year,
+    // counted by START date. Only ACTIVATED campaigns consume the quota: a
+    // draft was never announced and a cancelled one never happened. The year
+    // bounds are built in Rust and compared lexicographically against RFC3339
+    // — `strftime` on the string would be a second date parser to get wrong.
+    if input.campaign_type == TYPE_SEZONSKO {
+        if let Ok(start) = parse_rfc3339(&input.starts_on, "startsOn") {
+            let year = start.date().year();
+            let from = format!("{year}-01-01");
+            let to = format!("{}-01-01", year + 1);
+            let activated: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM campaigns
+                 WHERE campaign_type = 'sezonsko_snizenje'
+                   AND activated_at IS NOT NULL
+                   AND starts_on >= ?1
+                   AND starts_on < ?2
+                   AND id != COALESCE(?3, -1)",
+                params![from, to, exclude_campaign_id],
+                |row| row.get(0),
+            )?;
+            if activated >= 2 {
+                violations.push(Violation::new("h3", &msg_h3(year)));
+            }
+        }
+    }
+
+    for item in &input.items {
+        let active: Option<i64> = conn
+            .query_row(
+                "SELECT active FROM products WHERE id = ?1",
+                params![item.product_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // A missing product is h14f, already reported by `snapshot_anchors`.
+        let Some(active) = active else { continue };
+        let active = active == 1;
+
+        if input.campaign_type == TYPE_PROMOTIVNA {
+            // h7a — čl. 36 st. 9's „prvi put uvodi u ponudu" is exact: ANY
+            // non-NULL offered price before the start disqualifies. No
+            // tolerance window; a NULL row is an offering gap, not an offer.
+            let previously_offered: i64 = conn.query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM price_history
+                    WHERE product_id = ?1 AND price_minor IS NOT NULL AND effective_from < ?2
+                 )",
+                params![item.product_id, input.starts_on],
+                |row| row.get(0),
+            )?;
+            if previously_offered == 1 {
+                violations.push(Violation::for_product("h7a", MSG_H7A, item.product_id));
+            }
+            // h7c — the offering must BEGIN with the campaign, so the item
+            // cannot already be on sale.
+            if active {
+                violations.push(Violation::for_product("h7c", MSG_H7C, item.product_id));
+            }
+            // h7b — the future regular price is what makes promotivna legible.
+            if item
+                .future_regular_price_minor
+                .is_none_or(|price| price <= 0)
+            {
+                violations.push(Violation::for_product("h7b", MSG_H7B, item.product_id));
+            }
+            continue;
+        }
+
+        // h13b — a sniženje reduces a price that is currently offered.
+        if !active {
+            violations.push(Violation::for_product("h13b", MSG_H13B, item.product_id));
+        }
+
+        // h9 — čl. 37 st. 6/8/10: STRICTLY below. An equal price is not a
+        // sniženje. Skipped when the anchor is missing: h13a already fired and
+        // a second violation would only obscure the fix.
+        if let Some(prethodna_cena_minor) = anchors
+            .iter()
+            .find(|anchor| anchor.product_id == item.product_id)
+            .and_then(|anchor| anchor.prethodna_cena_minor)
+        {
+            if item.campaign_price_minor >= prethodna_cena_minor {
+                violations.push(Violation::for_product("h9", MSG_H9, item.product_id));
+            }
+        }
+    }
+
+    Ok(violations)
+}
+
+/// The whole mechanical rule set: shape + anchor snapshot + DB rules, every
+/// violation merged so the wizard shows the user all of it at once.
+///
+/// An empty violation list means „no rule we can mechanically check was
+/// broken". It is NOT a finding that the promotion is lawful — čl. 38 st. 4
+/// (misleading commercial practice) can bite when every number here is right.
+pub fn validate_campaign(
+    conn: &Connection,
+    input: &CampaignInput,
+    exclude_campaign_id: Option<i64>,
+) -> Result<(Vec<ItemAnchor>, Vec<Violation>), AppError> {
+    let mut violations = validate_shape(input)?;
+    let (anchors, anchor_violations) = snapshot_anchors(conn, input)?;
+    violations.extend(anchor_violations);
+    violations.extend(validate_against_db(
+        conn,
+        input,
+        &anchors,
+        exclude_campaign_id,
+    )?);
+    Ok((anchors, violations))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{test_database_path, Db};
+    use rusqlite::params;
+
+    fn with_campaign_db(test_name: &str, test: impl FnOnce(&Connection)) {
+        let path = test_database_path(test_name);
+        {
+            let db = Db::new(&path).expect("db init");
+            let connection = db.open().expect("open");
+            connection
+                .execute_batch(
+                    "INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+                     VALUES (1, 'PDV 20', 2000, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+                )
+                .expect("seed tax rate");
+            test(&connection);
+        }
+        std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    fn seed_product(conn: &Connection, id: i64, price: i64, active: bool, created_at: &str) {
+        conn.execute(
+            "INSERT INTO products (id, name, sku, sale_price_minor, purchase_price_minor,
+                                   tax_rate_id, minimum_stock_milli, active, created_at, updated_at)
+             VALUES (?1, ?2, ?2, ?3, 0, 1, 0, ?4, ?5, ?5)",
+            params![
+                id,
+                format!("P{id}"),
+                price,
+                if active { 1 } else { 0 },
+                created_at
+            ],
+        )
+        .expect("seed product");
+        if active {
+            conn.execute(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (?1, ?2, ?3, 'create', ?2)",
+                params![id, created_at, price],
+            )
+            .expect("seed history");
+        }
+    }
 
     fn base_input(campaign_type: &str) -> CampaignInput {
         CampaignInput {
@@ -429,5 +751,144 @@ mod tests {
         let violations = validate_shape(&input).expect("validate");
         assert!(codes(&violations).contains(&"h1"));
         assert!(codes(&violations).contains(&"h14d"));
+    }
+
+    #[test]
+    fn snapshot_computes_anchor_for_established_item() {
+        with_campaign_db("anchor_computed", |conn| {
+            seed_product(conn, 1, 1290000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 990000;
+            let (anchors, violations) = snapshot_anchors(conn, &input).expect("snapshot");
+            assert!(violations.is_empty(), "{violations:?}");
+            assert_eq!(anchors[0].anchor_status, "computed");
+            assert_eq!(anchors[0].prethodna_cena_minor, Some(1290000));
+        });
+    }
+
+    #[test]
+    fn perishable_item_requires_manual_anchor_with_justification() {
+        with_campaign_db("anchor_perishable", |conn| {
+            seed_product(conn, 1, 50000, true, "2026-01-01T00:00:00Z");
+            conn.execute("UPDATE products SET perishable = 1 WHERE id = 1", [])
+                .expect("mark perishable");
+
+            let input = base_input(TYPE_AKCIJSKA);
+            let (_, violations) = snapshot_anchors(conn, &input).expect("snapshot");
+            assert!(codes(&violations).contains(&"h13a"));
+
+            let mut with_manual = base_input(TYPE_AKCIJSKA);
+            with_manual.items[0].manual_prethodna_minor = Some(48000);
+            with_manual.items[0].anchor_justification =
+                Some("Cena sa police, rok trajanja 3 dana".to_string());
+            let (anchors, violations) = snapshot_anchors(conn, &with_manual).expect("snapshot");
+            assert!(violations.is_empty(), "{violations:?}");
+            assert_eq!(anchors[0].anchor_status, "manual");
+            assert_eq!(anchors[0].prethodna_cena_minor, Some(48000));
+            assert_eq!(anchors[0].anchor_reason.as_deref(), Some("perishable"));
+        });
+    }
+
+    #[test]
+    fn below_anchor_rule_rejects_equal_or_higher_price() {
+        with_campaign_db("h9_below_anchor", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 1000000; // equal — not below
+            let (anchors, _) = snapshot_anchors(conn, &input).expect("snapshot");
+            let violations = validate_against_db(conn, &input, &anchors, None).expect("validate");
+            assert!(codes(&violations).contains(&"h9"));
+        });
+    }
+
+    #[test]
+    fn seasonal_quota_counts_only_activated_campaigns_in_the_start_year() {
+        with_campaign_db("h3_quota", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            // Two ACTIVATED seasonal campaigns in 2026 + one draft + one cancelled.
+            conn.execute_batch(
+                "INSERT INTO campaigns (campaign_type, status, starts_on, ends_on, season_attested, activated_at, created_at, updated_at)
+                 VALUES
+                 ('sezonsko_snizenje','ended','2026-01-05T00:00:00Z','2026-02-20T00:00:00Z',1,'2026-01-05T08:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+                 ('sezonsko_snizenje','active','2026-07-01T00:00:00Z','2026-08-25T00:00:00Z',1,'2026-07-01T08:00:00Z','2026-06-20T00:00:00Z','2026-06-20T00:00:00Z'),
+                 ('sezonsko_snizenje','draft','2026-07-02T00:00:00Z','2026-08-01T00:00:00Z',1,NULL,'2026-06-20T00:00:00Z','2026-06-20T00:00:00Z'),
+                 ('sezonsko_snizenje','cancelled','2026-07-03T00:00:00Z','2026-08-01T00:00:00Z',1,NULL,'2026-06-20T00:00:00Z','2026-06-20T00:00:00Z');",
+            )
+            .expect("seed campaigns");
+
+            let mut input = base_input(TYPE_SEZONSKO);
+            input.items[0].campaign_price_minor = 900000;
+            let (anchors, _) = snapshot_anchors(conn, &input).expect("snapshot");
+            let violations = validate_against_db(conn, &input, &anchors, None).expect("validate");
+            assert!(
+                codes(&violations).contains(&"h3"),
+                "third activated-in-2026 must be blocked"
+            );
+
+            // A December start in the same year still counts against 2026;
+            // a 2027 January start does not.
+            let mut next_year = base_input(TYPE_SEZONSKO);
+            next_year.starts_on = "2027-01-05T00:00:00Z".to_string();
+            next_year.ends_on = Some("2027-02-10T00:00:00Z".to_string());
+            next_year.items[0].campaign_price_minor = 900000;
+            let (anchors, _) = snapshot_anchors(conn, &next_year).expect("snapshot");
+            let violations =
+                validate_against_db(conn, &next_year, &anchors, None).expect("validate");
+            assert!(!codes(&violations).contains(&"h3"));
+        });
+    }
+
+    #[test]
+    fn promotivna_rejects_previously_offered_or_active_items() {
+        with_campaign_db("h7_promotivna", |conn| {
+            seed_product(conn, 1, 800000, true, "2026-01-01T00:00:00Z"); // offered: has history
+            seed_product(conn, 2, 800000, false, "2026-07-01T00:00:00Z"); // never offered, inactive
+
+            let mut input = base_input(TYPE_PROMOTIVNA);
+            input.season_attested = false;
+            input.items = vec![
+                CampaignItemInput {
+                    product_id: 1,
+                    campaign_price_minor: 700000,
+                    manual_prethodna_minor: None,
+                    anchor_justification: None,
+                    future_regular_price_minor: Some(900000),
+                },
+                CampaignItemInput {
+                    product_id: 2,
+                    campaign_price_minor: 700000,
+                    manual_prethodna_minor: None,
+                    anchor_justification: None,
+                    future_regular_price_minor: Some(900000),
+                },
+            ];
+            let (anchors, _) = snapshot_anchors(conn, &input).expect("snapshot");
+            assert!(anchors.iter().all(|anchor| anchor.anchor_status == "none"));
+            let violations = validate_against_db(conn, &input, &anchors, None).expect("validate");
+            let product_one: Vec<_> = violations
+                .iter()
+                .filter(|violation| violation.product_id == Some(1))
+                .collect();
+            assert!(product_one.iter().any(|violation| violation.code == "h7a"));
+            assert!(product_one.iter().any(|violation| violation.code == "h7c"));
+            assert!(
+                !violations
+                    .iter()
+                    .any(|violation| violation.product_id == Some(2)),
+                "never-offered inactive item is exactly what promotivna is for: {violations:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn snizenje_on_inactive_item_fails_h13b() {
+        with_campaign_db("h13b_inactive", |conn| {
+            seed_product(conn, 1, 1000000, false, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 900000;
+            let (anchors, _) = snapshot_anchors(conn, &input).expect("snapshot");
+            let violations = validate_against_db(conn, &input, &anchors, None).expect("validate");
+            assert!(codes(&violations).contains(&"h13b"));
+        });
     }
 }
