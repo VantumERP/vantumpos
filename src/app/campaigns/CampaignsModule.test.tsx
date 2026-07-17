@@ -277,6 +277,56 @@ describe("CampaignsModule detail", () => {
   });
 });
 
+describe("CampaignsModule wizard wiring", () => {
+  it("opens an empty wizard from Nova kampanja", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith([sezonskoDraft], sezonskoView);
+
+    render(<CampaignsModule services={services} />);
+    await user.click(await screen.findByRole("button", { name: "Nova kampanja" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Nova kampanja" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the wizard on the selected draft and offers Izmeni only for drafts", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith([sezonskoDraft], sezonskoView);
+
+    render(<CampaignsModule services={services} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za kampanju #1" }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Izmeni" }));
+
+    const wizard = await screen.findByRole("dialog", {
+      name: "Izmena nacrta kampanje",
+    });
+    expect(
+      within(wizard).getByLabelText("Cena u kampanji za Kafa 200 g"),
+    ).toHaveValue("9.900,00");
+  });
+
+  it("never offers Izmeni once the anchor is frozen by activation", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(
+      [{ ...sezonskoDraft, status: "active" }],
+      activeView,
+    );
+
+    render(<CampaignsModule services={services} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za kampanju #1" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Završi kampanju…" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Izmeni" })).not.toBeInTheDocument();
+  });
+});
+
 describe("CampaignsModule lifecycle", () => {
   it("activates a draft through the service", async () => {
     const user = userEvent.setup();

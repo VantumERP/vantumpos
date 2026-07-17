@@ -31,30 +31,28 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  ANCHOR_TRUNCATED_NOTE,
+  displayModeLabels,
+  groundLabels,
+  STOCK_LABEL,
+  typeLabels,
+} from "./campaign-copy";
+import { CampaignWizard } from "./CampaignWizard";
 import { formatRsd, parseRsdInput } from "@/lib/money";
 import type { PosServices } from "@/services/ports";
 import type {
   CampaignAnchorStatus,
-  CampaignDisplayMode,
   CampaignItemView,
   CampaignStatus,
   CampaignSummary,
-  CampaignType,
   CampaignView,
   EndCampaignOverride,
-  RasprodajaGround,
 } from "@/services/types";
 
 interface CampaignsModuleProps {
   services: PosServices;
 }
-
-const typeLabels: Record<CampaignType, string> = {
-  rasprodaja: "Rasprodaja",
-  sezonsko_snizenje: "Sezonsko sniženje",
-  akcijska_prodaja: "Akcijska prodaja",
-  promotivna_prodaja: "Promotivna prodaja",
-};
 
 const statusLabels: Record<CampaignStatus, string> = {
   draft: "Nacrt",
@@ -79,20 +77,7 @@ const anchorStatusLabels: Record<CampaignAnchorStatus, string> = {
   none: "—",
 };
 
-const displayModeLabels: Record<CampaignDisplayMode, string> = {
-  two_prices: "Snižena i prethodna cena",
-  percentage: "Procenat sniženja",
-};
-
-// Verbatim from čl. 37 st. 6 — a closed list of three grounds.
-const groundLabels: Record<RasprodajaGround, string> = {
-  prestanak_poslovanja: "Prestanak poslovanja trgovca",
-  prestanak_u_objektu: "Prestanak poslovanja u određenim objektima",
-  prestanak_prodaje_robe: "Prestanak prodaje određene robe",
-};
-
 const OVERDUE_LABEL = "Isteklo — vratite cene";
-const STOCK_LABEL = "dok traju zalihe";
 
 export function CampaignsModule({ services }: CampaignsModuleProps) {
   const campaignsService = services.campaigns;
@@ -110,6 +95,10 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
   const [stepProductId, setStepProductId] = useState<number | null>(null);
   const [stepPrice, setStepPrice] = useState("");
   const [stepError, setStepError] = useState<string | undefined>();
+  // `null` draft = a new campaign. Mounting the wizard fresh each time is what
+  // resets its form, so this pair is the whole of the wizard's lifecycle.
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardDraft, setWizardDraft] = useState<CampaignView | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -213,6 +202,11 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
     }
   }
 
+  function openWizard(draft: CampaignView | null) {
+    setWizardDraft(draft);
+    setWizardOpen(true);
+  }
+
   function openStep(item: CampaignItemView) {
     setStepProductId(item.productId);
     setStepPrice(minorToInput(item.campaignPriceMinor));
@@ -258,8 +252,7 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
       <section className="flex min-w-0 flex-col gap-4">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-base font-semibold">Kampanje</h2>
-          {/* Wired up by the wizard in the next step. */}
-          <Button type="button" disabled>
+          <Button type="button" onClick={() => openWizard(null)}>
             <PlusIcon data-icon="inline-start" />
             Nova kampanja
           </Button>
@@ -365,6 +358,7 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
                 "Kampanja nije otkazana.",
               )
             }
+            onEdit={() => openWizard(selected)}
             onEnd={() => openEnd(selected)}
           />
         ) : (
@@ -421,6 +415,18 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {wizardOpen ? (
+        <CampaignWizard
+          services={services}
+          campaign={wizardDraft}
+          onClose={() => setWizardOpen(false)}
+          onSaved={(view) => {
+            setWizardOpen(false);
+            applyView(view);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -437,6 +443,7 @@ function CampaignDetailPanel({
   onSubmitStep,
   onActivate,
   onCancel,
+  onEdit,
   onEnd,
 }: {
   campaign: CampaignView;
@@ -450,6 +457,7 @@ function CampaignDetailPanel({
   onSubmitStep: (productId: number) => void;
   onActivate: () => void;
   onCancel: () => void;
+  onEdit: () => void;
   onEnd: () => void;
 }) {
   return (
@@ -573,8 +581,7 @@ function CampaignDetailPanel({
                   </span>
                   {item.anchorTruncated ? (
                     <span className="text-xs text-amber-700 dark:text-amber-500">
-                      Evidencija ne pokriva ceo prozor — prethodna cena je
-                      skraćena.
+                      {ANCHOR_TRUNCATED_NOTE}
                     </span>
                   ) : null}
                 </div>
@@ -678,6 +685,11 @@ function CampaignDetailPanel({
           <>
             <Button type="button" onClick={onActivate}>
               Aktiviraj
+            </Button>
+            {/* Draft-only, like `campaigns_update` itself: an activated
+                campaign's anchor is frozen (čl. 37 st. 5). */}
+            <Button type="button" variant="outline" onClick={onEdit}>
+              Izmeni
             </Button>
             <Button type="button" variant="outline" onClick={onCancel}>
               Otkaži
