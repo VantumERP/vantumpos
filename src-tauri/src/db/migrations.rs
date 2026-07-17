@@ -303,6 +303,32 @@ CREATE INDEX idx_compliance_log_created_at ON compliance_log(created_at);
 ALTER TABLE sales ADD COLUMN esir_receipt_number TEXT;
 "#,
     },
+    Migration {
+        version: 9,
+        name: "price_history",
+        sql: r#"
+CREATE TABLE price_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    effective_from TEXT NOT NULL,
+    price_minor INTEGER CHECK (price_minor IS NULL OR price_minor >= 0),
+    source TEXT NOT NULL CHECK (source IN ('create', 'update', 'import', 'deactivate', 'reactivate', 'seed')),
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_price_history_product ON price_history(product_id, effective_from);
+
+INSERT INTO price_history (product_id, effective_from, price_minor, source, user_id, created_at)
+SELECT id,
+       strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+       sale_price_minor,
+       'seed',
+       NULL,
+       strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+FROM products
+WHERE active = 1;
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
