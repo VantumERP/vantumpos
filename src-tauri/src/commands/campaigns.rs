@@ -11,10 +11,12 @@
 
 use tauri::State;
 
-use crate::app_error::CommandError;
+use crate::app_error::{AppError, CommandError};
+use crate::campaign_evidence::CorrectionReport;
 use crate::campaigns::{
     CampaignInput, CampaignSummary, CampaignView, EndOverride, ValidationReport,
 };
+use crate::commands::reports::ExportedFile;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -123,6 +125,87 @@ pub fn campaigns_cancel(state: State<'_, AppState>, id: i64) -> Result<CampaignV
     crate::campaigns::cancel_campaign(&mut connection, id, &now).map_err(Into::into)
 }
 
+/// Writes a rendered HTML document into the `exports/` dir beside the
+/// database — the same location `reports_export_csv` resolves — and returns
+/// the `reports::ExportedFile` descriptor the frontend already understands.
+fn write_export(
+    state: &AppState,
+    file_name: &str,
+    html: &str,
+    row_count: usize,
+) -> Result<ExportedFile, AppError> {
+    let export_dir = state.db().path().parent().map_or_else(
+        || std::path::Path::new(".").join("exports"),
+        |parent| parent.join("exports"),
+    );
+    std::fs::create_dir_all(&export_dir)?;
+    let path = export_dir.join(file_name);
+    std::fs::write(&path, html)?;
+    Ok(ExportedFile {
+        file_name: file_name.to_string(),
+        path: path.display().to_string(),
+        mime_type: "text/html",
+        row_count,
+    })
+}
+
+/// Self-contained walk-away evidence document (čl. 48) proving each prethodna
+/// cena from the offered-price rows. Read-only over campaign/price data.
+#[tauri::command]
+pub fn campaigns_export_evidence(
+    state: State<'_, AppState>,
+    campaign_id: i64,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let evidence = crate::campaign_evidence::assemble_evidence(&connection, campaign_id)?;
+    let html = crate::campaign_evidence::render_evidence_html(&evidence);
+    let file_name = format!("dokaz-cene-kampanja-{campaign_id}.html");
+    write_export(state.inner(), &file_name, &html, evidence.items.len()).map_err(Into::into)
+}
+
+/// Shelf-label sheet branching on type/display-mode (čl. 37 st. 2 / st. 11).
+#[tauri::command]
+pub fn campaigns_export_labels(
+    state: State<'_, AppState>,
+    campaign_id: i64,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let evidence = crate::campaign_evidence::assemble_evidence(&connection, campaign_id)?;
+    let html = crate::campaign_evidence::render_labels_html(&evidence);
+    let file_name = format!("etikete-kampanja-{campaign_id}.html");
+    write_export(state.inner(), &file_name, &html, evidence.items.len()).map_err(Into::into)
+}
+
+/// On-screen correction report: active-campaign label data with attention flags.
+#[tauri::command]
+pub fn campaigns_correction_report(
+    state: State<'_, AppState>,
+) -> Result<CorrectionReport, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    crate::campaign_evidence::assemble_correction_report(&connection).map_err(Into::into)
+}
+
+/// The same correction report rendered to a self-contained HTML export.
+#[tauri::command]
+pub fn campaigns_export_correction_report(
+    state: State<'_, AppState>,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let report = crate::campaign_evidence::assemble_correction_report(&connection)?;
+    let html = crate::campaign_evidence::render_correction_html(&report);
+    write_export(
+        state.inner(),
+        "ispravke-etiketa.html",
+        &html,
+        report.rows.len(),
+    )
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +279,26 @@ mod tests {
         state
             .set_session_user_id(cashier_id)
             .expect("cashier session should set");
+    }
+
+    /// An active akcijska over the seeded product 1 with a computed čl. 37
+    /// st. 3 anchor, inserted directly so an export has a campaign to read.
+    fn seed_active_campaign(state: &AppState) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .execute_batch(
+                "INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on,
+                                        display_mode, activated_at, created_at, updated_at)
+                 VALUES (1, 'akcijska_prodaja', 'active', '2026-07-05T00:00:00Z',
+                         '2026-07-20T00:00:00Z', 'two_prices', '2026-07-05T00:00:00Z',
+                         '2026-07-04T00:00:00Z', '2026-07-05T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor,
+                                             prethodna_cena_minor, anchor_status, anchor_window_days)
+                 VALUES (1, 1, 990000, 1290000, 'computed', 30);",
+            )
+            .expect("campaign should seed");
     }
 
     fn campaign_count(state: &AppState) -> i64 {
@@ -305,6 +408,56 @@ mod tests {
                 0,
                 "a dry run must persist nothing"
             );
+        });
+    }
+
+    #[test]
+    fn campaigns_export_evidence_rejected_for_cashier() {
+        with_app("campaigns_export_evidence_rejected_for_cashier", |app| {
+            sign_in_cashier(app.state::<AppState>().inner());
+
+            let error = campaigns_export_evidence(app.state::<AppState>(), 1)
+                .expect_err("cashier should not export evidence");
+
+            assert_eq!(error.code, "forbidden");
+        });
+    }
+
+    #[test]
+    fn campaigns_correction_report_rejected_for_cashier() {
+        with_app("campaigns_correction_report_rejected_for_cashier", |app| {
+            sign_in_cashier(app.state::<AppState>().inner());
+
+            let error = campaigns_correction_report(app.state::<AppState>())
+                .expect_err("cashier should not read the correction report");
+
+            assert_eq!(error.code, "forbidden");
+        });
+    }
+
+    #[test]
+    fn campaigns_export_evidence_writes_file_for_admin() {
+        with_app("campaigns_export_evidence_writes_file_for_admin", |app| {
+            sign_in_admin(app.state::<AppState>().inner());
+            seed_active_campaign(app.state::<AppState>().inner());
+
+            let exported = campaigns_export_evidence(app.state::<AppState>(), 1)
+                .expect("admin should export evidence");
+
+            assert_eq!(exported.file_name, "dokaz-cene-kampanja-1.html");
+            assert_eq!(exported.mime_type, "text/html");
+            assert_eq!(exported.row_count, 1);
+
+            // The command's contract: a file exists at the path it returned,
+            // carrying this campaign's own type marker.
+            let contents =
+                std::fs::read_to_string(&exported.path).expect("the export file must exist");
+            assert!(
+                contents.contains("Akcijska prodaja"),
+                "the evidence must name the campaign type"
+            );
+
+            std::fs::remove_file(&exported.path).expect("export file should clean up");
         });
     }
 }
