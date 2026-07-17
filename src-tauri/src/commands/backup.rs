@@ -442,6 +442,23 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
          WHERE key = 'receipt_numbering'",
         [],
     )?;
+    // Price history is normally append-only and retained ~5 years. The go-live
+    // reset is the one exception: practice prices were never offered to a
+    // consumer, so leaving them in would let training data drive a real
+    // prethodna cena. Clear and re-seed from the surviving catalog.
+    tx.execute("DELETE FROM price_history", [])?;
+    tx.execute(
+        "INSERT INTO price_history (product_id, effective_from, price_minor, source, user_id, created_at)
+         SELECT id,
+                strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                sale_price_minor,
+                'seed',
+                NULL,
+                strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+         FROM products
+         WHERE active = 1",
+        [],
+    )?;
     let detail = serde_json::json!({
         "note": "Go-live reset (SW-3).",
         "retention": "10y (ZoRač čl. 28; ZPDV čl. 47)",
@@ -788,6 +805,61 @@ INSERT INTO settings (key, value_json, updated_at)
             assert_eq!(count(state, "products"), 1);
             assert_eq!(count(state, "tax_rates"), 1);
             assert!(count(state, "users") >= 1);
+        });
+    }
+
+    #[test]
+    fn reset_trading_data_clears_and_reseeds_price_history() {
+        with_state("reset_clears_price_history", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-price-history");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            seed_trading_data(state);
+
+            // Practice price history: two rows for the seeded product.
+            let conn = state.db().open().expect("database should open");
+            conn.execute(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-06-01T00:00:00Z', 11000, 'update', '2026-06-01T00:00:00Z'),
+                        (1, '2026-06-02T00:00:00Z', 12000, 'update', '2026-06-02T00:00:00Z')",
+                [],
+            )
+            .expect("practice history should insert");
+            drop(conn);
+
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            let conn = state.db().open().expect("database should open");
+            // Practice rows are gone; exactly one fresh seed row per active product.
+            let (count, source): (i64, String) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(MIN(source), '') FROM price_history",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("query");
+            assert_eq!(
+                count, 1,
+                "expected exactly one re-seeded row for the active product"
+            );
+            assert_eq!(source, "seed");
+
+            let effective_from: String = conn
+                .query_row("SELECT effective_from FROM price_history", [], |row| {
+                    row.get(0)
+                })
+                .expect("query");
+            assert!(
+                effective_from.contains('T') && effective_from.ends_with('Z'),
+                "re-seed must be RFC3339, got {effective_from}"
+            );
         });
     }
 
