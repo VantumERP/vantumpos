@@ -1,10 +1,13 @@
-// The tests construct these inputs but only read what each rule needs, so
-// `dead_code` fires under `cfg(test)` too — the expectation cannot be gated on
-// `not(test)`. Task 8 (command layer) must DELETE this line; an unfulfilled
-// expectation is a clippy error, which is the point.
-#![expect(
-    dead_code,
-    reason = "wired up by the campaigns command layer in a later task"
+// The persistence tests now exercise the whole module, so the expectation is
+// fulfilled only OUTSIDE `cfg(test)` — hence the `not(test)` gate. Task 8
+// (command layer) must DELETE this line; an unfulfilled expectation is a
+// clippy error, which is the point.
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "wired up by the campaigns command layer in a later task"
+    )
 )]
 //! Campaign/sniženje domain: the closed four-type entity and its rules.
 //!
@@ -19,7 +22,7 @@
 
 use crate::app_error::AppError;
 use crate::price_history::{compute_prethodna_cena, IncomputableReason, PrethodnaCenaResult};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime};
 
@@ -70,6 +73,11 @@ const MSG_H14C: &str = "Datum isteka mora biti posle datuma početka.";
 const MSG_H14D: &str = "Kampanja mora imati bar jedan artikal.";
 const MSG_H14E: &str = "Način isticanja nije ispravan.";
 const MSG_H14F: &str = "Artikal nije pronađen.";
+
+const MSG_CAMPAIGN_INVALID: &str = "Kampanja nije ispravna.";
+const MSG_CAMPAIGN_NOT_FOUND: &str = "Kampanja nije pronađena.";
+const MSG_DRAFT_ONLY_UPDATE: &str = "Samo nacrt kampanje može da se menja.";
+const MSG_DRAFT_ONLY_CANCEL: &str = "Samo nacrt kampanje može da se otkaže.";
 
 /// čl. 37 st. 8 caps sezonsko at two per calendar year, counted by START date.
 fn msg_h3(year: i32) -> String {
@@ -541,6 +549,373 @@ pub fn validate_campaign(
     Ok((anchors, violations))
 }
 
+/// One item as the wizard and the detail view see it: the stored snapshot plus
+/// the product identity, never a recomputation. Reading a campaign must not be
+/// able to move the čl. 37 st. 5 anchor.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CampaignItemView {
+    pub product_id: i64,
+    pub product_name: String,
+    pub sku: String,
+    pub campaign_price_minor: i64,
+    pub prethodna_cena_minor: Option<i64>,
+    pub anchor_status: String,
+    pub anchor_window_days: Option<i64>,
+    pub anchor_truncated: bool,
+    pub anchor_reason: Option<String>,
+    pub anchor_justification: Option<String>,
+    pub future_regular_price_minor: Option<i64>,
+    pub pre_campaign_price_minor: Option<i64>,
+}
+
+/// `warnings` stays empty here; Task 6 fills it. An empty list is „nothing we
+/// mechanically check flagged", never „this promotion is lawful" (čl. 38 st. 4).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CampaignView {
+    pub id: i64,
+    pub campaign_type: String,
+    pub status: String,
+    pub starts_on: String,
+    pub ends_on: Option<String>,
+    pub display_mode: String,
+    pub headline_percent: Option<i64>,
+    pub rasprodaja_ground: Option<String>,
+    pub special_conditions: Option<String>,
+    pub reduced_utility_reason: Option<String>,
+    pub marketing_label: Option<String>,
+    pub season_attested: bool,
+    pub separation_attested: bool,
+    pub activated_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub overdue: bool,
+    pub items: Vec<CampaignItemView>,
+    pub warnings: Vec<Violation>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CampaignSummary {
+    pub id: i64,
+    pub campaign_type: String,
+    pub status: String,
+    pub starts_on: String,
+    pub ends_on: Option<String>,
+    pub marketing_label: Option<String>,
+    pub item_count: i64,
+    pub overdue: bool,
+}
+
+/// An active campaign past its declared `ends_on`. There is deliberately no
+/// auto-end: prices stay until a human ends the campaign, and this flag is what
+/// makes that visible (čl. 36 st. 2 t. 3). Both sides are RFC3339 UTC, so the
+/// lexicographic compare IS the chronological one.
+fn is_overdue(status: &str, ends_on: Option<&str>, now: &str) -> bool {
+    status == "active" && ends_on.is_some_and(|ends_on| ends_on < now)
+}
+
+/// Rejects on ANY hard violation, handing the whole set to the wizard in the
+/// error details so the user fixes everything at once instead of one per save.
+fn validated_anchors(
+    conn: &Connection,
+    input: &CampaignInput,
+    exclude_campaign_id: Option<i64>,
+) -> Result<Vec<ItemAnchor>, AppError> {
+    let (anchors, violations) = validate_campaign(conn, input, exclude_campaign_id)?;
+    if violations.is_empty() {
+        Ok(anchors)
+    } else {
+        Err(AppError::validation(
+            MSG_CAMPAIGN_INVALID,
+            serde_json::json!({ "violations": violations }),
+        ))
+    }
+}
+
+/// The anchor freeze (čl. 37 st. 5) rests on this gate: a draft is unannounced
+/// and may be re-snapshotted freely, an activated campaign never may. Callers
+/// run it INSIDE their transaction so the check and the write cannot straddle a
+/// concurrent activation.
+fn require_draft(conn: &Connection, id: i64, message: &str) -> Result<(), AppError> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM campaigns WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let status = status.ok_or_else(|| AppError::not_found(MSG_CAMPAIGN_NOT_FOUND))?;
+    if status == "draft" {
+        Ok(())
+    } else {
+        Err(AppError::business("invalid_state", message))
+    }
+}
+
+/// Writes the snapshot taken by `validate_campaign` — never a fresh one, so the
+/// stored anchor is exactly the one the rules were checked against.
+/// `pre_campaign_price_minor` stays NULL until activation captures it.
+fn insert_items(
+    tx: &Transaction<'_>,
+    campaign_id: i64,
+    input: &CampaignInput,
+    anchors: &[ItemAnchor],
+) -> Result<(), AppError> {
+    for item in &input.items {
+        let anchor = anchors
+            .iter()
+            .find(|anchor| anchor.product_id == item.product_id)
+            .ok_or_else(|| AppError::not_found(MSG_H14F))?;
+        tx.execute(
+            "INSERT INTO campaign_items (
+                campaign_id, product_id, campaign_price_minor, prethodna_cena_minor,
+                anchor_status, anchor_window_days, anchor_truncated, anchor_reason,
+                anchor_justification, future_regular_price_minor
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                campaign_id,
+                item.product_id,
+                item.campaign_price_minor,
+                anchor.prethodna_cena_minor,
+                anchor.anchor_status,
+                anchor.anchor_window_days,
+                i64::from(anchor.anchor_truncated),
+                anchor.anchor_reason,
+                anchor.anchor_justification,
+                item.future_regular_price_minor,
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Creates a draft. Hard violations refuse the write outright — a campaign that
+/// breaks čl. 36/37 must not exist even as a draft to be activated later.
+pub fn create_campaign(
+    conn: &mut Connection,
+    input: &CampaignInput,
+    acting_user_id: i64,
+    now: &str,
+) -> Result<CampaignView, AppError> {
+    let tx = conn.transaction()?;
+    let anchors = validated_anchors(&tx, input, None)?;
+    tx.execute(
+        "INSERT INTO campaigns (
+            campaign_type, status, starts_on, ends_on, display_mode, headline_percent,
+            rasprodaja_ground, special_conditions, reduced_utility_reason, marketing_label,
+            season_attested, separation_attested, created_by, created_at, updated_at
+         )
+         VALUES (?1, 'draft', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+        params![
+            input.campaign_type,
+            input.starts_on,
+            input.ends_on,
+            input.display_mode,
+            input.headline_percent,
+            input.rasprodaja_ground,
+            input.special_conditions,
+            input.reduced_utility_reason,
+            input.marketing_label,
+            i64::from(input.season_attested),
+            i64::from(input.separation_attested),
+            acting_user_id,
+            now,
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    insert_items(&tx, id, input, &anchors)?;
+    tx.commit()?;
+
+    get_campaign(conn, id, now)
+}
+
+/// Draft-only edit. Items are replaced wholesale and their anchors re-snapshot:
+/// a draft was never announced, so no shopper has seen the old figures — draft
+/// items are not evidence, `price_history` is.
+pub fn update_campaign(
+    conn: &mut Connection,
+    id: i64,
+    input: &CampaignInput,
+    now: &str,
+) -> Result<CampaignView, AppError> {
+    let tx = conn.transaction()?;
+    require_draft(&tx, id, MSG_DRAFT_ONLY_UPDATE)?;
+    let anchors = validated_anchors(&tx, input, Some(id))?;
+    tx.execute(
+        "UPDATE campaigns
+         SET campaign_type = ?2,
+             starts_on = ?3,
+             ends_on = ?4,
+             display_mode = ?5,
+             headline_percent = ?6,
+             rasprodaja_ground = ?7,
+             special_conditions = ?8,
+             reduced_utility_reason = ?9,
+             marketing_label = ?10,
+             season_attested = ?11,
+             separation_attested = ?12,
+             updated_at = ?13
+         WHERE id = ?1",
+        params![
+            id,
+            input.campaign_type,
+            input.starts_on,
+            input.ends_on,
+            input.display_mode,
+            input.headline_percent,
+            input.rasprodaja_ground,
+            input.special_conditions,
+            input.reduced_utility_reason,
+            input.marketing_label,
+            i64::from(input.season_attested),
+            i64::from(input.separation_attested),
+            now,
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM campaign_items WHERE campaign_id = ?1",
+        params![id],
+    )?;
+    insert_items(&tx, id, input, &anchors)?;
+    tx.commit()?;
+
+    get_campaign(conn, id, now)
+}
+
+/// Draft-only, and touches no prices: a draft never moved any.
+pub fn cancel_campaign(
+    conn: &mut Connection,
+    id: i64,
+    now: &str,
+) -> Result<CampaignView, AppError> {
+    let tx = conn.transaction()?;
+    require_draft(&tx, id, MSG_DRAFT_ONLY_CANCEL)?;
+    tx.execute(
+        "UPDATE campaigns SET status = 'cancelled', updated_at = ?2 WHERE id = ?1",
+        params![id, now],
+    )?;
+    tx.commit()?;
+
+    get_campaign(conn, id, now)
+}
+
+fn load_items(conn: &Connection, campaign_id: i64) -> Result<Vec<CampaignItemView>, AppError> {
+    let mut statement = conn.prepare(
+        "SELECT campaign_items.product_id,
+                products.name,
+                products.sku,
+                campaign_items.campaign_price_minor,
+                campaign_items.prethodna_cena_minor,
+                campaign_items.anchor_status,
+                campaign_items.anchor_window_days,
+                campaign_items.anchor_truncated,
+                campaign_items.anchor_reason,
+                campaign_items.anchor_justification,
+                campaign_items.future_regular_price_minor,
+                campaign_items.pre_campaign_price_minor
+         FROM campaign_items
+         JOIN products ON products.id = campaign_items.product_id
+         WHERE campaign_items.campaign_id = ?1
+         ORDER BY campaign_items.id",
+    )?;
+    let items = statement
+        .query_map(params![campaign_id], |row| {
+            Ok(CampaignItemView {
+                product_id: row.get(0)?,
+                product_name: row.get(1)?,
+                sku: row.get(2)?,
+                campaign_price_minor: row.get(3)?,
+                prethodna_cena_minor: row.get(4)?,
+                anchor_status: row.get(5)?,
+                anchor_window_days: row.get(6)?,
+                anchor_truncated: row.get::<_, i64>(7)? == 1,
+                anchor_reason: row.get(8)?,
+                anchor_justification: row.get(9)?,
+                future_regular_price_minor: row.get(10)?,
+                pre_campaign_price_minor: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(items)
+}
+
+pub fn get_campaign(conn: &Connection, id: i64, now: &str) -> Result<CampaignView, AppError> {
+    let view: Option<CampaignView> = conn
+        .query_row(
+            "SELECT id, campaign_type, status, starts_on, ends_on, display_mode, headline_percent,
+                    rasprodaja_ground, special_conditions, reduced_utility_reason, marketing_label,
+                    season_attested, separation_attested, activated_at, ended_at
+             FROM campaigns
+             WHERE id = ?1",
+            params![id],
+            |row| {
+                let status: String = row.get(2)?;
+                let ends_on: Option<String> = row.get(4)?;
+                Ok(CampaignView {
+                    id: row.get(0)?,
+                    campaign_type: row.get(1)?,
+                    starts_on: row.get(3)?,
+                    display_mode: row.get(5)?,
+                    headline_percent: row.get(6)?,
+                    rasprodaja_ground: row.get(7)?,
+                    special_conditions: row.get(8)?,
+                    reduced_utility_reason: row.get(9)?,
+                    marketing_label: row.get(10)?,
+                    season_attested: row.get::<_, i64>(11)? == 1,
+                    separation_attested: row.get::<_, i64>(12)? == 1,
+                    activated_at: row.get(13)?,
+                    ended_at: row.get(14)?,
+                    overdue: is_overdue(&status, ends_on.as_deref(), now),
+                    status,
+                    ends_on,
+                    items: Vec::new(),
+                    warnings: Vec::new(),
+                })
+            },
+        )
+        .optional()?;
+    let mut view = view.ok_or_else(|| AppError::not_found(MSG_CAMPAIGN_NOT_FOUND))?;
+    view.items = load_items(conn, id)?;
+
+    Ok(view)
+}
+
+pub fn list_campaigns(conn: &Connection, now: &str) -> Result<Vec<CampaignSummary>, AppError> {
+    let mut statement = conn.prepare(
+        "SELECT campaigns.id,
+                campaigns.campaign_type,
+                campaigns.status,
+                campaigns.starts_on,
+                campaigns.ends_on,
+                campaigns.marketing_label,
+                (SELECT COUNT(*) FROM campaign_items WHERE campaign_items.campaign_id = campaigns.id)
+         FROM campaigns
+         ORDER BY campaigns.starts_on DESC, campaigns.id DESC",
+    )?;
+    let summaries = statement
+        .query_map([], |row| {
+            let status: String = row.get(2)?;
+            let ends_on: Option<String> = row.get(4)?;
+            Ok(CampaignSummary {
+                id: row.get(0)?,
+                campaign_type: row.get(1)?,
+                starts_on: row.get(3)?,
+                marketing_label: row.get(5)?,
+                item_count: row.get(6)?,
+                overdue: is_overdue(&status, ends_on.as_deref(), now),
+                status,
+                ends_on,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(summaries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,17 +923,23 @@ mod tests {
     use rusqlite::params;
 
     fn with_campaign_db(test_name: &str, test: impl FnOnce(&Connection)) {
+        with_campaign_db_mut(test_name, |connection| test(connection));
+    }
+
+    /// Persistence takes `&mut Connection` (it opens transactions), so the
+    /// read-only fixture reborrows out of this one.
+    fn with_campaign_db_mut(test_name: &str, test: impl FnOnce(&mut Connection)) {
         let path = test_database_path(test_name);
         {
             let db = Db::new(&path).expect("db init");
-            let connection = db.open().expect("open");
+            let mut connection = db.open().expect("open");
             connection
                 .execute_batch(
                     "INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
                      VALUES (1, 'PDV 20', 2000, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
                 )
                 .expect("seed tax rate");
-            test(&connection);
+            test(&mut connection);
         }
         std::fs::remove_file(&path).expect("cleanup");
     }
@@ -889,6 +1270,93 @@ mod tests {
             let (anchors, _) = snapshot_anchors(conn, &input).expect("snapshot");
             let violations = validate_against_db(conn, &input, &anchors, None).expect("validate");
             assert!(codes(&violations).contains(&"h13b"));
+        });
+    }
+
+    #[test]
+    fn create_rejects_hard_violations_with_details() {
+        with_campaign_db_mut("create_rejects_mut", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 1000000; // h9
+            let error = create_campaign(conn, &input, 1, "2026-07-01T00:00:00Z")
+                .expect_err("h9 must block create");
+            assert_eq!(error.code(), "validation_error");
+        });
+    }
+
+    #[test]
+    fn create_then_get_round_trips_with_frozen_snapshot() {
+        with_campaign_db_mut("create_get_round_trip", |conn| {
+            seed_product(conn, 1, 1290000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 990000;
+            let created = create_campaign(conn, &input, 1, "2026-07-01T00:00:00Z").expect("create");
+            assert_eq!(created.status, "draft");
+            assert_eq!(created.items[0].prethodna_cena_minor, Some(1290000));
+
+            let fetched = get_campaign(conn, created.id, "2026-07-01T00:00:00Z").expect("get");
+            assert_eq!(fetched.items.len(), 1);
+            assert_eq!(fetched.items[0].anchor_status, "computed");
+            assert!(!fetched.overdue);
+        });
+    }
+
+    #[test]
+    fn update_is_draft_only_and_resnapshots() {
+        with_campaign_db_mut("update_draft_only", |conn| {
+            seed_product(conn, 1, 1290000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 990000;
+            let created = create_campaign(conn, &input, 1, "2026-07-01T00:00:00Z").expect("create");
+
+            // Cheaper price appears before the draft is edited: re-snapshot must see it.
+            conn.execute(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-06-20T00:00:00Z', 1190000, 'update', '2026-06-20T00:00:00Z')",
+                [],
+            )
+            .expect("history row");
+            let updated =
+                update_campaign(conn, created.id, &input, "2026-07-02T00:00:00Z").expect("update");
+            assert_eq!(
+                updated.items[0].prethodna_cena_minor,
+                Some(1190000),
+                "draft edit re-snapshots"
+            );
+
+            conn.execute(
+                "UPDATE campaigns SET status = 'active', activated_at = '2026-07-05T00:00:00Z' WHERE id = ?1",
+                params![created.id],
+            )
+            .expect("force active");
+            let error = update_campaign(conn, created.id, &input, "2026-07-06T00:00:00Z")
+                .expect_err("active campaign must not be editable");
+            assert_eq!(error.code(), "invalid_state");
+        });
+    }
+
+    #[test]
+    fn cancel_is_draft_only_and_overdue_flags_past_end() {
+        with_campaign_db_mut("cancel_overdue", |conn| {
+            seed_product(conn, 1, 1290000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items[0].campaign_price_minor = 990000;
+            let created = create_campaign(conn, &input, 1, "2026-07-01T00:00:00Z").expect("create");
+
+            conn.execute(
+                "UPDATE campaigns SET status='active', activated_at='2026-07-05T00:00:00Z' WHERE id=?1",
+                params![created.id],
+            )
+            .expect("force");
+            let error = cancel_campaign(conn, created.id, "2026-07-06T00:00:00Z")
+                .expect_err("active cannot cancel");
+            assert_eq!(error.code(), "invalid_state");
+
+            let view = get_campaign(conn, created.id, "2026-08-01T00:00:00Z").expect("get");
+            assert!(view.overdue, "past declared end while active");
+            let list = list_campaigns(conn, "2026-08-01T00:00:00Z").expect("list");
+            assert!(list[0].overdue);
         });
     }
 }
