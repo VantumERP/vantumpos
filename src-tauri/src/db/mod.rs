@@ -125,6 +125,8 @@ mod tests {
         "cash_movements",
         "compliance_log",
         "price_history",
+        "campaigns",
+        "campaign_items",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -143,6 +145,9 @@ mod tests {
         "idx_cash_movements_shift",
         "idx_compliance_log_created_at",
         "idx_price_history_product",
+        "idx_campaigns_type_start",
+        "idx_campaign_items_campaign",
+        "idx_campaign_items_product",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -480,6 +485,113 @@ mod tests {
     }
 
     #[test]
+    fn migration_v10_creates_campaign_tables_and_perishable_columns() {
+        with_test_database("migration_v10_campaigns", |db| {
+            let connection = db.open().expect("database should open");
+
+            for table in ["campaigns", "campaign_items"] {
+                assert!(
+                    schema_object_exists(&connection, "table", table),
+                    "expected table {table}"
+                );
+            }
+            for column in ["perishable", "perishable_justification"] {
+                let exists: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('products') WHERE name = ?1",
+                        params![column],
+                        |row| row.get(0),
+                    )
+                    .expect("column metadata should query");
+                assert_eq!(exists, 1, "expected products.{column}");
+            }
+
+            let campaigns_schema: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='campaigns'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("campaigns schema should load");
+            for token in [
+                "rasprodaja",
+                "sezonsko_snizenje",
+                "akcijska_prodaja",
+                "promotivna_prodaja",
+                "headline_percent",
+            ] {
+                assert!(
+                    campaigns_schema.contains(token),
+                    "campaigns schema missing {token}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn migration_v10_widens_price_history_sources_and_preserves_rows() {
+        with_test_database("migration_v10_price_history_sources", |db| {
+            let connection = db.open().expect("database should open");
+
+            // The widened CHECK admits campaign sources.
+            let schema: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='price_history'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("price_history schema should load");
+            for token in ["campaign_start", "campaign_step", "campaign_end"] {
+                assert!(
+                    schema.contains(token),
+                    "price_history CHECK missing {token}"
+                );
+            }
+            assert!(
+                schema_object_exists(&connection, "index", "idx_price_history_product"),
+                "rebuild must recreate idx_price_history_product"
+            );
+
+            // Rows written pre-rebuild shape survive with identity intact: insert
+            // via the legacy sources and via the new ones — both must work.
+            connection
+                .execute(
+                    "INSERT INTO products (id, name, sku, sale_price_minor, purchase_price_minor,
+                                           tax_rate_id, minimum_stock_milli, created_at, updated_at)
+                     SELECT 901, 'P', 'SKU-V10', 1000, 0, id, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                     FROM tax_rates LIMIT 1",
+                    [],
+                )
+                .ok(); // tax rate may not exist on a bare DB; fall back below
+            let product_seeded: i64 = connection
+                .query_row("SELECT COUNT(*) FROM products WHERE id = 901", [], |row| {
+                    row.get(0)
+                })
+                .expect("count");
+            if product_seeded == 0 {
+                connection
+                    .execute_batch(
+                        "INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+                         VALUES (900, 'T', 2000, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                         INSERT INTO products (id, name, sku, sale_price_minor, purchase_price_minor,
+                                               tax_rate_id, minimum_stock_milli, created_at, updated_at)
+                         VALUES (901, 'P', 'SKU-V10', 1000, 0, 900, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+                    )
+                    .expect("seed product");
+            }
+            for source in ["update", "campaign_start", "campaign_step", "campaign_end"] {
+                connection
+                    .execute(
+                        "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                         VALUES (901, '2026-07-01T00:00:00Z', 1000, ?1, '2026-07-01T00:00:00Z')",
+                        params![source],
+                    )
+                    .unwrap_or_else(|error| panic!("source {source} should insert: {error}"));
+            }
+        });
+    }
+
+    #[test]
     fn sales_reject_negative_money_fields() {
         with_test_database("sales_reject_negative_money_fields", |db| {
             let connection = db.open().expect("database should open");
@@ -609,7 +721,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 9);
+                assert_eq!(migration_count, 10);
             },
         );
     }

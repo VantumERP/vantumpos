@@ -329,6 +329,71 @@ FROM products
 WHERE active = 1;
 "#,
     },
+    Migration {
+        version: 10,
+        name: "campaigns_and_price_history_campaign_sources",
+        sql: r#"
+CREATE TABLE campaigns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_type TEXT NOT NULL CHECK (campaign_type IN ('rasprodaja', 'sezonsko_snizenje', 'akcijska_prodaja', 'promotivna_prodaja')),
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'ended', 'cancelled')),
+    starts_on TEXT NOT NULL,
+    ends_on TEXT,
+    display_mode TEXT NOT NULL DEFAULT 'two_prices' CHECK (display_mode IN ('two_prices', 'percentage')),
+    headline_percent INTEGER CHECK (headline_percent IS NULL OR (headline_percent BETWEEN 1 AND 99)),
+    rasprodaja_ground TEXT CHECK (rasprodaja_ground IN ('prestanak_poslovanja', 'prestanak_u_objektu', 'prestanak_prodaje_robe')),
+    special_conditions TEXT,
+    reduced_utility_reason TEXT,
+    marketing_label TEXT,
+    season_attested INTEGER NOT NULL DEFAULT 0 CHECK (season_attested IN (0, 1)),
+    separation_attested INTEGER NOT NULL DEFAULT 0 CHECK (separation_attested IN (0, 1)),
+    activated_at TEXT,
+    ended_at TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_campaigns_type_start ON campaigns(campaign_type, starts_on);
+
+CREATE TABLE campaign_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    campaign_price_minor INTEGER NOT NULL CHECK (campaign_price_minor >= 0),
+    prethodna_cena_minor INTEGER CHECK (prethodna_cena_minor IS NULL OR prethodna_cena_minor >= 0),
+    anchor_status TEXT NOT NULL CHECK (anchor_status IN ('computed', 'manual', 'none')),
+    anchor_window_days INTEGER,
+    anchor_truncated INTEGER NOT NULL DEFAULT 0 CHECK (anchor_truncated IN (0, 1)),
+    anchor_reason TEXT,
+    anchor_justification TEXT,
+    future_regular_price_minor INTEGER CHECK (future_regular_price_minor IS NULL OR future_regular_price_minor >= 0),
+    pre_campaign_price_minor INTEGER,
+    UNIQUE (campaign_id, product_id)
+);
+CREATE INDEX idx_campaign_items_campaign ON campaign_items(campaign_id);
+CREATE INDEX idx_campaign_items_product ON campaign_items(product_id);
+
+ALTER TABLE products ADD COLUMN perishable INTEGER NOT NULL DEFAULT 0 CHECK (perishable IN (0, 1));
+ALTER TABLE products ADD COLUMN perishable_justification TEXT;
+
+CREATE TABLE price_history_next (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    effective_from TEXT NOT NULL,
+    price_minor INTEGER CHECK (price_minor IS NULL OR price_minor >= 0),
+    source TEXT NOT NULL CHECK (source IN ('create', 'update', 'import', 'deactivate', 'reactivate', 'seed', 'campaign_start', 'campaign_step', 'campaign_end')),
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+
+INSERT INTO price_history_next (id, product_id, effective_from, price_minor, source, user_id, created_at)
+SELECT id, product_id, effective_from, price_minor, source, user_id, created_at FROM price_history;
+
+DROP TABLE price_history;
+ALTER TABLE price_history_next RENAME TO price_history;
+CREATE INDEX idx_price_history_product ON price_history(product_id, effective_from);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
