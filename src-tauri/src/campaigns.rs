@@ -24,7 +24,7 @@ use crate::app_error::AppError;
 use crate::price_history::{compute_prethodna_cena, IncomputableReason, PrethodnaCenaResult};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use time::format_description::well_known::Rfc3339;
-use time::{Date, OffsetDateTime};
+use time::{Date, Duration, OffsetDateTime};
 
 /// čl. 37 st. 6–7. Exhaustive three grounds, no default.
 pub const TYPE_RASPRODAJA: &str = "rasprodaja";
@@ -609,10 +609,33 @@ pub struct CampaignSummary {
 
 /// An active campaign past its declared `ends_on`. There is deliberately no
 /// auto-end: prices stay until a human ends the campaign, and this flag is what
-/// makes that visible (čl. 36 st. 2 t. 3). Both sides are RFC3339 UTC, so the
-/// lexicographic compare IS the chronological one.
+/// makes that visible (čl. 36 st. 2 t. 3).
+///
+/// `ends_on` is the declared `datum isteka` and is **inclusive** — it names the
+/// last day OF the `period važenja`, exactly as `declared_duration_days` counts
+/// it. So the cutoff is the first instant of the FOLLOWING day: a campaign is
+/// not overdue at any point during its declared end day. Comparing `ends_on <
+/// now` instead would raise the flag from 00:00:01 on the end day and make the
+/// UI order a revert while the promotion is still lawfully running.
+///
+/// Both sides are RFC3339 UTC, so the lexicographic compare IS the
+/// chronological one. An unparseable `ends_on` cannot come from the DB (we only
+/// ever write RFC3339); `false` is the conservative fallback — it withholds the
+/// revert prompt rather than issuing it early.
 fn is_overdue(status: &str, ends_on: Option<&str>, now: &str) -> bool {
-    status == "active" && ends_on.is_some_and(|ends_on| ends_on < now)
+    if status != "active" {
+        return false;
+    }
+    let Some(ends_on) = ends_on else {
+        return false;
+    };
+    let Ok(cutoff) = parse_rfc3339(ends_on, "endsOn").map(|end| end + Duration::days(1)) else {
+        return false;
+    };
+    let Ok(cutoff) = cutoff.format(&Rfc3339) else {
+        return false;
+    };
+    now >= cutoff.as_str()
 }
 
 /// Rejects on ANY hard violation, handing the whole set to the wizard in the
@@ -1358,5 +1381,40 @@ mod tests {
             let list = list_campaigns(conn, "2026-08-01T00:00:00Z").expect("list");
             assert!(list[0].overdue);
         });
+    }
+
+    /// `ends_on` is the declared `datum isteka` — the LAST day of the period
+    /// važenja (čl. 36 st. 2 t. 3), inclusive exactly as `declared_duration_days`
+    /// counts it. The flag drives the "vratite cene" prompt, so firing it during
+    /// the end day would order a revert while the promotion is still lawful.
+    #[test]
+    fn overdue_treats_declared_end_day_as_inclusive() {
+        let ends_on = Some("2026-07-20T00:00:00Z");
+
+        assert!(
+            !is_overdue("active", ends_on, "2026-07-20T00:00:00Z"),
+            "first instant of the declared end day is inside the campaign"
+        );
+        assert!(
+            !is_overdue("active", ends_on, "2026-07-20T10:00:00Z"),
+            "the whole declared end day is still lawfully running"
+        );
+        assert!(
+            !is_overdue("active", ends_on, "2026-07-20T23:59:59Z"),
+            "last instant of the declared end day is inside the campaign"
+        );
+        assert!(
+            is_overdue("active", ends_on, "2026-07-21T00:00:00Z"),
+            "overdue at the first instant of the following day"
+        );
+
+        assert!(
+            !is_overdue("draft", ends_on, "2026-07-21T00:00:00Z"),
+            "only an active campaign can be overdue"
+        );
+        assert!(
+            !is_overdue("active", None, "2026-07-21T00:00:00Z"),
+            "no declared end, nothing to be past"
+        );
     }
 }
