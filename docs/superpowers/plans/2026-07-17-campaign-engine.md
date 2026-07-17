@@ -312,6 +312,7 @@ Exact Serbian messages (copy character-for-character):
 | h4 | `Sezonsko sniženje može trajati najviše 60 dana (čl. 37 st. 9 u vezi st. 8).` |
 | h5 | `Akcijska prodaja može trajati najviše 31 dan (čl. 37 st. 10).` |
 | h6 | `Isticanje samo procenta je dozvoljeno isključivo za akcijsku prodaju sa rokom važenja do 3 dana (čl. 37 st. 11).` |
+| h6b | `Za isticanje samo procenta unesite jasno određenje procenta sniženja (čl. 37 st. 11).` |
 | h7b | `Za promotivnu prodaju unesite redovnu cenu koja će važiti nakon isteka (čl. 36 st. 9).` |
 | h7d | `Promotivna prodaja može trajati najviše 60 dana (čl. 36 st. 9).` |
 | h10 | `Za rasprodaju izaberite jedan od tri zakonska osnova (čl. 37 st. 6).` |
@@ -329,6 +330,7 @@ Rules `validate_shape` enforces:
 - h2 (sezonsko only): `starts_on`'s `(month, day)` ∈ [25.12–31.12] ∪ [01.01–10.01] ∪ [01.07–15.07] — the winter window straddles the year boundary, so compare month/day, never a single date range.
 - h4 (sezonsko): `declared_duration_days ≤ 60`; h5 (akcijska): `≤ 31`; h7d (promotivna): `≤ 60`.
 - h6: `display_mode == "percentage"` requires `campaign_type == akcijska` AND `declared_duration_days ≤ 3`.
+- h6b: `display_mode == "percentage"` requires `headline_percent` present. Added after review: čl. 37 st. 11's „već" is adversative — the memo (§2.6) reads it as a SUBSTITUTION („A ≤3-day akcija showing neither is unlawful"), so h6 alone would pass a campaign that displays nothing. Independent of h6: an akcija of a lawful duration still owes the number.
 - h10: rasprodaja requires `rasprodaja_ground` ∈ the three; non-rasprodaja must NOT set one.
 - h12a: sezonsko requires `season_attested`; h12b: rasprodaja requires `separation_attested`.
 

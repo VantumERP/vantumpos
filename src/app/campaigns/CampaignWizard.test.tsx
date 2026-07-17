@@ -208,6 +208,65 @@ describe("CampaignWizard display mode", () => {
       expect(screen.getByRole("option", { name: "Procenat sniženja" })).toBeDisabled(),
     );
   });
+
+  it("blocks the save on a percent it cannot read instead of dropping it", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(computedReport);
+    const validate = vi.spyOn(services.campaigns, "validateCampaign");
+    renderWizard(services);
+
+    await user.click(screen.getByRole("radio", { name: "Akcijska prodaja" }));
+    setDate("Datum početka", "2026-07-01");
+    setDate("Datum isteka", "2026-07-03");
+    await addKafa(user);
+    await user.type(screen.getByLabelText("Cena u kampanji za Kafa 200 g"), "9.900,00");
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Sačuvaj nacrt" })).toBeEnabled(),
+    );
+
+    validate.mockClear();
+    // „12,5" is not a whole percent. Silently sending null would be read as
+    // „no percentage declared" — the čl. 37 st. 11 state h6b exists to catch.
+    await user.type(screen.getByLabelText("Istaknuti procenat (%)"), "12,5");
+
+    expect(
+      await screen.findByText(
+        "Istaknuti procenat unesite kao ceo broj od 1 do 99, bez znaka „%\".",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sačuvaj nacrt" })).toBeDisabled();
+    expect(validate).not.toHaveBeenCalled();
+  });
+
+  it("sends a readable percent and says it is mandatory in percentage mode", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(computedReport);
+    const validate = vi.spyOn(services.campaigns, "validateCampaign");
+    renderWizard(services);
+
+    await user.click(screen.getByRole("radio", { name: "Akcijska prodaja" }));
+    setDate("Datum početka", "2026-07-01");
+    setDate("Datum isteka", "2026-07-03");
+    await addKafa(user);
+    await user.type(screen.getByLabelText("Cena u kampanji za Kafa 200 g"), "9.900,00");
+    await user.selectOptions(
+      screen.getByLabelText("Način isticanja cene"),
+      "percentage",
+    );
+    await user.type(screen.getByLabelText("Istaknuti procenat (%)"), "25");
+
+    expect(
+      await screen.findByText(
+        "Kada se ističe samo procenat, procenat sniženja je obavezan (čl. 37 st. 11).",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(validate).toHaveBeenLastCalledWith(
+        expect.objectContaining({ displayMode: "percentage", headlinePercent: 25 }),
+      ),
+    );
+  });
 });
 
 describe("CampaignWizard validation summary", () => {

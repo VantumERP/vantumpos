@@ -98,6 +98,11 @@ const SEPARATION_ATTESTATION =
 const WARNINGS_DO_NOT_BLOCK = "Upozorenja ne blokiraju čuvanje.";
 
 const DEBOUNCE_MS = 200;
+
+/** Wizard-level, not a statutory rule: the backend's h6b decides whether a
+ *  percentage is owed. This only says the one that was typed is unreadable. */
+const MSG_UI_PERCENT =
+  "Istaknuti procenat unesite kao ceo broj od 1 do 99, bez znaka „%\".";
 const SEARCH_LIMIT = 10;
 
 export function CampaignWizard({
@@ -175,6 +180,15 @@ export function CampaignWizard({
       message: `Unesite ispravnu cenu u kampanji za ${item.productName}.`,
       productId: item.productId,
     }));
+
+  // A percent we cannot read is not a percent the user did not enter. Dropping
+  // it silently would send `headlinePercent: null` and — under h6b — let a
+  // typo („12,5") read as an undeclared percentage instead of a mistyped one.
+  const unreadablePercent: CampaignViolation[] =
+    headlinePercent.trim() && parseWholePercent(headlinePercent) == null
+      ? [{ code: "ui-percent", message: MSG_UI_PERCENT, productId: null }]
+      : [];
+  const uiViolations = [...unreadablePrices, ...unreadablePercent];
 
   const input = useMemo(
     () =>
@@ -286,7 +300,7 @@ export function CampaignWizard({
       ),
     [report],
   );
-  const hard = input == null ? unreadablePrices : (report?.hard ?? []);
+  const hard = input == null ? uiViolations : (report?.hard ?? []);
   const warnings = report?.warnings ?? [];
   // Never savable on an unread report: an empty `hard` we have not received is
   // not the same thing as no hard violations.
@@ -453,6 +467,12 @@ export function CampaignWizard({
                 value={headlinePercent}
                 onChange={(event) => setHeadlinePercent(event.target.value)}
               />
+              {displayMode === "percentage" ? (
+                <FieldDescription>
+                  Kada se ističe samo procenat, procenat sniženja je obavezan
+                  (čl. 37 st. 11).
+                </FieldDescription>
+              ) : null}
             </Field>
             {isRasprodaja ? (
               <Field>
@@ -842,6 +862,14 @@ function buildInput(form: {
   separationAttested: boolean;
   items: WizardItem[];
 }): CampaignInput | null {
+  const headlinePercent = parseWholePercent(form.headlinePercent);
+
+  // Typed but unreadable: sending `null` would be indistinguishable from „no
+  // percentage declared" and would quietly change what the shop must display.
+  if (form.headlinePercent.trim() && headlinePercent == null) {
+    return null;
+  }
+
   const items = [];
 
   for (const item of form.items) {
@@ -867,7 +895,7 @@ function buildInput(form: {
     startsOn: toRfc3339(form.startsOn),
     endsOn: form.endsOn ? toRfc3339(form.endsOn) : null,
     displayMode: form.displayMode,
-    headlinePercent: parseWholePercent(form.headlinePercent),
+    headlinePercent,
     rasprodajaGround: form.rasprodajaGround || null,
     specialConditions: optionalText(form.specialConditions),
     reducedUtilityReason: optionalText(form.reducedUtilityReason),
@@ -933,10 +961,18 @@ function parseMoney(raw: string): number | null {
   }
 }
 
+/** The column accepts a whole 1–99 only, so anything else is unreadable here
+ *  rather than a constraint error at save. */
 function parseWholePercent(raw: string): number | null {
   const trimmed = raw.trim();
 
-  return /^\d{1,3}$/.test(trimmed) ? Number(trimmed) : null;
+  if (!/^\d{1,2}$/.test(trimmed)) {
+    return null;
+  }
+
+  const percent = Number(trimmed);
+
+  return percent >= 1 && percent <= 99 ? percent : null;
 }
 
 function optionalText(raw: string): string | null {

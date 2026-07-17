@@ -46,6 +46,11 @@ const MSG_H2: &str =
 const MSG_H4: &str = "Sezonsko sniženje može trajati najviše 60 dana (čl. 37 st. 9 u vezi st. 8).";
 const MSG_H5: &str = "Akcijska prodaja može trajati najviše 31 dan (čl. 37 st. 10).";
 const MSG_H6: &str = "Isticanje samo procenta je dozvoljeno isključivo za akcijsku prodaju sa rokom važenja do 3 dana (čl. 37 st. 11).";
+/// čl. 37 st. 11's „već" is adversative: the two-price duty is *replaced* by a
+/// mandatory duty to state the percentage, never waived alongside it. See the
+/// memo §2.6 — „A ≤3-day akcija showing neither is unlawful."
+const MSG_H6B: &str =
+    "Za isticanje samo procenta unesite jasno određenje procenta sniženja (čl. 37 st. 11).";
 const MSG_H7A: &str = "Promotivna prodaja je samo za robu koja se prvi put uvodi u ponudu — artikal je već bio u ponudi (čl. 36 st. 9).";
 const MSG_H7B: &str =
     "Za promotivnu prodaju unesite redovnu cenu koja će važiti nakon isteka (čl. 36 st. 9).";
@@ -318,6 +323,13 @@ pub fn validate_shape(input: &CampaignInput) -> Result<Vec<Violation>, AppError>
         && !(campaign_type == TYPE_AKCIJSKA && duration_days.is_some_and(|days| days <= 3))
     {
         violations.push(Violation::new("h6", MSG_H6));
+    }
+
+    // h6b — the st. 11 carve-out SUBSTITUTES the percentage for the two prices;
+    // it does not waive both. A percentage-only campaign with no percentage
+    // declared instructs the shop to display nothing at all.
+    if display_mode == DISPLAY_PERCENTAGE && input.headline_percent.is_none() {
+        violations.push(Violation::new("h6b", MSG_H6B));
     }
 
     // h10 — čl. 37 st. 6's closed list. Rasprodaja must carry a ground; no other
@@ -1779,6 +1791,31 @@ mod tests {
         let mut sezonsko_pct = base_input(TYPE_SEZONSKO);
         sezonsko_pct.display_mode = "percentage".to_string();
         assert!(codes(&validate_shape(&sezonsko_pct).expect("validate")).contains(&"h6"));
+    }
+
+    /// čl. 37 st. 11 substitutes the percentage for the two prices — it never
+    /// waives both. A lawful ≤3-day akcija must still say a number.
+    #[test]
+    fn percentage_display_without_a_percentage_fails_h6b() {
+        let mut bare = base_input(TYPE_AKCIJSKA);
+        bare.starts_on = "2026-05-01T00:00:00Z".to_string();
+        bare.ends_on = Some("2026-05-03T00:00:00Z".to_string()); // 3 days
+        bare.display_mode = "percentage".to_string();
+        bare.headline_percent = None;
+
+        let bare_codes = codes(&validate_shape(&bare).expect("validate"));
+        // The duration is lawful, so h6 must stay silent — h6b is the finding.
+        assert!(!bare_codes.contains(&"h6"));
+        assert!(bare_codes.contains(&"h6b"));
+
+        let mut declared = bare.clone();
+        declared.headline_percent = Some(20);
+        assert!(!codes(&validate_shape(&declared).expect("validate")).contains(&"h6b"));
+
+        // Two-price display carries no percentage duty at all (st. 2).
+        let mut two_prices = base_input(TYPE_AKCIJSKA);
+        two_prices.headline_percent = None;
+        assert!(!codes(&validate_shape(&two_prices).expect("validate")).contains(&"h6b"));
     }
 
     #[test]
