@@ -1070,6 +1070,33 @@ export function createMockServices(): PosServices {
         campaign.status = "cancelled";
         return campaign;
       },
+      async exportEvidence(campaignId) {
+        return {
+          fileName: `dokaz-cene-kampanja-${campaignId}.html`,
+          path: `mock://exports/dokaz-cene-kampanja-${campaignId}.html`,
+          mimeType: "text/csv" as const,
+          rowCount: 0,
+        };
+      },
+      async exportLabels(campaignId) {
+        return {
+          fileName: `etikete-kampanja-${campaignId}.html`,
+          path: `mock://exports/etikete-kampanja-${campaignId}.html`,
+          mimeType: "text/csv" as const,
+          rowCount: 0,
+        };
+      },
+      async correctionReport() {
+        return { rows: [] };
+      },
+      async exportCorrectionReport() {
+        return {
+          fileName: "ispravke-etiketa.html",
+          path: "mock://exports/ispravke-etiketa.html",
+          mimeType: "text/csv" as const,
+          rowCount: 0,
+        };
+      },
     },
   };
 

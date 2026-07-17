@@ -9,6 +9,7 @@ import type {
   CampaignValidationReport,
   CampaignView,
   CashierTurnoverReport,
+  CorrectionReport,
   CashMovementRequest,
   CategorySummary,
   CategorySalesReport,
@@ -175,6 +176,14 @@ export interface CampaignsService {
     overrides: EndCampaignOverride[],
   ): Promise<CampaignView>;
   cancelCampaign(id: number): Promise<CampaignView>;
+  /** Self-contained walk-away price-evidence document (čl. 48). */
+  exportEvidence(campaignId: number): Promise<ExportedFile>;
+  /** Shelf-label sheet branching on type/display-mode (čl. 37). */
+  exportLabels(campaignId: number): Promise<ExportedFile>;
+  /** Active-campaign label data with attention flags — on-screen. */
+  correctionReport(): Promise<CorrectionReport>;
+  /** The same correction report rendered to a self-contained HTML export. */
+  exportCorrectionReport(): Promise<ExportedFile>;
 }
 
 export interface ReportsService {

@@ -415,6 +415,26 @@ export interface EndCampaignOverride {
   returnPriceMinor: number;
 }
 
+/** Mirrors `crate::campaign_evidence::CorrectionRow` — one active-campaign
+ *  label line plus whether its anchor warrants a second look. Field names are
+ *  the serde camelCase rendering of that Rust struct. */
+export interface CorrectionRow {
+  campaignId: number;
+  productId: number;
+  productName: string;
+  sku: string;
+  campaignType: CampaignType;
+  displayMode: CampaignDisplayMode;
+  campaignPriceMinor: number;
+  prethodnaCenaMinor: number | null;
+  needsAttention: boolean;
+  attentionReason: string | null;
+}
+
+export interface CorrectionReport {
+  rows: CorrectionRow[];
+}
+
 export type DiscountDraft =
   | { type: "amount"; amountMinor: number }
   | { type: "percent"; basisPoints: number };

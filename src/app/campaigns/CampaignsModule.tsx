@@ -1,5 +1,6 @@
 import { PlusIcon, TagIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +48,7 @@ import type {
   CampaignStatus,
   CampaignSummary,
   CampaignView,
+  CorrectionReport,
   EndCampaignOverride,
 } from "@/services/types";
 
@@ -99,6 +101,8 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
   // resets its form, so this pair is the whole of the wizard's lifecycle.
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardDraft, setWizardDraft] = useState<CampaignView | null>(null);
+  const [correction, setCorrection] = useState<CorrectionReport | null>(null);
+  const [correctionError, setCorrectionError] = useState<string | undefined>();
 
   useEffect(() => {
     let cancelled = false;
@@ -247,8 +251,35 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
     }
   }
 
+  async function runExport(
+    action: () => Promise<{ path: string }>,
+    fallback: string,
+  ) {
+    try {
+      const exported = await action();
+      toast.success("Izvezeno", { description: exported.path });
+    } catch (error) {
+      toast.error("Izvoz nije uspeo", {
+        description: errorMessage(error, fallback),
+      });
+    }
+  }
+
+  async function loadCorrection() {
+    setCorrectionError(undefined);
+
+    try {
+      setCorrection(await campaignsService.correctionReport());
+    } catch (error) {
+      setCorrectionError(
+        errorMessage(error, "Učitavanje ispravki nije uspelo."),
+      );
+    }
+  }
+
   return (
-    <div className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(28rem,0.9fr)]">
+    <div className="flex flex-1 flex-col gap-4">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(28rem,0.9fr)]">
       <section className="flex min-w-0 flex-col gap-4">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-base font-semibold">Kampanje</h2>
@@ -360,6 +391,18 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
             }
             onEdit={() => openWizard(selected)}
             onEnd={() => openEnd(selected)}
+            onExportEvidence={() =>
+              runExport(
+                () => campaignsService.exportEvidence(selected.id),
+                "Dokaz o ceni nije izvezen.",
+              )
+            }
+            onExportLabels={() =>
+              runExport(
+                () => campaignsService.exportLabels(selected.id),
+                "Etikete nisu izvezene.",
+              )
+            }
           />
         ) : (
           <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">
@@ -367,6 +410,19 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
           </div>
         )}
       </section>
+      </div>
+
+      <CorrectionPanel
+        report={correction}
+        error={correctionError}
+        onRefresh={loadCorrection}
+        onExport={() =>
+          runExport(
+            () => campaignsService.exportCorrectionReport(),
+            "Izveštaj o ispravkama nije izvezen.",
+          )
+        }
+      />
 
       <Dialog open={endOpen} onOpenChange={setEndOpen}>
         <DialogContent>
@@ -445,6 +501,8 @@ function CampaignDetailPanel({
   onCancel,
   onEdit,
   onEnd,
+  onExportEvidence,
+  onExportLabels,
 }: {
   campaign: CampaignView;
   actionError: string | undefined;
@@ -459,6 +517,8 @@ function CampaignDetailPanel({
   onCancel: () => void;
   onEdit: () => void;
   onEnd: () => void;
+  onExportEvidence: () => void;
+  onExportLabels: () => void;
 }) {
   return (
     <section
@@ -702,6 +762,105 @@ function CampaignDetailPanel({
           </Button>
         ) : null}
       </div>
+
+      <Separator />
+
+      <div className="flex flex-col gap-2">
+        <h4 className="text-sm font-medium">Dokazi i etikete</h4>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" onClick={onExportEvidence}>
+            Izvezi dokaz o ceni
+          </Button>
+          <Button type="button" variant="outline" onClick={onExportLabels}>
+            Izvezi etikete
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CorrectionPanel({
+  report,
+  error,
+  onRefresh,
+  onExport,
+}: {
+  report: CorrectionReport | null;
+  error: string | undefined;
+  onRefresh: () => void;
+  onExport: () => void;
+}) {
+  return (
+    <section
+      aria-label="Ispravke etiketa"
+      className="flex min-w-0 flex-col gap-4 rounded-md border border-border p-4"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-col gap-1">
+          <h3 className="text-base font-semibold">Ispravke etiketa</h3>
+          <span className="text-sm text-muted-foreground">
+            Aktivne kampanje — etikete koje treba proveriti.
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" onClick={onRefresh}>
+            Osveži ispravke
+          </Button>
+          <Button type="button" variant="outline" onClick={onExport}>
+            Izvezi
+          </Button>
+        </div>
+      </div>
+
+      {error ? (
+        <Alert variant="destructive">
+          <AlertTitle>Ispravke nisu učitane</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {report == null ? (
+        <p className="text-sm text-muted-foreground">
+          Osvežite da vidite etikete aktivnih kampanja.
+        </p>
+      ) : report.rows.length === 0 ? (
+        <p className="text-sm text-muted-foreground">Nema etiketa za proveru.</p>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Artikal</TableHead>
+              <TableHead>Vrsta</TableHead>
+              <TableHead>Snižena cena</TableHead>
+              <TableHead>Prethodna cena</TableHead>
+              <TableHead>Napomena</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {report.rows.map((row) => (
+              <TableRow key={`${row.campaignId}-${row.productId}`}>
+                <TableCell>
+                  <div className="flex flex-col">
+                    <span>{row.productName}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {row.sku}
+                    </span>
+                  </div>
+                </TableCell>
+                <TableCell>{typeLabels[row.campaignType]}</TableCell>
+                <TableCell>{formatRsd(row.campaignPriceMinor)}</TableCell>
+                <TableCell>
+                  {row.prethodnaCenaMinor == null
+                    ? "—"
+                    : formatRsd(row.prethodnaCenaMinor)}
+                </TableCell>
+                <TableCell>{row.attentionReason ?? "—"}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
     </section>
   );
 }

@@ -4,9 +4,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import { CampaignsModule } from "./CampaignsModule";
 import { navigationItems } from "@/app/navigation";
+import { Toaster } from "@/components/ui/sonner";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices } from "@/services/ports";
-import type { CampaignSummary, CampaignView } from "@/services/types";
+import type {
+  CampaignSummary,
+  CampaignView,
+  CorrectionReport,
+} from "@/services/types";
 
 const sezonskoDraft: CampaignSummary = {
   id: 1,
@@ -469,6 +474,101 @@ describe("CampaignsModule lifecycle", () => {
     expect(await screen.findByLabelText("Povratna cena za Novi čaj")).toHaveValue(
       "800,00",
     );
+  });
+
+  it("exports the price evidence for the selected campaign and toasts its path", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith([sezonskoDraft], sezonskoView);
+    const exportEvidence = vi
+      .spyOn(services.campaigns, "exportEvidence")
+      .mockResolvedValue({
+        fileName: "dokaz-cene-kampanja-1.html",
+        path: "C:/exports/dokaz-cene-kampanja-1.html",
+        mimeType: "text/csv",
+        rowCount: 2,
+      });
+
+    render(
+      <>
+        <CampaignsModule services={services} />
+        <Toaster />
+      </>,
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za kampanju #1" }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Izvezi dokaz o ceni" }),
+    );
+
+    await waitFor(() => expect(exportEvidence).toHaveBeenCalledWith(1));
+    expect(
+      await screen.findByText("C:/exports/dokaz-cene-kampanja-1.html"),
+    ).toBeInTheDocument();
+  });
+
+  it("exports the shelf labels for the selected campaign", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith([sezonskoDraft], sezonskoView);
+    const exportLabels = vi
+      .spyOn(services.campaigns, "exportLabels")
+      .mockResolvedValue({
+        fileName: "etikete-kampanja-1.html",
+        path: "C:/exports/etikete-kampanja-1.html",
+        mimeType: "text/csv",
+        rowCount: 2,
+      });
+
+    render(
+      <>
+        <CampaignsModule services={services} />
+        <Toaster />
+      </>,
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za kampanju #1" }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Izvezi etikete" }),
+    );
+
+    await waitFor(() => expect(exportLabels).toHaveBeenCalledWith(1));
+    expect(
+      await screen.findByText("C:/exports/etikete-kampanja-1.html"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the correction report with its attention note", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith([sezonskoDraft], sezonskoView);
+    const report: CorrectionReport = {
+      rows: [
+        {
+          campaignId: 1,
+          productId: 11,
+          productName: "Jogurt 1 kg",
+          sku: "JOG-1000",
+          campaignType: "sezonsko_snizenje",
+          displayMode: "two_prices",
+          campaignPriceMinor: 12000,
+          prethodnaCenaMinor: 15000,
+          needsAttention: true,
+          attentionReason: "Ručni unos",
+        },
+      ],
+    };
+    vi.spyOn(services.campaigns, "correctionReport").mockResolvedValue(report);
+
+    render(<CampaignsModule services={services} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Osveži ispravke" }),
+    );
+
+    const panel = await screen.findByRole("region", {
+      name: "Ispravke etiketa",
+    });
+    const row = within(panel).getByRole("row", { name: /Jogurt 1 kg/ });
+    expect(within(row).getByText("Ručni unos")).toBeInTheDocument();
   });
 
   it("surfaces a command error instead of pretending the action succeeded", async () => {

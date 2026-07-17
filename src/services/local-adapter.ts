@@ -14,6 +14,7 @@ import type {
   CategorySummary,
   CategorySalesReport,
   CompanySettings,
+  CorrectionReport,
   CompletedSale,
   DailyTurnoverReport,
   ExportedFile,
@@ -199,6 +200,14 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       endCampaign: (id, overrides) =>
         invoke<CampaignView>("campaigns_end", { id, overrides }),
       cancelCampaign: (id) => invoke<CampaignView>("campaigns_cancel", { id }),
+      exportEvidence: (campaignId) =>
+        invoke<ExportedFile>("campaigns_export_evidence", { campaignId }),
+      exportLabels: (campaignId) =>
+        invoke<ExportedFile>("campaigns_export_labels", { campaignId }),
+      correctionReport: () =>
+        invoke<CorrectionReport>("campaigns_correction_report"),
+      exportCorrectionReport: () =>
+        invoke<ExportedFile>("campaigns_export_correction_report"),
     },
   };
 }

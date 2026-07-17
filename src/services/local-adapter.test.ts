@@ -639,6 +639,39 @@ describe("local service adapter", () => {
     });
     expect(invoke).toHaveBeenNthCalledWith(9, "campaigns_cancel", { id: 7 });
   });
+
+  it("maps campaign evidence and correction methods to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      if (command === "campaigns_correction_report") {
+        return Promise.resolve({ rows: [] });
+      }
+
+      return Promise.resolve({
+        fileName: "dokaz-cene-kampanja-7.html",
+        path: "C:/exports/dokaz-cene-kampanja-7.html",
+        mimeType: "text/html",
+        rowCount: 1,
+      });
+    });
+    const services = createLocalServices(invoke);
+
+    await services.campaigns.exportEvidence(7);
+    await services.campaigns.exportLabels(7);
+    await services.campaigns.correctionReport();
+    await services.campaigns.exportCorrectionReport();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "campaigns_export_evidence", {
+      campaignId: 7,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "campaigns_export_labels", {
+      campaignId: 7,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "campaigns_correction_report");
+    expect(invoke).toHaveBeenNthCalledWith(
+      4,
+      "campaigns_export_correction_report",
+    );
+  });
 });
 
 describe("mock service adapter", () => {
