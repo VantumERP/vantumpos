@@ -573,6 +573,154 @@ pub fn render_labels_html(evidence: &CampaignEvidence) -> String {
     html
 }
 
+/// One active-campaign line in the correction report: the required label
+/// content plus whether the anchor warrants a second look.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionRow {
+    pub campaign_id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub sku: String,
+    pub campaign_type: String,
+    pub display_mode: String,
+    pub campaign_price_minor: i64,
+    pub prethodna_cena_minor: Option<i64>,
+    pub needs_attention: bool,
+    pub attention_reason: Option<String>,
+}
+
+/// The correction report: every active-campaign article's required label
+/// content, with the anchors that a human should double-check flagged.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionReport {
+    pub rows: Vec<CorrectionRow>,
+}
+
+/// Assembles the correction report over every **active** campaign's items
+/// (draft/ended/cancelled items are absent), joined to `products`, ordered by
+/// `campaign_id, campaign_items.id`. Pure SELECT — no writes.
+///
+/// An item `needs_attention` when its anchor is a manual entry, when the
+/// computed evidence was truncated, or when a sniženje-type campaign carries no
+/// anchor at all (`anchor_status == "none"` — an incomputable case that a
+/// discount campaign should never leave unresolved). The report never claims a
+/// physical tag is wrong: it lists what each label must say and which warrant a
+/// second look.
+pub fn assemble_correction_report(conn: &Connection) -> Result<CorrectionReport, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, ci.product_id, p.name, p.sku, c.campaign_type, c.display_mode,
+                ci.campaign_price_minor, ci.prethodna_cena_minor, ci.anchor_status,
+                ci.anchor_truncated
+         FROM campaign_items ci
+         JOIN campaigns c ON c.id = ci.campaign_id
+         JOIN products p ON p.id = ci.product_id
+         WHERE c.status = 'active'
+         ORDER BY c.id, ci.id",
+    )?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let campaign_type: String = row.get(4)?;
+            let anchor_status: String = row.get(8)?;
+            let anchor_truncated: bool = row.get::<_, i64>(9)? != 0;
+
+            let is_snizenje = matches!(
+                campaign_type.as_str(),
+                crate::campaigns::TYPE_RASPRODAJA
+                    | crate::campaigns::TYPE_SEZONSKO
+                    | crate::campaigns::TYPE_AKCIJSKA
+            );
+            let needs_attention = anchor_status == "manual"
+                || anchor_truncated
+                || (is_snizenje && anchor_status == "none");
+            let attention_reason = if anchor_status == "manual" {
+                Some("Ručni unos".to_string())
+            } else if anchor_truncated {
+                Some("Nepotpuna evidencija".to_string())
+            } else {
+                None
+            };
+
+            Ok(CorrectionRow {
+                campaign_id: row.get(0)?,
+                product_id: row.get(1)?,
+                product_name: row.get(2)?,
+                sku: row.get(3)?,
+                campaign_type,
+                display_mode: row.get(5)?,
+                campaign_price_minor: row.get(6)?,
+                prethodna_cena_minor: row.get(7)?,
+                needs_attention,
+                attention_reason,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(CorrectionReport { rows })
+}
+
+/// Renders the correction report as a self-contained HTML table (article, sku,
+/// type, snižena, prethodna, `Napomena`). Same escaping and no-fiscal rules as
+/// the other documents; header „Etikete koje treba proveriti". No `<script>`,
+/// no QR/PIB/brojač.
+pub fn render_correction_html(report: &CorrectionReport) -> String {
+    let mut html = String::new();
+    html.push_str("<!doctype html>\n<html lang=\"sr-Latn\">\n<head>\n");
+    html.push_str("<meta charset=\"utf-8\">\n");
+    html.push_str("<title>Ispravke etiketa</title>\n");
+    html.push_str(
+        "<style>\n\
+         @page { margin: 1cm }\n\
+         body { font-family: sans-serif; color: #111; margin: 1cm; }\n\
+         h1 { font-size: 1.4rem; }\n\
+         table { border-collapse: collapse; margin: 0.5rem 0; }\n\
+         th, td { border: 1px solid #999; padding: 0.25rem 0.5rem; text-align: left; }\n\
+         .attention { color: #a00; font-weight: bold; }\n\
+         footer { margin-top: 2rem; color: #666; font-size: 0.85rem; }\n\
+         </style>\n</head>\n<body>\n",
+    );
+
+    html.push_str("<h1>Etikete koje treba proveriti</h1>\n");
+    html.push_str(
+        "<table>\n<thead><tr>\
+         <th>Artikal</th><th>SKU</th><th>Vrsta</th>\
+         <th>Snižena cena</th><th>Prethodna cena</th><th>Napomena</th>\
+         </tr></thead>\n<tbody>\n",
+    );
+
+    for row in &report.rows {
+        let prethodna = match row.prethodna_cena_minor {
+            Some(minor) => format!("{} RSD", format_rsd_minor(minor)),
+            None => "—".to_string(),
+        };
+        let napomena = row.attention_reason.as_deref().unwrap_or("—");
+        let napomena_class = if row.needs_attention {
+            " class=\"attention\""
+        } else {
+            ""
+        };
+        html.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{} RSD</td><td>{}</td><td{}>{}</td></tr>\n",
+            escape_html(&row.product_name),
+            escape_html(&row.sku),
+            escape_html(campaign_type_serbian(&row.campaign_type)),
+            format_rsd_minor(row.campaign_price_minor),
+            prethodna,
+            napomena_class,
+            escape_html(napomena)
+        ));
+    }
+
+    html.push_str("</tbody>\n</table>\n");
+    html.push_str(
+        "<footer>Interni pregled etiketa. Nije fiskalni dokument.</footer>\n\
+         </body>\n</html>\n",
+    );
+    html
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,6 +1035,91 @@ mod tests {
             assert!(html.contains("Uvodna cena") && html.contains("8.900,00"));
             assert!(html.contains("10.900,00"));
             assert!(!html.contains("Prethodna cena"));
+        });
+    }
+
+    // Correction report covers ONLY active-campaign items: a clean computed
+    // anchor is not flagged, a manual anchor is („Ručni unos"), and a draft
+    // campaign's item never appears.
+    #[test]
+    fn correction_report_covers_active_items_and_flags_manual() {
+        with_db("correction_active", |conn| {
+            seed_product(conn, 1, "Jakna", 1290000, "2026-05-15T00:00:00Z");
+            seed_product(conn, 2, "Jogurt", 50000, "2026-07-01T00:00:00Z");
+            seed_product(conn, 3, "Nacrt-Artikal", 30000, "2026-07-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-05-15T00:00:00Z', 1290000, 'create', '2026-05-15T00:00:00Z');
+                 INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, activated_at, created_at, updated_at)
+                 VALUES (1, 'akcijska_prodaja', 'active', '2026-07-05T00:00:00Z', '2026-07-20T00:00:00Z', 'two_prices', '2026-07-05T00:00:00Z', '2026-07-04T00:00:00Z', '2026-07-05T00:00:00Z');
+                 INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, created_at, updated_at)
+                 VALUES (2, 'akcijska_prodaja', 'draft', '2026-07-10T00:00:00Z', '2026-07-20T00:00:00Z', 'two_prices', '2026-07-09T00:00:00Z', '2026-07-09T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor, anchor_status, anchor_window_days)
+                 VALUES (1, 1, 990000, 1190000, 'computed', 30);
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor, anchor_status, anchor_reason, anchor_justification)
+                 VALUES (1, 2, 45000, 48000, 'manual', 'perishable', 'Cena sa police');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor, anchor_status, anchor_window_days)
+                 VALUES (2, 3, 25000, 30000, 'computed', 30);",
+            )
+            .expect("seed");
+
+            let report = assemble_correction_report(conn).expect("assemble");
+            // Only the active campaign's two items; the draft campaign's item is absent.
+            assert_eq!(report.rows.len(), 2);
+            assert!(report.rows.iter().all(|row| row.campaign_id == 1));
+            assert!(
+                !report
+                    .rows
+                    .iter()
+                    .any(|row| row.product_name == "Nacrt-Artikal"),
+                "draft campaign items must be absent"
+            );
+
+            let computed = report
+                .rows
+                .iter()
+                .find(|row| row.product_id == 1)
+                .expect("computed row");
+            assert!(!computed.needs_attention);
+            assert!(computed.attention_reason.is_none());
+
+            let manual = report
+                .rows
+                .iter()
+                .find(|row| row.product_id == 2)
+                .expect("manual row");
+            assert!(manual.needs_attention);
+            assert_eq!(manual.attention_reason.as_deref(), Some("Ručni unos"));
+        });
+    }
+
+    #[test]
+    fn correction_html_lists_attention_reason_and_excludes_drafts() {
+        with_db("correction_render", |conn| {
+            seed_product(conn, 1, "Jogurt", 50000, "2026-07-01T00:00:00Z");
+            seed_product(conn, 2, "Nacrt-Artikal", 30000, "2026-07-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, activated_at, created_at, updated_at)
+                 VALUES (1, 'akcijska_prodaja', 'active', '2026-07-05T00:00:00Z', '2026-07-20T00:00:00Z', 'two_prices', '2026-07-05T00:00:00Z', '2026-07-04T00:00:00Z', '2026-07-05T00:00:00Z');
+                 INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, created_at, updated_at)
+                 VALUES (2, 'akcijska_prodaja', 'draft', '2026-07-10T00:00:00Z', '2026-07-20T00:00:00Z', 'two_prices', '2026-07-09T00:00:00Z', '2026-07-09T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor, anchor_status, anchor_reason, anchor_justification)
+                 VALUES (1, 1, 45000, 48000, 'manual', 'perishable', 'Cena sa police');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor, anchor_status, anchor_window_days)
+                 VALUES (2, 2, 25000, 30000, 'computed', 30);",
+            )
+            .expect("seed");
+            let html = render_correction_html(&assemble_correction_report(conn).expect("assemble"));
+            assert!(html.starts_with("<!doctype html>"));
+            assert!(html.contains("Etikete koje treba proveriti"));
+            assert!(html.contains("Ručni unos"));
+            assert!(html.contains("Jogurt"));
+            assert!(
+                !html.contains("Nacrt-Artikal"),
+                "draft campaign items must be absent"
+            );
+            assert!(!html.contains("<script"));
+            assert!(html.contains("Nije fiskalni dokument"));
         });
     }
 }
