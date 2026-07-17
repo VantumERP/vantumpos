@@ -586,8 +586,8 @@ describe("local service adapter", () => {
 
     const input: CampaignInput = {
       campaignType: "sezonsko_snizenje",
-      startsOn: "2026-07-01",
-      endsOn: "2026-07-31",
+      startsOn: "2026-07-01T00:00:00Z",
+      endsOn: "2026-07-31T00:00:00Z",
       displayMode: "two_prices",
       headlinePercent: null,
       rasprodajaGround: null,
@@ -854,8 +854,8 @@ describe("mock service adapter", () => {
 function campaignInput(): CampaignInput {
   return {
     campaignType: "sezonsko_snizenje",
-    startsOn: "2026-07-01",
-    endsOn: "2026-07-31",
+    startsOn: "2026-07-01T00:00:00Z",
+    endsOn: "2026-07-31T00:00:00Z",
     displayMode: "two_prices",
     headlinePercent: null,
     rasprodajaGround: null,

@@ -317,9 +317,17 @@ export interface CampaignItemInput {
 
 export interface CampaignInput {
   campaignType: CampaignType;
-  /** Calendar date, `YYYY-MM-DD`. */
+  /**
+   * RFC3339 instant, e.g. `2026-07-01T00:00:00Z`. The statute counts calendar
+   * days, so the time component is irrelevant — but the format is not: the
+   * backend parses this with `parse_rfc3339` and a bare `YYYY-MM-DD` comes back
+   * as hard violation h14a.
+   */
   startsOn: string;
-  /** `null` only for rasprodaja — „dok traju zalihe". */
+  /**
+   * RFC3339 instant, same format requirement as `startsOn` (h14c on failure).
+   * `null` only for rasprodaja — „dok traju zalihe".
+   */
   endsOn?: string | null;
   displayMode: CampaignDisplayMode;
   headlinePercent?: number | null;
