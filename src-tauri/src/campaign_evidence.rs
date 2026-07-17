@@ -639,6 +639,11 @@ pub fn assemble_correction_report(conn: &Connection) -> Result<CorrectionReport,
                 Some("Ručni unos".to_string())
             } else if anchor_truncated {
                 Some("Nepotpuna evidencija".to_string())
+            } else if is_snizenje && anchor_status == "none" {
+                // The most legally serious flag: a sniženje article carrying no
+                // prethodna cena at all. Make it self-explanatory rather than a
+                // bare dash — čl. 37 requires a prethodna cena on these types.
+                Some("Nema prethodne cene".to_string())
             } else {
                 None
             };
@@ -1090,6 +1095,27 @@ mod tests {
                 .expect("manual row");
             assert!(manual.needs_attention);
             assert_eq!(manual.attention_reason.as_deref(), Some("Ručni unos"));
+        });
+    }
+
+    #[test]
+    fn correction_flags_snizenje_without_prethodna_cena_with_a_reason() {
+        with_db("correction_none_snizenje", |conn| {
+            seed_product(conn, 1, "Cipele", 800000, "2026-07-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, activated_at, created_at, updated_at)
+                 VALUES (1, 'akcijska_prodaja', 'active', '2026-07-17T00:00:00Z', '2026-07-20T00:00:00Z', 'two_prices', '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, anchor_status)
+                 VALUES (1, 1, 700000, 'none');",
+            )
+            .expect("seed");
+            let report = assemble_correction_report(conn).expect("assemble");
+            let row = &report.rows[0];
+            assert!(
+                row.needs_attention,
+                "a sniženje with no prethodna cena must be flagged"
+            );
+            assert_eq!(row.attention_reason.as_deref(), Some("Nema prethodne cene"));
         });
     }
 

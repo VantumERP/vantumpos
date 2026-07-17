@@ -800,7 +800,7 @@ export interface ExportReportRequest {
 export interface ExportedFile {
   fileName: string;
   path: string;
-  mimeType: "text/csv";
+  mimeType: "text/csv" | "text/html";
   rowCount: number;
 }
 

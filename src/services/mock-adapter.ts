@@ -1074,7 +1074,7 @@ export function createMockServices(): PosServices {
         return {
           fileName: `dokaz-cene-kampanja-${campaignId}.html`,
           path: `mock://exports/dokaz-cene-kampanja-${campaignId}.html`,
-          mimeType: "text/csv" as const,
+          mimeType: "text/html" as const,
           rowCount: 0,
         };
       },
@@ -1082,7 +1082,7 @@ export function createMockServices(): PosServices {
         return {
           fileName: `etikete-kampanja-${campaignId}.html`,
           path: `mock://exports/etikete-kampanja-${campaignId}.html`,
-          mimeType: "text/csv" as const,
+          mimeType: "text/html" as const,
           rowCount: 0,
         };
       },
@@ -1093,7 +1093,7 @@ export function createMockServices(): PosServices {
         return {
           fileName: "ispravke-etiketa.html",
           path: "mock://exports/ispravke-etiketa.html",
-          mimeType: "text/csv" as const,
+          mimeType: "text/html" as const,
           rowCount: 0,
         };
       },

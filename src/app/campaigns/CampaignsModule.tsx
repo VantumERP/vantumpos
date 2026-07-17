@@ -855,7 +855,13 @@ function CorrectionPanel({
                     ? "—"
                     : formatRsd(row.prethodnaCenaMinor)}
                 </TableCell>
-                <TableCell>{row.attentionReason ?? "—"}</TableCell>
+                <TableCell
+                  className={
+                    row.needsAttention ? "font-medium text-destructive" : undefined
+                  }
+                >
+                  {row.attentionReason ?? (row.needsAttention ? "Proveriti" : "—")}
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
