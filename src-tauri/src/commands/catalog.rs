@@ -52,6 +52,15 @@ pub struct SaveProductRequest {
     pub minimum_stock_milli: i64,
     pub allow_negative_stock: bool,
     pub active: bool,
+    /// Lako kvarljiva roba. Not a price field: it describes the goods, so a
+    /// change here never enters `price_history`. It suppresses the čl. 37
+    /// st. 3 computation instead — the log's prices for perishables reflect
+    /// end-of-life markdowns, not the „najniža cena" a shopper compares
+    /// against, so `campaigns.rs` demands a manual anchor for these.
+    #[serde(default)]
+    pub perishable: bool,
+    #[serde(default)]
+    pub perishable_justification: Option<String>,
     pub external_source: Option<ProductExternalSourceRequest>,
 }
 
@@ -130,6 +139,8 @@ pub struct ProductSummary {
     pub current_stock_milli: i64,
     pub allow_negative_stock: bool,
     pub active: bool,
+    pub perishable: bool,
+    pub perishable_justification: Option<String>,
     pub external_source: Option<ProductExternalSource>,
 }
 
@@ -154,6 +165,8 @@ struct NormalizedProductRequest {
     minimum_stock_milli: i64,
     allow_negative_stock: bool,
     active: bool,
+    perishable: bool,
+    perishable_justification: Option<String>,
     external_source: Option<ProductExternalSourceRequest>,
 }
 
@@ -373,6 +386,8 @@ pub fn create_product(
             minimum_stock_milli,
             allow_negative_stock,
             active,
+            perishable,
+            perishable_justification,
             external_source_provider,
             external_source_label,
             external_source_barcode,
@@ -381,7 +396,7 @@ pub fn create_product(
             created_at,
             updated_at
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?19)",
         params![
             normalized.name,
             normalized.sku,
@@ -394,6 +409,8 @@ pub fn create_product(
             normalized.minimum_stock_milli,
             bool_to_i64(normalized.allow_negative_stock),
             bool_to_i64(normalized.active),
+            bool_to_i64(normalized.perishable),
+            normalized.perishable_justification,
             normalized
                 .external_source
                 .as_ref()
@@ -479,13 +496,15 @@ pub fn update_product(
              minimum_stock_milli = ?9,
              allow_negative_stock = ?10,
              active = ?11,
-             external_source_provider = ?12,
-             external_source_label = ?13,
-             external_source_barcode = ?14,
-             external_source_fetched_at = ?15,
-             external_source_accepted_fields_json = ?16,
-             updated_at = ?17
-         WHERE id = ?18",
+             perishable = ?12,
+             perishable_justification = ?13,
+             external_source_provider = ?14,
+             external_source_label = ?15,
+             external_source_barcode = ?16,
+             external_source_fetched_at = ?17,
+             external_source_accepted_fields_json = ?18,
+             updated_at = ?19
+         WHERE id = ?20",
         params![
             normalized.name,
             normalized.sku,
@@ -498,6 +517,8 @@ pub fn update_product(
             normalized.minimum_stock_milli,
             bool_to_i64(normalized.allow_negative_stock),
             bool_to_i64(normalized.active),
+            bool_to_i64(normalized.perishable),
+            normalized.perishable_justification,
             normalized
                 .external_source
                 .as_ref()
@@ -761,7 +782,9 @@ pub fn list_products_for_connection(
              p.external_source_label,
              p.external_source_barcode,
              p.external_source_fetched_at,
-             p.external_source_accepted_fields_json
+             p.external_source_accepted_fields_json,
+             p.perishable,
+             p.perishable_justification
          FROM products p
          JOIN tax_rates tr ON tr.id = p.tax_rate_id
          LEFT JOIN categories c ON c.id = p.category_id
@@ -831,7 +854,9 @@ fn product_by_id_for_connection(
                  p.external_source_label,
                  p.external_source_barcode,
                  p.external_source_fetched_at,
-                 p.external_source_accepted_fields_json
+                 p.external_source_accepted_fields_json,
+                 p.perishable,
+                 p.perishable_justification
              FROM products p
              JOIN tax_rates tr ON tr.id = p.tax_rate_id
              LEFT JOIN categories c ON c.id = p.category_id
@@ -1024,6 +1049,8 @@ fn normalize_product_request(
     let barcode = normalized_optional_text(request.barcode.as_deref());
     let unit_of_measure = request.unit_of_measure.trim().to_string();
     let external_source = normalize_external_source(request.external_source)?;
+    let perishable_justification =
+        normalized_optional_text(request.perishable_justification.as_deref());
 
     if name.is_empty() {
         return Err(validation_error("Naziv je obavezan.", "name"));
@@ -1069,6 +1096,16 @@ fn normalize_product_request(
         ));
     }
 
+    // Marking goods perishable switches off the čl. 37 st. 3 computation for
+    // every campaign that touches them, so the reason has to be on the record
+    // rather than in the head of whoever ticked the box.
+    if request.perishable && perishable_justification.is_none() {
+        return Err(validation_error(
+            "Za lako kvarljivu robu unesite obrazloženje.",
+            "perishableJustification",
+        ));
+    }
+
     Ok(NormalizedProductRequest {
         name,
         sku,
@@ -1081,6 +1118,13 @@ fn normalize_product_request(
         minimum_stock_milli: request.minimum_stock_milli,
         allow_negative_stock: request.allow_negative_stock,
         active: request.active,
+        perishable: request.perishable,
+        // A justification without the flag is dead text: drop it so the two
+        // columns can never disagree about whether the goods are perishable.
+        perishable_justification: request
+            .perishable
+            .then_some(perishable_justification)
+            .flatten(),
         external_source,
     })
 }
@@ -1104,6 +1148,8 @@ fn product_from_row(row: &Row<'_>) -> rusqlite::Result<ProductSummary> {
         allow_negative_stock: row.get::<_, i64>(14)? == 1,
         active: row.get::<_, i64>(15)? == 1,
         external_source: external_source_from_row(row, 16)?,
+        perishable: row.get::<_, i64>(21)? == 1,
+        perishable_justification: row.get(22)?,
     })
 }
 
@@ -1253,12 +1299,13 @@ mod tests {
     use rusqlite::params;
     use tauri::Manager;
 
-    use crate::app_error::CommandError;
+    use crate::app_error::{AppError, CommandError};
     use crate::commands::catalog::{
         catalog_create_product, catalog_save_category, catalog_update_product, create_product,
-        list_products, lookup_suggestion_from_open_food_facts_json, prethodna_cena, save_category,
-        search_products, set_product_active, update_product, ProductExternalSourceRequest,
-        ProductListQuery, ProductSearchQuery, SaveCategoryRequest, SaveProductRequest,
+        get_product, list_products, lookup_suggestion_from_open_food_facts_json, prethodna_cena,
+        save_category, search_products, set_product_active, update_product,
+        ProductExternalSourceRequest, ProductListQuery, ProductSearchQuery, SaveCategoryRequest,
+        SaveProductRequest,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -1375,6 +1422,8 @@ mod tests {
             minimum_stock_milli: 2000,
             allow_negative_stock: false,
             active: true,
+            perishable: false,
+            perishable_justification: None,
             external_source: None,
         }
     }
@@ -1761,6 +1810,94 @@ mod tests {
                 assert_eq!(updated.current_stock_milli, 3000);
             },
         );
+    }
+
+    #[test]
+    fn create_product_persists_perishable_flag_and_justification() {
+        with_catalog_database(
+            "create_product_persists_perishable_flag_and_justification",
+            |db| {
+                let mut request = product_request("JOG-1L", Some("8600000000034"));
+                request.perishable = true;
+                request.perishable_justification =
+                    Some("  Rok trajanja 7 dana — cena pada pred istek.  ".to_string());
+
+                let product =
+                    create_product(db, request, admin_id(db)).expect("product should create");
+
+                assert!(product.perishable);
+                assert_eq!(
+                    product.perishable_justification.as_deref(),
+                    Some("Rok trajanja 7 dana — cena pada pred istek."),
+                    "justification is trimmed on the way in"
+                );
+
+                let reread = get_product(db, product.id)
+                    .expect("product should read")
+                    .expect("product should exist");
+                assert!(reread.perishable);
+                assert_eq!(
+                    reread.perishable_justification.as_deref(),
+                    Some("Rok trajanja 7 dana — cena pada pred istek.")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn create_product_rejects_perishable_without_justification() {
+        with_catalog_database(
+            "create_product_rejects_perishable_without_justification",
+            |db| {
+                let mut request = product_request("JOG-1L", Some("8600000000034"));
+                request.perishable = true;
+                request.perishable_justification = Some("   ".to_string());
+
+                let error = create_product(db, request, admin_id(db))
+                    .expect_err("perishable without justification should be rejected");
+
+                match error {
+                    AppError::Validation { message, details } => {
+                        assert_eq!(message, "Za lako kvarljivu robu unesite obrazloženje.");
+                        assert_eq!(
+                            details.expect("validation error should name the field")["field"],
+                            "perishableJustification"
+                        );
+                    }
+                    other => panic!("expected a validation error, got {other:?}"),
+                }
+            },
+        );
+    }
+
+    /// The perishable flag describes the goods, not the offer. Flipping it
+    /// must not enter `price_history` — a čl. 37 st. 3 window is built from
+    /// offered PRICES, and a spurious row there would move a shopper-facing
+    /// prethodna cena for a change no shopper ever saw.
+    #[test]
+    fn perishable_flag_change_is_not_a_price_event() {
+        with_catalog_database("perishable_flag_change_is_not_a_price_event", |db| {
+            let created = create_product(
+                db,
+                product_request("JOG-1L", Some("8600000000034")),
+                admin_id(db),
+            )
+            .expect("product should create");
+            let before = price_rows(db, created.id);
+
+            let mut request = product_request("JOG-1L", Some("8600000000034"));
+            request.perishable = true;
+            request.perishable_justification = Some("Kratak rok trajanja.".to_string());
+            let updated = update_product(db, created.id, request, admin_id(db))
+                .expect("product should update");
+
+            assert!(updated.perishable);
+            assert_eq!(
+                price_rows(db, created.id),
+                before,
+                "a perishable flag change is not an offered-price change"
+            );
+        });
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod backup;
 pub mod backup_crypto;
+pub mod campaigns;
 pub mod catalog;
 pub mod health;
 pub mod imports;

@@ -1,14 +1,3 @@
-// The persistence tests now exercise the whole module, so the expectation is
-// fulfilled only OUTSIDE `cfg(test)` — hence the `not(test)` gate. Task 8
-// (command layer) must DELETE this line; an unfulfilled expectation is a
-// clippy error, which is the point.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired up by the campaigns command layer in a later task"
-    )
-)]
 //! Campaign/sniženje domain: the closed four-type entity and its rules.
 //!
 //! Legal authority: `docs/ZOT-36-37-VERIFIED-RULES.md`. Design:
@@ -189,7 +178,8 @@ impl Violation {
 /// `"none"` ONLY for promotivna prodaja (čl. 36 st. 9 defines it against a
 /// *future* regular price, so it has no prethodna cena to anchor against and
 /// must never pass through the st. 3–4 validator).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ItemAnchor {
     pub product_id: i64,
     pub anchor_status: &'static str,
@@ -257,10 +247,12 @@ pub fn validate_shape(input: &CampaignInput) -> Result<Vec<Violation>, AppError>
     };
 
     // h14b — čl. 36 st. 2 t. 3 requires a declared expiry; rasprodaja is the
-    // only type that may run „dok traju zalihe".
+    // only type that may run „dok traju zalihe". The parsed date is carried
+    // alongside its source string so the caps below can run off
+    // `declared_duration_days` itself.
     let end_date = match input.ends_on.as_deref() {
         Some(ends_on) => match parse_rfc3339(ends_on, "endsOn") {
-            Ok(end) => Some(end.date()),
+            Ok(end) => Some((end.date(), ends_on)),
             Err(_) => {
                 violations.push(Violation::new("h14c", MSG_H14C));
                 None
@@ -275,12 +267,18 @@ pub fn validate_shape(input: &CampaignInput) -> Result<Vec<Violation>, AppError>
     };
 
     // h14c — an end before the start is not a duration, so no cap is evaluated.
+    //
+    // The caps below count days through `declared_duration_days` rather than a
+    // second copy of the arithmetic: 60/31/3 are statutory calendar-day counts
+    // (čl. 37 st. 9/10/11, čl. 36 st. 9), and two implementations of that count
+    // could drift apart — leaving the tested one and the enforcing one at odds.
     let duration_days = match (start_date, end_date) {
-        (Some(start), Some(end)) if end < start => {
+        (Some(start), Some((end, _))) if end < start => {
             violations.push(Violation::new("h14c", MSG_H14C));
             None
         }
-        (Some(start), Some(end)) => Some((end - start).whole_days() + 1),
+        // Both strings parsed above, so this cannot fail.
+        (Some(_), Some((_, ends_on))) => Some(declared_duration_days(&input.starts_on, ends_on)?),
         _ => None,
     };
 
@@ -866,7 +864,8 @@ pub fn compute_warnings(
 ///
 /// The split is the point. `hard` is empty ⇒ no rule we can mechanically check
 /// was broken. It is NOT „this promotion is legal".
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ValidationReport {
     pub hard: Vec<Violation>,
     pub warnings: Vec<Violation>,
