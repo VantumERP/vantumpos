@@ -21,7 +21,10 @@
 //! was broken", never "this is legal".
 
 use crate::app_error::AppError;
-use crate::price_history::{compute_prethodna_cena, IncomputableReason, PrethodnaCenaResult};
+use crate::price_history::{
+    compute_prethodna_cena, load_offering_state, record_offered_price_change, IncomputableReason,
+    OfferingState, PrethodnaCenaResult,
+};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Duration, OffsetDateTime};
@@ -78,6 +81,12 @@ const MSG_CAMPAIGN_INVALID: &str = "Kampanja nije ispravna.";
 const MSG_CAMPAIGN_NOT_FOUND: &str = "Kampanja nije pronađena.";
 const MSG_DRAFT_ONLY_UPDATE: &str = "Samo nacrt kampanje može da se menja.";
 const MSG_DRAFT_ONLY_CANCEL: &str = "Samo nacrt kampanje može da se otkaže.";
+const MSG_DRAFT_ONLY_ACTIVATE: &str = "Samo nacrt kampanje može da se aktivira.";
+const MSG_ACTIVE_ONLY_STEP: &str = "Cena artikla može da se menja samo na aktivnoj kampanji.";
+const MSG_ACTIVE_ONLY_END: &str = "Samo aktivna kampanja može da se završi.";
+const MSG_ITEM_NOT_IN_CAMPAIGN: &str = "Artikal nije u ovoj kampanji.";
+const MSG_NO_RETURN_PRICE: &str =
+    "Za ovaj artikal nije poznata cena na koju se vraća — unesite je ručno.";
 
 /// čl. 37 st. 8 caps sezonsko at two per calendar year, counted by START date.
 fn msg_h3(year: i32) -> String {
@@ -661,6 +670,17 @@ fn validated_anchors(
 /// run it INSIDE their transaction so the check and the write cannot straddle a
 /// concurrent activation.
 fn require_draft(conn: &Connection, id: i64, message: &str) -> Result<(), AppError> {
+    require_status(conn, id, "draft", message)
+}
+
+/// Reads the status inside the caller's transaction so the gate and the write
+/// cannot straddle a concurrent lifecycle transition.
+fn require_status(
+    conn: &Connection,
+    id: i64,
+    expected: &str,
+    message: &str,
+) -> Result<(), AppError> {
     let status: Option<String> = conn
         .query_row(
             "SELECT status FROM campaigns WHERE id = ?1",
@@ -669,7 +689,7 @@ fn require_draft(conn: &Connection, id: i64, message: &str) -> Result<(), AppErr
         )
         .optional()?;
     let status = status.ok_or_else(|| AppError::not_found(MSG_CAMPAIGN_NOT_FOUND))?;
-    if status == "draft" {
+    if status == expected {
         Ok(())
     } else {
         Err(AppError::business("invalid_state", message))
@@ -818,6 +838,299 @@ pub fn cancel_campaign(
     require_draft(&tx, id, MSG_DRAFT_ONLY_CANCEL)?;
     tx.execute(
         "UPDATE campaigns SET status = 'cancelled', updated_at = ?2 WHERE id = ?1",
+        params![id, now],
+    )?;
+    tx.commit()?;
+
+    get_campaign(conn, id, now)
+}
+
+/// One product's return price at the end of a campaign.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndOverride {
+    pub product_id: i64,
+    pub return_price_minor: i64,
+}
+
+/// Rebuilds the `CampaignInput` that the stored campaign represents, so
+/// activation can re-run the whole rule set against today's world.
+///
+/// Only a MANUAL anchor round-trips as an *input*: a computed one is derived
+/// from `price_history`, and feeding it back in would launder a stale
+/// computation into a user-attested figure (čl. 37 st. 5).
+fn load_input(conn: &Connection, id: i64) -> Result<CampaignInput, AppError> {
+    let input: Option<CampaignInput> = conn
+        .query_row(
+            "SELECT campaign_type, starts_on, ends_on, display_mode, headline_percent,
+                    rasprodaja_ground, special_conditions, reduced_utility_reason,
+                    marketing_label, season_attested, separation_attested
+             FROM campaigns
+             WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(CampaignInput {
+                    campaign_type: row.get(0)?,
+                    starts_on: row.get(1)?,
+                    ends_on: row.get(2)?,
+                    display_mode: row.get(3)?,
+                    headline_percent: row.get(4)?,
+                    rasprodaja_ground: row.get(5)?,
+                    special_conditions: row.get(6)?,
+                    reduced_utility_reason: row.get(7)?,
+                    marketing_label: row.get(8)?,
+                    season_attested: row.get::<_, i64>(9)? == 1,
+                    separation_attested: row.get::<_, i64>(10)? == 1,
+                    items: Vec::new(),
+                })
+            },
+        )
+        .optional()?;
+    let mut input = input.ok_or_else(|| AppError::not_found(MSG_CAMPAIGN_NOT_FOUND))?;
+
+    let mut statement = conn.prepare(
+        "SELECT product_id, campaign_price_minor, prethodna_cena_minor, anchor_status,
+                anchor_justification, future_regular_price_minor
+         FROM campaign_items
+         WHERE campaign_id = ?1
+         ORDER BY id",
+    )?;
+    input.items = statement
+        .query_map(params![id], |row| {
+            let stored_anchor: Option<i64> = row.get(2)?;
+            let anchor_status: String = row.get(3)?;
+            Ok(CampaignItemInput {
+                product_id: row.get(0)?,
+                campaign_price_minor: row.get(1)?,
+                manual_prethodna_minor: match anchor_status.as_str() {
+                    "manual" => stored_anchor,
+                    _ => None,
+                },
+                anchor_justification: row.get(4)?,
+                future_regular_price_minor: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(input)
+}
+
+/// Moves one product's offered price and logs the move in the SAME transaction.
+/// Nothing in this module may touch `products.sale_price_minor` without going
+/// through here: a price the till charges but the log does not carry destroys
+/// the evidence that čl. 37 st. 3–4 requires the shop to keep.
+fn move_offered_price(
+    tx: &Transaction<'_>,
+    product_id: i64,
+    price_minor: i64,
+    active: bool,
+    source: &str,
+    acting_user_id: i64,
+    now: &str,
+) -> Result<OfferingState, AppError> {
+    let before =
+        load_offering_state(tx, product_id)?.ok_or_else(|| AppError::not_found(MSG_H14F))?;
+    tx.execute(
+        "UPDATE products SET sale_price_minor = ?2, active = ?3, updated_at = ?4 WHERE id = ?1",
+        params![product_id, price_minor, i64::from(active), now],
+    )?;
+    record_offered_price_change(
+        tx,
+        product_id,
+        Some(before),
+        OfferingState {
+            active,
+            price_minor,
+        },
+        source,
+        Some(acting_user_id),
+        now,
+    )?;
+
+    Ok(before)
+}
+
+/// Announces the campaign: re-validates, then moves every item's till price in
+/// ONE transaction (čl. 36 st. 2 — the offer starts as a whole; a half-applied
+/// campaign would advertise prices the till does not charge).
+///
+/// Re-validation is NOT a re-snapshot. The world may have changed since the
+/// draft was written — the quota may be gone, an item may have been pulled —
+/// so every rule runs again; but the stored anchors stand exactly as the last
+/// draft edit snapshotted them. From this commit on they are frozen: čl. 37
+/// st. 5 pins the prethodna cena to what was true when the campaign was set,
+/// and no later path in this module writes that column.
+pub fn activate_campaign(
+    conn: &mut Connection,
+    id: i64,
+    acting_user_id: i64,
+    now: &str,
+) -> Result<CampaignView, AppError> {
+    let tx = conn.transaction()?;
+    require_draft(&tx, id, MSG_DRAFT_ONLY_ACTIVATE)?;
+    let input = load_input(&tx, id)?;
+    // Validates only — the returned snapshot is deliberately discarded.
+    validated_anchors(&tx, &input, Some(id))?;
+
+    for item in &input.items {
+        // Promotivna items go active here — activation IS the first offering
+        // (čl. 36 st. 9). Sniženje items are already active (h13b).
+        let before = move_offered_price(
+            &tx,
+            item.product_id,
+            item.campaign_price_minor,
+            true,
+            "campaign_start",
+            acting_user_id,
+            now,
+        )?;
+        // What `end_campaign` returns the price to, absent an override.
+        tx.execute(
+            "UPDATE campaign_items SET pre_campaign_price_minor = ?3
+             WHERE campaign_id = ?1 AND product_id = ?2",
+            params![id, item.product_id, before.price_minor],
+        )?;
+    }
+
+    tx.execute(
+        "UPDATE campaigns SET status = 'active', activated_at = ?2, updated_at = ?2 WHERE id = ?1",
+        params![id, now],
+    )?;
+    tx.commit()?;
+
+    get_campaign(conn, id, now)
+}
+
+/// A markdown step on a running campaign (memo §2.7 worked example (b)).
+///
+/// The step is checked against the STORED anchor and never recomputes it. A
+/// lazy recompute here would let the campaign's own earlier price into the
+/// window and ratchet the displayed prethodna cena down toward the current
+/// price — the memo names that as a breach of st. 5 that understates the
+/// discount. This function does not write `prethodna_cena_minor`.
+pub fn adjust_item_price(
+    conn: &mut Connection,
+    campaign_id: i64,
+    product_id: i64,
+    new_price_minor: i64,
+    acting_user_id: i64,
+    now: &str,
+) -> Result<CampaignView, AppError> {
+    let tx = conn.transaction()?;
+    require_status(&tx, campaign_id, "active", MSG_ACTIVE_ONLY_STEP)?;
+
+    let item: Option<(String, Option<i64>)> = tx
+        .query_row(
+            "SELECT campaigns.campaign_type, campaign_items.prethodna_cena_minor
+             FROM campaign_items
+             JOIN campaigns ON campaigns.id = campaign_items.campaign_id
+             WHERE campaign_items.campaign_id = ?1 AND campaign_items.product_id = ?2",
+            params![campaign_id, product_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (campaign_type, prethodna_cena_minor) =
+        item.ok_or_else(|| AppError::not_found(MSG_ITEM_NOT_IN_CAMPAIGN))?;
+
+    // h9 — čl. 37 st. 6/8/10, against the frozen anchor. Promotivna has no
+    // prethodna cena to be below (čl. 36 st. 9), so the rule does not apply.
+    if campaign_type != TYPE_PROMOTIVNA {
+        if let Some(anchor) = prethodna_cena_minor {
+            if new_price_minor >= anchor {
+                return Err(AppError::validation(
+                    MSG_H9,
+                    serde_json::json!({
+                        "violations": [Violation::for_product("h9", MSG_H9, product_id)]
+                    }),
+                ));
+            }
+        }
+    }
+
+    move_offered_price(
+        &tx,
+        product_id,
+        new_price_minor,
+        true,
+        "campaign_step",
+        acting_user_id,
+        now,
+    )?;
+    tx.execute(
+        "UPDATE campaign_items SET campaign_price_minor = ?3
+         WHERE campaign_id = ?1 AND product_id = ?2",
+        params![campaign_id, product_id, new_price_minor],
+    )?;
+    tx.commit()?;
+
+    get_campaign(conn, campaign_id, now)
+}
+
+/// Ends the campaign and returns every item's till price, in ONE transaction.
+///
+/// The return price is the override if the user gave one, else the declared
+/// future regular price for promotivna (čl. 36 st. 9 — its expiry transitions
+/// TO that price; h7b makes its absence impossible), else the price the item
+/// carried before activation. There is deliberately no auto-end: prices move
+/// only when a human ends the campaign.
+pub fn end_campaign(
+    conn: &mut Connection,
+    id: i64,
+    overrides: &[EndOverride],
+    acting_user_id: i64,
+    now: &str,
+) -> Result<CampaignView, AppError> {
+    let tx = conn.transaction()?;
+    require_status(&tx, id, "active", MSG_ACTIVE_ONLY_END)?;
+
+    let campaign_type: String = tx.query_row(
+        "SELECT campaign_type FROM campaigns WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+
+    let mut statement = tx.prepare(
+        "SELECT product_id, future_regular_price_minor, pre_campaign_price_minor
+         FROM campaign_items
+         WHERE campaign_id = ?1
+         ORDER BY id",
+    )?;
+    let items = statement
+        .query_map(params![id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for (product_id, future_regular_price_minor, pre_campaign_price_minor) in items {
+        let return_price_minor = overrides
+            .iter()
+            .find(|override_| override_.product_id == product_id)
+            .map(|override_| override_.return_price_minor)
+            .or(if campaign_type == TYPE_PROMOTIVNA {
+                future_regular_price_minor
+            } else {
+                pre_campaign_price_minor
+            })
+            .ok_or_else(|| AppError::business("invalid_state", MSG_NO_RETURN_PRICE))?;
+
+        move_offered_price(
+            &tx,
+            product_id,
+            return_price_minor,
+            true,
+            "campaign_end",
+            acting_user_id,
+            now,
+        )?;
+    }
+
+    tx.execute(
+        "UPDATE campaigns SET status = 'ended', ended_at = ?2, updated_at = ?2 WHERE id = ?1",
         params![id, now],
     )?;
     tx.commit()?;
@@ -1416,5 +1729,231 @@ mod tests {
             !is_overdue("active", None, "2026-07-21T00:00:00Z"),
             "no declared end, nothing to be past"
         );
+    }
+
+    // Memo worked example (b) — ZOT-36-37-VERIFIED-RULES.md §2.7.
+    // JAKNA-Z-L applied/offered: 12.900 (15.05–20.06), 11.900 (21.06–30.06),
+    // 12.900 (01.07→). Sezonsko starts 05.07.2026: anchor = 11.900, FROZEN
+    // across markdown steps 9.900 → 8.900 → 7.500. Both named wrong
+    // implementations must be impossible: 12.900 ("price at first reduction")
+    // and lazy recompute (which would yield 9.900 at step 2).
+    #[test]
+    fn worked_example_b_progressive_anchor_snapshots_and_freezes_at_11900() {
+        with_campaign_db_mut("worked_example_b", |conn| {
+            seed_product(conn, 1, 1290000, true, "2026-05-15T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at) VALUES
+                 (1, '2026-06-21T00:00:00Z', 1190000, 'update', '2026-06-21T00:00:00Z'),
+                 (1, '2026-07-01T00:00:00Z', 1290000, 'update', '2026-07-01T00:00:00Z');",
+            )
+            .expect("timeline");
+
+            let mut input = base_input(TYPE_SEZONSKO);
+            input.starts_on = "2026-07-05T00:00:00Z".to_string();
+            input.ends_on = Some("2026-09-02T00:00:00Z".to_string()); // exactly 60 days
+            input.items[0].campaign_price_minor = 990000; // step 1: 9.900
+
+            let created = create_campaign(conn, &input, 1, "2026-07-04T00:00:00Z").expect("create");
+            assert_eq!(
+                created.items[0].prethodna_cena_minor,
+                Some(1190000),
+                "anchor is the MIN, not the first-reduction price"
+            );
+
+            let activated =
+                activate_campaign(conn, created.id, 1, "2026-07-05T00:00:00Z").expect("activate");
+            assert_eq!(activated.status, "active");
+
+            // Till price now 9.900 with campaign_start provenance.
+            let (till, source): (i64, String) = conn
+                .query_row(
+                    "SELECT p.sale_price_minor, ph.source FROM products p
+                     JOIN price_history ph ON ph.product_id = p.id
+                     WHERE p.id = 1 ORDER BY ph.id DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("till state");
+            assert_eq!((till, source.as_str()), (990000, "campaign_start"));
+
+            // Steps 2 and 3: the anchor NEVER moves.
+            let after_step2 =
+                adjust_item_price(conn, created.id, 1, 890000, 1, "2026-07-20T00:00:00Z")
+                    .expect("step 2");
+            assert_eq!(
+                after_step2.items[0].prethodna_cena_minor,
+                Some(1190000),
+                "frozen — lazy recompute would say 990000"
+            );
+            let after_step3 =
+                adjust_item_price(conn, created.id, 1, 750000, 1, "2026-08-05T00:00:00Z")
+                    .expect("step 3");
+            assert_eq!(after_step3.items[0].prethodna_cena_minor, Some(1190000));
+
+            // A step at-or-above the anchor is rejected.
+            let error = adjust_item_price(conn, created.id, 1, 1190000, 1, "2026-08-06T00:00:00Z")
+                .expect_err("must stay below the anchor");
+            assert_eq!(error.code(), "validation_error");
+
+            // End: default return = pre-campaign price (12.900).
+            let ended =
+                end_campaign(conn, created.id, &[], 1, "2026-09-02T00:00:00Z").expect("end");
+            assert_eq!(ended.status, "ended");
+            let (till, source): (i64, String) = conn
+                .query_row(
+                    "SELECT p.sale_price_minor, ph.source FROM products p
+                     JOIN price_history ph ON ph.product_id = p.id
+                     WHERE p.id = 1 ORDER BY ph.id DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("till state");
+            assert_eq!((till, source.as_str()), (1290000, "campaign_end"));
+        });
+    }
+
+    // Memo worked example (c1): genuine first introduction -> promotivna.
+    // No anchor, ≤60 days, declared future regular price, first offering IS the
+    // activation, expiry transitions to the declared regular price.
+    #[test]
+    fn worked_example_c1_promotivna_first_offer_and_transition() {
+        with_campaign_db_mut("worked_example_c1", |conn| {
+            seed_product(conn, 2, 890000, false, "2026-07-01T00:00:00Z"); // inactive, never offered
+
+            let mut input = base_input(TYPE_PROMOTIVNA);
+            input.season_attested = false;
+            input.starts_on = "2026-07-01T00:00:00Z".to_string();
+            input.ends_on = Some("2026-08-29T00:00:00Z".to_string()); // 60 days
+            input.items = vec![CampaignItemInput {
+                product_id: 2,
+                campaign_price_minor: 890000,
+                manual_prethodna_minor: None,
+                anchor_justification: None,
+                future_regular_price_minor: Some(1090000),
+            }];
+
+            let created = create_campaign(conn, &input, 1, "2026-06-30T00:00:00Z").expect("create");
+            assert_eq!(created.items[0].anchor_status, "none");
+            assert_eq!(created.items[0].prethodna_cena_minor, None);
+
+            activate_campaign(conn, created.id, 1, "2026-07-01T00:00:00Z").expect("activate");
+            // First offering: product is now active and its FIRST history row is campaign_start.
+            let (active, first_source): (i64, String) = conn
+                .query_row(
+                    "SELECT p.active, (SELECT source FROM price_history WHERE product_id = 2 ORDER BY id LIMIT 1)
+                     FROM products p WHERE p.id = 2",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("state");
+            assert_eq!((active, first_source.as_str()), (1, "campaign_start"));
+
+            end_campaign(conn, created.id, &[], 1, "2026-08-29T00:00:00Z").expect("end");
+            let till: i64 = conn
+                .query_row(
+                    "SELECT sale_price_minor FROM products WHERE id = 2",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("price");
+            assert_eq!(
+                till, 1090000,
+                "expiry transitions to the declared regular price"
+            );
+        });
+    }
+
+    #[test]
+    fn activation_re_validates_the_changed_world() {
+        with_campaign_db_mut("activate_revalidates", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_SEZONSKO);
+            input.items[0].campaign_price_minor = 900000;
+            let created = create_campaign(conn, &input, 1, "2026-06-01T00:00:00Z").expect("create");
+
+            // Two other seasonal campaigns get ACTIVATED after this draft was written.
+            conn.execute_batch(
+                "INSERT INTO campaigns (campaign_type, status, starts_on, ends_on, season_attested, activated_at, created_at, updated_at)
+                 VALUES
+                 ('sezonsko_snizenje','active','2026-07-01T00:00:00Z','2026-08-01T00:00:00Z',1,'2026-07-01T00:00:00Z','2026-06-20T00:00:00Z','2026-06-20T00:00:00Z'),
+                 ('sezonsko_snizenje','ended','2026-01-02T00:00:00Z','2026-02-01T00:00:00Z',1,'2026-01-02T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
+            )
+            .expect("seed rivals");
+
+            let error = activate_campaign(conn, created.id, 1, "2026-07-05T00:00:00Z")
+                .expect_err("quota is now exhausted — activation must re-validate");
+            assert_eq!(error.code(), "validation_error");
+        });
+    }
+
+    #[test]
+    fn activation_is_atomic_across_items() {
+        with_campaign_db_mut("activate_atomic", |conn| {
+            seed_product(conn, 1, 1000000, true, "2026-01-01T00:00:00Z");
+            seed_product(conn, 2, 800000, true, "2026-01-01T00:00:00Z");
+            let mut input = base_input(TYPE_AKCIJSKA);
+            input.items = vec![
+                CampaignItemInput {
+                    product_id: 1,
+                    campaign_price_minor: 900000,
+                    manual_prethodna_minor: None,
+                    anchor_justification: None,
+                    future_regular_price_minor: None,
+                },
+                CampaignItemInput {
+                    product_id: 2,
+                    campaign_price_minor: 700000,
+                    manual_prethodna_minor: None,
+                    anchor_justification: None,
+                    future_regular_price_minor: None,
+                },
+            ];
+            let created = create_campaign(conn, &input, 1, "2026-07-01T00:00:00Z").expect("create");
+            // Sabotage item 2 so activation's write-through fails mid-way.
+            //
+            // The plan sabotaged by DELETEing product 2, but `campaign_items`
+            // has a FOREIGN KEY to `products`, so that delete is rejected
+            // outright — and even if it landed it would fail in RE-VALIDATION
+            // (h14f), before the write loop ever ran, proving nothing about
+            // atomicity. This trigger instead aborts the UPDATE for item 2
+            // AFTER item 1's price has already moved inside the transaction,
+            // which is the actual mid-way failure the invariant is about.
+            conn.execute_batch(
+                "CREATE TRIGGER sabotage_item_two BEFORE UPDATE ON products
+                 WHEN NEW.id = 2
+                 BEGIN SELECT RAISE(ABORT, 'sabotage'); END;",
+            )
+            .expect("sabotage");
+
+            let result = activate_campaign(conn, created.id, 1, "2026-07-05T00:00:00Z");
+            // Specifically the sabotaged WRITE must be what failed. Asserting
+            // only `is_err` would keep passing if this ever degraded into a
+            // validation rejection, which would exercise no rollback at all.
+            assert_eq!(
+                result
+                    .expect_err("sabotaged write must fail activation")
+                    .code(),
+                "database_error",
+                "the failure must come from item 2's write, not from validation"
+            );
+
+            // NOTHING moved: product 1 keeps its price and no campaign_start rows exist.
+            let price: i64 = conn
+                .query_row(
+                    "SELECT sale_price_minor FROM products WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("price");
+            assert_eq!(price, 1000000);
+            let starts: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM price_history WHERE source = 'campaign_start'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count");
+            assert_eq!(starts, 0, "activation must be all-or-nothing");
+        });
     }
 }
