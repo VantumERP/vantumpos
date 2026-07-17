@@ -223,4 +223,146 @@ describe("CatalogModule", () => {
       await screen.findByText("Nema evidencije cena za ovaj artikal."),
     ).toBeInTheDocument();
   });
+
+  // čl. 37 st. 3's carve-out is from the *definition* of prethodna cena, not
+  // from st. 2's duty to display one (ZOT-36-37-VERIFIED-RULES.md §2.6). So the
+  // flag opens a manual-entry path with a recorded justification; it never
+  // suppresses anything. Default FALSE is the stricter rule (memo §5.5).
+  it("reveals a justification field when the perishable flag is checked", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+
+    render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+    );
+
+    expect(screen.queryByLabelText("Obrazloženje")).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Lako kvarljiva roba / kratak rok trajanja",
+      }),
+    );
+
+    expect(await screen.findByLabelText("Obrazloženje")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Za kvarljivu robu prethodna cena se unosi ručno pri sniženju (čl. 37 st. 3).",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("requires a justification before saving a perishable article", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+    render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Lako kvarljiva roba / kratak rok trajanja",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+    expect(
+      await screen.findByText("Obrazloženje je obavezno za kvarljivu robu."),
+    ).toBeInTheDocument();
+    expect(updateProduct).not.toHaveBeenCalled();
+  });
+
+  it("sends the perishable flag and justification on save", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+    render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Lako kvarljiva roba / kratak rok trajanja",
+      }),
+    );
+    await user.type(
+      await screen.findByLabelText("Obrazloženje"),
+      "Svež proizvod, rok trajanja 5 dana.",
+    );
+    await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+    await waitFor(() => {
+      expect(updateProduct).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          perishable: true,
+          perishableJustification: "Svež proizvod, rok trajanja 5 dana.",
+        }),
+      );
+    });
+  });
+
+  it("round-trips the perishable flag back into the form after save", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+
+    render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Lako kvarljiva roba / kratak rok trajanja",
+      }),
+    );
+    await user.type(
+      await screen.findByLabelText("Obrazloženje"),
+      "Kratak rok trajanja.",
+    );
+    await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+    );
+
+    expect(
+      await screen.findByRole("checkbox", {
+        name: "Lako kvarljiva roba / kratak rok trajanja",
+      }),
+    ).toBeChecked();
+    expect(await screen.findByLabelText("Obrazloženje")).toHaveValue(
+      "Kratak rok trajanja.",
+    );
+  });
+
+  it("sends perishable false when the flag is left unchecked", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+    render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+    await waitFor(() => {
+      expect(updateProduct).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          perishable: false,
+          perishableJustification: null,
+        }),
+      );
+    });
+  });
 });

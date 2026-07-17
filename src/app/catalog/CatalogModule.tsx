@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/empty";
 import {
   Field,
+  FieldDescription,
   FieldError,
   FieldGroup,
   FieldLabel,
@@ -106,6 +107,8 @@ interface ProductFormState {
   minimumStock: string;
   allowNegativeStock: boolean;
   active: boolean;
+  perishable: boolean;
+  perishableJustification: string;
   externalSource: ProductExternalSource | null;
 }
 
@@ -151,6 +154,10 @@ const EMPTY_PRODUCT_FORM: ProductFormState = {
   minimumStock: "0",
   allowNegativeStock: false,
   active: true,
+  // Default FALSE is the stricter rule: an unflagged article keeps the čl. 37
+  // st. 3 computation (memo §5.5). Never inferred from category.
+  perishable: false,
+  perishableJustification: "",
   externalSource: null,
 };
 
@@ -310,6 +317,8 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
       minimumStock: quantityInput(product.minimumStockMilli),
       allowNegativeStock: product.allowNegativeStock,
       active: product.active,
+      perishable: product.perishable,
+      perishableJustification: product.perishableJustification ?? "",
       externalSource: product.externalSource ?? null,
     });
     setProductSheetOpen(true);
@@ -1446,6 +1455,44 @@ function ProductSheet({
                         Aktivan artikal
                       </FieldLabel>
                     </Field>
+                    <Field orientation="horizontal">
+                      <Checkbox
+                        id="product-perishable"
+                        checked={form.perishable}
+                        onCheckedChange={(checked) =>
+                          onFormChange({
+                            ...form,
+                            perishable: Boolean(checked),
+                            perishableJustification: checked
+                              ? form.perishableJustification
+                              : "",
+                          })
+                        }
+                      />
+                      <FieldLabel htmlFor="product-perishable">
+                        Lako kvarljiva roba / kratak rok trajanja
+                      </FieldLabel>
+                    </Field>
+                    {form.perishable ? (
+                      <>
+                        <TextField
+                          error={errors.perishableJustification}
+                          id="product-perishable-justification"
+                          label="Obrazloženje"
+                          value={form.perishableJustification}
+                          onChange={(value) =>
+                            onFormChange({
+                              ...form,
+                              perishableJustification: value,
+                            })
+                          }
+                        />
+                        <FieldDescription>
+                          Za kvarljivu robu prethodna cena se unosi ručno pri
+                          sniženju (čl. 37 st. 3).
+                        </FieldDescription>
+                      </>
+                    ) : null}
                   </FieldGroup>
                 </div>
               </FieldGroup>
@@ -2010,6 +2057,14 @@ function validateProductForm(form: ProductFormState): ProductFieldErrors {
     errors.minimumStock = commandMessage(error, "Minimalni lager nije ispravan.");
   }
 
+  // The carve-out switches off the computation, not st. 2's display duty, and
+  // the law names no substitute method — so the merchant's reason for claiming
+  // it must be on record before a campaign can lean on a manual anchor.
+  if (form.perishable && !form.perishableJustification.trim()) {
+    errors.perishableJustification =
+      "Obrazloženje je obavezno za kvarljivu robu.";
+  }
+
   return errors;
 }
 
@@ -2028,10 +2083,13 @@ function productRequest(form: ProductFormState): SaveProductRequest {
     minimumStockMilli: parseQuantityInput(form.minimumStock),
     allowNegativeStock: form.allowNegativeStock,
     active: form.active,
-    // The form controls arrive in the catalog perishable UI task; until then
-    // the request carries the backend's own default explicitly.
-    perishable: false,
-    perishableJustification: null,
+    perishable: form.perishable,
+    // Clearing the flag drops the justification: a stale reason on a
+    // non-perishable article would be a false record of why the computation
+    // was waived.
+    perishableJustification: form.perishable
+      ? form.perishableJustification.trim()
+      : null,
     externalSource: form.externalSource,
   };
 }
