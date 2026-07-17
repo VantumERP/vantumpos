@@ -456,6 +456,123 @@ pub fn render_evidence_html(evidence: &CampaignEvidence) -> String {
     html
 }
 
+/// Integer floor discount percentage from the frozen anchor: `(anchor − price)
+/// × 100 / anchor`. Rust integer division truncates toward zero (floor for the
+/// normal `anchor ≥ price` case), which understates the discount — the legally
+/// safe direction, never overstating (čl. 37 st. 11's percentage substitution).
+/// Guards `anchor > 0` (else 0) so a missing/zero anchor cannot divide by zero.
+fn discount_percent(anchor: i64, price: i64) -> i64 {
+    if anchor > 0 {
+        (anchor - price) * 100 / anchor
+    } else {
+        0
+    }
+}
+
+/// Renders the shelf-label sheet: one card per article, branching on the
+/// campaign's type and display mode.
+///
+/// - `percentage` display (only reachable for a declared ≤3-day akcijska, 6b
+///   H6): the card shows only `-N%` and the article name — never two prices
+///   (čl. 37 st. 11's substitution). The `%` is taken from the frozen anchor.
+/// - otherwise **two prices**: the struck-through `Prethodna cena` (anchor) plus
+///   the `Nova cena` (čl. 37 st. 2).
+/// - `rasprodaja`: where a two-price card shows the end date, a rasprodaja card
+///   (`ends_on` NULL) reads „dok traju zalihe"; any `reduced_utility_reason` is
+///   printed (čl. 36 st. 3).
+/// - `promotivna` items (`anchor_status == "none"`): `Uvodna cena` plus the
+///   future `Redovna cena po isteku` — never a prethodna cena.
+///
+/// Self-contained HTML, grid layout via inline CSS, no `<script>`, no
+/// QR/PIB/brojač; a footer marks it non-fiscal.
+pub fn render_labels_html(evidence: &CampaignEvidence) -> String {
+    let mut html = String::new();
+    html.push_str("<!doctype html>\n<html lang=\"sr-Latn\">\n<head>\n");
+    html.push_str("<meta charset=\"utf-8\">\n");
+    html.push_str("<title>Etikete</title>\n");
+    html.push_str(
+        "<style>\n\
+         @page { margin: 1cm }\n\
+         body { font-family: sans-serif; color: #111; margin: 1cm; }\n\
+         .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5cm; }\n\
+         .label { border: 1px solid #333; padding: 0.75rem; }\n\
+         .name { font-weight: bold; font-size: 1.1rem; }\n\
+         .prethodna { text-decoration: line-through; color: #666; }\n\
+         .nova { font-size: 1.3rem; font-weight: bold; }\n\
+         .percent { font-size: 2rem; font-weight: bold; }\n\
+         .period { color: #444; font-size: 0.9rem; }\n\
+         .reason { color: #444; font-size: 0.9rem; }\n\
+         footer { margin-top: 2rem; color: #666; font-size: 0.85rem; }\n\
+         </style>\n</head>\n<body>\n",
+    );
+
+    let is_percentage = evidence.display_mode == "percentage";
+    // Two-price / uvodna cards carry the campaign duration; for a rasprodaja
+    // (open-ended, `ends_on` NULL) that reads „dok traju zalihe".
+    let period_label = match evidence.ends_on.as_deref() {
+        Some(ends_on) => format!("Važi do: {}", escape_html(date_only(ends_on))),
+        None => "dok traju zalihe".to_string(),
+    };
+
+    html.push_str("<div class=\"grid\">\n");
+    for item in &evidence.items {
+        html.push_str("<div class=\"label\">\n");
+        html.push_str(&format!(
+            "<div class=\"name\">{}</div>\n",
+            escape_html(&item.product_name)
+        ));
+
+        if is_percentage {
+            let anchor = item.prethodna_cena_minor.unwrap_or(0);
+            let percent = discount_percent(anchor, item.campaign_price_minor);
+            html.push_str(&format!("<div class=\"percent\">-{percent}%</div>\n"));
+        } else if item.anchor_status == "none" {
+            html.push_str(&format!(
+                "<div class=\"nova\">Uvodna cena: {} RSD</div>\n",
+                format_rsd_minor(item.campaign_price_minor)
+            ));
+            let future = item
+                .future_regular_price_minor
+                .map(format_rsd_minor)
+                .unwrap_or_default();
+            html.push_str(&format!(
+                "<div class=\"period\">Redovna cena po isteku: {future} RSD</div>\n"
+            ));
+        } else {
+            let anchor = item
+                .prethodna_cena_minor
+                .map(format_rsd_minor)
+                .unwrap_or_default();
+            html.push_str(&format!(
+                "<div class=\"prethodna\">Prethodna cena: {anchor} RSD</div>\n"
+            ));
+            html.push_str(&format!(
+                "<div class=\"nova\">Nova cena: {} RSD</div>\n",
+                format_rsd_minor(item.campaign_price_minor)
+            ));
+        }
+
+        if !is_percentage {
+            html.push_str(&format!("<div class=\"period\">{period_label}</div>\n"));
+            if let Some(reason) = evidence.reduced_utility_reason.as_deref() {
+                html.push_str(&format!(
+                    "<div class=\"reason\">Umanjena upotrebna vrednost: {}</div>\n",
+                    escape_html(reason)
+                ));
+            }
+        }
+
+        html.push_str("</div>\n");
+    }
+    html.push_str("</div>\n");
+
+    html.push_str(
+        "<footer>Etikete za policu. Nije fiskalni dokument.</footer>\n\
+         </body>\n</html>\n",
+    );
+    html
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,6 +809,84 @@ mod tests {
             let html = render_evidence_html(&assemble_evidence(conn, 1).expect("assemble"));
             assert!(html.contains("A &amp; &lt;b&gt;"));
             assert!(!html.contains("A & <b>"));
+        });
+    }
+
+    #[test]
+    fn labels_default_to_two_prices() {
+        with_db("labels_two_prices", |conn| {
+            seed_product(conn, 1, "Kaput", 100000, "2026-01-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-01-01T00:00:00Z', 100000, 'create', '2026-01-01T00:00:00Z');
+                 INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, created_at, updated_at)
+                 VALUES (1, 'akcijska_prodaja', 'active', '2026-07-17T00:00:00Z', '2026-07-27T00:00:00Z', 'two_prices', '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor, anchor_status, anchor_window_days)
+                 VALUES (1, 1, 80000, 100000, 'computed', 30);",
+            )
+            .expect("seed");
+            let html = render_labels_html(&assemble_evidence(conn, 1).expect("assemble"));
+            assert!(html.contains("Prethodna cena"));
+            assert!(html.contains("1.000,00") && html.contains("800,00"));
+        });
+    }
+
+    #[test]
+    fn labels_percentage_only_for_short_akcija_show_no_two_prices() {
+        with_db("labels_percentage", |conn| {
+            seed_product(conn, 1, "Sok", 10000, "2026-01-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-01-01T00:00:00Z', 10000, 'create', '2026-01-01T00:00:00Z');
+                 INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, created_at, updated_at)
+                 VALUES (1, 'akcijska_prodaja', 'active', '2026-07-17T00:00:00Z', '2026-07-19T00:00:00Z', 'percentage', '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor, anchor_status, anchor_window_days)
+                 VALUES (1, 1, 8000, 10000, 'computed', 30);",
+            )
+            .expect("seed");
+            let html = render_labels_html(&assemble_evidence(conn, 1).expect("assemble"));
+            assert!(html.contains("-20%"));
+            assert!(
+                !html.contains("Prethodna cena"),
+                "percentage label must NOT show two prices"
+            );
+        });
+    }
+
+    #[test]
+    fn rasprodaja_labels_say_dok_traju_zaliha_and_show_reason() {
+        with_db("labels_rasprodaja", |conn| {
+            seed_product(conn, 1, "Sto", 500000, "2026-01-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-01-01T00:00:00Z', 500000, 'create', '2026-01-01T00:00:00Z');
+                 INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, rasprodaja_ground, reduced_utility_reason, separation_attested, activated_at, created_at, updated_at)
+                 VALUES (1, 'rasprodaja', 'active', '2026-07-01T00:00:00Z', NULL, 'two_prices', 'prestanak_prodaje_robe', 'Oštećena ambalaža', 1, '2026-07-01T00:00:00Z', '2026-06-30T00:00:00Z', '2026-07-01T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, prethodna_cena_minor, anchor_status, anchor_window_days)
+                 VALUES (1, 1, 400000, 500000, 'computed', 30);",
+            )
+            .expect("seed");
+            let html = render_labels_html(&assemble_evidence(conn, 1).expect("assemble"));
+            assert!(html.contains("dok traju zalihe"));
+            assert!(html.contains("Oštećena ambalaža"));
+        });
+    }
+
+    #[test]
+    fn promotivna_labels_show_intro_and_future_price() {
+        with_db("labels_promotivna", |conn| {
+            seed_product(conn, 2, "Patike", 890000, "2026-07-01T00:00:00Z");
+            conn.execute_batch(
+                "INSERT INTO campaigns (id, campaign_type, status, starts_on, ends_on, display_mode, created_at, updated_at)
+                 VALUES (1, 'promotivna_prodaja', 'draft', '2026-07-01T00:00:00Z', '2026-08-29T00:00:00Z', 'two_prices', '2026-06-30T00:00:00Z', '2026-06-30T00:00:00Z');
+                 INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, anchor_status, future_regular_price_minor)
+                 VALUES (1, 2, 890000, 'none', 1090000);",
+            )
+            .expect("seed");
+            let html = render_labels_html(&assemble_evidence(conn, 1).expect("assemble"));
+            assert!(html.contains("Uvodna cena") && html.contains("8.900,00"));
+            assert!(html.contains("10.900,00"));
+            assert!(!html.contains("Prethodna cena"));
         });
     }
 }
