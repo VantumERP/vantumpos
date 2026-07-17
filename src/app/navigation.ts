@@ -7,6 +7,7 @@ import {
   ReceiptTextIcon,
   SettingsIcon,
   ShoppingCartIcon,
+  TagIcon,
   UploadIcon,
 } from "lucide-react";
 
@@ -37,6 +38,12 @@ export const navigationItems = [
     id: "receipts",
     label: "Računi",
     icon: ReceiptTextIcon,
+  },
+  {
+    id: "campaigns",
+    label: "Kampanje",
+    icon: TagIcon,
+    adminOnly: true,
   },
   {
     id: "reports",

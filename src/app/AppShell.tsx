@@ -14,6 +14,7 @@ import { toast } from "sonner";
 
 import { AppVersion } from "@/app/AppVersion";
 import { BackendStatus } from "@/app/BackendStatus";
+import { CampaignsModule } from "@/app/campaigns/CampaignsModule";
 import { CatalogModule } from "@/app/catalog/CatalogModule";
 import { FirstRunTaxSetup } from "@/app/FirstRunTaxSetup";
 import { ImportWizard } from "@/app/import/ImportWizard";
@@ -458,6 +459,10 @@ function renderModule({
 
   if (activeId === "receipts") {
     return <ReceiptsScreen receipts={services.receipts} />;
+  }
+
+  if (activeId === "campaigns") {
+    return <CampaignsModule services={services} />;
   }
 
   if (activeId === "import") {
