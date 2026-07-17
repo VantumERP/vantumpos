@@ -3,6 +3,7 @@ mod clock;
 mod commands;
 mod db;
 mod importer;
+mod price_history;
 mod security;
 mod state;
 mod text;
