@@ -7,6 +7,7 @@ use time::OffsetDateTime;
 
 use crate::app_error::{AppError, CommandError};
 use crate::db::Db;
+use crate::price_history::{load_offering_state, record_offered_price_change, OfferingState};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -357,6 +358,7 @@ pub fn validate_import(
 pub fn commit_import(
     db: &Db,
     request: &CommitImportRequest,
+    acting_user_id: i64,
 ) -> Result<ImportJobSummary, ImportError> {
     let validation = validate_import(
         db,
@@ -414,6 +416,7 @@ pub fn commit_import(
             &lookup,
             &request.mapping,
             &validation.rows,
+            acting_user_id,
         )?,
         ImportType::Categories => commit_category_rows(
             &tx,
@@ -696,6 +699,7 @@ fn commit_product_rows(
     lookup: &HeaderLookup,
     mapping: &HashMap<String, String>,
     validated_rows: &[ImportRowResult],
+    acting_user_id: i64,
 ) -> Result<(), ImportError> {
     for (index, row) in parsed.rows.iter().enumerate() {
         let sku_input = optional_value(lookup, row, mapping, "sku");
@@ -728,6 +732,9 @@ fn commit_product_rows(
         let product_id = if let Some(product_id) =
             find_existing_product(tx, &sku_input, barcode.as_deref().unwrap_or(""))?
         {
+            // Read before the UPDATE: afterwards the row already carries the new
+            // price and the comparison would silently record nothing.
+            let before = load_offering_state(tx, product_id)?;
             tx.execute(
                 "UPDATE products
                  SET name = ?1,
@@ -754,6 +761,19 @@ fn commit_product_rows(
                     now,
                     product_id
                 ],
+            )?;
+            record_offered_price_change(
+                tx,
+                product_id,
+                before,
+                OfferingState {
+                    // The importer's UPDATE never touches `active`; preserve it.
+                    active: before.map(|state| state.active).unwrap_or(true),
+                    price_minor: sale_price,
+                },
+                "import",
+                Some(acting_user_id),
+                &now,
             )?;
             product_id
         } else {
@@ -785,7 +805,21 @@ fn commit_product_rows(
                     now
                 ],
             )?;
-            tx.last_insert_rowid()
+            let product_id = tx.last_insert_rowid();
+            record_offered_price_change(
+                tx,
+                product_id,
+                None,
+                // The INSERT omits `active`, so it defaults to 1 (offered).
+                OfferingState {
+                    active: true,
+                    price_minor: sale_price,
+                },
+                "import",
+                Some(acting_user_id),
+                &now,
+            )?;
+            product_id
         };
 
         if let Some(initial_stock) =
@@ -1422,6 +1456,15 @@ mod tests {
             .collect()
     }
 
+    fn admin_id(db: &Db) -> i64 {
+        db.open()
+            .expect("db open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist")
+    }
+
     fn with_test_database(test_name: &str, test: impl FnOnce(&Db)) {
         let path = test_database_path(test_name);
 
@@ -1602,7 +1645,8 @@ mod tests {
                     ]),
                 };
 
-                let result = commit_import(db, &request).expect("commit should succeed");
+                let result =
+                    commit_import(db, &request, admin_id(db)).expect("commit should succeed");
 
                 let connection = db.open().expect("database should open");
                 let product_count: i64 = connection
@@ -1633,6 +1677,97 @@ mod tests {
         );
     }
 
+    fn products_request(price: &str) -> CommitImportRequest {
+        CommitImportRequest {
+            import_type: ImportType::Products,
+            file_name: "artikli.csv".to_string(),
+            csv_text: format!("Naziv;Cena;PDV;Sifra\nHleb;{price};20;SKU-1\n"),
+            mapping: mapping(&[
+                ("name", "Naziv"),
+                ("sale_price", "Cena"),
+                ("vat_rate", "PDV"),
+                ("sku", "Sifra"),
+            ]),
+        }
+    }
+
+    #[test]
+    fn import_records_an_offered_price_row_for_a_new_product() {
+        with_test_database(
+            "import_records_an_offered_price_row_for_a_new_product",
+            |db| {
+                seed_tax_rate(db, "PDV 20", 2000);
+                let acting = admin_id(db);
+
+                commit_import(db, &products_request("4990,00"), acting)
+                    .expect("commit should succeed");
+
+                let connection = db.open().expect("db open");
+                let (price_minor, source): (Option<i64>, String) = connection
+                    .query_row(
+                        "SELECT price_minor, source FROM price_history ORDER BY id DESC LIMIT 1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("price row should exist");
+                assert_eq!(price_minor, Some(499000));
+                assert_eq!(source, "import");
+            },
+        );
+    }
+
+    #[test]
+    fn re_importing_the_same_price_appends_no_row() {
+        with_test_database("re_importing_the_same_price_appends_no_row", |db| {
+            seed_tax_rate(db, "PDV 20", 2000);
+            let acting = admin_id(db);
+
+            commit_import(db, &products_request("4990,00"), acting).expect("first commit");
+            commit_import(db, &products_request("4990,00"), acting).expect("second commit");
+
+            let connection = db.open().expect("db open");
+            let count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM price_history", [], |row| row.get(0))
+                .expect("count");
+            assert_eq!(count, 1, "an unchanged price must not pollute the timeline");
+        });
+    }
+
+    #[test]
+    fn re_importing_a_changed_price_appends_the_new_offered_price() {
+        // Guards the UPDATE branch and the read-before-write ordering: loading
+        // the before-state after the UPDATE would compare 5490,00 to itself and
+        // silently drop the change the shop must be able to prove.
+        with_test_database(
+            "re_importing_a_changed_price_appends_the_new_offered_price",
+            |db| {
+                seed_tax_rate(db, "PDV 20", 2000);
+                let acting = admin_id(db);
+
+                commit_import(db, &products_request("4990,00"), acting).expect("first commit");
+                commit_import(db, &products_request("5490,00"), acting).expect("second commit");
+
+                let connection = db.open().expect("db open");
+                let mut stmt = connection
+                    .prepare("SELECT price_minor, source FROM price_history ORDER BY id")
+                    .expect("prepare");
+                let rows: Vec<(Option<i64>, String)> = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .expect("query")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("collect");
+
+                assert_eq!(
+                    rows,
+                    vec![
+                        (Some(499000), "import".to_string()),
+                        (Some(549000), "import".to_string()),
+                    ]
+                );
+            },
+        );
+    }
+
     #[test]
     fn commit_rejects_invalid_rows_without_partial_product_writes() {
         with_test_database(
@@ -1653,7 +1788,8 @@ mod tests {
                     ]),
                 };
 
-                let error = commit_import(db, &request).expect_err("commit should fail");
+                let error =
+                    commit_import(db, &request, admin_id(db)).expect_err("commit should fail");
                 let connection = db.open().expect("database should open");
                 let product_count: i64 = connection
                     .query_row("SELECT COUNT(*) FROM products", [], |row| row.get(0))
@@ -1678,7 +1814,7 @@ mod tests {
                     mapping: mapping(&[("sku", "Sifra"), ("quantity", "Kolicina")]),
                 };
 
-                commit_import(db, &request).expect("initial stock should commit");
+                commit_import(db, &request, admin_id(db)).expect("initial stock should commit");
 
                 let connection = db.open().expect("database should open");
                 let movement_quantity: i64 = connection

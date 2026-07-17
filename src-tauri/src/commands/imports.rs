@@ -29,8 +29,8 @@ pub fn import_commit(
     state: State<'_, AppState>,
     request: CommitImportRequest,
 ) -> Result<ImportJobSummary, CommandError> {
-    super::auth::require_admin(state.inner())?;
-    commit_import(state.db(), &request).map_err(Into::into)
+    let acting = super::auth::require_admin(state.inner())?;
+    commit_import(state.db(), &request, acting.id).map_err(Into::into)
 }
 
 #[tauri::command]
