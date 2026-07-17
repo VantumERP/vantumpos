@@ -9,18 +9,6 @@
 //! being offered at `effective_from`; that explicit gap is what distinguishes
 //! returning seasonal stock from a genuinely new arrival.
 
-// The catalog and importer start calling these in the next task; until then the
-// tests are the only consumers. `expect` (not `allow`) on purpose: it turns into
-// an unfulfilled-expectation warning the moment a real caller lands, so the
-// suppression cannot outlive its reason.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "wired into the catalog (Task 3) and importer (Task 4)"
-    )
-)]
-
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// What the shop is offering for a product: an inactive product is not offered

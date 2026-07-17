@@ -7,6 +7,7 @@ use tauri::State;
 use crate::app_error::{AppError, CommandError};
 use crate::clock::utc_now;
 use crate::db::Db;
+use crate::price_history::{load_offering_state, record_offered_price_change, OfferingState};
 use crate::state::AppState;
 
 const DEFAULT_PRODUCT_LIST_LIMIT: i64 = 500;
@@ -182,8 +183,8 @@ pub fn catalog_create_product(
     state: State<'_, AppState>,
     request: SaveProductRequest,
 ) -> Result<ProductSummary, CommandError> {
-    super::auth::require_admin(state.inner())?;
-    create_product(state.db(), request).map_err(Into::into)
+    let acting = super::auth::require_admin(state.inner())?;
+    create_product(state.db(), request, acting.id).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -192,8 +193,8 @@ pub fn catalog_update_product(
     id: i64,
     request: SaveProductRequest,
 ) -> Result<ProductSummary, CommandError> {
-    super::auth::require_admin(state.inner())?;
-    update_product(state.db(), id, request).map_err(Into::into)
+    let acting = super::auth::require_admin(state.inner())?;
+    update_product(state.db(), id, request, acting.id).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -202,8 +203,8 @@ pub fn catalog_set_product_active(
     id: i64,
     active: bool,
 ) -> Result<ProductSummary, CommandError> {
-    super::auth::require_admin(state.inner())?;
-    set_product_active(state.db(), id, active).map_err(Into::into)
+    let acting = super::auth::require_admin(state.inner())?;
+    set_product_active(state.db(), id, active, acting.id).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -268,7 +269,11 @@ pub fn get_product(db: &Db, id: i64) -> Result<Option<ProductSummary>, AppError>
     product_by_id_for_connection(&connection, id)
 }
 
-pub fn create_product(db: &Db, request: SaveProductRequest) -> Result<ProductSummary, AppError> {
+pub fn create_product(
+    db: &Db,
+    request: SaveProductRequest,
+    acting_user_id: i64,
+) -> Result<ProductSummary, AppError> {
     let mut connection = db.open()?;
     let normalized = normalize_product_request(request)?;
     let now = utc_now()?;
@@ -335,6 +340,20 @@ pub fn create_product(db: &Db, request: SaveProductRequest) -> Result<ProductSum
         ],
     )?;
     let product_id = tx.last_insert_rowid();
+
+    record_offered_price_change(
+        &tx,
+        product_id,
+        None,
+        OfferingState {
+            active: normalized.active,
+            price_minor: normalized.sale_price_minor,
+        },
+        "create",
+        Some(acting_user_id),
+        &now,
+    )?;
+
     let product = product_by_id_for_connection(&tx, product_id)?
         .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
@@ -346,6 +365,7 @@ pub fn update_product(
     db: &Db,
     id: i64,
     request: SaveProductRequest,
+    acting_user_id: i64,
 ) -> Result<ProductSummary, AppError> {
     if id <= 0 {
         return Err(validation_error("Artikal nije ispravan.", "id"));
@@ -357,6 +377,9 @@ pub fn update_product(
     let tx = connection.transaction()?;
 
     ensure_product_exists(&tx, id)?;
+    // Read the before-state BEFORE the UPDATE: afterwards it would compare the
+    // new value to itself and record nothing.
+    let before = load_offering_state(&tx, id)?;
     ensure_category_exists(&tx, normalized.category_id)?;
     ensure_active_tax_rate_exists(&tx, normalized.tax_rate_id)?;
     ensure_unique_product(
@@ -422,6 +445,19 @@ pub fn update_product(
         ],
     )?;
 
+    record_offered_price_change(
+        &tx,
+        id,
+        before,
+        OfferingState {
+            active: normalized.active,
+            price_minor: normalized.sale_price_minor,
+        },
+        "update",
+        Some(acting_user_id),
+        &now,
+    )?;
+
     let product = product_by_id_for_connection(&tx, id)?
         .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
@@ -429,7 +465,12 @@ pub fn update_product(
     Ok(product)
 }
 
-pub fn set_product_active(db: &Db, id: i64, active: bool) -> Result<ProductSummary, AppError> {
+pub fn set_product_active(
+    db: &Db,
+    id: i64,
+    active: bool,
+    acting_user_id: i64,
+) -> Result<ProductSummary, AppError> {
     if id <= 0 {
         return Err(validation_error("Artikal nije ispravan.", "id"));
     }
@@ -437,6 +478,9 @@ pub fn set_product_active(db: &Db, id: i64, active: bool) -> Result<ProductSumma
     let mut connection = db.open()?;
     let now = utc_now()?;
     let tx = connection.transaction()?;
+    // Read the before-state BEFORE the UPDATE: afterwards it would compare the
+    // new value to itself and record nothing.
+    let before = load_offering_state(&tx, id)?;
     let changed = tx.execute(
         "UPDATE products
          SET active = ?1, updated_at = ?2
@@ -446,6 +490,21 @@ pub fn set_product_active(db: &Db, id: i64, active: bool) -> Result<ProductSumma
 
     if changed == 0 {
         return Err(AppError::not_found("Artikal nije pronađen."));
+    }
+
+    if let Some(before_state) = before {
+        record_offered_price_change(
+            &tx,
+            id,
+            Some(before_state),
+            OfferingState {
+                active,
+                price_minor: before_state.price_minor,
+            },
+            if active { "reactivate" } else { "deactivate" },
+            Some(acting_user_id),
+            &now,
+        )?;
     }
 
     let product = product_by_id_for_connection(&tx, id)?
@@ -1245,11 +1304,187 @@ mod tests {
         }
     }
 
+    fn admin_id(db: &Db) -> i64 {
+        db.open()
+            .expect("db open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist")
+    }
+
+    fn price_rows(db: &Db, product_id: i64) -> Vec<(Option<i64>, String)> {
+        let connection = db.open().expect("db open");
+        let mut stmt = connection
+            .prepare(
+                "SELECT price_minor, source FROM price_history WHERE product_id = ?1 ORDER BY id",
+            )
+            .expect("prepare");
+        let mapped = stmt
+            .query_map(params![product_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query");
+        mapped.collect::<Result<Vec<_>, _>>().expect("collect")
+    }
+
+    #[test]
+    fn creating_an_active_product_appends_a_create_price_row() {
+        with_catalog_database("price_history_create_row", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PH-1", None), acting)
+                .expect("product should create");
+
+            assert_eq!(
+                price_rows(db, product.id),
+                vec![(Some(18000), "create".to_string())]
+            );
+        });
+    }
+
+    #[test]
+    fn creating_an_inactive_product_appends_no_price_row() {
+        with_catalog_database("price_history_create_inactive", |db| {
+            let acting = admin_id(db);
+            let mut request = product_request("PH-INACTIVE", None);
+            request.active = false;
+            let product = create_product(db, request, acting).expect("product should create");
+
+            assert!(
+                price_rows(db, product.id).is_empty(),
+                "an unoffered product has no offered price to log"
+            );
+        });
+    }
+
+    #[test]
+    fn updating_only_the_name_appends_no_price_row() {
+        with_catalog_database("price_history_name_only", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PH-2", None), acting)
+                .expect("product should create");
+
+            let mut renamed = product_request("PH-2", None);
+            renamed.name = "Novo ime".to_string();
+            update_product(db, product.id, renamed, acting).expect("product should update");
+
+            assert_eq!(
+                price_rows(db, product.id).len(),
+                1,
+                "editing the name must not pollute the price timeline"
+            );
+        });
+    }
+
+    #[test]
+    fn lowering_the_price_appends_an_update_price_row() {
+        with_catalog_database("price_history_price_change", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PH-3", None), acting)
+                .expect("product should create");
+
+            let mut cheaper = product_request("PH-3", None);
+            cheaper.sale_price_minor = 15000;
+            update_product(db, product.id, cheaper, acting).expect("product should update");
+
+            assert_eq!(
+                price_rows(db, product.id),
+                vec![
+                    (Some(18000), "create".to_string()),
+                    (Some(15000), "update".to_string())
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn deactivating_then_reactivating_records_a_gap_then_a_return() {
+        with_catalog_database("price_history_gap_then_return", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PH-4", None), acting)
+                .expect("product should create");
+
+            set_product_active(db, product.id, false, acting).expect("deactivate");
+            set_product_active(db, product.id, true, acting).expect("reactivate");
+
+            assert_eq!(
+                price_rows(db, product.id),
+                vec![
+                    (Some(18000), "create".to_string()),
+                    (None, "deactivate".to_string()),
+                    (Some(18000), "reactivate".to_string()),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn setting_active_to_its_current_value_appends_nothing() {
+        with_catalog_database("price_history_active_noop", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PH-5", None), acting)
+                .expect("product should create");
+
+            set_product_active(db, product.id, true, acting).expect("no-op activate");
+
+            assert_eq!(
+                price_rows(db, product.id).len(),
+                1,
+                "no state change, no row"
+            );
+        });
+    }
+
+    #[test]
+    fn deactivating_via_update_product_also_records_the_gap() {
+        with_catalog_database("price_history_update_deactivates", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PH-6", None), acting)
+                .expect("product should create");
+
+            // update_product sets `active` too, so it can end an offering.
+            let mut deactivated = product_request("PH-6", None);
+            deactivated.active = false;
+            update_product(db, product.id, deactivated, acting).expect("product should update");
+
+            assert_eq!(
+                price_rows(db, product.id),
+                vec![
+                    (Some(18000), "create".to_string()),
+                    (None, "update".to_string())
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn price_row_is_attributed_to_the_acting_user() {
+        with_catalog_database("price_history_attribution", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PH-7", None), acting)
+                .expect("product should create");
+
+            let user_id: Option<i64> = db
+                .open()
+                .expect("db open")
+                .query_row(
+                    "SELECT user_id FROM price_history WHERE product_id = ?1 ORDER BY id LIMIT 1",
+                    params![product.id],
+                    |row| row.get(0),
+                )
+                .expect("query");
+
+            assert_eq!(user_id, Some(acting));
+        });
+    }
+
     #[test]
     fn create_product_persists_catalog_fields() {
         with_catalog_database("create_product_persists_catalog_fields", |db| {
-            let product = create_product(db, product_request("JOG-1L", Some("8600000000034")))
-                .expect("product should create");
+            let product = create_product(
+                db,
+                product_request("JOG-1L", Some("8600000000034")),
+                admin_id(db),
+            )
+            .expect("product should create");
 
             assert_eq!(product.name, "Jogurt 1 l");
             assert_eq!(product.sku, "JOG-1L");
@@ -1302,7 +1537,7 @@ mod tests {
                 accepted_fields: vec!["name".to_string(), "brand".to_string()],
             });
 
-            let product = create_product(db, request).expect("product should create");
+            let product = create_product(db, request, admin_id(db)).expect("product should create");
             let source = product
                 .external_source
                 .expect("source provenance should persist");
@@ -1316,8 +1551,12 @@ mod tests {
     #[test]
     fn create_product_rejects_duplicate_sku() {
         with_catalog_database("create_product_rejects_duplicate_sku", |db| {
-            let error = create_product(db, product_request("mleko-1l", Some("8600000000034")))
-                .expect_err("duplicate sku should fail");
+            let error = create_product(
+                db,
+                product_request("mleko-1l", Some("8600000000034")),
+                admin_id(db),
+            )
+            .expect_err("duplicate sku should fail");
             let command_error = CommandError::from(error);
 
             assert_eq!(command_error.code, "duplicate_sku");
@@ -1327,8 +1566,12 @@ mod tests {
     #[test]
     fn create_product_rejects_duplicate_barcode() {
         with_catalog_database("create_product_rejects_duplicate_barcode", |db| {
-            let error = create_product(db, product_request("JOG-1L", Some("8600000000010")))
-                .expect_err("duplicate barcode should fail");
+            let error = create_product(
+                db,
+                product_request("JOG-1L", Some("8600000000010")),
+                admin_id(db),
+            )
+            .expect_err("duplicate barcode should fail");
             let command_error = CommandError::from(error);
 
             assert_eq!(command_error.code, "duplicate_barcode");
@@ -1435,7 +1678,8 @@ mod tests {
                 request.name = "Mleko 1.5 l".to_string();
                 request.sale_price_minor = 21999;
 
-                let updated = update_product(db, 1, request).expect("product should update");
+                let updated =
+                    update_product(db, 1, request, admin_id(db)).expect("product should update");
 
                 assert_eq!(updated.name, "Mleko 1.5 l");
                 assert_eq!(updated.sale_price_minor, 21999);
@@ -1447,7 +1691,8 @@ mod tests {
     #[test]
     fn set_product_active_updates_status() {
         with_catalog_database("set_product_active_updates_status", |db| {
-            let updated = set_product_active(db, 1, false).expect("status should update");
+            let updated =
+                set_product_active(db, 1, false, admin_id(db)).expect("status should update");
 
             assert!(!updated.active);
         });
