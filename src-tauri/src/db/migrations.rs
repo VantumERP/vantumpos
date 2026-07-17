@@ -545,4 +545,137 @@ CREATE TABLE _migrations (
 
         std::fs::remove_file(&path).expect("test database should be removed");
     }
+
+    /// Migration v10 rebuilds price_history to widen the `source` CHECK. The log is
+    /// append-only and its ids are evidentiary: a rebuild is a schema migration, not a
+    /// data mutation, so every row must land in the new table with its original id.
+    /// Seeding non-contiguous ids at v9 is what makes this provable — a rebuild that
+    /// dropped `id` from the copy would silently renumber them 1, 2, 3.
+    #[test]
+    fn migration_v10_rebuild_copies_price_history_rows_with_original_ids() {
+        let path = test_database_path("migrations_v10_price_history_ids");
+
+        {
+            let mut conn = Connection::open(&path).expect("connection should open");
+
+            // Bring the database to v9 — price_history exists, the campaign rebuild has
+            // not run yet — through the same path an installed database takes.
+            conn.execute_batch(
+                r#"
+CREATE TABLE _migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"#,
+            )
+            .expect("migrations table should create");
+            for migration in MIGRATIONS.iter().take_while(|m| m.version <= 9) {
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, datetime('now'))",
+                    params![migration.version, migration.name],
+                )
+                .expect("migration should record");
+            }
+
+            // Installed-base data: an offered-price log with non-contiguous ids, the
+            // shape a real till accumulates once rows are appended over time.
+            conn.execute_batch(
+                r#"
+INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+VALUES (1, 'Opšta stopa', 2000, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z');
+INSERT INTO products (id, name, sku, sale_price_minor, purchase_price_minor,
+                      tax_rate_id, minimum_stock_milli, created_at, updated_at)
+VALUES (1, 'Šećer 1kg', 'SKU-SECER', 1290000, 0, 1, 0,
+        '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z');
+INSERT INTO price_history (id, product_id, effective_from, price_minor, source, user_id, created_at)
+VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:00:00Z'),
+       (42, 1, '2025-05-10T09:00:00Z', 1190000, 'update', NULL, '2025-05-10T09:00:00Z'),
+       (99, 1, '2025-06-20T09:00:00Z', 1090000, 'import', NULL, '2025-06-20T09:00:00Z');
+"#,
+            )
+            .expect("v9 price_history rows should seed");
+
+            // The real installed-base upgrade path: v10 rebuilds price_history.
+            run_migrations(&mut conn).expect("forward migration should succeed");
+
+            let mut stmt = conn
+                .prepare("SELECT id, product_id, effective_from, price_minor, source FROM price_history ORDER BY id")
+                .expect("price_history should prepare");
+            let rows: Vec<(i64, i64, String, i64, String)> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .expect("price_history should query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("price_history rows should collect");
+
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        7,
+                        1,
+                        "2025-03-01T09:00:00Z".to_string(),
+                        1290000,
+                        "create".to_string()
+                    ),
+                    (
+                        42,
+                        1,
+                        "2025-05-10T09:00:00Z".to_string(),
+                        1190000,
+                        "update".to_string()
+                    ),
+                    (
+                        99,
+                        1,
+                        "2025-06-20T09:00:00Z".to_string(),
+                        1090000,
+                        "import".to_string()
+                    ),
+                ],
+                "the v10 rebuild must copy every price_history row verbatim, id included"
+            );
+
+            // AUTOINCREMENT's high-water mark must follow the rebuild, or the next
+            // appended row would collide with a copied id.
+            let sequence: i64 = conn
+                .query_row(
+                    "SELECT seq FROM sqlite_sequence WHERE name = 'price_history'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("price_history sequence should survive the rebuild");
+            assert_eq!(sequence, 99, "sqlite_sequence must follow the RENAME");
+
+            conn.execute(
+                "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                 VALUES (1, '2026-07-17T09:00:00Z', 990000, 'campaign_start', '2026-07-17T09:00:00Z')",
+                [],
+            )
+            .expect("a campaign append should insert after the rebuild");
+            let appended_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM price_history WHERE source = 'campaign_start'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("appended row should query");
+            assert_eq!(
+                appended_id, 100,
+                "appends must continue past the copied ids, never reuse them"
+            );
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
 }

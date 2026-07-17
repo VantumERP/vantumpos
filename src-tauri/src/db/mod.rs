@@ -528,6 +528,10 @@ mod tests {
         });
     }
 
+    /// This fixture builds a fresh database, so the rebuild here copies an empty
+    /// table — row-and-id preservation across the v10 rebuild is proven against a
+    /// populated v9 database in
+    /// `db::migrations::tests::migration_v10_rebuild_copies_price_history_rows_with_original_ids`.
     #[test]
     fn migration_v10_widens_price_history_sources_and_preserves_rows() {
         with_test_database("migration_v10_price_history_sources", |db| {
