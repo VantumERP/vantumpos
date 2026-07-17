@@ -7,7 +7,10 @@ use tauri::State;
 use crate::app_error::{AppError, CommandError};
 use crate::clock::utc_now;
 use crate::db::Db;
-use crate::price_history::{load_offering_state, record_offered_price_change, OfferingState};
+use crate::price_history::{
+    compute_prethodna_cena, load_offering_state, record_offered_price_change, IncomputableReason,
+    OfferingState, PrethodnaCenaResult,
+};
 use crate::state::AppState;
 
 const DEFAULT_PRODUCT_LIST_LIMIT: i64 = 500;
@@ -205,6 +208,78 @@ pub fn catalog_set_product_active(
 ) -> Result<ProductSummary, CommandError> {
     let acting = super::auth::require_admin(state.inner())?;
     set_product_active(state.db(), id, active, acting.id).map_err(Into::into)
+}
+
+/// Flat DTO for the frontend. The domain uses a Rust enum; flattening here
+/// keeps the TypeScript contract simple.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrethodnaCenaDto {
+    /// "computed" | "incomputable"
+    pub status: &'static str,
+    pub price_minor: Option<i64>,
+    pub window_days: Option<i64>,
+    pub window_from: Option<String>,
+    pub window_to: Option<String>,
+    pub truncated: bool,
+    /// "too_new_in_assortment" | "not_offered_in_window" | "no_history"
+    pub reason: Option<&'static str>,
+    pub age_days: Option<i64>,
+}
+
+impl From<PrethodnaCenaResult> for PrethodnaCenaDto {
+    fn from(result: PrethodnaCenaResult) -> Self {
+        match result {
+            PrethodnaCenaResult::Computed(value) => Self {
+                status: "computed",
+                price_minor: Some(value.price_minor),
+                window_days: Some(value.window_days),
+                window_from: Some(value.window_from),
+                window_to: Some(value.window_to),
+                truncated: value.truncated,
+                reason: None,
+                age_days: None,
+            },
+            PrethodnaCenaResult::Incomputable(reason) => {
+                let (reason_code, age_days) = match reason {
+                    IncomputableReason::TooNewInAssortment { age_days } => {
+                        ("too_new_in_assortment", Some(age_days))
+                    }
+                    IncomputableReason::NotOfferedInWindow => ("not_offered_in_window", None),
+                    IncomputableReason::NoHistory => ("no_history", None),
+                };
+                Self {
+                    status: "incomputable",
+                    price_minor: None,
+                    window_days: None,
+                    window_from: None,
+                    window_to: None,
+                    truncated: false,
+                    reason: Some(reason_code),
+                    age_days,
+                }
+            }
+        }
+    }
+}
+
+pub fn prethodna_cena(
+    db: &Db,
+    product_id: i64,
+    campaign_start: &str,
+) -> Result<PrethodnaCenaDto, AppError> {
+    let connection = db.open()?;
+    Ok(compute_prethodna_cena(&connection, product_id, campaign_start)?.into())
+}
+
+#[tauri::command]
+pub fn catalog_prethodna_cena(
+    state: State<'_, AppState>,
+    product_id: i64,
+    campaign_start: String,
+) -> Result<PrethodnaCenaDto, CommandError> {
+    super::auth::require_session(state.inner())?;
+    prethodna_cena(state.db(), product_id, &campaign_start).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1181,9 +1256,9 @@ mod tests {
     use crate::app_error::CommandError;
     use crate::commands::catalog::{
         catalog_create_product, catalog_save_category, catalog_update_product, create_product,
-        list_products, lookup_suggestion_from_open_food_facts_json, save_category, search_products,
-        set_product_active, update_product, ProductExternalSourceRequest, ProductListQuery,
-        ProductSearchQuery, SaveCategoryRequest, SaveProductRequest,
+        list_products, lookup_suggestion_from_open_food_facts_json, prethodna_cena, save_category,
+        search_products, set_product_active, update_product, ProductExternalSourceRequest,
+        ProductListQuery, ProductSearchQuery, SaveCategoryRequest, SaveProductRequest,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -1827,6 +1902,71 @@ mod tests {
                 "test database file {} should be removed: {error}",
                 path.display()
             )
+        });
+    }
+
+    #[test]
+    fn prethodna_cena_dto_reports_computed_values() {
+        with_catalog_database("prethodna_cena_dto_computed", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PC-1", None), acting)
+                .expect("product should create");
+
+            let connection = db.open().expect("db open");
+            // Old enough in assortment for the full 30-day window (st. 3).
+            connection
+                .execute(
+                    "UPDATE products SET created_at = '2026-04-01T00:00:00Z' WHERE id = ?1",
+                    params![product.id],
+                )
+                .expect("created_at should back-date");
+            // Replace the create row with the worked-example timeline.
+            connection
+                .execute(
+                    "DELETE FROM price_history WHERE product_id = ?1",
+                    params![product.id],
+                )
+                .expect("clear");
+            connection
+                .execute(
+                    "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                     VALUES (?1, '2026-04-01T00:00:00Z', 499000, 'create', '2026-04-01T00:00:00Z'),
+                            (?1, '2026-07-01T00:00:00Z', 529000, 'update', '2026-07-01T00:00:00Z')",
+                    params![product.id],
+                )
+                .expect("timeline should insert");
+            drop(connection);
+
+            let dto = prethodna_cena(db, product.id, "2026-07-20T00:00:00Z").expect("compute");
+
+            assert_eq!(dto.status, "computed");
+            assert_eq!(dto.price_minor, Some(499000));
+            assert_eq!(dto.window_days, Some(30));
+            assert_eq!(dto.reason, None);
+        });
+    }
+
+    #[test]
+    fn prethodna_cena_dto_reports_too_new_in_assortment() {
+        with_catalog_database("prethodna_cena_dto_too_new", |db| {
+            let acting = admin_id(db);
+            let product = create_product(db, product_request("PC-2", None), acting)
+                .expect("product should create");
+
+            db.open()
+                .expect("db open")
+                .execute(
+                    "UPDATE products SET created_at = '2026-07-11T00:00:00Z' WHERE id = ?1",
+                    params![product.id],
+                )
+                .expect("created_at should back-date");
+
+            let dto = prethodna_cena(db, product.id, "2026-07-17T00:00:00Z").expect("compute");
+
+            assert_eq!(dto.status, "incomputable");
+            assert_eq!(dto.reason, Some("too_new_in_assortment"));
+            assert_eq!(dto.age_days, Some(6));
+            assert_eq!(dto.price_minor, None);
         });
     }
 }

@@ -21,6 +21,7 @@ import type {
   InventoryAdjustmentResult,
   LowStockReport,
   PaymentMethodReport,
+  PrethodnaCenaDto,
   ProductLedger,
   ProductListResult,
   ProductLookupSuggestion,
@@ -119,6 +120,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       listCategories: () => invoke<CategorySummary[]>("catalog_list_categories"),
       saveCategory: (request) =>
         invoke<CategorySummary>("catalog_save_category", { request }),
+      getPrethodnaCena: (productId, campaignStart) =>
+        invoke<PrethodnaCenaDto>("catalog_prethodna_cena", { productId, campaignStart }),
     },
     sales: {
       createSalePreview: (request) =>

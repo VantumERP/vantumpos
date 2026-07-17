@@ -8,6 +8,7 @@ import type {
   CreateBackupRequest,
   ImportJob,
   InventoryAdjustmentRequest,
+  PrethodnaCenaDto,
   ProductLedgerMovement,
   ProductListQuery,
   ProductLookupSuggestion,
@@ -625,6 +626,18 @@ export function createMockServices(): PosServices {
           : [...categories, saved];
 
         return saved;
+      },
+      async getPrethodnaCena() {
+        return {
+          status: "computed",
+          priceMinor: 499000,
+          windowDays: 30,
+          windowFrom: "2026-06-20T00:00:00Z",
+          windowTo: "2026-07-20T00:00:00Z",
+          truncated: false,
+          reason: null,
+          ageDays: null,
+        } satisfies PrethodnaCenaDto;
       },
     },
     sales: {

@@ -272,6 +272,17 @@ export interface SaveCategoryRequest {
   active?: boolean;
 }
 
+export interface PrethodnaCenaDto {
+  status: "computed" | "incomputable";
+  priceMinor: number | null;
+  windowDays: number | null;
+  windowFrom: string | null;
+  windowTo: string | null;
+  truncated: boolean;
+  reason: "too_new_in_assortment" | "not_offered_in_window" | "no_history" | null;
+  ageDays: number | null;
+}
+
 export type DiscountDraft =
   | { type: "amount"; amountMinor: number }
   | { type: "percent"; basisPoints: number };

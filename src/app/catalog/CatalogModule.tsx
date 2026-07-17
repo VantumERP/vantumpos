@@ -69,6 +69,7 @@ import type { PosServices } from "@/services/ports";
 import type {
   CategorySummary,
   CommandError,
+  PrethodnaCenaDto,
   ProductExternalSource,
   ProductListQuery,
   ProductLookupSuggestion,
@@ -176,6 +177,9 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
   );
   const [productErrors, setProductErrors] = useState<ProductFieldErrors>({});
   const [savingProduct, setSavingProduct] = useState(false);
+  const [prethodnaCena, setPrethodnaCena] = useState<PrethodnaCenaDto | null>(
+    null,
+  );
   const [lookupSuggestion, setLookupSuggestion] =
     useState<ProductLookupSuggestion | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
@@ -230,6 +234,48 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
   useEffect(() => {
     void loadProducts();
   }, [loadProducts]);
+
+  // ZoT čl. 37 st. 3-4: lowering the offered price of an existing article is
+  // what triggers the prethodna cena duty, so the advisory is fetched exactly
+  // then. It is read-only guidance and never gates saving.
+  useEffect(() => {
+    if (!productSheetOpen || !editingProduct) {
+      setPrethodnaCena(null);
+      return;
+    }
+
+    let enteredPriceMinor: number;
+    try {
+      enteredPriceMinor = parseRsdInput(productForm.salePrice);
+    } catch {
+      setPrethodnaCena(null);
+      return;
+    }
+
+    if (enteredPriceMinor >= editingProduct.salePriceMinor) {
+      setPrethodnaCena(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    void services.catalog
+      .getPrethodnaCena(editingProduct.id, new Date().toISOString())
+      .then((result) => {
+        if (!cancelled) {
+          setPrethodnaCena(result);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPrethodnaCena(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [editingProduct, productForm.salePrice, productSheetOpen, services]);
 
   function openCreateProduct() {
     const taxRateId = defaultProductTaxRateId(taxRates);
@@ -750,6 +796,7 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
         lookupLoading={lookupLoading}
         lookupSuggestion={lookupSuggestion}
         open={productSheetOpen}
+        prethodnaCena={prethodnaCena}
         saving={savingProduct}
         taxRates={taxRates}
         title={editingProduct ? "Izmena artikla" : "Novi artikal"}
@@ -1064,6 +1111,7 @@ function ProductSheet({
   lookupLoading,
   lookupSuggestion,
   open,
+  prethodnaCena,
   saving,
   taxRates,
   title,
@@ -1088,6 +1136,7 @@ function ProductSheet({
   lookupLoading: boolean;
   lookupSuggestion: ProductLookupSuggestion | null;
   open: boolean;
+  prethodnaCena: PrethodnaCenaDto | null;
   saving: boolean;
   taxRates: TaxRateSummary[];
   title: string;
@@ -1336,6 +1385,7 @@ function ProductSheet({
                     />
                   </Field>
                 </div>
+                <PrethodnaCenaAdvisory advisory={prethodnaCena} />
                 <div className="rounded-md border p-3">
                   <div className="mb-3 text-sm font-medium">
                     Dodatna podešavanja
@@ -1641,6 +1691,65 @@ function BulkProductEntry({
         </Button>
       </SheetFooter>
     </form>
+  );
+}
+
+const INCOMPUTABLE_PRETHODNA_CENA_MESSAGES: Record<
+  NonNullable<PrethodnaCenaDto["reason"]>,
+  string
+> = {
+  too_new_in_assortment:
+    "Roba je u asortimanu kraće od 15 dana — zakon ne propisuje jasan referentni period. Unesite prethodnu cenu ručno i obrazložite.",
+  not_offered_in_window: "Artikal nije bio u ponudi tokom referentnog perioda.",
+  no_history: "Nema evidencije cena za ovaj artikal.",
+};
+
+/// Read-only guidance for the operator when an offered price is lowered.
+///
+/// Deliberately never affirms that a sniženje is lawful: ZoT čl. 38 st. 4 can
+/// still bite even when the čl. 37 st. 3 arithmetic is correct. It also never
+/// blocks saving.
+function PrethodnaCenaAdvisory({
+  advisory,
+}: {
+  advisory: PrethodnaCenaDto | null;
+}) {
+  if (!advisory) {
+    return null;
+  }
+
+  if (advisory.status === "computed" && advisory.priceMinor !== null) {
+    return (
+      <div className="rounded-md border p-3">
+        <div className="text-sm font-medium">
+          Prethodna cena: {formatRsd(advisory.priceMinor)}
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Prethodna cena izračunata prema čl. 37 st. 3. Mora biti istaknuta uz
+          sniženu cenu na prodajnom mestu.
+        </p>
+        {advisory.truncated ? (
+          <p className="mt-1 text-xs text-muted-foreground">
+            Evidencija cena ne pokriva ceo period od 30 dana — proverite
+            podatke.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  const message = advisory.reason
+    ? INCOMPUTABLE_PRETHODNA_CENA_MESSAGES[advisory.reason]
+    : null;
+
+  if (!message) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-md border p-3">
+      <p className="text-xs text-muted-foreground">{message}</p>
+    </div>
   );
 }
 

@@ -86,13 +86,7 @@ pub fn record_offered_price_change(
     Ok(())
 }
 
-// The prethodna cena computation below is reached only through the advisory
-// command added in the next task; until that lands, `dead_code` fires on items
-// the tests already exercise. The allows are scoped to these items so real dead
-// code elsewhere in this module stays visible.
-
 /// A prethodna cena computed under ZoT čl. 37 st. 3–4.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrethodnaCena {
     pub price_minor: i64,
@@ -106,7 +100,6 @@ pub struct PrethodnaCena {
     pub truncated: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncomputableReason {
     /// čl. 37 st. 4 names a window „ne kraćem od 15 dana" that cannot be
@@ -120,14 +113,12 @@ pub enum IncomputableReason {
     NoHistory,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrethodnaCenaResult {
     Computed(PrethodnaCena),
     Incomputable(IncomputableReason),
 }
 
-#[allow(dead_code)]
 fn parse_rfc3339(value: &str, field: &str) -> Result<OffsetDateTime, AppError> {
     OffsetDateTime::parse(value, &Rfc3339).map_err(|source| {
         AppError::validation(
@@ -143,7 +134,6 @@ fn parse_rfc3339(value: &str, field: &str) -> Result<OffsetDateTime, AppError> {
 /// (shorter assortment age, window floor of 15 days). st. 5 (the frozen
 /// progressive anchor) is deliberately NOT implemented here — it is defined
 /// against a campaign's start and belongs with the campaign entity (SW-6b).
-#[allow(dead_code)]
 pub fn compute_prethodna_cena(
     conn: &Connection,
     product_id: i64,

@@ -27,6 +27,7 @@ import type {
   LoginRequest,
   OpenShiftRequest,
   PaymentMethodReport,
+  PrethodnaCenaDto,
   ProductLedger,
   ProductListQuery,
   ProductListResult,
@@ -118,6 +119,7 @@ export interface CatalogService {
   lookupProductByBarcode(barcode: string): Promise<ProductLookupSuggestion | null>;
   listCategories(): Promise<CategorySummary[]>;
   saveCategory(request: SaveCategoryRequest): Promise<CategorySummary>;
+  getPrethodnaCena(productId: number, campaignStart: string): Promise<PrethodnaCenaDto>;
 }
 
 export interface SalesService {
