@@ -420,6 +420,31 @@ pub fn apply_inventory_adjustment(
 ) -> Result<InventoryAdjustmentResult, AppError> {
     validate_adjustment_request(movement_type, &request)?;
 
+    // ZoT cl. 37 st. 7: from the announcement of a rasprodaja until it ends, the
+    // trader may not order and include new quantities of the goods that are its
+    // subject. The ban is narrow: it applies to receiving stock of those SKUs
+    // only. Corrections and write-offs stay allowed (counting and damage are not
+    // "new quantities"), as does receiving any article outside the rasprodaja.
+    if matches!(movement_type, InventoryMovementType::Receive) {
+        let in_active_rasprodaja: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM campaign_items ci
+                JOIN campaigns c ON c.id = ci.campaign_id
+                WHERE ci.product_id = ?1
+                  AND c.campaign_type = 'rasprodaja'
+                  AND c.status = 'active'
+             )",
+            params![request.product_id],
+            |row| row.get(0),
+        )?;
+        if in_active_rasprodaja {
+            return Err(AppError::business(
+                "rasprodaja_receive_blocked",
+                "Artikal je predmet aktivne rasprodaje — prijem nove količine nije dozvoljen do kraja rasprodaje (čl. 37 st. 7).",
+            ));
+        }
+    }
+
     let delta_quantity_milli = match movement_type {
         InventoryMovementType::Receive => request.quantity_milli,
         InventoryMovementType::Correction => request.quantity_milli,
@@ -982,6 +1007,186 @@ mod tests {
             assert_eq!(stock.items[0].product_name, "Mleko 1 l");
             assert!(stock.items[0].low_stock);
         });
+    }
+
+    fn seed_rasprodaja(connection: &Connection, product_id: i64, status: &str) {
+        connection
+            .execute(
+                "INSERT INTO campaigns (
+                    id,
+                    campaign_type,
+                    status,
+                    starts_on,
+                    ends_on,
+                    display_mode,
+                    rasprodaja_ground,
+                    separation_attested,
+                    activated_at,
+                    created_by,
+                    created_at,
+                    updated_at
+                 )
+                 VALUES (
+                    1,
+                    'rasprodaja',
+                    ?1,
+                    '2026-06-18',
+                    NULL,
+                    'two_prices',
+                    'prestanak_poslovanja',
+                    1,
+                    '2026-06-18T09:00:00Z',
+                    1,
+                    '2026-06-18T09:00:00Z',
+                    '2026-06-18T09:00:00Z'
+                 )",
+                params![status],
+            )
+            .expect("campaign should insert");
+
+        connection
+            .execute(
+                "INSERT INTO campaign_items (
+                    campaign_id,
+                    product_id,
+                    campaign_price_minor,
+                    prethodna_cena_minor,
+                    anchor_status,
+                    anchor_window_days,
+                    anchor_truncated,
+                    pre_campaign_price_minor
+                 )
+                 VALUES (1, ?1, 9999, 12999, 'computed', 30, 0, 12999)",
+                params![product_id],
+            )
+            .expect("campaign item should insert");
+    }
+
+    #[test]
+    fn receive_is_blocked_while_article_is_in_an_active_rasprodaja() {
+        with_connection(
+            "receive_is_blocked_while_article_is_in_an_active_rasprodaja",
+            |connection| {
+                seed_rasprodaja(connection, 1, "active");
+
+                let error = apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::Receive,
+                    adjustment(3000, "Prijem robe"),
+                    SEEDED_ADMIN_ID,
+                    "2026-06-18T12:00:00Z",
+                )
+                .expect_err("receive should be blocked during an active rasprodaja");
+                assert_eq!(CommandError::from(error).code, "rasprodaja_receive_blocked");
+
+                // The block writes nothing at all.
+                let movement_count: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM inventory_movements WHERE product_id = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("movement count should query");
+                assert_eq!(movement_count, 0);
+
+                // Counting and damage stay allowed: cl. 37 st. 7 bans adding new
+                // quantities, not corrections or write-offs.
+                apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::Correction,
+                    adjustment(500, "Korekcija popisa"),
+                    SEEDED_ADMIN_ID,
+                    "2026-06-18T12:30:00Z",
+                )
+                .expect("correction should stay allowed during a rasprodaja");
+                apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::WriteOff,
+                    adjustment(200, "Lom"),
+                    SEEDED_ADMIN_ID,
+                    "2026-06-18T12:45:00Z",
+                )
+                .expect("write-off should stay allowed during a rasprodaja");
+
+                // The block lifts when the rasprodaja ends.
+                connection
+                    .execute("UPDATE campaigns SET status = 'ended' WHERE id = 1", [])
+                    .expect("campaign should end");
+
+                let result = apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::Receive,
+                    adjustment(3000, "Prijem robe"),
+                    SEEDED_ADMIN_ID,
+                    "2026-06-19T12:00:00Z",
+                )
+                .expect("receive should succeed once the rasprodaja has ended");
+                assert_eq!(result.new_quantity_milli, 3300);
+            },
+        );
+    }
+
+    #[test]
+    fn receive_stays_open_for_articles_outside_the_rasprodaja() {
+        with_connection(
+            "receive_stays_open_for_articles_outside_the_rasprodaja",
+            |connection| {
+                connection
+                    .execute(
+                        "INSERT INTO products (
+                            id, name, sku, category_id, unit_of_measure, sale_price_minor,
+                            purchase_price_minor, tax_rate_id, minimum_stock_milli,
+                            allow_negative_stock, created_at, updated_at
+                         )
+                         VALUES (
+                            2, 'Jogurt 1 l', 'JOGURT-1L', 1, 'kom', 11999, 8500, 1, 0, 0,
+                            '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z'
+                         )",
+                        [],
+                    )
+                    .expect("second product should insert");
+
+                // Only product 1 is on rasprodaja.
+                seed_rasprodaja(connection, 1, "active");
+
+                let result = apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::Receive,
+                    InventoryAdjustmentRequest {
+                        product_id: 2,
+                        quantity_milli: 4000,
+                        reason: Some("Prijem robe".to_string()),
+                        purchase_price_minor: None,
+                        reference_type: None,
+                        reference_id: None,
+                    },
+                    SEEDED_ADMIN_ID,
+                    "2026-06-18T12:00:00Z",
+                )
+                .expect("receive of an unrelated article should succeed");
+                assert_eq!(result.new_quantity_milli, 4000);
+            },
+        );
+    }
+
+    #[test]
+    fn receive_is_allowed_while_a_draft_rasprodaja_is_unannounced() {
+        with_connection(
+            "receive_is_allowed_while_a_draft_rasprodaja_is_unannounced",
+            |connection| {
+                seed_rasprodaja(connection, 1, "draft");
+
+                let result = apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::Receive,
+                    adjustment(3000, "Prijem robe"),
+                    SEEDED_ADMIN_ID,
+                    "2026-06-18T12:00:00Z",
+                )
+                .expect("receive should succeed before the rasprodaja is announced");
+                assert_eq!(result.new_quantity_milli, 3000);
+            },
+        );
     }
 
     #[test]
