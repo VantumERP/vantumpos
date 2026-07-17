@@ -1719,19 +1719,24 @@ function PrethodnaCenaAdvisory({
   }
 
   if (advisory.status === "computed" && advisory.priceMinor !== null) {
+    // 35/2026 renumbered čl. 37: st. 3 is the 30-day general rule, st. 4 the
+    // shorter window for goods under 30 days in the assortment. The citation
+    // must follow the window the backend actually used — a hardcoded stav is
+    // the bug ZOT-36-37-VERIFIED-RULES.md §5.1 warns about.
+    const stav = advisory.windowDays === 30 ? "3" : "4";
     return (
       <div className="rounded-md border p-3">
         <div className="text-sm font-medium">
           Prethodna cena: {formatRsd(advisory.priceMinor)}
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          Prethodna cena izračunata prema čl. 37 st. 3. Mora biti istaknuta uz
-          sniženu cenu na prodajnom mestu.
+          Prethodna cena izračunata prema čl. 37 st. {stav}. Mora biti istaknuta
+          uz sniženu cenu na prodajnom mestu.
         </p>
         {advisory.truncated ? (
           <p className="mt-1 text-xs text-muted-foreground">
-            Evidencija cena ne pokriva ceo period od 30 dana — proverite
-            podatke.
+            Evidencija cena ne pokriva ceo period od {advisory.windowDays} dana
+            — proverite podatke.
           </p>
         ) : null}
       </div>

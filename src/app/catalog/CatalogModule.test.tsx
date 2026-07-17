@@ -43,6 +43,45 @@ describe("CatalogModule", () => {
     expect(getPrethodnaCena).toHaveBeenCalledWith(1, expect.any(String));
   });
 
+  // ZoT čl. 37 was renumbered by 35/2026: st. 3 is the 30-day general rule and
+  // st. 4 the shorter-assortment rule. Citing st. 3 for a st. 4 result is the
+  // hardcoded-stav bug ZOT-36-37-VERIFIED-RULES.md §5.1/§5.2 warns against.
+  it("cites čl. 37 st. 4 and the real window length for a short-assortment result", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    vi.spyOn(services.catalog, "getPrethodnaCena").mockResolvedValue({
+      status: "computed",
+      priceMinor: 229000,
+      windowDays: 22,
+      windowFrom: "2026-06-25T00:00:00Z",
+      windowTo: "2026-07-17T00:00:00Z",
+      truncated: true,
+      reason: null,
+      ageDays: null,
+    });
+
+    render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+    );
+
+    const price = await screen.findByLabelText("Prodajna cena sa PDV");
+    await user.clear(price);
+    await user.type(price, "100");
+
+    expect(
+      await screen.findByText(
+        "Prethodna cena izračunata prema čl. 37 st. 4. Mora biti istaknuta uz sniženu cenu na prodajnom mestu.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Evidencija cena ne pokriva ceo period od 22 dana — proverite podatke.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("shows no advisory once the entered price is at or above the stored one", async () => {
     const user = userEvent.setup();
     const services = createMockServices();
