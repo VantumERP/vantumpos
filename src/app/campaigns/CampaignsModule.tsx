@@ -83,6 +83,7 @@ const OVERDUE_LABEL = "Isteklo — vratite cene";
 
 export function CampaignsModule({ services }: CampaignsModuleProps) {
   const campaignsService = services.campaigns;
+  const printService = services.print;
   const [rows, setRows] = useState<CampaignSummary[]>([]);
   const [selected, setSelected] = useState<CampaignView | null>(null);
   const [listStatus, setListStatus] = useState<"loading" | "ready" | "error">(
@@ -265,6 +266,29 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
     }
   }
 
+  async function runPrint(
+    action: () => Promise<{ path: string }>,
+    fallback: string,
+  ) {
+    let exported: { path: string };
+    try {
+      exported = await action();
+    } catch (error) {
+      toast.error("Izvoz nije uspeo", {
+        description: errorMessage(error, fallback),
+      });
+      return;
+    }
+    try {
+      await printService.openForPrint(exported.path);
+      toast.success("Otvoreno za štampu", { description: exported.path });
+    } catch {
+      toast.warning("Dokument je sačuvan — otvorite ga ručno za štampu", {
+        description: exported.path,
+      });
+    }
+  }
+
   async function loadCorrection() {
     setCorrectionError(undefined);
 
@@ -403,6 +427,18 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
                 "Etikete nisu izvezene.",
               )
             }
+            onPrintEvidence={() =>
+              runPrint(
+                () => campaignsService.exportEvidence(selected.id),
+                "Dokaz o ceni nije izvezen.",
+              )
+            }
+            onPrintLabels={() =>
+              runPrint(
+                () => campaignsService.exportLabels(selected.id),
+                "Etikete nisu izvezene.",
+              )
+            }
           />
         ) : (
           <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">
@@ -418,6 +454,12 @@ export function CampaignsModule({ services }: CampaignsModuleProps) {
         onRefresh={loadCorrection}
         onExport={() =>
           runExport(
+            () => campaignsService.exportCorrectionReport(),
+            "Izveštaj o ispravkama nije izvezen.",
+          )
+        }
+        onPrint={() =>
+          runPrint(
             () => campaignsService.exportCorrectionReport(),
             "Izveštaj o ispravkama nije izvezen.",
           )
@@ -503,6 +545,8 @@ function CampaignDetailPanel({
   onEnd,
   onExportEvidence,
   onExportLabels,
+  onPrintEvidence,
+  onPrintLabels,
 }: {
   campaign: CampaignView;
   actionError: string | undefined;
@@ -519,6 +563,8 @@ function CampaignDetailPanel({
   onEnd: () => void;
   onExportEvidence: () => void;
   onExportLabels: () => void;
+  onPrintEvidence: () => void;
+  onPrintLabels: () => void;
 }) {
   return (
     <section
@@ -774,6 +820,12 @@ function CampaignDetailPanel({
           <Button type="button" variant="outline" onClick={onExportLabels}>
             Izvezi etikete
           </Button>
+          <Button type="button" onClick={onPrintEvidence}>
+            Štampaj dokaz o ceni
+          </Button>
+          <Button type="button" onClick={onPrintLabels}>
+            Štampaj etikete
+          </Button>
         </div>
       </div>
     </section>
@@ -785,11 +837,13 @@ function CorrectionPanel({
   error,
   onRefresh,
   onExport,
+  onPrint,
 }: {
   report: CorrectionReport | null;
   error: string | undefined;
   onRefresh: () => void;
   onExport: () => void;
+  onPrint: () => void;
 }) {
   return (
     <section
@@ -809,6 +863,9 @@ function CorrectionPanel({
           </Button>
           <Button type="button" variant="outline" onClick={onExport}>
             Izvezi
+          </Button>
+          <Button type="button" onClick={onPrint}>
+            Štampaj
           </Button>
         </div>
       </div>

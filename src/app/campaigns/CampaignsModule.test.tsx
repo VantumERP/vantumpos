@@ -538,6 +538,74 @@ describe("CampaignsModule lifecycle", () => {
     ).toBeInTheDocument();
   });
 
+  it("prints labels by exporting then opening the file", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith([sezonskoDraft], sezonskoView);
+    const exportLabels = vi
+      .spyOn(services.campaigns, "exportLabels")
+      .mockResolvedValue({
+        fileName: "etikete-kampanja-1.html",
+        path: "C:/exports/etikete-kampanja-1.html",
+        mimeType: "text/html",
+        rowCount: 2,
+      });
+    const openForPrint = vi
+      .spyOn(services.print, "openForPrint")
+      .mockResolvedValue(undefined);
+
+    render(
+      <>
+        <CampaignsModule services={services} />
+        <Toaster />
+      </>,
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za kampanju #1" }),
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Štampaj etikete" }),
+    );
+
+    expect(exportLabels).toHaveBeenCalledWith(expect.any(Number));
+    expect(openForPrint).toHaveBeenCalledWith(
+      "C:/exports/etikete-kampanja-1.html",
+    );
+  });
+
+  it("keeps the saved file when opening for print fails", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith([sezonskoDraft], sezonskoView);
+    vi.spyOn(services.campaigns, "exportLabels").mockResolvedValue({
+      fileName: "etikete-kampanja-1.html",
+      path: "C:/exports/etikete-kampanja-1.html",
+      mimeType: "text/html",
+      rowCount: 2,
+    });
+    vi.spyOn(services.print, "openForPrint").mockRejectedValue(
+      new Error("no handler"),
+    );
+
+    render(
+      <>
+        <CampaignsModule services={services} />
+        <Toaster />
+      </>,
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za kampanju #1" }),
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Štampaj etikete" }),
+    );
+
+    // The saved path is surfaced so the shop can open it manually.
+    expect(
+      await screen.findByText("C:/exports/etikete-kampanja-1.html"),
+    ).toBeInTheDocument();
+  });
+
   it("renders the correction report with its attention note", async () => {
     const user = userEvent.setup();
     const services = servicesWith([sezonskoDraft], sezonskoView);
