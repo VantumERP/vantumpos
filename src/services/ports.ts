@@ -186,6 +186,11 @@ export interface CampaignsService {
   exportCorrectionReport(): Promise<ExportedFile>;
 }
 
+export interface PrintService {
+  /** Opens an exported document in the OS default handler for printing. */
+  openForPrint(path: string): Promise<void>;
+}
+
 export interface ReportsService {
   getDailyTurnover(query: ReportDateQuery): Promise<DailyTurnoverReport>;
   getShiftTurnover(query: ReportDateQuery): Promise<ShiftTurnoverReport>;
@@ -211,4 +216,5 @@ export interface PosServices {
   imports: ImportService;
   reports: ReportsService;
   campaigns: CampaignsService;
+  print: PrintService;
 }

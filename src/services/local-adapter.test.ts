@@ -4,6 +4,10 @@ import { createLocalServices } from "./local-adapter";
 import { createMockServices } from "./mock-adapter";
 import type { CampaignInput } from "./types";
 
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openPath: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe("local service adapter", () => {
   it("calls the Tauri health command through the injected invoker", async () => {
     const invoke = vi.fn().mockResolvedValue({
@@ -671,6 +675,13 @@ describe("local service adapter", () => {
       4,
       "campaigns_export_correction_report",
     );
+  });
+
+  it("opens an exported document for printing through the opener plugin", async () => {
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    const services = createLocalServices(vi.fn());
+    await services.print.openForPrint("C:/exports/etikete-kampanja-1.html");
+    expect(openPath).toHaveBeenCalledWith("C:/exports/etikete-kampanja-1.html");
   });
 });
 

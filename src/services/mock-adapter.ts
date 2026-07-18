@@ -1098,6 +1098,9 @@ export function createMockServices(): PosServices {
         };
       },
     },
+    print: {
+      async openForPrint() {},
+    },
   };
 
   return services;
