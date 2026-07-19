@@ -1365,13 +1365,23 @@ function recomputeMockDeadlines(view: ReklamacijaView): void {
     consumerWindowDue = addDays(received.eventDate, 3);
   }
   if (received && !responded) {
-    clock = "paused";
+    clock = dateGt(now, consumerWindowDue as string) ? "impasse" : "paused";
     resolutionDue = null;
-  } else if (responded) {
-    resolutionDue = addDays(responded.eventDate, span);
+  } else if (received && responded) {
+    // Match the Rust engine: OLD restarts to a fresh span from the response;
+    // NEW resumes, preserving the base + elapsed suspension.
+    resolutionDue =
+      view.regime === "old"
+        ? addDays(responded.eventDate, span)
+        : addDays(
+            addDays(view.filedAt, span),
+            daysBetween(received.eventDate, responded.eventDate),
+          );
   }
-  if (extension?.detailJson) {
-    resolutionDue = JSON.parse(extension.detailJson).newDeadline as string;
+  if (extension?.detailJson && resolutionDue != null) {
+    // Tighter-date tiebreak, as the engine does.
+    const extDeadline = JSON.parse(extension.detailJson).newDeadline as string;
+    resolutionDue = dateGt(resolutionDue, extDeadline) ? extDeadline : resolutionDue;
   }
   if (resolved) {
     clock = "resolved";
@@ -1398,6 +1408,11 @@ function addDays(iso: string, days: number): string {
 
 function dateGt(a: string, b: string): boolean {
   return new Date(a).getTime() > new Date(b).getTime();
+}
+
+function daysBetween(from: string, to: string): number {
+  const ms = new Date(to).getTime() - new Date(from).getTime();
+  return Math.round(ms / 86_400_000);
 }
 
 function mockBarcodeLookup(barcode: string): ProductLookupSuggestion | null {
