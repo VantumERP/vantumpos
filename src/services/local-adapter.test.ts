@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createLocalServices } from "./local-adapter";
 import { createMockServices } from "./mock-adapter";
-import type { CampaignInput } from "./types";
+import type { AnswerInput, CampaignInput, ReklamacijaInput } from "./types";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
@@ -677,6 +677,77 @@ describe("local service adapter", () => {
     );
   });
 
+  it("maps reklamacije service methods to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockResolvedValue(null);
+    const services = createLocalServices(invoke);
+
+    const input: ReklamacijaInput = {
+      podnosilacImePrezime: "Petar Petrović",
+      kontakt: "060/123-456",
+      podaciORobi: "Frižider Beko",
+      opisNesaobraznosti: "Ne hladi",
+      zahtev: "Zamena",
+      robaKind: "tehnicka",
+      filedAt: "2026-06-15T00:00:00Z",
+    };
+    const answer: AnswerInput = {
+      answerText: "Reklamacija prihvaćena.",
+      warningDuty: "Dužnost izjašnjenja.",
+      warningConsequences: "Posledice.",
+      warningZastoj: "Zastoj rokova.",
+      eventDate: "2026-06-18T00:00:00Z",
+    };
+
+    await services.reklamacije.list();
+    await services.reklamacije.get(7);
+    await services.reklamacije.create(input);
+    await services.reklamacije.logAnswer(7, answer);
+    await services.reklamacije.consumerReceived(7, "2026-06-20T00:00:00Z");
+    await services.reklamacije.consumerResponded(7, "2026-06-22T00:00:00Z");
+    await services.reklamacije.grantExtension(
+      7,
+      "2026-07-20T00:00:00Z",
+      true,
+      "Naručen rezervni deo",
+      "2026-06-22T00:00:00Z",
+    );
+    await services.reklamacije.resolve(7, "zamena", "2026-06-25T00:00:00Z");
+    await services.reklamacije.exportPotvrda(7);
+    await services.reklamacije.exportNotice();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "reklamacija_list");
+    expect(invoke).toHaveBeenNthCalledWith(2, "reklamacija_get", { id: 7 });
+    expect(invoke).toHaveBeenNthCalledWith(3, "reklamacija_create", { input });
+    expect(invoke).toHaveBeenNthCalledWith(4, "reklamacija_log_answer", {
+      id: 7,
+      input: answer,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, "reklamacija_consumer_received", {
+      id: 7,
+      eventDate: "2026-06-20T00:00:00Z",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(6, "reklamacija_consumer_responded", {
+      id: 7,
+      eventDate: "2026-06-22T00:00:00Z",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(7, "reklamacija_grant_extension", {
+      id: 7,
+      newDeadline: "2026-07-20T00:00:00Z",
+      consumerConsent: true,
+      reason: "Naručen rezervni deo",
+      eventDate: "2026-06-22T00:00:00Z",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(8, "reklamacija_resolve", {
+      id: 7,
+      nacin: "zamena",
+      eventDate: "2026-06-25T00:00:00Z",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(9, "reklamacija_export_potvrda", {
+      id: 7,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(10, "reklamacija_export_notice");
+  });
+
   it("opens an exported document for printing through the opener plugin", async () => {
     const { openPath } = await import("@tauri-apps/plugin-opener");
     const services = createLocalServices(vi.fn());
@@ -893,7 +964,112 @@ describe("mock service adapter", () => {
     expect(cancelled.status).toBe("cancelled");
     expect(cancelled.activatedAt).toBeNull();
   });
+
+  it("carries a reklamacija through its lifecycle at mock fidelity", async () => {
+    const services = createMockServices();
+
+    const created = await services.reklamacije.create(reklamacijaInput());
+    expect(created.id).toBeGreaterThan(0);
+    expect(created.registerNumber).toBeGreaterThan(0);
+    expect(created.status).toBe("open");
+    expect(created.regime).toBeTruthy();
+    expect(created.purgeEligible).toBe(false);
+    // A plausible DeadlineState: the 8-day answer clock is running, not overdue.
+    expect(created.deadlines.answerDue).toBeTruthy();
+    expect(created.deadlines.resolutionDue).toBeTruthy();
+    expect(created.deadlines.clock).toBe("running");
+    expect(created.deadlines.answerOverdue).toBe(false);
+    expect(created.deadlines.oneExtensionUsed).toBe(false);
+
+    await expect(services.reklamacije.list()).resolves.toMatchObject([
+      {
+        id: created.id,
+        registerNumber: created.registerNumber,
+        status: "open",
+      },
+    ]);
+    await expect(services.reklamacije.get(created.id)).resolves.toEqual(created);
+
+    const answered = await services.reklamacije.logAnswer(
+      created.id,
+      answerInput(),
+    );
+    expect(answered.status).toBe("answered");
+
+    const received = await services.reklamacije.consumerReceived(
+      created.id,
+      "2026-06-20T00:00:00Z",
+    );
+    expect(received.status).toBe("awaiting_consumer");
+    expect(received.deadlines.clock).toBe("paused");
+    expect(received.deadlines.resolutionDue).toBeNull();
+    expect(received.deadlines.consumerWindowDue).toBeTruthy();
+
+    const responded = await services.reklamacije.consumerResponded(
+      created.id,
+      "2026-06-22T00:00:00Z",
+    );
+    expect(responded.deadlines.clock).toBe("running");
+    expect(responded.deadlines.resolutionDue).toBeTruthy();
+
+    const extended = await services.reklamacije.grantExtension(
+      created.id,
+      "2026-07-20T00:00:00Z",
+      true,
+      "Naručen rezervni deo",
+      "2026-06-22T00:00:00Z",
+    );
+    expect(extended.deadlines.oneExtensionUsed).toBe(true);
+    expect(extended.deadlines.resolutionDue).toBe("2026-07-20T00:00:00Z");
+
+    const resolved = await services.reklamacije.resolve(
+      created.id,
+      "zamena",
+      "2026-06-25T00:00:00Z",
+    );
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.deadlines.clock).toBe("resolved");
+    expect(resolved.deadlines.resolutionDue).toBeNull();
+  });
+
+  it("exports the potvrda and notice at mock fidelity", async () => {
+    const services = createMockServices();
+    const created = await services.reklamacije.create(reklamacijaInput());
+
+    await expect(
+      services.reklamacije.exportPotvrda(created.id),
+    ).resolves.toMatchObject({
+      fileName: `potvrda-reklamacija-${created.registerNumber}.html`,
+      mimeType: "text/html",
+    });
+    await expect(services.reklamacije.exportNotice()).resolves.toMatchObject({
+      fileName: "obavestenje-reklamacije.html",
+      mimeType: "text/html",
+    });
+  });
 });
+
+function reklamacijaInput(): ReklamacijaInput {
+  return {
+    podnosilacImePrezime: "Petar Petrović",
+    kontakt: "060/123-456",
+    podaciORobi: "Frižider Beko",
+    opisNesaobraznosti: "Ne hladi",
+    zahtev: "Zamena",
+    robaKind: "tehnicka",
+    filedAt: "2026-06-15T00:00:00Z",
+  };
+}
+
+function answerInput(): AnswerInput {
+  return {
+    answerText: "Reklamacija prihvaćena.",
+    warningDuty: "Dužnost izjašnjenja.",
+    warningConsequences: "Posledice.",
+    warningZastoj: "Zastoj rokova.",
+    eventDate: "2026-06-18T00:00:00Z",
+  };
+}
 
 function campaignInput(): CampaignInput {
   return {

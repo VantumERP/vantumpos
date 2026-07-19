@@ -18,6 +18,8 @@ import type {
   ProductSummary,
   ReceiptDetail,
   ReceiptSettings,
+  ReklamacijaInput,
+  ReklamacijaView,
   RestoreBackupRequest,
   SaleDraftRequest,
   SalePreview,
@@ -85,6 +87,7 @@ export function createMockServices(): PosServices {
   ];
   const ledgerMovements = new Map<number, ProductLedgerMovement[]>();
   const campaigns: CampaignView[] = [];
+  const reklamacije: ReklamacijaView[] = [];
   const receipt = createReceiptDetail();
   let users: UserAccount[] = [
     {
@@ -1098,6 +1101,121 @@ export function createMockServices(): PosServices {
         };
       },
     },
+    // Mock fidelity only: the real deadline engine lives in `crate::reklamacije`
+    // and derives every date from the event log per-read. This stub mirrors the
+    // lifecycle — create assigns id + register number and freezes the regime;
+    // each transition appends an event and re-derives a plausible DeadlineState.
+    reklamacije: {
+      async list() {
+        return reklamacije.map((view) => ({
+          id: view.id,
+          registerNumber: view.registerNumber,
+          regime: view.regime,
+          status: view.status,
+          podnosilacImePrezime: view.podnosilacImePrezime,
+          filedAt: view.filedAt,
+          answerDue: view.deadlines.answerDue,
+          resolutionDue: view.deadlines.resolutionDue,
+          answerOverdue: view.deadlines.answerOverdue,
+          resolutionOverdue: view.deadlines.resolutionOverdue,
+          purgeEligible: view.purgeEligible,
+        }));
+      },
+      async get(id) {
+        return findReklamacija(reklamacije, id);
+      },
+      async create(input) {
+        const view = mockReklamacijaView(
+          Math.max(0, ...reklamacije.map((item) => item.id)) + 1,
+          Math.max(0, ...reklamacije.map((item) => item.registerNumber)) + 1,
+          input,
+        );
+        reklamacije.push(view);
+        return view;
+      },
+      async logAnswer(id, input) {
+        const view = findReklamacija(reklamacije, id);
+        view.events.push({
+          eventType: "answer_given",
+          eventDate: input.eventDate,
+          detailJson: null,
+          consumerConsent: false,
+        });
+        view.status = "answered";
+        recomputeMockDeadlines(view);
+        return view;
+      },
+      async consumerReceived(id, eventDate) {
+        const view = findReklamacija(reklamacije, id);
+        view.events.push({
+          eventType: "consumer_received_answer",
+          eventDate,
+          detailJson: null,
+          consumerConsent: false,
+        });
+        view.status = "awaiting_consumer";
+        recomputeMockDeadlines(view);
+        return view;
+      },
+      async consumerResponded(id, eventDate) {
+        const view = findReklamacija(reklamacije, id);
+        view.events.push({
+          eventType: "consumer_responded",
+          eventDate,
+          detailJson: null,
+          consumerConsent: false,
+        });
+        view.status = "answered";
+        recomputeMockDeadlines(view);
+        return view;
+      },
+      async grantExtension(id, newDeadline, consumerConsent, reason, eventDate) {
+        const view = findReklamacija(reklamacije, id);
+        if (view.deadlines.oneExtensionUsed) {
+          throw {
+            code: "validation_error",
+            message: "Rok je već jednom produžen.",
+          };
+        }
+        view.events.push({
+          eventType: "extension_granted",
+          eventDate,
+          detailJson: JSON.stringify({ newDeadline, reason }),
+          consumerConsent,
+        });
+        recomputeMockDeadlines(view);
+        return view;
+      },
+      async resolve(id, nacin, eventDate) {
+        const view = findReklamacija(reklamacije, id);
+        view.events.push({
+          eventType: "resolved",
+          eventDate,
+          detailJson: JSON.stringify({ nacin }),
+          consumerConsent: false,
+        });
+        view.status = "resolved";
+        recomputeMockDeadlines(view);
+        return view;
+      },
+      async exportPotvrda(id) {
+        const view = findReklamacija(reklamacije, id);
+        return {
+          fileName: `potvrda-reklamacija-${view.registerNumber}.html`,
+          path: `mock://exports/potvrda-reklamacija-${view.registerNumber}.html`,
+          mimeType: "text/html" as const,
+          rowCount: 1,
+        };
+      },
+      async exportNotice() {
+        return {
+          fileName: "obavestenje-reklamacije.html",
+          path: "mock://exports/obavestenje-reklamacije.html",
+          mimeType: "text/html" as const,
+          rowCount: 0,
+        };
+      },
+    },
     print: {
       async openForPrint() {},
     },
@@ -1162,6 +1280,124 @@ function mockCampaignView(
     items,
     warnings: [],
   };
+}
+
+// The cutover the real engine reads from `crate::reklamacije::CUTOVER_DATE`.
+// The regime is frozen here at create and never recomputed.
+const REKLAMACIJA_CUTOVER = "2026-08-01T00:00:00Z";
+
+function findReklamacija(
+  reklamacije: ReklamacijaView[],
+  id: number,
+): ReklamacijaView {
+  const view = reklamacije.find((candidate) => candidate.id === id);
+  if (!view) {
+    throw { code: "not_found", message: "Reklamacija nije pronađena." };
+  }
+
+  return view;
+}
+
+function mockReklamacijaView(
+  id: number,
+  registerNumber: number,
+  input: ReklamacijaInput,
+): ReklamacijaView {
+  const view: ReklamacijaView = {
+    id,
+    registerNumber,
+    regime:
+      new Date(input.filedAt) < new Date(REKLAMACIJA_CUTOVER) ? "old" : "new",
+    status: "open",
+    filedAt: input.filedAt,
+    podnosilacImePrezime: input.podnosilacImePrezime,
+    kontakt: input.kontakt,
+    podaciORobi: input.podaciORobi,
+    opisNesaobraznosti: input.opisNesaobraznosti,
+    zahtev: input.zahtev,
+    robaKind: input.robaKind,
+    datumIzdavanjaPotvrde: now,
+    createdBy: 1,
+    createdAt: now,
+    updatedAt: now,
+    events: [],
+    deadlines: {
+      answerDue: now,
+      resolutionDue: null,
+      clock: "running",
+      consumerWindowDue: null,
+      answerOverdue: false,
+      resolutionOverdue: false,
+      oneExtensionUsed: false,
+    },
+    purgeEligible: false,
+  };
+  recomputeMockDeadlines(view);
+  return view;
+}
+
+// A deliberately simplified stand-in for `compute_deadlines`: the 8-day answer
+// clock never pauses; the resolution clock pauses on `consumer_received_answer`
+// and restarts to a fresh span on `consumer_responded`; a granted extension
+// takes the consented date; `resolved` stops the clock. UI-fidelity only.
+function recomputeMockDeadlines(view: ReklamacijaView): void {
+  const span = view.robaKind === "opsta" ? 15 : 30;
+  const answerDue = addDays(view.filedAt, 8);
+  const received = view.events.find(
+    (event) => event.eventType === "consumer_received_answer",
+  );
+  const responded = view.events.find(
+    (event) => event.eventType === "consumer_responded",
+  );
+  const extension = view.events.find(
+    (event) => event.eventType === "extension_granted",
+  );
+  const resolved = view.events.some((event) => event.eventType === "resolved");
+  const answered = view.events.some(
+    (event) => event.eventType === "answer_given",
+  );
+
+  let clock = "running";
+  let resolutionDue: string | null = addDays(view.filedAt, span);
+  let consumerWindowDue: string | null = null;
+
+  if (received) {
+    consumerWindowDue = addDays(received.eventDate, 3);
+  }
+  if (received && !responded) {
+    clock = "paused";
+    resolutionDue = null;
+  } else if (responded) {
+    resolutionDue = addDays(responded.eventDate, span);
+  }
+  if (extension?.detailJson) {
+    resolutionDue = JSON.parse(extension.detailJson).newDeadline as string;
+  }
+  if (resolved) {
+    clock = "resolved";
+    resolutionDue = null;
+    consumerWindowDue = null;
+  }
+
+  view.deadlines = {
+    answerDue,
+    resolutionDue,
+    clock,
+    consumerWindowDue,
+    answerOverdue: !resolved && !answered && dateGt(now, answerDue),
+    resolutionOverdue: resolutionDue != null && dateGt(now, resolutionDue),
+    oneExtensionUsed: extension != null,
+  };
+}
+
+function addDays(iso: string, days: number): string {
+  const date = new Date(iso);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function dateGt(a: string, b: string): boolean {
+  return new Date(a).getTime() > new Date(b).getTime();
 }
 
 function mockBarcodeLookup(barcode: string): ProductLookupSuggestion | null {

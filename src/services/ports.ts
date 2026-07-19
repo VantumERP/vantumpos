@@ -42,6 +42,10 @@ import type {
   ProductSalesReport,
   ProductSearchQuery,
   ProductSummary,
+  AnswerInput,
+  ReklamacijaInput,
+  ReklamacijaSummary,
+  ReklamacijaView,
   ReportDateQuery,
   ReadImportHeadersRequest,
   ReceiptDetail,
@@ -186,6 +190,32 @@ export interface CampaignsService {
   exportCorrectionReport(): Promise<ExportedFile>;
 }
 
+/**
+ * The admin-gated reklamacije register. Deadlines are DERIVED per-read by the
+ * backend, never stored, and the regime is frozen at `create`; the ten methods
+ * map 1:1 to the `reklamacija_*` command names.
+ */
+export interface ReklamacijeService {
+  list(): Promise<ReklamacijaSummary[]>;
+  get(id: number): Promise<ReklamacijaView>;
+  create(input: ReklamacijaInput): Promise<ReklamacijaView>;
+  logAnswer(id: number, input: AnswerInput): Promise<ReklamacijaView>;
+  consumerReceived(id: number, eventDate: string): Promise<ReklamacijaView>;
+  consumerResponded(id: number, eventDate: string): Promise<ReklamacijaView>;
+  grantExtension(
+    id: number,
+    newDeadline: string,
+    consumerConsent: boolean,
+    reason: string,
+    eventDate: string,
+  ): Promise<ReklamacijaView>;
+  resolve(id: number, nacin: string, eventDate: string): Promise<ReklamacijaView>;
+  /** Self-contained potvrda o prijemu reklamacije (čl. 55 st. 7 / čl. 63 st. 7). */
+  exportPotvrda(id: number): Promise<ExportedFile>;
+  /** The statutory prodajno-mesto display notice (čl. 55 st. 4 / čl. 63 st. 4). */
+  exportNotice(): Promise<ExportedFile>;
+}
+
 export interface PrintService {
   /** Opens an exported document in the OS default handler for printing. */
   openForPrint(path: string): Promise<void>;
@@ -216,5 +246,6 @@ export interface PosServices {
   imports: ImportService;
   reports: ReportsService;
   campaigns: CampaignsService;
+  reklamacije: ReklamacijeService;
   print: PrintService;
 }

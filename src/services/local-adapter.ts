@@ -34,6 +34,8 @@ import type {
   ProductSummary,
   ReceiptDetail,
   ReceiptSettings,
+  ReklamacijaSummary,
+  ReklamacijaView,
   SalesSettings,
   ReceiptSearchResult,
   SalePreview,
@@ -209,6 +211,38 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<CorrectionReport>("campaigns_correction_report"),
       exportCorrectionReport: () =>
         invoke<ExportedFile>("campaigns_export_correction_report"),
+    },
+    reklamacije: {
+      list: () => invoke<ReklamacijaSummary[]>("reklamacija_list"),
+      get: (id) => invoke<ReklamacijaView>("reklamacija_get", { id }),
+      create: (input) =>
+        invoke<ReklamacijaView>("reklamacija_create", { input }),
+      logAnswer: (id, input) =>
+        invoke<ReklamacijaView>("reklamacija_log_answer", { id, input }),
+      consumerReceived: (id, eventDate) =>
+        invoke<ReklamacijaView>("reklamacija_consumer_received", {
+          id,
+          eventDate,
+        }),
+      consumerResponded: (id, eventDate) =>
+        invoke<ReklamacijaView>("reklamacija_consumer_responded", {
+          id,
+          eventDate,
+        }),
+      grantExtension: (id, newDeadline, consumerConsent, reason, eventDate) =>
+        invoke<ReklamacijaView>("reklamacija_grant_extension", {
+          id,
+          newDeadline,
+          consumerConsent,
+          reason,
+          eventDate,
+        }),
+      resolve: (id, nacin, eventDate) =>
+        invoke<ReklamacijaView>("reklamacija_resolve", { id, nacin, eventDate }),
+      exportPotvrda: (id) =>
+        invoke<ExportedFile>("reklamacija_export_potvrda", { id }),
+      exportNotice: () =>
+        invoke<ExportedFile>("reklamacija_export_notice"),
     },
     print: {
       openForPrint: (path) => openPath(path),

@@ -435,6 +435,125 @@ export interface CorrectionReport {
   rows: CorrectionRow[];
 }
 
+/**
+ * The three `roba_kind` values the schema's CHECK constraint permits, mirroring
+ * `crate::reklamacije::ROBA_KINDS`. The furniture/technical classification is
+ * the shop's legal call (memo §2.3) — this is only the persisted tag.
+ */
+export type RobaKind = "opsta" | "tehnicka" | "namestaj";
+
+/**
+ * The frozen regime, persisted at intake from the filing date vs the cutover and
+ * NEVER recomputed. Mirrors `crate::reklamacije::REGIME_OLD`/`REGIME_NEW`.
+ */
+export type ReklamacijaRegime = "old" | "new";
+
+/**
+ * The derived deadline verdict — mirrors `crate::reklamacije::DeadlineState`
+ * (serde camelCase). Nothing here is stored: `compute_deadlines` re-derives it
+ * from the event log on every read, so the same events always produce the same
+ * answer for a given day. `clock` is `"running" | "paused" | "impasse" |
+ * "resolved"`; `resolutionDue` is `null` while paused / at impasse / resolved.
+ */
+export interface DeadlineState {
+  answerDue: string;
+  resolutionDue: string | null;
+  clock: string;
+  consumerWindowDue: string | null;
+  answerOverdue: boolean;
+  resolutionOverdue: boolean;
+  oneExtensionUsed: boolean;
+}
+
+/**
+ * One event-log row projected for the UI — mirrors `crate::reklamacije::
+ * EventView`. `consumerConsent` only ever carries meaning on an
+ * `extension_granted` row.
+ */
+export interface ReklamacijaEvent {
+  eventType: string;
+  eventDate: string;
+  detailJson: string | null;
+  consumerConsent: boolean;
+}
+
+/**
+ * Intake payload — mirrors `crate::reklamacije::ReklamacijaInput`. Consumer PII
+ * (`podnosilacImePrezime`, `kontakt`) is inline and admin-gated; there is no
+ * consent UI — the lawful basis is the shop's legal obligation to keep the
+ * evidencija. `filedAt` is an RFC3339 instant; its calendar date fixes the
+ * regime and starts the clocks.
+ */
+export interface ReklamacijaInput {
+  podnosilacImePrezime: string;
+  kontakt: string | null;
+  podaciORobi: string;
+  opisNesaobraznosti: string;
+  zahtev: string;
+  robaKind: RobaKind;
+  filedAt: string;
+}
+
+/**
+ * The answer payload — mirrors `crate::reklamacije::AnswerInput`. The three
+ * `warning*` fields carry the express warning (memo §4(a)); they are mandatory
+ * only under the NEW regime, where `log_answer` is gated on them.
+ */
+export interface AnswerInput {
+  answerText: string;
+  warningDuty: string | null;
+  warningConsequences: string | null;
+  warningZastoj: string | null;
+  eventDate: string;
+}
+
+/**
+ * The full record — mirrors `crate::reklamacije::ReklamacijaView`. `status` is
+ * the stored column; `deadlines.clock` is the derived running/paused/impasse
+ * view. `purgeEligible` is the derived `filedAt + 2y ≤ today` retention flag —
+ * an eligibility signal only; nothing auto-deletes (memo §3).
+ */
+export interface ReklamacijaView {
+  id: number;
+  registerNumber: number;
+  regime: ReklamacijaRegime;
+  status: string;
+  filedAt: string;
+  podnosilacImePrezime: string;
+  kontakt: string | null;
+  podaciORobi: string;
+  opisNesaobraznosti: string;
+  zahtev: string;
+  robaKind: RobaKind;
+  datumIzdavanjaPotvrde: string;
+  createdBy: number | null;
+  createdAt: string;
+  updatedAt: string;
+  events: ReklamacijaEvent[];
+  deadlines: DeadlineState;
+  purgeEligible: boolean;
+}
+
+/**
+ * Register-list row — mirrors `crate::reklamacije::ReklamacijaSummary`. Carries
+ * the stored `status` plus the derived answer/resolution dates and overdue
+ * flags, so the list shows the deadline engine's verdict without loading each
+ * record's full event log.
+ */
+export interface ReklamacijaSummary {
+  id: number;
+  registerNumber: number;
+  regime: ReklamacijaRegime;
+  status: string;
+  podnosilacImePrezime: string;
+  filedAt: string;
+  answerDue: string;
+  resolutionDue: string | null;
+  answerOverdue: boolean;
+  resolutionOverdue: boolean;
+  purgeEligible: boolean;
+}
+
 export type DiscountDraft =
   | { type: "amount"; amountMinor: number }
   | { type: "percent"; basisPoints: number };
