@@ -7,6 +7,7 @@ pub mod health;
 pub mod imports;
 pub mod inventory;
 pub mod receipts;
+pub mod reklamacije;
 pub mod reports;
 pub mod sales;
 pub mod settings;
