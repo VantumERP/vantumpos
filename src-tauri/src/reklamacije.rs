@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 use crate::app_error::AppError;
+use rusqlite::{params, Connection, OptionalExtension};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
@@ -218,9 +219,356 @@ pub fn compute_deadlines(
     })
 }
 
+const MSG_REKLAMACIJA_NOT_FOUND: &str = "Reklamacija nije pronađena.";
+
+/// The three `roba_kind` values the schema's CHECK constraint permits.
+const ROBA_KINDS: [&str; 3] = ["opsta", "tehnicka", "namestaj"];
+
+/// Retention floor: `filed_at + 2 years` (calendar days). Purge-*eligibility*
+/// only — nothing auto-deletes; indefinite retention stays compliant (memo §3).
+const RETENTION_DAYS: i64 = 730;
+
+/// Intake payload from the command layer. Consumer PII (`podnosilac_ime_prezime`,
+/// `kontakt`) is inline and admin-gated; there is no consent UI — the lawful
+/// basis is the shop's legal obligation to keep the evidencija.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReklamacijaInput {
+    pub podnosilac_ime_prezime: String,
+    pub kontakt: Option<String>,
+    pub podaci_o_robi: String,
+    pub opis_nesaobraznosti: String,
+    pub zahtev: String,
+    pub roba_kind: String,
+    pub filed_at: String,
+}
+
+/// One event-log row, projected for the UI. `consumer_consent` is surfaced as a
+/// bool (it only ever carries meaning on `extension_granted`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventView {
+    pub event_type: String,
+    pub event_date: String,
+    pub detail_json: Option<String>,
+    pub consumer_consent: bool,
+}
+
+/// The full record: every persisted column, the frozen `regime`, the event log,
+/// and the freshly `compute_deadlines`-derived `DeadlineState`. `status` is the
+/// stored column; `deadlines.clock` is the derived running/paused/impasse view.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReklamacijaView {
+    pub id: i64,
+    pub register_number: i64,
+    pub regime: String,
+    pub status: String,
+    pub filed_at: String,
+    pub podnosilac_ime_prezime: String,
+    pub kontakt: Option<String>,
+    pub podaci_o_robi: String,
+    pub opis_nesaobraznosti: String,
+    pub zahtev: String,
+    pub roba_kind: String,
+    pub datum_izdavanja_potvrde: String,
+    pub created_by: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub events: Vec<EventView>,
+    pub deadlines: DeadlineState,
+    pub purge_eligible: bool,
+}
+
+/// Register-list row: the stored `status` plus the derived answer/resolution
+/// dates and their overdue flags, so the list can show the deadline engine's
+/// verdict without loading each record's full event log into the client.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReklamacijaSummary {
+    pub id: i64,
+    pub register_number: i64,
+    pub regime: String,
+    pub status: String,
+    pub podnosilac_ime_prezime: String,
+    pub filed_at: String,
+    pub answer_due: String,
+    pub resolution_due: Option<String>,
+    pub answer_overdue: bool,
+    pub resolution_overdue: bool,
+    pub purge_eligible: bool,
+}
+
+fn require_non_empty(value: &str, field: &str) -> Result<(), AppError> {
+    if value.trim().is_empty() {
+        return Err(AppError::validation(
+            "Obavezno polje ne sme biti prazno.",
+            serde_json::json!({ "field": field }),
+        ));
+    }
+    Ok(())
+}
+
+/// `filed_at + 2 years ≤ today`, compared on the calendar date. An eligibility
+/// flag only — the module surfaces it; it never auto-deletes (memo §3).
+fn is_purge_eligible(filed_at: &str, today: &str) -> bool {
+    !date_gt(&add_days(filed_at, RETENTION_DAYS), today)
+}
+
+/// Loads the event log for one record, oldest first, in the UI projection.
+fn load_events(conn: &Connection, reklamacija_id: i64) -> Result<Vec<EventView>, AppError> {
+    let mut statement = conn.prepare(
+        "SELECT event_type, event_date, detail_json, consumer_consent
+         FROM reklamacija_events
+         WHERE reklamacija_id = ?1
+         ORDER BY event_date ASC, id ASC",
+    )?;
+    let events = statement
+        .query_map(params![reklamacija_id], |row| {
+            Ok(EventView {
+                event_type: row.get(0)?,
+                event_date: row.get(1)?,
+                detail_json: row.get(2)?,
+                consumer_consent: row.get::<_, i64>(3)? == 1,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(events)
+}
+
+/// Projects the event log into the pure engine's `DeadlineEvent` shape.
+fn deadline_events(events: &[EventView]) -> Vec<DeadlineEvent> {
+    events
+        .iter()
+        .map(|e| DeadlineEvent {
+            event_type: e.event_type.clone(),
+            event_date: e.event_date.clone(),
+        })
+        .collect()
+}
+
+/// Intake: validate, then in ONE transaction stamp the frozen `regime`, allocate
+/// the sequential `register_number` (`MAX+1`, UNIQUE-guarded), and insert the
+/// record with `datum_izdavanja_potvrde = now` and `status = 'open'`.
+pub fn create_reklamacija(
+    conn: &mut Connection,
+    input: &ReklamacijaInput,
+    acting_user_id: i64,
+    now: &str,
+) -> Result<ReklamacijaView, AppError> {
+    require_non_empty(&input.podnosilac_ime_prezime, "podnosilacImePrezime")?;
+    require_non_empty(&input.podaci_o_robi, "podaciORobi")?;
+    require_non_empty(&input.opis_nesaobraznosti, "opisNesaobraznosti")?;
+    require_non_empty(&input.zahtev, "zahtev")?;
+    if !ROBA_KINDS.contains(&input.roba_kind.as_str()) {
+        return Err(AppError::validation(
+            "Vrsta robe nije prepoznata.",
+            serde_json::json!({ "field": "robaKind" }),
+        ));
+    }
+    // Also validates that `filed_at` parses; the regime is frozen here forever.
+    let regime = regime_for(&input.filed_at)?;
+
+    let tx = conn.transaction()?;
+    // Single-instance desktop: `MAX+1` inside the intake transaction is atomic,
+    // and the UNIQUE column is the backstop.
+    let register_number: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(register_number), 0) + 1 FROM reklamacije",
+        [],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO reklamacije (
+            register_number, regime, status, filed_at, podnosilac_ime_prezime, kontakt,
+            podaci_o_robi, opis_nesaobraznosti, zahtev, roba_kind, datum_izdavanja_potvrde,
+            created_by, created_at, updated_at
+         )
+         VALUES (?1, ?2, 'open', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+        params![
+            register_number,
+            regime,
+            input.filed_at,
+            input.podnosilac_ime_prezime,
+            input.kontakt,
+            input.podaci_o_robi,
+            input.opis_nesaobraznosti,
+            input.zahtev,
+            input.roba_kind,
+            now, // datum_izdavanja_potvrde — stamped at intake
+            acting_user_id,
+            now,
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.commit()?;
+
+    get_reklamacija(conn, id, now)
+}
+
+/// Loads one record and derives its `DeadlineState` from the event log for
+/// `today`. The stored `status` and derived clock travel together.
+pub fn get_reklamacija(
+    conn: &Connection,
+    id: i64,
+    today: &str,
+) -> Result<ReklamacijaView, AppError> {
+    #[allow(clippy::type_complexity)]
+    let base: Option<(
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        String,
+        String,
+    )> = conn
+        .query_row(
+            "SELECT id, register_number, regime, status, filed_at, podnosilac_ime_prezime,
+                    kontakt, podaci_o_robi, opis_nesaobraznosti, zahtev, roba_kind,
+                    datum_izdavanja_potvrde, created_by, created_at, updated_at
+             FROM reklamacije
+             WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (
+        id,
+        register_number,
+        regime,
+        status,
+        filed_at,
+        podnosilac_ime_prezime,
+        kontakt,
+        podaci_o_robi,
+        opis_nesaobraznosti,
+        zahtev,
+        roba_kind,
+        datum_izdavanja_potvrde,
+        created_by,
+        created_at,
+        updated_at,
+    ) = base.ok_or_else(|| AppError::not_found(MSG_REKLAMACIJA_NOT_FOUND))?;
+
+    let events = load_events(conn, id)?;
+    let deadlines = compute_deadlines(
+        &regime,
+        &filed_at,
+        &roba_kind,
+        &deadline_events(&events),
+        today,
+    )?;
+    let purge_eligible = is_purge_eligible(&filed_at, today);
+
+    Ok(ReklamacijaView {
+        id,
+        register_number,
+        regime,
+        status,
+        filed_at,
+        podnosilac_ime_prezime,
+        kontakt,
+        podaci_o_robi,
+        opis_nesaobraznosti,
+        zahtev,
+        roba_kind,
+        datum_izdavanja_potvrde,
+        created_by,
+        created_at,
+        updated_at,
+        events,
+        deadlines,
+        purge_eligible,
+    })
+}
+
+/// The whole register, newest filing first, each row carrying its derived
+/// answer/resolution dates and overdue flags for `today`.
+pub fn list_reklamacije(
+    conn: &Connection,
+    today: &str,
+) -> Result<Vec<ReklamacijaSummary>, AppError> {
+    // Collect the rows fully before iterating: `load_events` prepares its own
+    // statement, which cannot overlap an active `query_map` on the same conn.
+    let base: Vec<(i64, i64, String, String, String, String, String)> = {
+        let mut statement = conn.prepare(
+            "SELECT id, register_number, regime, status, podnosilac_ime_prezime, filed_at, roba_kind
+             FROM reklamacije
+             ORDER BY filed_at DESC, id DESC",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let mut summaries = Vec::with_capacity(base.len());
+    for (id, register_number, regime, status, podnosilac_ime_prezime, filed_at, roba_kind) in base {
+        let events = load_events(conn, id)?;
+        let deadlines = compute_deadlines(
+            &regime,
+            &filed_at,
+            &roba_kind,
+            &deadline_events(&events),
+            today,
+        )?;
+        summaries.push(ReklamacijaSummary {
+            id,
+            register_number,
+            regime,
+            status,
+            podnosilac_ime_prezime,
+            answer_due: deadlines.answer_due,
+            resolution_due: deadlines.resolution_due,
+            answer_overdue: deadlines.answer_overdue,
+            resolution_overdue: deadlines.resolution_overdue,
+            purge_eligible: is_purge_eligible(&filed_at, today),
+            filed_at,
+        });
+    }
+    Ok(summaries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{test_database_path, Db};
 
     fn ev(t: &str, d: &str) -> DeadlineEvent {
         DeadlineEvent {
@@ -379,5 +727,141 @@ mod tests {
         .unwrap();
         assert_eq!(s.clock, "resolved");
         assert!(!s.resolution_overdue && !s.answer_overdue);
+    }
+
+    /// Db::new seeds the admin user (id 1), which the `created_by` FK needs.
+    fn with_reklamacija_db(test_name: &str, test: impl FnOnce(&mut Connection)) {
+        let path = test_database_path(test_name);
+        {
+            let db = Db::new(&path).expect("db init");
+            let mut connection = db.open().expect("open");
+            test(&mut connection);
+        }
+        std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    fn intake_input(filed_at: &str) -> ReklamacijaInput {
+        ReklamacijaInput {
+            podnosilac_ime_prezime: "Petar Petrović".into(),
+            kontakt: Some("060/123-456".into()),
+            podaci_o_robi: "Frižider Beko".into(),
+            opis_nesaobraznosti: "Ne hladi".into(),
+            zahtev: "Zamena".into(),
+            roba_kind: "tehnicka".into(),
+            filed_at: filed_at.into(),
+        }
+    }
+
+    #[test]
+    fn create_assigns_sequential_register_numbers_and_freezes_regime() {
+        with_reklamacija_db("rek_create_sequential", |conn| {
+            let first = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(first.register_number, 1);
+            assert_eq!(first.regime, REGIME_OLD, "2026-06-01 filing is pre-cutover");
+            assert_eq!(first.status, "open");
+            assert_eq!(first.podnosilac_ime_prezime, "Petar Petrović");
+            assert_eq!(first.podaci_o_robi, "Frižider Beko");
+            assert_eq!(first.kontakt.as_deref(), Some("060/123-456"));
+            assert_eq!(first.datum_izdavanja_potvrde, "2026-06-01T08:00:00Z");
+            assert_eq!(first.created_by, Some(1));
+
+            let second = create_reklamacija(
+                conn,
+                &intake_input("2026-09-01T00:00:00Z"),
+                1,
+                "2026-09-01T08:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(second.register_number, 2, "MAX+1 allocates the next number");
+            assert_eq!(
+                second.regime, REGIME_NEW,
+                "2026-09-01 filing is post-cutover"
+            );
+        });
+    }
+
+    #[test]
+    fn get_derives_deadline_state_from_the_event_log() {
+        with_reklamacija_db("rek_get_deadlines", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            let view = get_reklamacija(conn, created.id, "2026-06-05T00:00:00Z").unwrap();
+            assert!(view.events.is_empty());
+            // tehnička → 30-day base; answer_due = filed + 8.
+            assert_eq!(&view.deadlines.answer_due[..10], "2026-06-09");
+            assert_eq!(
+                view.deadlines.resolution_due.as_deref().map(|d| &d[..10]),
+                Some("2026-07-01"),
+                "filed + 30 with no round-trip yet"
+            );
+            assert_eq!(view.deadlines.clock, "running");
+        });
+    }
+
+    #[test]
+    fn list_orders_newest_filing_first_and_carries_derived_dates() {
+        with_reklamacija_db("rek_list_order", |conn| {
+            create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            create_reklamacija(
+                conn,
+                &intake_input("2026-06-10T00:00:00Z"),
+                1,
+                "2026-06-10T08:00:00Z",
+            )
+            .unwrap();
+            let list = list_reklamacije(conn, "2026-06-12T00:00:00Z").unwrap();
+            assert_eq!(list.len(), 2);
+            assert_eq!(&list[0].filed_at[..10], "2026-06-10", "filed_at DESC");
+            assert_eq!(&list[1].filed_at[..10], "2026-06-01");
+            assert_eq!(&list[1].answer_due[..10], "2026-06-09");
+        });
+    }
+
+    #[test]
+    fn create_rejects_empty_required_field() {
+        with_reklamacija_db("rek_reject_empty", |conn| {
+            let mut input = intake_input("2026-06-01T00:00:00Z");
+            input.podnosilac_ime_prezime = "   ".into();
+            let error = create_reklamacija(conn, &input, 1, "2026-06-01T08:00:00Z").unwrap_err();
+            assert_eq!(error.code(), "validation_error");
+        });
+    }
+
+    #[test]
+    fn purge_eligibility_flips_at_the_two_year_floor() {
+        with_reklamacija_db("rek_purge_floor", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            // Day before filed + 730 (2028-05-31) → not yet eligible.
+            let before = get_reklamacija(conn, created.id, "2028-05-30T00:00:00Z").unwrap();
+            assert!(!before.purge_eligible);
+            // On filed + 730 → eligible (filed_at + 2y ≤ today).
+            let on = get_reklamacija(conn, created.id, "2028-05-31T00:00:00Z").unwrap();
+            assert!(on.purge_eligible);
+            let summary = list_reklamacije(conn, "2028-05-31T00:00:00Z").unwrap();
+            assert!(summary[0].purge_eligible);
+        });
     }
 }
