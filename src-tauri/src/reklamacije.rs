@@ -565,6 +565,310 @@ pub fn list_reklamacije(
     Ok(summaries)
 }
 
+// ── Lifecycle events ───────────────────────────────────────────────────────
+// Every lifecycle mutation appends one `reklamacija_events` row and updates the
+// record's `status`/`updated_at` in a single transaction. The `regime` is read
+// from the stored record and NEVER recomputed — deadlines stay derived, the
+// warning gate depends only on the frozen regime.
+
+/// Verbatim from the plan (memo §4a, čl. 63 st. 10): the NEW-regime answer is
+/// gated on this three-part express warning. Copy character-for-character.
+const MSG_NEW_ANSWER_WARNING: &str = "Za novu reklamaciju odgovor mora sadržati izričito obaveštenje potrošaču o obavezi izjašnjenja, posledicama i zastoju rokova (čl. 63 st. 10).";
+
+/// The answer payload. The three `warning_*` fields carry the express warning;
+/// they are mandatory only under the NEW regime (see `log_answer`).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerInput {
+    pub answer_text: String,
+    pub warning_duty: Option<String>,
+    pub warning_consequences: Option<String>,
+    pub warning_zastoj: Option<String>,
+    pub event_date: String,
+}
+
+/// One event row to append. `consumer_consent` only ever carries meaning on an
+/// `extension_granted` row.
+struct NewEvent<'a> {
+    event_type: &'a str,
+    event_date: &'a str,
+    detail_json: Option<&'a str>,
+    consumer_consent: bool,
+}
+
+/// Loads the frozen `regime` for one record; doubles as the existence check.
+fn load_regime(conn: &Connection, id: i64) -> Result<String, AppError> {
+    conn.query_row(
+        "SELECT regime FROM reklamacije WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| AppError::not_found(MSG_REKLAMACIJA_NOT_FOUND))
+}
+
+/// True iff at least one event of `event_type` exists for the record.
+fn event_exists(conn: &Connection, id: i64, event_type: &str) -> Result<bool, AppError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM reklamacija_events WHERE reklamacija_id = ?1 AND event_type = ?2",
+        params![id, event_type],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Appends one event row, carrying the acting user's id and the `now` stamp.
+fn insert_event(
+    conn: &Connection,
+    id: i64,
+    event: &NewEvent<'_>,
+    acting: i64,
+    now: &str,
+) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT INTO reklamacija_events
+            (reklamacija_id, event_type, event_date, detail_json, consumer_consent, user_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            event.event_type,
+            event.event_date,
+            event.detail_json,
+            i64::from(event.consumer_consent),
+            acting,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+/// Sets the stored `status` and bumps `updated_at`.
+fn set_status(conn: &Connection, id: i64, status: &str, now: &str) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE reklamacije SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status, now, id],
+    )?;
+    Ok(())
+}
+
+/// Bumps `updated_at` without changing the stored `status` (an extension changes
+/// the derived resolution date, not the lifecycle status).
+fn touch_updated_at(conn: &Connection, id: i64, now: &str) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE reklamacije SET updated_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
+    Ok(())
+}
+
+/// Logs the shop's answer. **NEW regime:** rejected unless all three express-
+/// warning fields are present and non-empty (čl. 63 st. 10). **OLD regime:** the
+/// warning is optional — rejecting an old-regime answer for its absence would be
+/// wrong. Stores the answer text + warnings in `detail_json`; status → answered.
+pub fn log_answer(
+    conn: &mut Connection,
+    id: i64,
+    input: &AnswerInput,
+    acting: i64,
+    now: &str,
+) -> Result<ReklamacijaView, AppError> {
+    require_non_empty(&input.answer_text, "answerText")?;
+    parse_rfc3339(&input.event_date, "eventDate")?;
+
+    let tx = conn.transaction()?;
+    let regime = load_regime(&tx, id)?;
+
+    if regime == REGIME_NEW {
+        let all_present = [
+            input.warning_duty.as_deref(),
+            input.warning_consequences.as_deref(),
+            input.warning_zastoj.as_deref(),
+        ]
+        .into_iter()
+        .all(|w| w.is_some_and(|v| !v.trim().is_empty()));
+        if !all_present {
+            return Err(AppError::validation(
+                MSG_NEW_ANSWER_WARNING,
+                serde_json::json!({ "field": "warning" }),
+            ));
+        }
+    }
+
+    let detail = serde_json::json!({
+        "answerText": input.answer_text,
+        "warningDuty": input.warning_duty,
+        "warningConsequences": input.warning_consequences,
+        "warningZastoj": input.warning_zastoj,
+    })
+    .to_string();
+
+    insert_event(
+        &tx,
+        id,
+        &NewEvent {
+            event_type: "answer_given",
+            event_date: &input.event_date,
+            detail_json: Some(&detail),
+            consumer_consent: false,
+        },
+        acting,
+        now,
+    )?;
+    set_status(&tx, id, "answered", now)?;
+    tx.commit()?;
+    get_reklamacija(conn, id, now)
+}
+
+/// Records that the consumer received the answer. Requires a prior `answer_given`;
+/// opens the 3-day response window and suspends the resolution clock. Status →
+/// awaiting_consumer.
+pub fn log_consumer_received_answer(
+    conn: &mut Connection,
+    id: i64,
+    event_date: &str,
+    acting: i64,
+    now: &str,
+) -> Result<ReklamacijaView, AppError> {
+    parse_rfc3339(event_date, "eventDate")?;
+    let tx = conn.transaction()?;
+    load_regime(&tx, id)?;
+    if !event_exists(&tx, id, "answer_given")? {
+        return Err(AppError::business(
+            "invalid_state",
+            "Prijem odgovora se može evidentirati tek nakon što je odgovor dat.",
+        ));
+    }
+    insert_event(
+        &tx,
+        id,
+        &NewEvent {
+            event_type: "consumer_received_answer",
+            event_date,
+            detail_json: None,
+            consumer_consent: false,
+        },
+        acting,
+        now,
+    )?;
+    set_status(&tx, id, "awaiting_consumer", now)?;
+    tx.commit()?;
+    get_reklamacija(conn, id, now)
+}
+
+/// Records the consumer's response. Requires a prior `consumer_received_answer`;
+/// OLD restarts the resolution clock to a fresh span, NEW resumes it. Status →
+/// answered (running again).
+pub fn log_consumer_response(
+    conn: &mut Connection,
+    id: i64,
+    event_date: &str,
+    acting: i64,
+    now: &str,
+) -> Result<ReklamacijaView, AppError> {
+    parse_rfc3339(event_date, "eventDate")?;
+    let tx = conn.transaction()?;
+    load_regime(&tx, id)?;
+    if !event_exists(&tx, id, "consumer_received_answer")? {
+        return Err(AppError::business(
+            "invalid_state",
+            "Izjašnjenje potrošača se može evidentirati tek nakon evidentiranog prijema odgovora.",
+        ));
+    }
+    insert_event(
+        &tx,
+        id,
+        &NewEvent {
+            event_type: "consumer_responded",
+            event_date,
+            detail_json: None,
+            consumer_consent: false,
+        },
+        acting,
+        now,
+    )?;
+    set_status(&tx, id, "answered", now)?;
+    tx.commit()?;
+    get_reklamacija(conn, id, now)
+}
+
+/// Grants the single permitted extension. Rejected if one already exists, and
+/// rejected without the consumer's consent; the consented `new_deadline` is the
+/// event's `event_date`, and it can only pull the resolution date in (the
+/// engine's tighter-date tiebreak). The lifecycle status is unchanged.
+pub fn grant_extension(
+    conn: &mut Connection,
+    id: i64,
+    new_deadline: &str,
+    consumer_consent: bool,
+    reason: &str,
+    acting: i64,
+    now: &str,
+) -> Result<ReklamacijaView, AppError> {
+    parse_rfc3339(new_deadline, "newDeadline")?;
+    let tx = conn.transaction()?;
+    load_regime(&tx, id)?;
+    if event_exists(&tx, id, "extension_granted")? {
+        return Err(AppError::business(
+            "invalid_state",
+            "Produženje roka je moguće samo jednom (čl. 55/63 st. 11).",
+        ));
+    }
+    if !consumer_consent {
+        return Err(AppError::validation(
+            "Produženje roka zahteva saglasnost potrošača.",
+            serde_json::json!({ "field": "consumerConsent" }),
+        ));
+    }
+    let detail = serde_json::json!({ "reason": reason }).to_string();
+    insert_event(
+        &tx,
+        id,
+        &NewEvent {
+            event_type: "extension_granted",
+            event_date: new_deadline,
+            detail_json: Some(&detail),
+            consumer_consent: true,
+        },
+        acting,
+        now,
+    )?;
+    touch_updated_at(&tx, id, now)?;
+    tx.commit()?;
+    get_reklamacija(conn, id, now)
+}
+
+/// Resolves the record: appends `resolved` with `nacin` in `detail_json` and sets
+/// `status = 'resolved'`, which clears the derived clock.
+pub fn resolve_reklamacija(
+    conn: &mut Connection,
+    id: i64,
+    nacin: &str,
+    event_date: &str,
+    acting: i64,
+    now: &str,
+) -> Result<ReklamacijaView, AppError> {
+    require_non_empty(nacin, "nacin")?;
+    parse_rfc3339(event_date, "eventDate")?;
+    let tx = conn.transaction()?;
+    load_regime(&tx, id)?;
+    let detail = serde_json::json!({ "nacin": nacin }).to_string();
+    insert_event(
+        &tx,
+        id,
+        &NewEvent {
+            event_type: "resolved",
+            event_date,
+            detail_json: Some(&detail),
+            consumer_consent: false,
+        },
+        acting,
+        now,
+    )?;
+    set_status(&tx, id, "resolved", now)?;
+    tx.commit()?;
+    get_reklamacija(conn, id, now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +1166,225 @@ mod tests {
             assert!(on.purge_eligible);
             let summary = list_reklamacije(conn, "2028-05-31T00:00:00Z").unwrap();
             assert!(summary[0].purge_eligible);
+        });
+    }
+
+    fn answer(event_date: &str) -> AnswerInput {
+        AnswerInput {
+            answer_text: "Predlog zamene robe.".into(),
+            warning_duty: None,
+            warning_consequences: None,
+            warning_zastoj: None,
+            event_date: event_date.into(),
+        }
+    }
+
+    #[test]
+    fn new_regime_answer_requires_the_express_warning() {
+        with_reklamacija_db("rek_new_answer_gate", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-09-01T00:00:00Z"),
+                1,
+                "2026-09-01T08:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(created.regime, REGIME_NEW);
+
+            // Missing warning fields → rejected.
+            let bare = answer("2026-09-05T00:00:00Z");
+            let error = log_answer(conn, created.id, &bare, 1, "2026-09-05T09:00:00Z").unwrap_err();
+            assert_eq!(error.code(), "validation_error");
+
+            // All three present → accepted; status → answered; answer_given logged.
+            let full = AnswerInput {
+                warning_duty: Some("Dužni ste da se izjasnite o predlogu.".into()),
+                warning_consequences: Some("U suprotnom se smatra da ste odustali.".into()),
+                warning_zastoj: Some("Rok za rešavanje ne teče do vašeg izjašnjenja.".into()),
+                ..answer("2026-09-05T00:00:00Z")
+            };
+            let view = log_answer(conn, created.id, &full, 1, "2026-09-05T09:00:00Z").unwrap();
+            assert_eq!(view.status, "answered");
+            assert!(view.events.iter().any(|e| e.event_type == "answer_given"));
+        });
+    }
+
+    #[test]
+    fn old_regime_answer_accepts_without_warning() {
+        with_reklamacija_db("rek_old_answer_no_warning", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(created.regime, REGIME_OLD);
+            let view = log_answer(
+                conn,
+                created.id,
+                &answer("2026-06-05T00:00:00Z"),
+                1,
+                "2026-06-05T09:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(view.status, "answered");
+        });
+    }
+
+    #[test]
+    fn extension_is_one_only_and_requires_consent() {
+        with_reklamacija_db("rek_extension_rules", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            // Without consent → validation_error.
+            let no_consent = grant_extension(
+                conn,
+                created.id,
+                "2026-06-20T00:00:00Z",
+                false,
+                "razlog",
+                1,
+                "2026-06-02T09:00:00Z",
+            )
+            .unwrap_err();
+            assert_eq!(no_consent.code(), "validation_error");
+
+            // First consented extension → ok.
+            let granted = grant_extension(
+                conn,
+                created.id,
+                "2026-06-20T00:00:00Z",
+                true,
+                "Dogovoreno sa potrošačem.",
+                1,
+                "2026-06-02T09:00:00Z",
+            )
+            .unwrap();
+            assert!(granted.deadlines.one_extension_used);
+
+            // Second extension → invalid_state.
+            let second = grant_extension(
+                conn,
+                created.id,
+                "2026-06-22T00:00:00Z",
+                true,
+                "opet",
+                1,
+                "2026-06-03T09:00:00Z",
+            )
+            .unwrap_err();
+            assert_eq!(second.code(), "invalid_state");
+        });
+    }
+
+    #[test]
+    fn consumer_events_require_their_prior_event() {
+        with_reklamacija_db("rek_consumer_order", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            // received before any answer → invalid_state.
+            let e1 = log_consumer_received_answer(
+                conn,
+                created.id,
+                "2026-06-06T00:00:00Z",
+                1,
+                "2026-06-06T09:00:00Z",
+            )
+            .unwrap_err();
+            assert_eq!(e1.code(), "invalid_state");
+            // response before received → invalid_state.
+            let e2 = log_consumer_response(
+                conn,
+                created.id,
+                "2026-06-08T00:00:00Z",
+                1,
+                "2026-06-08T09:00:00Z",
+            )
+            .unwrap_err();
+            assert_eq!(e2.code(), "invalid_state");
+        });
+    }
+
+    #[test]
+    fn old_regime_full_cycle_restarts_to_the_memo_date() {
+        with_reklamacija_db("rek_old_full_cycle", |conn| {
+            let mut input = intake_input("2026-06-01T00:00:00Z");
+            input.roba_kind = "opsta".into(); // 15-day span → memo §2.5 OLD/general/restart
+            let created = create_reklamacija(conn, &input, 1, "2026-06-01T08:00:00Z").unwrap();
+
+            let after_answer = log_answer(
+                conn,
+                created.id,
+                &answer("2026-06-05T00:00:00Z"),
+                1,
+                "2026-06-05T09:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(after_answer.status, "answered");
+
+            let after_received = log_consumer_received_answer(
+                conn,
+                created.id,
+                "2026-06-06T00:00:00Z",
+                1,
+                "2026-06-06T09:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(after_received.status, "awaiting_consumer");
+
+            let after_responded = log_consumer_response(
+                conn,
+                created.id,
+                "2026-06-08T00:00:00Z",
+                1,
+                "2026-06-08T09:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(after_responded.status, "answered");
+
+            let view = get_reklamacija(conn, created.id, "2026-06-10T00:00:00Z").unwrap();
+            assert_eq!(
+                view.deadlines.resolution_due.as_deref().map(|d| &d[..10]),
+                Some("2026-06-23"),
+                "OLD restart = responded + 15"
+            );
+            assert_eq!(view.deadlines.clock, "running");
+        });
+    }
+
+    #[test]
+    fn resolve_marks_the_record_resolved() {
+        with_reklamacija_db("rek_resolve", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            let view = resolve_reklamacija(
+                conn,
+                created.id,
+                "Zamena robe",
+                "2026-06-05T00:00:00Z",
+                1,
+                "2026-06-05T09:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(view.status, "resolved");
+            assert_eq!(view.deadlines.clock, "resolved");
+            assert!(view.events.iter().any(|e| e.event_type == "resolved"));
         });
     }
 }
