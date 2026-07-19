@@ -24,6 +24,7 @@ import {
   navigationItems,
   type NavigationItemId,
 } from "@/app/navigation";
+import { ReklamacijeModule } from "@/app/reklamacije/ReklamacijeModule";
 import { ReportsScreen } from "@/app/reports/ReportsScreen";
 import { ReceiptsScreen } from "@/app/ReceiptsScreen";
 import { RegisterScreen } from "@/app/register/RegisterScreen";
@@ -459,6 +460,10 @@ function renderModule({
 
   if (activeId === "receipts") {
     return <ReceiptsScreen receipts={services.receipts} />;
+  }
+
+  if (activeId === "reklamacije") {
+    return <ReklamacijeModule services={services} />;
   }
 
   if (activeId === "campaigns") {

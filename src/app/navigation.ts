@@ -3,6 +3,7 @@ import {
   ArchiveIcon,
   BarChart3Icon,
   FileSpreadsheetIcon,
+  MessageSquareWarningIcon,
   PackageIcon,
   ReceiptTextIcon,
   SettingsIcon,
@@ -38,6 +39,12 @@ export const navigationItems = [
     id: "receipts",
     label: "Računi",
     icon: ReceiptTextIcon,
+  },
+  {
+    id: "reklamacije",
+    label: "Reklamacije",
+    icon: MessageSquareWarningIcon,
+    adminOnly: true,
   },
   {
     id: "campaigns",
