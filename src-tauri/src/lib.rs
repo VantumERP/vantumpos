@@ -6,6 +6,7 @@ mod commands;
 mod db;
 mod importer;
 mod price_history;
+mod reklamacije;
 mod security;
 mod state;
 mod text;
