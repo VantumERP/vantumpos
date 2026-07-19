@@ -394,6 +394,44 @@ ALTER TABLE price_history_next RENAME TO price_history;
 CREATE INDEX idx_price_history_product ON price_history(product_id, effective_from);
 "#,
     },
+    Migration {
+        version: 11,
+        name: "reklamacije_register",
+        sql: r#"
+CREATE TABLE reklamacije (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    register_number INTEGER NOT NULL UNIQUE,
+    regime TEXT NOT NULL CHECK (regime IN ('old', 'new')),
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'answered', 'awaiting_consumer', 'impasse', 'resolved')),
+    filed_at TEXT NOT NULL,
+    podnosilac_ime_prezime TEXT NOT NULL,
+    kontakt TEXT,
+    podaci_o_robi TEXT NOT NULL,
+    opis_nesaobraznosti TEXT NOT NULL,
+    zahtev TEXT NOT NULL,
+    roba_kind TEXT NOT NULL DEFAULT 'opsta' CHECK (roba_kind IN ('opsta', 'tehnicka', 'namestaj')),
+    datum_izdavanja_potvrde TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_reklamacije_status ON reklamacije(status, filed_at);
+
+CREATE TABLE reklamacija_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reklamacija_id INTEGER NOT NULL REFERENCES reklamacije(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (event_type IN
+        ('answer_given', 'consumer_received_answer', 'consumer_responded', 'extension_granted', 'resolved')),
+    event_date TEXT NOT NULL,
+    detail_json TEXT,
+    consumer_consent INTEGER NOT NULL DEFAULT 0 CHECK (consumer_consent IN (0, 1)),
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_reklamacija_events_parent ON reklamacija_events(reklamacija_id, event_date);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {

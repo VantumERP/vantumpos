@@ -127,6 +127,8 @@ mod tests {
         "price_history",
         "campaigns",
         "campaign_items",
+        "reklamacije",
+        "reklamacija_events",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -148,6 +150,8 @@ mod tests {
         "idx_campaigns_type_start",
         "idx_campaign_items_campaign",
         "idx_campaign_items_product",
+        "idx_reklamacije_status",
+        "idx_reklamacija_events_parent",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -528,6 +532,55 @@ mod tests {
         });
     }
 
+    #[test]
+    fn migration_v11_creates_reklamacije_tables() {
+        with_test_database("migration_v11_reklamacije", |db| {
+            let connection = db.open().expect("database should open");
+            for table in ["reklamacije", "reklamacija_events"] {
+                assert!(
+                    schema_object_exists(&connection, "table", table),
+                    "expected {table}"
+                );
+            }
+            let schema: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='reklamacije'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("schema");
+            for token in [
+                "register_number",
+                "regime",
+                "opsta",
+                "tehnicka",
+                "namestaj",
+                "podnosilac_ime_prezime",
+            ] {
+                assert!(schema.contains(token), "reklamacije schema missing {token}");
+            }
+            let events_schema: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='reklamacija_events'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("events schema");
+            for token in [
+                "answer_given",
+                "consumer_received_answer",
+                "consumer_responded",
+                "extension_granted",
+                "resolved",
+            ] {
+                assert!(
+                    events_schema.contains(token),
+                    "events CHECK missing {token}"
+                );
+            }
+        });
+    }
+
     /// This fixture builds a fresh database, so the rebuild here copies an empty
     /// table — row-and-id preservation across the v10 rebuild is proven against a
     /// populated v9 database in
@@ -725,7 +778,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 10);
+                assert_eq!(migration_count, 11);
             },
         );
     }
