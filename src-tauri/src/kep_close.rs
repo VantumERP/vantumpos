@@ -327,6 +327,69 @@ fn date_only(rfc3339: &str) -> &str {
     rfc3339.split('T').next().unwrap_or(rfc3339)
 }
 
+/// One closure as the frontend list shows it, with the retention flag.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KepClosureView {
+    pub book_year: i64,
+    pub krajnji_saldo_minor: i64,
+    pub entry_count: i64,
+    pub closed_at: String,
+    pub purge_eligible: bool,
+}
+
+/// Retention floor (§5.6): a closed book may be discarded only 5 full years
+/// after the LATER of its close date and the end of its book year. Dates are
+/// RFC3339; comparison is lexicographic on the `YYYY-MM-DD` prefix, which is
+/// correct for ISO dates. `today` on/after the floor ⇒ eligible.
+pub fn purge_eligible(book_year: i64, closed_at: &str, today: &str) -> bool {
+    let year_end_floor = format!("{}-12-31", book_year + 5);
+    let closed_floor = {
+        let day = date_only(closed_at);
+        // day is YYYY-MM-DD; add 5 to the year component.
+        let year: i64 = day
+            .get(0..4)
+            .and_then(|y| y.parse().ok())
+            .unwrap_or(book_year + 1);
+        format!("{}{}", year + 5, &day[4..])
+    };
+    let floor = if closed_floor >= year_end_floor {
+        closed_floor
+    } else {
+        year_end_floor
+    };
+    date_only(today) >= floor.as_str()
+}
+
+/// Lists recorded closures newest-first, each with its retention flag.
+pub fn list_closures(conn: &Connection, today: &str) -> Result<Vec<KepClosureView>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT book_year, krajnji_saldo_minor, entry_count, closed_at
+         FROM kep_closures ORDER BY book_year DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (book_year, krajnji_saldo_minor, entry_count, closed_at) = row?;
+        let purge_eligible = purge_eligible(book_year, &closed_at, today);
+        out.push(KepClosureView {
+            book_year,
+            krajnji_saldo_minor,
+            entry_count,
+            closed_at,
+            purge_eligible,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +547,56 @@ mod tests {
             "first DONOS shows the 50000 opening carry-in"
         );
         assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn purge_eligible_uses_the_later_floor() {
+        // 2026 book year, closed early 2027-01-05.
+        // 31 Dec 2026 + 5y = 2031-12-31; closed_at + 5y = 2032-01-05 (the later).
+        assert!(!purge_eligible(
+            2026,
+            "2027-01-05T09:00:00Z",
+            "2031-12-31T00:00:00Z"
+        ));
+        assert!(!purge_eligible(
+            2026,
+            "2027-01-05T09:00:00Z",
+            "2032-01-04T00:00:00Z"
+        ));
+        assert!(purge_eligible(
+            2026,
+            "2027-01-05T09:00:00Z",
+            "2032-01-05T00:00:00Z"
+        ));
+
+        // A close done ON 31 Dec 2026 → both floors 2031-12-31; eligible from then.
+        assert!(!purge_eligible(
+            2026,
+            "2026-12-31T23:00:00Z",
+            "2031-12-30T00:00:00Z"
+        ));
+        assert!(purge_eligible(
+            2026,
+            "2026-12-31T23:00:00Z",
+            "2031-12-31T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn list_closures_reports_retention() {
+        with_conn("list_closures_retention", |conn| {
+            seed_zaduzenje(conn, 2026, 1, 900000);
+            close_year(conn, 2026, CLOSE_CONFIRMATION, 1, "2027-01-05T09:00:00Z")
+                .expect("close 2026");
+
+            let recent = list_closures(conn, "2028-06-01T00:00:00Z").expect("list");
+            assert_eq!(recent.len(), 1);
+            assert_eq!(recent[0].book_year, 2026);
+            assert_eq!(recent[0].krajnji_saldo_minor, 900000);
+            assert!(!recent[0].purge_eligible, "well within 5 years");
+
+            let aged = list_closures(conn, "2032-02-01T00:00:00Z").expect("list");
+            assert!(aged[0].purge_eligible, "past the 5-year floor");
+        });
     }
 }
