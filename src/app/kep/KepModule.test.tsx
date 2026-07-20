@@ -4,9 +4,16 @@ import { describe, expect, it, vi } from "vitest";
 
 import { KepModule } from "./KepModule";
 import { navigationItems } from "@/app/navigation";
+import { Toaster } from "@/components/ui/sonner";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices } from "@/services/ports";
-import type { KepEntryView, KepLedger, KepStatus } from "@/services/types";
+import type {
+  KalkulacijaSummary,
+  KepEntryView,
+  KepLedger,
+  KepStatus,
+  ProductSummary,
+} from "@/services/types";
 
 // Memo §2 worked ledger: a receipt zaduženje 7.800,00 (50 × 156,00 retail incl.
 // PDV — NOT the nabavna) and a daily razduženje 2.340,00, deriving saldo
@@ -144,6 +151,242 @@ describe("KepModule daily posting", () => {
 
     await waitFor(() =>
       expect(postSpy).toHaveBeenCalledWith("2026-07-05T00:00:00Z", 250000),
+    );
+  });
+});
+
+// Memo §3/§4.5 worked example product: retail sa PDV 156,00/jm (salePriceMinor
+// 15600), on-hand 35 kom (35_000 milli), 20% PDV. Otpis of 35 kom books
+// −5.460,00 in kolona 4; a nivelacija 156→176 books +700,00.
+const testProduct: ProductSummary = {
+  id: 7,
+  name: "Test artikal",
+  sku: "SKU-7",
+  barcode: null,
+  categoryId: null,
+  categoryName: null,
+  unitOfMeasure: "kom",
+  salePriceMinor: 15600,
+  purchasePriceMinor: 10000,
+  taxRateId: 1,
+  taxRateBasisPoints: 2000,
+  minimumStockMilli: 0,
+  currentStockMilli: 35000,
+  allowNegativeStock: false,
+  active: true,
+  perishable: false,
+  externalSource: null,
+};
+
+function spyProductSearch(services: PosServices) {
+  return vi.spyOn(services.catalog, "searchProducts").mockResolvedValue({
+    items: [testProduct],
+    categories: [],
+    taxRates: [],
+    total: 1,
+  });
+}
+
+describe("KepModule adjustments", () => {
+  it("shows the derived kolona and crveni storno read-only for otpis, then posts via postAdjustment", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(ledger);
+    spyProductSearch(services);
+    const postSpy = vi
+      .spyOn(services.kep, "postAdjustment")
+      .mockResolvedValue(undefined);
+
+    render(
+      <>
+        <KepModule services={services} />
+        <Toaster />
+      </>,
+    );
+
+    await screen.findByText("Prijem robe");
+
+    fireEvent.change(screen.getByLabelText("Vrsta izmene"), {
+      target: { value: "otpis" },
+    });
+
+    // The cause fixes the kolona and sign; the shop sees why it books there.
+    const explanation = screen.getByText(/Knjiži se u kolonu 4/);
+    expect(explanation).toHaveTextContent("kolonu 4");
+    expect(explanation).toHaveTextContent("crveni storno");
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izaberi Test artikal" }),
+    );
+
+    fireEvent.change(screen.getByLabelText("Količina"), {
+      target: { value: "35" },
+    });
+    fireEvent.change(screen.getByLabelText("Naziv dokumenta"), {
+      target: { value: "Odluka o otpisu" },
+    });
+    fireEvent.change(screen.getByLabelText("Broj dokumenta"), {
+      target: { value: "12" },
+    });
+    fireEvent.change(screen.getByLabelText("Datum dokumenta"), {
+      target: { value: "2026-07-20" },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Proknjiži izmenu" }));
+
+    await waitFor(() =>
+      expect(postSpy).toHaveBeenCalledWith("otpis", 7, 35000, {
+        naziv: "Odluka o otpisu",
+        broj: "12",
+        datum: "2026-07-20",
+      }),
+    );
+  });
+
+  it("shows the new-price field for a nivelacija and posts via nivelacija", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(ledger);
+    spyProductSearch(services);
+    const nivSpy = vi
+      .spyOn(services.kep, "nivelacija")
+      .mockResolvedValue(undefined);
+    const postSpy = vi
+      .spyOn(services.kep, "postAdjustment")
+      .mockResolvedValue(undefined);
+
+    render(
+      <>
+        <KepModule services={services} />
+        <Toaster />
+      </>,
+    );
+
+    await screen.findByText("Prijem robe");
+
+    fireEvent.change(screen.getByLabelText("Vrsta izmene"), {
+      target: { value: "nivelacija_up" },
+    });
+
+    await user.click(
+      await screen.findByRole("button", { name: "Izaberi Test artikal" }),
+    );
+
+    // Nivelacija changes the price — it takes a new price, not a quantity.
+    expect(screen.queryByLabelText("Količina")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Nova prodajna cena"), {
+      target: { value: "176" },
+    });
+    fireEvent.change(screen.getByLabelText("Naziv dokumenta"), {
+      target: { value: "Nivelacioni zapisnik" },
+    });
+    fireEvent.change(screen.getByLabelText("Broj dokumenta"), {
+      target: { value: "3" },
+    });
+    fireEvent.change(screen.getByLabelText("Datum dokumenta"), {
+      target: { value: "2026-07-20" },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Proknjiži izmenu" }));
+
+    await waitFor(() =>
+      expect(nivSpy).toHaveBeenCalledWith(7, 17600, {
+        naziv: "Nivelacioni zapisnik",
+        broj: "3",
+        datum: "2026-07-20",
+      }),
+    );
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it("corrects a ledger entry via the Ispravi stavku dialog", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(ledger);
+    const correctSpy = vi
+      .spyOn(services.kep, "correctEntry")
+      .mockResolvedValue(undefined);
+
+    render(
+      <>
+        <KepModule services={services} />
+        <Toaster />
+      </>,
+    );
+
+    await screen.findByText("Prijem robe");
+
+    await user.click(
+      screen.getAllByRole("button", { name: /Ispravi stavku/ })[0],
+    );
+
+    fireEvent.change(await screen.findByLabelText("Ispravan iznos"), {
+      target: { value: "7800" },
+    });
+    fireEvent.change(screen.getByLabelText("Naziv dokumenta"), {
+      target: { value: "Ispravka knjiženja" },
+    });
+    fireEvent.change(screen.getByLabelText("Broj dokumenta"), {
+      target: { value: "1" },
+    });
+    fireEvent.change(screen.getByLabelText("Datum dokumenta"), {
+      target: { value: "2026-07-20" },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Sačuvaj ispravku" }));
+
+    await waitFor(() =>
+      expect(correctSpy).toHaveBeenCalledWith(1, 2026, 780000, {
+        naziv: "Ispravka knjiženja",
+        broj: "1",
+        datum: "2026-07-20",
+      }),
+    );
+  });
+});
+
+describe("KepModule kalkulacije", () => {
+  const kalkulacija: KalkulacijaSummary = {
+    id: 5,
+    redniBroj: 1,
+    bookYear: 2026,
+    trgovackiNaziv: "Test artikal",
+    kolicinaMilli: 50000,
+    razlikaUCeniMinor: 150000,
+    prodajnaVrednostSaPdvMinor: 780000,
+    createdAt: "2026-07-04T10:00:00Z",
+  };
+
+  it("prints a kalkulacija by exporting then opening it", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(ledger);
+    vi.spyOn(services.kep, "listKalkulacije").mockResolvedValue([kalkulacija]);
+    const exportSpy = vi
+      .spyOn(services.kep, "exportKalkulacija")
+      .mockResolvedValue({
+        fileName: "kalkulacija-1.html",
+        path: "C:/exports/kalkulacija-1.html",
+        mimeType: "text/html",
+        rowCount: 1,
+      });
+    const openForPrint = vi
+      .spyOn(services.print, "openForPrint")
+      .mockResolvedValue(undefined);
+
+    render(
+      <>
+        <KepModule services={services} />
+        <Toaster />
+      </>,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: /Štampaj kalkulaciju/ }),
+    );
+
+    expect(exportSpy).toHaveBeenCalledWith(5);
+    await waitFor(() =>
+      expect(openForPrint).toHaveBeenCalledWith(
+        "C:/exports/kalkulacija-1.html",
+      ),
     );
   });
 });

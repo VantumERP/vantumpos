@@ -1,11 +1,20 @@
-import { AlertCircleIcon, BookIcon } from "lucide-react";
+import { AlertCircleIcon, BookIcon, PrinterIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { toast } from "sonner";
 
+import { formatQuantity, parseQuantityInput } from "@/app/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Empty,
   EmptyDescription,
@@ -36,8 +45,21 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatRsd, parseRsdInput } from "@/lib/money";
-import type { KepService, PosServices } from "@/services/ports";
-import type { KepLedger, KepStatus } from "@/services/types";
+import type {
+  CatalogService,
+  KepService,
+  PosServices,
+} from "@/services/ports";
+import type {
+  BasisDoc,
+  ExportedFile,
+  KalkulacijaSummary,
+  KepEntryView,
+  KepLedger,
+  KepStatus,
+  ProductSummary,
+  StornoCauseId,
+} from "@/services/types";
 
 interface KepModuleProps {
   services: PosServices;
@@ -59,8 +81,15 @@ export function KepModule({ services }: KepModuleProps) {
   >("loading");
   const [ledgerError, setLedgerError] = useState<string | undefined>();
   const [status, setStatus] = useState<KepStatus | null>(null);
-  // Bumped after a successful posting to re-derive both the ledger and the
-  // overdue/unbooked status from the append-only source of truth.
+  const [kalkulacije, setKalkulacije] = useState<KalkulacijaSummary[]>([]);
+  // The ledger row currently targeted by „Ispravi stavku"; drives the
+  // reversing-storno dialog. `null` closes it.
+  const [correctionTarget, setCorrectionTarget] = useState<KepEntryView | null>(
+    null,
+  );
+  // Bumped after a successful posting to re-derive the ledger, the
+  // overdue/unbooked status, and the kalkulacije list from the append-only
+  // source of truth.
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -112,6 +141,54 @@ export function KepModule({ services }: KepModuleProps) {
     };
   }, [kep, reloadToken]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    kep
+      .listKalkulacije(bookYear)
+      .then((result) => {
+        if (!cancelled) {
+          setKalkulacije(result);
+        }
+      })
+      .catch(() => {
+        // The kalkulacija list is a print convenience; a failed read degrades
+        // to an empty section rather than blocking the ledger.
+        if (!cancelled) {
+          setKalkulacije([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [kep, bookYear, reloadToken]);
+
+  // SW-8 export-then-open: export the document, then hand its path to the OS
+  // print handler. A failed open still leaves the saved file surfaced.
+  async function runPrint(
+    action: () => Promise<ExportedFile>,
+    fallback: string,
+  ) {
+    let exported: ExportedFile;
+    try {
+      exported = await action();
+    } catch (error) {
+      toast.error("Izvoz nije uspeo", {
+        description: errorMessage(error, fallback),
+      });
+      return;
+    }
+    try {
+      await services.print.openForPrint(exported.path);
+      toast.success("Otvoreno za štampu", { description: exported.path });
+    } catch {
+      toast.warning("Dokument je sačuvan — otvorite ga ručno za štampu", {
+        description: exported.path,
+      });
+    }
+  }
+
   const yearOptions = buildYearOptions(new Date().getFullYear());
 
   return (
@@ -145,6 +222,12 @@ export function KepModule({ services }: KepModuleProps) {
 
       <DailyPostingForm
         kep={kep}
+        onPosted={() => setReloadToken((token) => token + 1)}
+      />
+
+      <AdjustmentForm
+        kep={kep}
+        catalog={services.catalog}
         onPosted={() => setReloadToken((token) => token + 1)}
       />
 
@@ -184,6 +267,7 @@ export function KepModule({ services }: KepModuleProps) {
                   <TableHead>Opis</TableHead>
                   <TableHead className="text-right">Zaduženje</TableHead>
                   <TableHead className="text-right">Razduženje</TableHead>
+                  <TableHead className="text-right">Radnje</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -198,6 +282,17 @@ export function KepModule({ services }: KepModuleProps) {
                     <TableCell className="text-right tabular-nums">
                       <AmountCell minor={entry.razduzenjeMinor} />
                     </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        aria-label={`Ispravi stavku RB ${entry.redniBroj}`}
+                        onClick={() => setCorrectionTarget(entry)}
+                      >
+                        Ispravi stavku
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -211,6 +306,23 @@ export function KepModule({ services }: KepModuleProps) {
           </div>
         </>
       ) : null}
+
+      <Separator />
+
+      <KalkulacijeSection
+        items={kalkulacije}
+        onPrint={(id) =>
+          runPrint(() => kep.exportKalkulacija(id), "Kalkulacija nije izvezena.")
+        }
+      />
+
+      <CorrectionDialog
+        kep={kep}
+        bookYear={bookYear}
+        target={correctionTarget}
+        onClose={() => setCorrectionTarget(null)}
+        onCorrected={() => setReloadToken((token) => token + 1)}
+      />
     </section>
   );
 }
@@ -350,6 +462,662 @@ function DailyPostingForm({
         posebnim knjiženjem.
       </p>
     </form>
+  );
+}
+
+// The frontend mirror of the backend cause→{kolona, sign} hard map (see
+// `crate::kep_storno::posting_for` / design §3), used ONLY to explain to the
+// shop where a posting books. The backend remains authoritative — this text
+// never decides the booking. Nivelacija naviše/naniže both route to the
+// price-changing `nivelacija` method; the seven others route to
+// `postAdjustment`, which fixes the kolona and sign backend-side.
+type AdjustmentCauseId = StornoCauseId | "nivelacija_up" | "nivelacija_down";
+
+interface CauseMeta {
+  id: AdjustmentCauseId;
+  label: string;
+  kolona: 4 | 5;
+  /** Booked as a negative crveni-storno amount (subtracts from the column). */
+  storno: boolean;
+  /** Routes to `nivelacija` (changes the product price) instead of `postAdjustment`. */
+  isNivelacija: boolean;
+}
+
+const ADJUSTMENT_CAUSES: readonly CauseMeta[] = [
+  {
+    id: "nivelacija_up",
+    label: "Nivelacija naviše",
+    kolona: 4,
+    storno: false,
+    isNivelacija: true,
+  },
+  {
+    id: "nivelacija_down",
+    label: "Nivelacija naniže",
+    kolona: 4,
+    storno: true,
+    isNivelacija: true,
+  },
+  {
+    id: "supplier_return",
+    label: "Povraćaj dobavljaču",
+    kolona: 4,
+    storno: true,
+    isNivelacija: false,
+  },
+  {
+    id: "customer_return",
+    label: "Povraćaj kupca (raskid ugovora)",
+    kolona: 5,
+    storno: true,
+    isNivelacija: false,
+  },
+  {
+    id: "otpis",
+    label: "Otpis",
+    kolona: 4,
+    storno: true,
+    isNivelacija: false,
+  },
+  {
+    id: "manjak_odluka",
+    label: "Manjak po odluci",
+    kolona: 4,
+    storno: true,
+    isNivelacija: false,
+  },
+  {
+    id: "rashod",
+    label: "Rashod",
+    kolona: 4,
+    storno: true,
+    isNivelacija: false,
+  },
+  {
+    id: "popis_visak",
+    label: "Višak po popisu",
+    kolona: 4,
+    storno: false,
+    isNivelacija: false,
+  },
+  {
+    id: "popis_manjak",
+    label: "Manjak po popisu",
+    kolona: 5,
+    storno: false,
+    isNivelacija: false,
+  },
+];
+
+const CAUSE_BY_ID: Record<AdjustmentCauseId, CauseMeta> = Object.fromEntries(
+  ADJUSTMENT_CAUSES.map((cause) => [cause.id, cause]),
+) as Record<AdjustmentCauseId, CauseMeta>;
+
+const EMPTY_BASIS: BasisDoc = { naziv: "", broj: "", datum: "" };
+
+const PRODUCT_SEARCH_LIMIT = 20;
+const SEARCH_DEBOUNCE_MS = 150;
+
+function kolonaExplanation(meta: CauseMeta): string {
+  const kolonaWord = meta.kolona === 4 ? "zaduženje" : "razduženje";
+  const base = `Knjiži se u kolonu ${meta.kolona} kao ${kolonaWord}`;
+  return meta.storno ? `${base} (crveni storno).` : `${base}.`;
+}
+
+// Integer half-up division matching the backend `round_div` (b > 0, a >= 0
+// here). Kept in integer minor units — never floats.
+function roundDiv(a: number, b: number): number {
+  return Math.floor((a + Math.floor(b / 2)) / b);
+}
+
+// The signed effect on the derived saldo (Σkolona4 − Σkolona5). A storno stores
+// a negative amount; a kolona-5 posting subtracts from the saldo.
+function saldoSign(meta: CauseMeta): number {
+  const stored = meta.storno ? -1 : 1;
+  const columnSign = meta.kolona === 4 ? 1 : -1;
+  return stored * columnSign;
+}
+
+function computeSaldoDelta(
+  meta: CauseMeta | undefined,
+  product: ProductSummary | null,
+  quantity: string,
+  newPrice: string,
+): number | null {
+  if (!meta || !product) {
+    return null;
+  }
+
+  if (meta.isNivelacija) {
+    let priceMinor: number;
+    try {
+      priceMinor = parseRsdInput(newPrice);
+    } catch {
+      return null;
+    }
+    const diff = priceMinor - product.salePriceMinor;
+    const magnitude = roundDiv(product.currentStockMilli * Math.abs(diff), 1000);
+    return diff >= 0 ? magnitude : -magnitude;
+  }
+
+  let quantityMilli: number;
+  try {
+    quantityMilli = parseQuantityInput(quantity);
+  } catch {
+    return null;
+  }
+  const value = roundDiv(quantityMilli * product.salePriceMinor, 1000);
+  return saldoSign(meta) * value;
+}
+
+function AdjustmentForm({
+  kep,
+  catalog,
+  onPosted,
+}: {
+  kep: KepService;
+  catalog: CatalogService;
+  onPosted: () => void;
+}) {
+  const [causeId, setCauseId] = useState<AdjustmentCauseId | "">("");
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState<ProductSummary[]>([]);
+  const [selected, setSelected] = useState<ProductSummary | null>(null);
+  const [quantity, setQuantity] = useState("");
+  const [newPrice, setNewPrice] = useState("");
+  const [basis, setBasis] = useState<BasisDoc>(EMPTY_BASIS);
+  const [error, setError] = useState<string | undefined>();
+  const [submitting, setSubmitting] = useState(false);
+
+  const meta = causeId ? CAUSE_BY_ID[causeId] : undefined;
+
+  useEffect(() => {
+    // Only search once a cause is chosen — an unopened form fetches nothing.
+    if (!causeId) {
+      return;
+    }
+
+    let cancelled = false;
+    const term = search.trim();
+    const timer = setTimeout(() => {
+      catalog
+        .searchProducts({
+          search: term || undefined,
+          active: true,
+          limit: PRODUCT_SEARCH_LIMIT,
+        })
+        .then((result) => {
+          if (!cancelled) {
+            setResults(result.items);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setResults([]);
+          }
+        });
+    }, SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [catalog, search, causeId]);
+
+  function resetForm() {
+    setCauseId("");
+    setSearch("");
+    setResults([]);
+    setSelected(null);
+    setQuantity("");
+    setNewPrice("");
+    setBasis(EMPTY_BASIS);
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(undefined);
+
+    if (!meta) {
+      setError("Izaberite vrstu izmene.");
+      return;
+    }
+    if (!selected) {
+      setError("Izaberite artikal.");
+      return;
+    }
+
+    const naziv = basis.naziv.trim();
+    const broj = basis.broj.trim();
+    const datum = basis.datum.trim();
+    if (!naziv || !broj || !datum) {
+      setError("Popunite dokument osnova (naziv, broj i datum).");
+      return;
+    }
+    const doc: BasisDoc = { naziv, broj, datum };
+
+    let action: () => Promise<void>;
+    if (meta.isNivelacija) {
+      let priceMinor: number;
+      try {
+        priceMinor = parseRsdInput(newPrice);
+      } catch (parseError) {
+        setError(errorMessage(parseError, "Nova cena nije ispravna."));
+        return;
+      }
+      action = () => kep.nivelacija(selected.id, priceMinor, doc);
+    } else {
+      let quantityMilli: number;
+      try {
+        quantityMilli = parseQuantityInput(quantity);
+      } catch (parseError) {
+        setError(errorMessage(parseError, "Količina nije ispravna."));
+        return;
+      }
+      action = () =>
+        kep.postAdjustment(meta.id as StornoCauseId, selected.id, quantityMilli, doc);
+    }
+
+    setSubmitting(true);
+    try {
+      await action();
+      resetForm();
+      onPosted();
+      toast.success("Izmena je proknjižena.");
+    } catch (postError) {
+      setError(errorMessage(postError, "Izmena nije proknjižena."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const saldoDelta = computeSaldoDelta(meta, selected, quantity, newPrice);
+
+  return (
+    <form
+      className="flex flex-col gap-3 rounded-md border border-border p-3"
+      onSubmit={handleSubmit}
+      aria-label="Nova izmena"
+    >
+      <div className="flex flex-col gap-1">
+        <h3 className="text-sm font-medium">Nova izmena</h3>
+        <p className="text-xs text-muted-foreground">
+          Vrsta izmene određuje kolonu i predznak knjiženja — to nije izbor
+          korisnika. Nivelacija menja i prodajnu cenu artikla.
+        </p>
+      </div>
+      <FieldGroup>
+        {error ? <FieldError>{error}</FieldError> : null}
+        <Field className="w-auto">
+          <FieldLabel htmlFor="kep-adjustment-cause">Vrsta izmene</FieldLabel>
+          <NativeSelect
+            id="kep-adjustment-cause"
+            value={causeId}
+            onChange={(event) => {
+              setCauseId(event.target.value as AdjustmentCauseId | "");
+              setError(undefined);
+            }}
+          >
+            <NativeSelectOption value="">— izaberite —</NativeSelectOption>
+            {ADJUSTMENT_CAUSES.map((cause) => (
+              <NativeSelectOption key={cause.id} value={cause.id}>
+                {cause.label}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+        </Field>
+
+        {meta ? (
+          <>
+            <p className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              {kolonaExplanation(meta)}
+            </p>
+
+            <Field className="w-auto">
+              <FieldLabel htmlFor="kep-adjustment-product">Artikal</FieldLabel>
+              <Input
+                id="kep-adjustment-product"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Pretraga po nazivu ili šifri"
+              />
+            </Field>
+
+            {selected ? (
+              <div className="flex items-center justify-between gap-3 rounded-md border p-2 text-xs">
+                <span>
+                  Izabrano: {selected.name} —{" "}
+                  {formatRsd(selected.salePriceMinor)}/{selected.unitOfMeasure}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setSelected(null)}
+                >
+                  Promeni
+                </Button>
+              </div>
+            ) : results.length > 0 ? (
+              <ul className="flex flex-col gap-1">
+                {results.map((product) => (
+                  <li key={product.id}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="w-full justify-between"
+                      aria-label={`Izaberi ${product.name}`}
+                      onClick={() => {
+                        setSelected(product);
+                        setResults([]);
+                        setSearch("");
+                      }}
+                    >
+                      <span>Izaberi {product.name}</span>
+                      <span className="text-muted-foreground">
+                        {product.sku}
+                      </span>
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {meta.isNivelacija ? (
+              <Field className="w-auto">
+                <FieldLabel htmlFor="kep-adjustment-price">
+                  Nova prodajna cena
+                </FieldLabel>
+                <Input
+                  id="kep-adjustment-price"
+                  inputMode="decimal"
+                  value={newPrice}
+                  onChange={(event) => setNewPrice(event.target.value)}
+                />
+                <FieldDescription>
+                  Nova maloprodajna cena sa PDV-om po jedinici mere.
+                </FieldDescription>
+              </Field>
+            ) : (
+              <Field className="w-auto">
+                <FieldLabel htmlFor="kep-adjustment-qty">Količina</FieldLabel>
+                <Input
+                  id="kep-adjustment-qty"
+                  inputMode="decimal"
+                  value={quantity}
+                  onChange={(event) => setQuantity(event.target.value)}
+                />
+              </Field>
+            )}
+
+            <BasisFields
+              idPrefix="kep-adj-basis"
+              value={basis}
+              onChange={setBasis}
+            />
+
+            {saldoDelta != null ? (
+              <p className="text-xs text-muted-foreground">
+                Efekat na saldo:{" "}
+                <span className="font-medium tabular-nums">
+                  {formatRsd(saldoDelta)}
+                </span>
+              </p>
+            ) : null}
+
+            <Button type="submit" className="w-auto" disabled={submitting}>
+              {submitting ? (
+                <Spinner data-icon="inline-start" aria-hidden="true" />
+              ) : null}
+              Proknjiži izmenu
+            </Button>
+          </>
+        ) : null}
+      </FieldGroup>
+    </form>
+  );
+}
+
+function CorrectionDialog({
+  kep,
+  bookYear,
+  target,
+  onClose,
+  onCorrected,
+}: {
+  kep: KepService;
+  bookYear: number;
+  target: KepEntryView | null;
+  onClose: () => void;
+  onCorrected: () => void;
+}) {
+  const [amount, setAmount] = useState("");
+  const [basis, setBasis] = useState<BasisDoc>(EMPTY_BASIS);
+  const [error, setError] = useState<string | undefined>();
+  const [submitting, setSubmitting] = useState(false);
+
+  // Reset the form each time a different ledger row is targeted.
+  useEffect(() => {
+    setAmount("");
+    setBasis(EMPTY_BASIS);
+    setError(undefined);
+  }, [target]);
+
+  async function handleConfirm() {
+    setError(undefined);
+    if (!target) {
+      return;
+    }
+
+    let amountMinor: number;
+    try {
+      amountMinor = parseRsdInput(amount);
+    } catch (parseError) {
+      setError(errorMessage(parseError, "Iznos nije ispravan."));
+      return;
+    }
+
+    const naziv = basis.naziv.trim();
+    const broj = basis.broj.trim();
+    const datum = basis.datum.trim();
+    if (!naziv || !broj || !datum) {
+      setError("Popunite dokument osnova (naziv, broj i datum).");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await kep.correctEntry(target.redniBroj, bookYear, amountMinor, {
+        naziv,
+        broj,
+        datum,
+      });
+      onCorrected();
+      onClose();
+      toast.success("Ispravka je proknjižena.");
+    } catch (correctError) {
+      setError(errorMessage(correctError, "Ispravka nije proknjižena."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open={target != null}
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Ispravi stavku</DialogTitle>
+          <DialogDescription>
+            Ispravka se knjiži kao storno originalne stavke i novo knjiženje sa
+            tekućim datumom. Originalna stavka ostaje nepromenjena (čl. 14).
+          </DialogDescription>
+        </DialogHeader>
+        <FieldGroup>
+          {error ? <FieldError>{error}</FieldError> : null}
+          {target ? (
+            <p className="text-xs text-muted-foreground">
+              Stavka RB {target.redniBroj} — {target.opis}
+            </p>
+          ) : null}
+          <Field>
+            <FieldLabel htmlFor="kep-correction-amount">
+              Ispravan iznos
+            </FieldLabel>
+            <Input
+              id="kep-correction-amount"
+              inputMode="decimal"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+            />
+            <FieldDescription>
+              Tačan iznos koji je trebalo proknjižiti u istoj koloni.
+            </FieldDescription>
+          </Field>
+          <BasisFields
+            idPrefix="kep-corr-basis"
+            value={basis}
+            onChange={setBasis}
+          />
+        </FieldGroup>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            Odustani
+          </Button>
+          <Button type="button" onClick={handleConfirm} disabled={submitting}>
+            {submitting ? (
+              <Spinner data-icon="inline-start" aria-hidden="true" />
+            ) : null}
+            Sačuvaj ispravku
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function KalkulacijeSection({
+  items,
+  onPrint,
+}: {
+  items: KalkulacijaSummary[];
+  onPrint: (id: number) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1">
+        <h3 className="text-sm font-medium">Kalkulacije</h3>
+        <p className="text-xs text-muted-foreground">
+          Kalkulacija cene se generiše iz prijema robe. Razlika u ceni (marža)
+          se izvodi unazad iz maloprodajne cene i može biti negativna.
+        </p>
+      </div>
+      {items.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Nema kalkulacija za izabranu poslovnu godinu.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Red. br.</TableHead>
+                <TableHead>Trgovački naziv</TableHead>
+                <TableHead className="text-right">Količina</TableHead>
+                <TableHead className="text-right">
+                  Razlika u ceni (marža)
+                </TableHead>
+                <TableHead className="text-right">
+                  Prodajna vrednost sa PDV
+                </TableHead>
+                <TableHead className="text-right">Radnje</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {items.map((item) => (
+                <TableRow key={item.id}>
+                  <TableCell>{item.redniBroj}</TableCell>
+                  <TableCell>{item.trgovackiNaziv}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatQuantity(item.kolicinaMilli)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatRsd(item.razlikaUCeniMinor)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatRsd(item.prodajnaVrednostSaPdvMinor)}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      aria-label={`Štampaj kalkulaciju RB ${item.redniBroj}`}
+                      onClick={() => onPrint(item.id)}
+                    >
+                      <PrinterIcon data-icon="inline-start" aria-hidden="true" />
+                      Štampaj kalkulaciju
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BasisFields({
+  idPrefix,
+  value,
+  onChange,
+}: {
+  idPrefix: string;
+  value: BasisDoc;
+  onChange: (value: BasisDoc) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-end gap-3">
+      <Field className="w-auto">
+        <FieldLabel htmlFor={`${idPrefix}-naziv`}>Naziv dokumenta</FieldLabel>
+        <Input
+          id={`${idPrefix}-naziv`}
+          value={value.naziv}
+          onChange={(event) => onChange({ ...value, naziv: event.target.value })}
+        />
+      </Field>
+      <Field className="w-auto">
+        <FieldLabel htmlFor={`${idPrefix}-broj`}>Broj dokumenta</FieldLabel>
+        <Input
+          id={`${idPrefix}-broj`}
+          value={value.broj}
+          onChange={(event) => onChange({ ...value, broj: event.target.value })}
+        />
+      </Field>
+      <Field className="w-auto">
+        <FieldLabel htmlFor={`${idPrefix}-datum`}>Datum dokumenta</FieldLabel>
+        <Input
+          id={`${idPrefix}-datum`}
+          type="date"
+          value={value.datum}
+          onChange={(event) => onChange({ ...value, datum: event.target.value })}
+        />
+      </Field>
+    </div>
   );
 }
 
