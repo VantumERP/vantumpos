@@ -128,7 +128,8 @@ pub fn campaigns_cancel(state: State<'_, AppState>, id: i64) -> Result<CampaignV
 /// Writes a rendered HTML document into the `exports/` dir beside the
 /// database — the same location `reports_export_csv` resolves — and returns
 /// the `reports::ExportedFile` descriptor the frontend already understands.
-fn write_export(
+/// Reused by `commands::kep` for the kalkulacija export (SW-9b).
+pub(crate) fn write_export(
     state: &AppState,
     file_name: &str,
     html: &str,

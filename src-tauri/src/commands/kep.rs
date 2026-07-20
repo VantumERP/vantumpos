@@ -7,13 +7,23 @@
 //! payload), open the connection, and stamp `now`/`today` from `utc_now()`.
 //!
 //! Every command is `require_admin`; a cashier can neither read the ledger nor
-//! post a trading day. The ledger is append-only (PEP čl. 14): there is no edit
-//! or delete command — corrections are 9b.
+//! post a trading day, a nivelacija, a storno or a correction. The ledger is
+//! append-only (PEP čl. 14): there is no edit or delete command — a correction
+//! is a reversing storno (`kep_correct_entry`), never an in-place edit.
+//!
+//! The 9b adjustment commands keep the same thin shape: they resolve the acting
+//! admin, open the connection, run the domain function in a transaction, and
+//! commit. Every posting rule — the cause→{kolona, sign, kind} map, the backward
+//! kalkulacija, the nivelacija revaluation — lives in `crate::kep_storno` /
+//! `crate::kep_kalkulacija`, never here.
 
 use tauri::State;
 
-use crate::app_error::CommandError;
+use crate::app_error::{AppError, CommandError};
+use crate::commands::reports::ExportedFile;
 use crate::kep::{KepEntryView, KepLedger, KepStatus};
+use crate::kep_kalkulacija::KalkulacijaSummary;
+use crate::kep_storno::{BasisDoc, StornoCause};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -48,6 +58,142 @@ pub fn kep_status(state: State<'_, AppState>) -> Result<KepStatus, CommandError>
     let connection = state.db().open().map_err(CommandError::from)?;
     let today = crate::clock::utc_now()?;
     crate::kep::kep_status(&connection, &today).map_err(Into::into)
+}
+
+/// Lists a book year's kalkulacije (newest first) for the KEP module's list.
+#[tauri::command]
+pub fn kep_list_kalkulacije(
+    state: State<'_, AppState>,
+    book_year: i64,
+) -> Result<Vec<KalkulacijaSummary>, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    crate::kep_kalkulacija::list_kalkulacije(&connection, book_year).map_err(Into::into)
+}
+
+/// Renders one kalkulacija to a self-contained HTML isprava and writes it into
+/// `exports/` (reusing the campaigns export helper), returning the descriptor
+/// the frontend opens for print (SW-8). A missing id is `not_found`.
+#[tauri::command]
+pub fn kep_export_kalkulacija(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let view = crate::kep_kalkulacija::load_kalkulacija(&connection, id)?;
+    let html = crate::kep_kalkulacija::render_kalkulacija_html(&view);
+    let file_name = format!("kalkulacija-{}.html", view.redni_broj);
+    super::campaigns::write_export(state.inner(), &file_name, &html, 1).map_err(Into::into)
+}
+
+/// Nivelacija — the one adjustment that changes the product price. Updates the
+/// catalog price, records the offered-price change, and posts the KEP kolona-4 Δ
+/// in one transaction (all in `crate::kep_storno::post_nivelacija`).
+#[tauri::command]
+pub fn kep_nivelacija(
+    state: State<'_, AppState>,
+    product_id: i64,
+    new_sale_price_minor: i64,
+    basis: BasisDoc,
+) -> Result<(), CommandError> {
+    let acting = super::auth::require_admin(state.inner())?;
+    let mut connection = state.db().open().map_err(CommandError::from)?;
+    let now = crate::clock::utc_now()?;
+    let tx = connection.transaction().map_err(AppError::from)?;
+    crate::kep_storno::post_nivelacija(
+        &tx,
+        product_id,
+        new_sale_price_minor,
+        &basis,
+        acting.id,
+        &now,
+    )?;
+    tx.commit().map_err(AppError::from)?;
+    Ok(())
+}
+
+/// Posts a value-only storno for a non-nivelacija cause. The string maps to a
+/// `StornoCause` whose {kolona, sign, kind} the hard map dictates; the nivelacija
+/// / PDV-rate causes are rejected here (they change price — use `kep_nivelacija`)
+/// and an unknown cause is a validation error.
+#[tauri::command]
+pub fn kep_post_adjustment(
+    state: State<'_, AppState>,
+    cause: String,
+    product_id: i64,
+    quantity_milli: i64,
+    basis: BasisDoc,
+) -> Result<(), CommandError> {
+    let acting = super::auth::require_admin(state.inner())?;
+    let storno_cause = parse_adjustment_cause(&cause)?;
+    let mut connection = state.db().open().map_err(CommandError::from)?;
+    let now = crate::clock::utc_now()?;
+    let tx = connection.transaction().map_err(AppError::from)?;
+    crate::kep_storno::post_value_storno(
+        &tx,
+        storno_cause,
+        product_id,
+        quantity_milli,
+        &basis,
+        acting.id,
+        &now,
+    )?;
+    tx.commit().map_err(AppError::from)?;
+    Ok(())
+}
+
+/// Corrects a posted row via a reversing storno + re-entry (two new rows, current
+/// date). The original row is never edited or deleted (`crate::kep::correct_entry`).
+#[tauri::command]
+pub fn kep_correct_entry(
+    state: State<'_, AppState>,
+    target_redni_broj: i64,
+    book_year: i64,
+    correct_amount_minor: i64,
+    basis: BasisDoc,
+) -> Result<(), CommandError> {
+    let acting = super::auth::require_admin(state.inner())?;
+    let mut connection = state.db().open().map_err(CommandError::from)?;
+    let now = crate::clock::utc_now()?;
+    let tx = connection.transaction().map_err(AppError::from)?;
+    crate::kep::correct_entry(
+        &tx,
+        target_redni_broj,
+        book_year,
+        correct_amount_minor,
+        &basis,
+        acting.id,
+        &now,
+    )?;
+    tx.commit().map_err(AppError::from)?;
+    Ok(())
+}
+
+/// Maps a frontend cause id to a value-storno `StornoCause`. The nivelacija /
+/// PDV-rate causes change the product price and must route through
+/// `kep_nivelacija`; anything unrecognised is a validation error (never a silent
+/// no-op that would leave the saldo unadjusted).
+fn parse_adjustment_cause(cause: &str) -> Result<StornoCause, AppError> {
+    match cause {
+        "supplier_return" => Ok(StornoCause::SupplierReturn),
+        "customer_return" => Ok(StornoCause::CustomerReturn),
+        "otpis" => Ok(StornoCause::Otpis),
+        "manjak_odluka" => Ok(StornoCause::ManjakOdluka),
+        "rashod" => Ok(StornoCause::Rashod),
+        "popis_visak" => Ok(StornoCause::PopisVisak),
+        "popis_manjak" => Ok(StornoCause::PopisManjak),
+        "nivelacija_up" | "nivelacija_down" | "pdv_rate_up" | "pdv_rate_down" => {
+            Err(AppError::business(
+                "invalid_state",
+                "Nivelacija menja cenu — koristite nivelaciju.",
+            ))
+        }
+        _ => Err(AppError::validation(
+            "Nepoznat uzrok storna.",
+            serde_json::json!({ "field": "cause", "value": cause }),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +332,174 @@ mod tests {
             let ledger = kep_ledger(app.state::<AppState>(), book_year).expect("admin should read");
             assert_eq!(ledger.entries.len(), 2, "zaduženje + razduženje");
             assert_eq!(ledger.saldo_minor, 546000, "780000 − 234000");
+        });
+    }
+
+    /// A storno/nivelacija basis isprava for the command tests.
+    fn basis() -> crate::kep_storno::BasisDoc {
+        crate::kep_storno::BasisDoc {
+            naziv: "Zapisnik o otpisu".to_string(),
+            broj: "7".to_string(),
+            datum: "08.07.2026".to_string(),
+        }
+    }
+
+    /// Seeds a 20% tax rate and a product at the given retail price so the
+    /// value-storno / kalkulacija commands have a real product line to read.
+    fn seed_product(state: &AppState, id: i64, name: &str, sale_price_minor: i64) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+                 VALUES (1, 'PDV 20', 2000, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("tax rate should insert");
+        connection
+            .execute(
+                "INSERT INTO products (
+                    id, name, sku, unit_of_measure, sale_price_minor, purchase_price_minor,
+                    tax_rate_id, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 'kom', ?4, 10000, 1,
+                           '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![id, name, format!("SKU-{id}"), sale_price_minor],
+            )
+            .expect("product should insert");
+    }
+
+    #[test]
+    fn kep_post_adjustment_rejected_for_cashier() {
+        with_app("kep_post_adjustment_rejected_for_cashier", |app| {
+            sign_in_cashier(app.state::<AppState>().inner());
+
+            let error =
+                kep_post_adjustment(app.state::<AppState>(), "otpis".into(), 1, 35_000, basis())
+                    .expect_err("cashier should not post an adjustment");
+
+            assert_eq!(error.code, "forbidden");
+        });
+    }
+
+    #[test]
+    fn kep_nivelacija_rejected_for_cashier() {
+        with_app("kep_nivelacija_rejected_for_cashier", |app| {
+            sign_in_cashier(app.state::<AppState>().inner());
+
+            let error = kep_nivelacija(app.state::<AppState>(), 1, 17600, basis())
+                .expect_err("cashier should not post a nivelacija");
+
+            assert_eq!(error.code, "forbidden");
+        });
+    }
+
+    // Admin happy path (memo §4.5): otpis 35 kom @ 156,00 → −5.460,00 crveni
+    // storno in kolona 4.
+    #[test]
+    fn admin_posts_an_otpis_adjustment_negative_in_kolona_4() {
+        with_app("kep_admin_otpis_adjustment", |app| {
+            let state = app.state::<AppState>();
+            sign_in_admin(state.inner());
+            seed_product(state.inner(), 1, "Mleko 1l", 15600);
+
+            kep_post_adjustment(app.state::<AppState>(), "otpis".into(), 1, 35_000, basis())
+                .expect("admin should post the otpis");
+
+            let (kolona, amount, kind, cause) = state
+                .db()
+                .open()
+                .expect("database should open")
+                .query_row(
+                    "SELECT kolona, amount_minor, kind, cause
+                     FROM kep_entries ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .expect("a kep row");
+            assert_eq!(kolona, "zaduzenje");
+            assert_eq!(amount, -546000, "35 × 156,00 crveni storno");
+            assert_eq!(kind, "nivelacija_down_storno");
+            assert_eq!(cause, "otpis");
+        });
+    }
+
+    // The nivelacija causes change the product price and must route through
+    // `kep_nivelacija`; an unrecognised cause is a validation error.
+    #[test]
+    fn kep_post_adjustment_rejects_nivelacija_and_unknown_causes() {
+        with_app("kep_post_adjustment_rejects_bad_causes", |app| {
+            let state = app.state::<AppState>();
+            sign_in_admin(state.inner());
+            seed_product(state.inner(), 1, "Mleko 1l", 15600);
+
+            let niv = kep_post_adjustment(
+                app.state::<AppState>(),
+                "nivelacija_down".into(),
+                1,
+                1_000,
+                basis(),
+            )
+            .expect_err("nivelacija must route through kep_nivelacija");
+            assert_eq!(niv.code, "invalid_state");
+
+            let unknown = kep_post_adjustment(
+                app.state::<AppState>(),
+                "izmišljeno".into(),
+                1,
+                1_000,
+                basis(),
+            )
+            .expect_err("an unknown cause must be rejected");
+            assert_eq!(unknown.code, "validation_error");
+        });
+    }
+
+    #[test]
+    fn kep_export_kalkulacija_writes_file_with_product_name() {
+        with_app("kep_export_kalkulacija", |app| {
+            let state = app.state::<AppState>();
+            sign_in_admin(state.inner());
+            seed_product(state.inner(), 1, "Mleko 1l", 15600);
+
+            // Persist a kalkulacija (elements 5–14) to export.
+            let id = {
+                let mut connection = state.db().open().expect("database should open");
+                let tx = connection.transaction().expect("tx");
+                let id = crate::kep_kalkulacija::create_kalkulacija(
+                    &tx,
+                    1,
+                    50_000,
+                    10_000,
+                    Some("kalkulacija"),
+                    Some(7),
+                    1,
+                    "2026-07-04T09:00:00Z",
+                )
+                .expect("create kalkulacija");
+                tx.commit().expect("commit");
+                id
+            };
+
+            let exported = kep_export_kalkulacija(app.state::<AppState>(), id)
+                .expect("admin should export the kalkulacija");
+
+            assert!(exported.file_name.starts_with("kalkulacija-"));
+            assert_eq!(exported.mime_type, "text/html");
+            let contents =
+                std::fs::read_to_string(&exported.path).expect("the export file must exist");
+            assert!(
+                contents.contains("Mleko 1l"),
+                "the kalkulacija document names the product"
+            );
+            assert!(contents.contains("Kalkulacija cene"));
+
+            std::fs::remove_file(&exported.path).expect("export file should clean up");
         });
     }
 }

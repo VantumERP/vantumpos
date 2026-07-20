@@ -184,6 +184,51 @@ pub struct KalkulacijaView {
     pub created_at: String,
 }
 
+/// A kalkulacija list row (redni broj, product, and the two headline values) for
+/// the KEP module's kalkulacije list — the print action loads the full view.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KalkulacijaSummary {
+    pub id: i64,
+    pub redni_broj: i64,
+    pub book_year: i64,
+    pub trgovacki_naziv: String,
+    pub kolicina_milli: i64,
+    pub razlika_u_ceni_minor: i64,
+    pub prodajna_vrednost_sa_pdv_minor: i64,
+    pub created_at: String,
+}
+
+/// Lists a book year's kalkulacije, newest first — the list surface the export
+/// command's summaries feed. Read-only; no isprava is generated here.
+pub fn list_kalkulacije(
+    conn: &Connection,
+    book_year: i64,
+) -> Result<Vec<KalkulacijaSummary>, AppError> {
+    let mut statement = conn.prepare(
+        "SELECT id, redni_broj, book_year, trgovacki_naziv, kolicina_milli,
+                razlika_u_ceni_minor, prodajna_vrednost_sa_pdv_minor, created_at
+         FROM kalkulacije
+         WHERE book_year = ?1
+         ORDER BY redni_broj DESC",
+    )?;
+    let rows = statement
+        .query_map(params![book_year], |row| {
+            Ok(KalkulacijaSummary {
+                id: row.get(0)?,
+                redni_broj: row.get(1)?,
+                book_year: row.get(2)?,
+                trgovacki_naziv: row.get(3)?,
+                kolicina_milli: row.get(4)?,
+                razlika_u_ceni_minor: row.get(5)?,
+                prodajna_vrednost_sa_pdv_minor: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// Loads one kalkulacija by id (all 14 elements + header snapshot). A missing id
 /// is `not_found`, never a silent empty document.
 pub fn load_kalkulacija(conn: &Connection, id: i64) -> Result<KalkulacijaView, AppError> {
