@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use crate::app_error::AppError;
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -294,6 +294,103 @@ pub fn kep_status(conn: &Connection, today: &str) -> Result<KepStatus, AppError>
     })
 }
 
+/// Corrects a mis-booked KEP row by a reversing storno + re-entry (§4.4).
+///
+/// A posted row is never edited or deleted (čl. 14 st. 1 — no `brisanje`). The
+/// lawful undo is two NEW appended rows bearing the **current** date (never
+/// back-dated to the error's day, which would break the chronology čl. 11/14
+/// mandate):
+/// 1. a reversing crveni storno in the target's SAME column
+///    (`amount_minor = -target.amount_minor`, `kind = 'error_storno'`), whose
+///    `opis` references the erroneous RB („Storno stavke RB {n}");
+/// 2. the corrected entry (`amount_minor = correct_amount_minor`,
+///    `kind = 'error_correction'`), `opis` from the basis isprava.
+///
+/// Both carry `cause = 'ispravka'`. The target row (`book_year`, `redni_broj`)
+/// is left byte-for-byte untouched; a missing target is rejected `not_found`.
+/// Runs inside the caller's transaction so both rows commit or roll back together.
+pub fn correct_entry(
+    tx: &Transaction<'_>,
+    target_redni_broj: i64,
+    book_year: i64,
+    correct_amount_minor: i64,
+    basis: &crate::kep_storno::BasisDoc,
+    acting: i64,
+    now: &str,
+) -> Result<(), AppError> {
+    let (target_id, kolona, target_amount_minor) = tx
+        .query_row(
+            "SELECT id, kolona, amount_minor
+             FROM kep_entries WHERE book_year = ?1 AND redni_broj = ?2",
+            params![book_year, target_redni_broj],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("Stavka nije pronađena."))?;
+
+    // Corrections are chronological: they book under the CURRENT book year, never
+    // the target's, so a mid-January fix of a prior-year row still appends forward.
+    let correction_book_year = book_year_of(now)?;
+
+    // 1) Reversing crveni storno in the SAME column, negating the target.
+    let reversing_redni_broj = next_redni_broj(tx, correction_book_year)?;
+    let reversing_opis = format!("Storno stavke RB {target_redni_broj}");
+    tx.execute(
+        "INSERT INTO kep_entries (
+            book_year, redni_broj, entry_date, document_date, opis,
+            kolona, amount_minor, kind, entry_source,
+            reference_type, reference_id, user_id, created_at, cause
+        ) VALUES (
+            ?1, ?2, ?3, NULL, ?4,
+            ?5, ?6, 'error_storno', 'manual',
+            'kep_entry', ?7, ?8, ?3, 'ispravka'
+        )",
+        params![
+            correction_book_year,
+            reversing_redni_broj,
+            now,
+            reversing_opis,
+            kolona,
+            -target_amount_minor,
+            target_id,
+            acting,
+        ],
+    )?;
+
+    // 2) The corrected entry, in the SAME column.
+    let corrected_redni_broj = next_redni_broj(tx, correction_book_year)?;
+    let corrected_opis = format!("{} br. {} od {}", basis.naziv, basis.broj, basis.datum);
+    tx.execute(
+        "INSERT INTO kep_entries (
+            book_year, redni_broj, entry_date, document_date, opis,
+            kolona, amount_minor, kind, entry_source,
+            reference_type, reference_id, user_id, created_at, cause
+        ) VALUES (
+            ?1, ?2, ?3, NULL, ?4,
+            ?5, ?6, 'error_correction', 'manual',
+            'kep_entry', ?7, ?8, ?3, 'ispravka'
+        )",
+        params![
+            correction_book_year,
+            corrected_redni_broj,
+            now,
+            corrected_opis,
+            kolona,
+            correct_amount_minor,
+            target_id,
+            acting,
+        ],
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +639,152 @@ mod tests {
                 status.overdue_sales_days.is_empty(),
                 "day + 1 is the deadline, not overdue yet"
             );
+        });
+    }
+
+    fn correction_basis() -> crate::kep_storno::BasisDoc {
+        crate::kep_storno::BasisDoc {
+            naziv: "Interni nalog".to_string(),
+            broj: "7".to_string(),
+            datum: "10.07.2026".to_string(),
+        }
+    }
+
+    fn row_by_redni_broj(
+        conn: &Connection,
+        redni_broj: i64,
+    ) -> (String, i64, String, String, String) {
+        conn.query_row(
+            "SELECT kolona, amount_minor, kind, opis, entry_date
+             FROM kep_entries WHERE book_year = 2026 AND redni_broj = ?1",
+            params![redni_broj],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .expect("a kep row")
+    }
+
+    // §4.4 error correction: a receipt zaduženje mistyped as 8.700,00 (870000) is
+    // corrected to 7.800,00 by a reversing crveni storno + re-entry. The original
+    // row is untouched, both new rows bear the current date (never back-dated),
+    // and the net effect on the running saldo is −90000 vs the erroneous state.
+    #[test]
+    fn error_correction_reverses_and_re_enters_without_touching_original() {
+        with_kep_db("kep_error_correction", |conn| {
+            seed_product(conn, 1, 17400, 10000);
+            let tx = conn.transaction().expect("tx");
+            post_receipt_zaduzenje(
+                &tx,
+                1,
+                50_000, // 50 kom -> 50_000 * 17400 / 1000 = 870000 (mistyped 8.700,00)
+                17400,
+                "Kalkulacija br. 12",
+                Some("2026-07-03T00:00:00Z"),
+                "kalkulacija",
+                Some(7),
+                1,
+                "2026-07-04T09:00:00Z",
+            )
+            .expect("post erroneous receipt");
+            tx.commit().expect("commit");
+
+            // Erroneous state: a single zaduženje of 870000.
+            let erroneous = list_ledger(conn, 2026).expect("ledger");
+            assert_eq!(erroneous.saldo_minor, 870000);
+
+            let tx = conn.transaction().expect("tx");
+            correct_entry(
+                &tx,
+                1,
+                2026,
+                780000,
+                &correction_basis(),
+                1,
+                "2026-07-10T09:00:00Z",
+            )
+            .expect("correct");
+            tx.commit().expect("commit");
+
+            // The original row (RB 1) is untouched — no UPDATE/DELETE, not back-dated.
+            let (kolona, amount, kind, _, entry_date) = row_by_redni_broj(conn, 1);
+            assert_eq!(kolona, "zaduzenje");
+            assert_eq!(amount, 870000, "original amount preserved");
+            assert_eq!(kind, "receipt");
+            assert_eq!(
+                entry_date, "2026-07-04T09:00:00Z",
+                "original date untouched"
+            );
+
+            // Reversing crveni storno in the SAME column (RB 2).
+            let (kolona, amount, kind, opis, entry_date) = row_by_redni_broj(conn, 2);
+            assert_eq!(kolona, "zaduzenje");
+            assert_eq!(amount, -870000, "negation of the target");
+            assert_eq!(kind, "error_storno");
+            assert_eq!(opis, "Storno stavke RB 1");
+            assert_eq!(
+                entry_date, "2026-07-10T09:00:00Z",
+                "current date, never back-dated"
+            );
+
+            // The corrected entry (RB 3).
+            let (kolona, amount, kind, opis, entry_date) = row_by_redni_broj(conn, 3);
+            assert_eq!(kolona, "zaduzenje");
+            assert_eq!(amount, 780000);
+            assert_eq!(kind, "error_correction");
+            assert_eq!(opis, "Interni nalog br. 7 od 10.07.2026");
+            assert_eq!(entry_date, "2026-07-10T09:00:00Z");
+
+            // Both correction rows carry cause = 'ispravka'.
+            let ispravka_rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM kep_entries WHERE cause = 'ispravka'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count");
+            assert_eq!(ispravka_rows, 2);
+
+            // Net effect on the running saldo: −90000 vs the erroneous state.
+            let corrected = list_ledger(conn, 2026).expect("ledger");
+            assert_eq!(corrected.saldo_minor, 780000);
+            assert_eq!(corrected.saldo_minor - erroneous.saldo_minor, -90000);
+
+            // Append-only: exactly three rows, the original still present.
+            let total: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM kep_entries WHERE book_year = 2026",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count");
+            assert_eq!(total, 3);
+        });
+    }
+
+    // A correction targeting a non-existent RB is rejected before any write.
+    #[test]
+    fn error_correction_rejects_missing_target() {
+        with_kep_db("kep_error_correction_missing", |conn| {
+            let tx = conn.transaction().expect("tx");
+            let err = correct_entry(
+                &tx,
+                999,
+                2026,
+                780000,
+                &correction_basis(),
+                1,
+                "2026-07-10T09:00:00Z",
+            )
+            .expect_err("missing target must reject");
+            assert_eq!(err.code(), "not_found");
+            drop(tx);
         });
     }
 }
