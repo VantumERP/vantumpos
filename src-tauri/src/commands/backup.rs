@@ -434,6 +434,9 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     // go-live reset is its one sanctioned wipe — practice postings were never a
     // real promet and must not carry into the live book.
     tx.execute("DELETE FROM kep_entries", [])?;
+    // Closures gate the ledger (čl. 18). The go-live reset is the one sanctioned
+    // escape from an irreversible close: practice years must not stay frozen.
+    tx.execute("DELETE FROM kep_closures", [])?;
     tx.execute(
         "UPDATE inventory_balances SET quantity_milli = 0, updated_at = datetime('now')",
         [],
@@ -972,6 +975,47 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
                 count(state, "kep_entries"),
                 0,
                 "practice KEP entries must not survive go-live"
+            );
+        });
+    }
+
+    #[test]
+    fn reset_trading_data_clears_kep_closures() {
+        with_state("reset_clears_kep_closures", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-kep-closures");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            seed_trading_data(state);
+
+            // A practice-era year-end close. Closures gate the ledger (čl. 18);
+            // the go-live reset is the one sanctioned escape from an irreversible
+            // close — practice years must not stay frozen into the live book.
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute(
+                    "INSERT INTO kep_closures
+                        (book_year, krajnji_saldo_minor, entry_count, closed_at, closed_by, created_at)
+                     VALUES (2026, 546000, 2, '2027-01-05T09:00:00Z', 1, '2027-01-05T09:00:00Z')",
+                    [],
+                )
+                .expect("practice closure should seed");
+            assert_eq!(count(state, "kep_closures"), 1, "seeded a practice closure");
+
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            assert_eq!(
+                count(state, "kep_closures"),
+                0,
+                "go-live reset clears closures"
             );
         });
     }

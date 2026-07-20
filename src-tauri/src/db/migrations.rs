@@ -496,6 +496,22 @@ CREATE INDEX idx_kalkulacije_product ON kalkulacije(product_id, created_at);
 ALTER TABLE kep_entries ADD COLUMN cause TEXT;
 "#,
     },
+    Migration {
+        version: 14,
+        name: "kep_closures",
+        sql: r#"
+CREATE TABLE kep_closures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_year INTEGER NOT NULL UNIQUE,
+    krajnji_saldo_minor INTEGER NOT NULL,
+    entry_count INTEGER NOT NULL,
+    closed_at TEXT NOT NULL,
+    closed_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_kep_closures_year ON kep_closures(book_year);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {

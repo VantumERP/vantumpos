@@ -131,6 +131,7 @@ mod tests {
         "reklamacija_events",
         "kep_entries",
         "kalkulacije",
+        "kep_closures",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -157,6 +158,7 @@ mod tests {
         "idx_kep_entries_book",
         "idx_kep_entries_date",
         "idx_kalkulacije_product",
+        "idx_kep_closures_year",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -783,9 +785,43 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 13);
+                assert_eq!(migration_count, 14);
             },
         );
+    }
+
+    #[test]
+    fn migration_v14_adds_kep_closures() {
+        with_test_database("migration_v14_kep_closures", |db| {
+            let connection = db.open().expect("database should open");
+            for column in [
+                "id",
+                "book_year",
+                "krajnji_saldo_minor",
+                "entry_count",
+                "closed_at",
+                "closed_by",
+                "created_at",
+            ] {
+                let exists: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('kep_closures') WHERE name = ?1",
+                        [column],
+                        |row| row.get(0),
+                    )
+                    .expect("pragma should query");
+                assert_eq!(exists, 1, "kep_closures.{column}");
+            }
+            let index: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_kep_closures_year'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("index query");
+            assert_eq!(index, 1, "idx_kep_closures_year exists");
+        });
     }
 
     #[test]
