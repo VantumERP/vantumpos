@@ -22,6 +22,8 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use crate::app_error::AppError;
+use crate::commands::settings::CompanySettings;
+use crate::kep::{KepEntryView, KepLedger};
 
 /// The exact phrase the operator must type to close a year.
 pub const CLOSE_CONFIRMATION: &str = "ZAKLJUČI KNJIGU";
@@ -104,10 +106,233 @@ pub fn close_year(
     })
 }
 
+/// Default rows per printed book page (§5.5 page mechanics).
+pub const BOOK_ROWS_PER_PAGE: usize = 30;
+
+/// Everything the signable close document shows (čl. 17 st. 4).
+pub struct KepCloseView {
+    pub company: CompanySettings,
+    pub closure: KepClosure,
+    pub opening_saldo_minor: i64,
+    pub zaduzenje_total_minor: i64,
+    pub razduzenje_total_minor: i64,
+}
+
+const DOC_STYLE: &str = "\
+@page { margin: 1cm }\n\
+body { font-family: sans-serif; color: #111; margin: 1cm; }\n\
+h1 { font-size: 1.3rem; }\n\
+.meta { color: #444; margin: 0.1rem 0; }\n\
+table { border-collapse: collapse; width: 100%; margin: 0.75rem 0; }\n\
+th, td { border: 1px solid #999; padding: 0.25rem 0.5rem; text-align: left; }\n\
+td.amount, th.amount { text-align: right; white-space: nowrap; }\n\
+tr.donos td, tr.svega td { font-weight: bold; background: #f0f0f0; }\n\
+.page { page-break-after: always; }\n\
+.page:last-child { page-break-after: auto; }\n\
+.sign { margin-top: 3rem; display: flex; justify-content: space-between; }\n\
+footer { margin-top: 2rem; color: #666; font-size: 0.85rem; }\n";
+
+fn doc_head(title: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"sr-Latn\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <title>{}</title>\n<style>\n{}</style>\n</head>\n<body>\n",
+        escape_html(title),
+        DOC_STYLE
+    )
+}
+
+fn company_header(company: &CompanySettings, book_year: i64) -> String {
+    format!(
+        "<p class=\"meta\">Trgovac: {}</p>\n\
+         <p class=\"meta\">PIB: {}</p>\n\
+         <p class=\"meta\">Prodajni objekat: {}</p>\n\
+         <p class=\"meta\">KNJIGA EVIDENCIJE PROMETA ZA {}. GODINU</p>\n",
+        escape_html(&company.shop_name),
+        escape_html(&company.pib),
+        escape_html(&company.address),
+        book_year
+    )
+}
+
+/// The signable electronic-close document (čl. 17 st. 4): opening carry-in, the
+/// year's zaduženje/razduženje totals, the krajnji saldo, and a signature line.
+pub fn render_close_html(view: &KepCloseView) -> String {
+    let mut html = doc_head("Zaključenje knjige evidencije prometa");
+    html.push_str(&format!(
+        "<h1>Zaključenje knjige za {}</h1>\n",
+        view.closure.book_year
+    ));
+    html.push_str(&company_header(&view.company, view.closure.book_year));
+
+    html.push_str("<table>\n<tbody>\n");
+    for (label, minor) in [
+        ("Početno stanje (donos)", view.opening_saldo_minor),
+        ("Ukupno zaduženje (kolona 4)", view.zaduzenje_total_minor),
+        ("Ukupno razduženje (kolona 5)", view.razduzenje_total_minor),
+        ("KRAJNJI SALDO", view.closure.krajnji_saldo_minor),
+    ] {
+        html.push_str(&format!(
+            "<tr><th>{label}</th><td class=\"amount\">{} RSD</td></tr>\n",
+            format_rsd_minor(minor)
+        ));
+    }
+    html.push_str(&format!(
+        "<tr><th>Broj stavki</th><td class=\"amount\">{}</td></tr>\n",
+        view.closure.entry_count
+    ));
+    html.push_str(&format!(
+        "<tr><th>Datum zaključenja</th><td>{}</td></tr>\n",
+        escape_html(date_only(&view.closure.closed_at))
+    ));
+    html.push_str("</tbody>\n</table>\n");
+
+    html.push_str(
+        "<div class=\"sign\"><span>M.P. ______________</span>\
+         <span>ODGOVORNO LICE ______________</span></div>\n",
+    );
+    html.push_str("<footer>Interni dokument. Nije fiskalni dokument.</footer>\n</body>\n</html>\n");
+    html
+}
+
+/// The full-book paginated print (§5.5): the 5-column table split into pages of
+/// `rows_per_page`, each page after the first opening with a DONOS (running
+/// carry-in) row and each page but the last closing with a SVEGA ZA PRENOS
+/// (running carry-out) row. Pages are numbered `Strana k`.
+pub fn render_book_html(
+    company: &CompanySettings,
+    ledger: &KepLedger,
+    rows_per_page: usize,
+) -> String {
+    let per_page = rows_per_page.max(1);
+    let mut html = doc_head("Knjiga evidencije prometa");
+    html.push_str(&company_header(company, ledger.book_year));
+
+    let chunks: Vec<&[KepEntryView]> = ledger.entries.chunks(per_page).collect();
+    let page_total = chunks.len().max(1);
+    // Running saldo carried across pages, seeded from the opening carry-in.
+    let mut running = ledger.opening_saldo_minor;
+
+    for (page_index, chunk) in chunks.iter().enumerate() {
+        let page_number = page_index + 1;
+        html.push_str("<div class=\"page\">\n");
+        html.push_str(&format!(
+            "<p class=\"meta\">Strana {page_number} / {page_total}</p>\n"
+        ));
+        html.push_str(
+            "<table>\n<thead>\n<tr>\
+             <th>RB</th><th>Datum</th><th>Opis</th>\
+             <th class=\"amount\">Zaduženje (4)</th>\
+             <th class=\"amount\">Razduženje (5)</th>\
+             <th class=\"amount\">Saldo</th></tr>\n</thead>\n<tbody>\n",
+        );
+
+        // DONOS — the running carry-in for this page (every page carries it; the
+        // first page's DONOS is the year's opening carry-in).
+        html.push_str(&format!(
+            "<tr class=\"donos\"><td></td><td></td><td>DONOS</td>\
+             <td class=\"amount\"></td><td class=\"amount\"></td>\
+             <td class=\"amount\">{} RSD</td></tr>\n",
+            format_rsd_minor(running)
+        ));
+
+        let mut page_zaduzenje = 0i64;
+        let mut page_razduzenje = 0i64;
+        for entry in chunk.iter() {
+            let zad = entry.zaduzenje_minor.unwrap_or(0);
+            let raz = entry.razduzenje_minor.unwrap_or(0);
+            running += zad - raz;
+            page_zaduzenje += zad;
+            page_razduzenje += raz;
+            html.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td>\
+                 <td class=\"amount\">{}</td><td class=\"amount\">{}</td>\
+                 <td class=\"amount\">{} RSD</td></tr>\n",
+                entry.redni_broj,
+                escape_html(&entry.datum),
+                escape_html(&entry.opis),
+                entry
+                    .zaduzenje_minor
+                    .map(format_rsd_minor)
+                    .unwrap_or_default(),
+                entry
+                    .razduzenje_minor
+                    .map(format_rsd_minor)
+                    .unwrap_or_default(),
+                format_rsd_minor(running)
+            ));
+        }
+
+        // Per-page subtotal, then SVEGA ZA PRENOS on every page but the last.
+        html.push_str(&format!(
+            "<tr class=\"svega\"><td></td><td></td><td>UKUPNO STRANA</td>\
+             <td class=\"amount\">{}</td><td class=\"amount\">{}</td>\
+             <td class=\"amount\"></td></tr>\n",
+            format_rsd_minor(page_zaduzenje),
+            format_rsd_minor(page_razduzenje)
+        ));
+        if page_number < page_total {
+            html.push_str(&format!(
+                "<tr class=\"svega\"><td></td><td></td><td>SVEGA ZA PRENOS</td>\
+                 <td class=\"amount\"></td><td class=\"amount\"></td>\
+                 <td class=\"amount\">{} RSD</td></tr>\n",
+                format_rsd_minor(running)
+            ));
+        } else {
+            html.push_str(&format!(
+                "<tr class=\"svega\"><td></td><td></td><td>KRAJNJI SALDO</td>\
+                 <td class=\"amount\"></td><td class=\"amount\"></td>\
+                 <td class=\"amount\">{} RSD</td></tr>\n",
+                format_rsd_minor(running)
+            ));
+        }
+
+        html.push_str("</tbody>\n</table>\n</div>\n");
+    }
+
+    html.push_str("<footer>Interni dokument. Nije fiskalni dokument.</footer>\n</body>\n</html>\n");
+    html
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Formats integer minor units as grouped RSD: `900000 → "9.000,00"`.
+fn format_rsd_minor(minor: i64) -> String {
+    let negative = minor < 0;
+    let abs = minor.unsigned_abs();
+    let dinars = abs / 100;
+    let para = abs % 100;
+    let digits = dinars.to_string();
+    let bytes = digits.as_bytes();
+    let len = bytes.len();
+    let mut grouped = String::with_capacity(len + len / 3);
+    for (i, byte) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            grouped.push('.');
+        }
+        grouped.push(*byte as char);
+    }
+    let sign = if negative { "-" } else { "" };
+    format!("{sign}{grouped},{para:02}")
+}
+
+/// `2027-01-05T09:00:00Z` → `2027-01-05` for display.
+fn date_only(rfc3339: &str) -> &str {
+    rfc3339.split('T').next().unwrap_or(rfc3339)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::settings::CompanySettings;
     use crate::db::{test_database_path, Db};
+    use crate::kep::{KepEntryView, KepLedger};
 
     /// Opens a migrated connection over a throwaway database.
     fn with_conn(test_name: &str, test: impl FnOnce(&mut Connection)) {
@@ -186,5 +411,78 @@ mod tests {
             assert_eq!(err.code(), "year_closed");
             ensure_year_open(conn, 2027).expect("a later open year still passes");
         });
+    }
+
+    fn company() -> CompanySettings {
+        CompanySettings {
+            shop_name: "STR Delta".to_string(),
+            address: "Kralja Petra 1, Novi Sad".to_string(),
+            pib: "123456789".to_string(),
+            ..CompanySettings::default()
+        }
+    }
+
+    #[test]
+    fn close_html_carries_krajnji_saldo_and_signature() {
+        let view = KepCloseView {
+            company: company(),
+            closure: KepClosure {
+                book_year: 2026,
+                krajnji_saldo_minor: 900000,
+                entry_count: 2,
+                closed_at: "2027-01-05T09:00:00Z".to_string(),
+                closed_by: Some(1),
+            },
+            opening_saldo_minor: 0,
+            zaduzenje_total_minor: 900000,
+            razduzenje_total_minor: 0,
+        };
+        let html = render_close_html(&view);
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("Zaključenje knjige za 2026"));
+        assert!(html.contains("9.000,00"), "krajnji saldo 900000 minor");
+        assert!(html.contains("ODGOVORNO LICE"), "signature line");
+        assert!(html.contains("Nije fiskalni dokument"));
+        assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn book_html_paginates_with_donos_and_svega() {
+        // 65 entries at rows_per_page = 30 → 3 pages (30 / 30 / 5).
+        let mut entries = Vec::new();
+        for i in 1..=65 {
+            entries.push(KepEntryView {
+                redni_broj: i,
+                datum: "01.06".to_string(),
+                opis: format!("Stavka {i}"),
+                zaduzenje_minor: Some(10000),
+                razduzenje_minor: None,
+                kind: "receipt".to_string(),
+            });
+        }
+        let ledger = KepLedger {
+            book_year: 2026,
+            entries,
+            opening_saldo_minor: 50000,
+            saldo_minor: 700000,
+        };
+        let html = render_book_html(&company(), &ledger, 30);
+        assert!(html.contains("Strana 1"));
+        assert!(html.contains("Strana 3"));
+        assert!(!html.contains("Strana 4"), "65 rows @ 30 → exactly 3 pages");
+        assert!(
+            html.contains("DONOS"),
+            "each page after the first carries a DONOS"
+        );
+        assert!(
+            html.contains("SVEGA ZA PRENOS"),
+            "each page but the last carries a carry-out"
+        );
+        assert!(html.contains("page-break-after"));
+        assert!(
+            html.contains("500,00"),
+            "first DONOS shows the 50000 opening carry-in"
+        );
+        assert!(!html.contains("<script"));
     }
 }
