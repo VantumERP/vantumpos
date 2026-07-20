@@ -151,6 +151,18 @@ mod tests {
         });
     }
 
+    #[test]
+    fn kep_status_rejected_for_cashier() {
+        with_app("kep_status_rejected_for_cashier", |app| {
+            sign_in_cashier(app.state::<AppState>().inner());
+
+            let error = kep_status(app.state::<AppState>())
+                .expect_err("cashier should not read the KEP status");
+
+            assert_eq!(error.code, "forbidden");
+        });
+    }
+
     // Admin happy path (memo §2.7 numbers): a seeded receipt zaduženje of
     // 7.800,00 minus a posted daily razduženje of 2.340,00 leaves saldo 5.460,00.
     #[test]
