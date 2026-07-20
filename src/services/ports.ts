@@ -46,6 +46,9 @@ import type {
   ProductSearchQuery,
   ProductSummary,
   AnswerInput,
+  BasisDoc,
+  KalkulacijaSummary,
+  StornoCauseId,
   ReklamacijaInput,
   ReklamacijaSummary,
   ReklamacijaView,
@@ -221,8 +224,11 @@ export interface ReklamacijeService {
 
 /**
  * The admin-gated KEP (evidencija prometa) value ledger. The ledger view and
- * its running saldo are derived per-read by the backend; the three methods map
- * 1:1 to the `kep_*` command names.
+ * its running saldo are derived per-read by the backend; every method maps 1:1
+ * to a `kep_*` command name. The kalkulacija + storno surface (9b) extends the
+ * 9a ledger methods: `nivelacija` is the one adjustment that changes the product
+ * price, so it has its own method; every other write-down routes through
+ * `postAdjustment`, whose cause fixes the kolona and sign backend-side.
  */
 export interface KepService {
   ledger(bookYear: number): Promise<KepLedger>;
@@ -231,6 +237,25 @@ export interface KepService {
     overrideAmountMinor: number | null,
   ): Promise<KepEntryView>;
   status(): Promise<KepStatus>;
+  listKalkulacije(bookYear: number): Promise<KalkulacijaSummary[]>;
+  exportKalkulacija(id: number): Promise<ExportedFile>;
+  nivelacija(
+    productId: number,
+    newSalePriceMinor: number,
+    basis: BasisDoc,
+  ): Promise<void>;
+  postAdjustment(
+    cause: StornoCauseId,
+    productId: number,
+    quantityMilli: number,
+    basis: BasisDoc,
+  ): Promise<void>;
+  correctEntry(
+    targetRedniBroj: number,
+    bookYear: number,
+    correctAmountMinor: number,
+    basis: BasisDoc,
+  ): Promise<void>;
 }
 
 export interface PrintService {

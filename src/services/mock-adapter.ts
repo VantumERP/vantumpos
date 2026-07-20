@@ -1255,6 +1255,23 @@ export function createMockServices(): PosServices {
       async status() {
         return { overdueSalesDays: [], unbookedReceiptCount: 0 };
       },
+      // Mock fidelity only: the real kalkulacija/nivelacija/storno surface lives
+      // in `crate::kep_kalkulacija` / `crate::kep_storno`; these stubs keep the
+      // KEP module's UI tests deterministic without touching the ledger.
+      async listKalkulacije() {
+        return [];
+      },
+      async exportKalkulacija(id) {
+        return {
+          fileName: `kalkulacija-${id}.html`,
+          path: `mock://exports/kalkulacija-${id}.html`,
+          mimeType: "text/html" as const,
+          rowCount: 1,
+        };
+      },
+      async nivelacija() {},
+      async postAdjustment() {},
+      async correctEntry() {},
     },
     print: {
       async openForPrint() {},

@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createLocalServices } from "./local-adapter";
 import { createMockServices } from "./mock-adapter";
-import type { AnswerInput, CampaignInput, ReklamacijaInput } from "./types";
+import type {
+  AnswerInput,
+  BasisDoc,
+  CampaignInput,
+  ReklamacijaInput,
+} from "./types";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
@@ -776,6 +781,52 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenNthCalledWith(3, "kep_status");
   });
 
+  it("maps kep kalkulacija/nivelacija/storno methods to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      if (command === "kep_list_kalkulacije") {
+        return Promise.resolve([]);
+      }
+
+      return Promise.resolve(undefined);
+    });
+    const services = createLocalServices(invoke);
+    const basis: BasisDoc = {
+      naziv: "Zapisnik o otpisu",
+      broj: "7",
+      datum: "08.07.2026",
+    };
+
+    await services.kep.listKalkulacije(2026);
+    await services.kep.exportKalkulacija(5);
+    await services.kep.nivelacija(1, 17600, basis);
+    await services.kep.postAdjustment("otpis", 1, 35000, basis);
+    await services.kep.correctEntry(3, 2026, 780000, basis);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "kep_list_kalkulacije", {
+      bookYear: 2026,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "kep_export_kalkulacija", {
+      id: 5,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "kep_nivelacija", {
+      productId: 1,
+      newSalePriceMinor: 17600,
+      basis,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "kep_post_adjustment", {
+      cause: "otpis",
+      productId: 1,
+      quantityMilli: 35000,
+      basis,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, "kep_correct_entry", {
+      targetRedniBroj: 3,
+      bookYear: 2026,
+      correctAmountMinor: 780000,
+      basis,
+    });
+  });
+
   it("opens an exported document for printing through the opener plugin", async () => {
     const { openPath } = await import("@tauri-apps/plugin-opener");
     const services = createLocalServices(vi.fn());
@@ -1081,6 +1132,30 @@ describe("mock service adapter", () => {
       overdueSalesDays: [],
       unbookedReceiptCount: 0,
     });
+  });
+
+  it("stubs the kalkulacija/nivelacija/storno surface at mock fidelity", async () => {
+    const services = createMockServices();
+    const basis: BasisDoc = {
+      naziv: "Zapisnik o otpisu",
+      broj: "7",
+      datum: "08.07.2026",
+    };
+
+    await expect(services.kep.listKalkulacije(2026)).resolves.toEqual([]);
+    await expect(services.kep.exportKalkulacija(5)).resolves.toMatchObject({
+      fileName: "kalkulacija-5.html",
+      mimeType: "text/html",
+    });
+    await expect(
+      services.kep.nivelacija(1, 17600, basis),
+    ).resolves.toBeUndefined();
+    await expect(
+      services.kep.postAdjustment("otpis", 1, 35000, basis),
+    ).resolves.toBeUndefined();
+    await expect(
+      services.kep.correctEntry(3, 2026, 780000, basis),
+    ).resolves.toBeUndefined();
   });
 
   it("exports the potvrda and notice at mock fidelity", async () => {

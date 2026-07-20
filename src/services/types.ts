@@ -1019,3 +1019,45 @@ export interface KepStatus {
   overdueSalesDays: string[];
   unbookedReceiptCount: number;
 }
+
+/**
+ * The frontend cause ids for a value-only storno — the strings
+ * `crate::commands::kep::parse_adjustment_cause` accepts. The cause→{kolona,
+ * sign, kind} booking is a HARD map decided backend-side, never a user choice.
+ * Nivelacija (and the PDV-rate revaluations) change the product price and route
+ * through the dedicated `nivelacija` method, so they are excluded here.
+ */
+export type StornoCauseId =
+  | "supplier_return"
+  | "customer_return"
+  | "otpis"
+  | "manjak_odluka"
+  | "rashod"
+  | "popis_visak"
+  | "popis_manjak";
+
+/**
+ * A storno/nivelacija basis isprava (naziv/broj/datum) — mirrors
+ * `crate::kep_storno::BasisDoc` (serde camelCase). Composed into the KEP `opis`.
+ */
+export interface BasisDoc {
+  naziv: string;
+  broj: string;
+  datum: string;
+}
+
+/**
+ * One kalkulacija list row — mirrors `crate::kep_kalkulacija::KalkulacijaSummary`
+ * (serde camelCase). `razlikaUCeniMinor` (element 10, the marža) is derived
+ * backward from the catalog price and MAY be negative for a loss-leader.
+ */
+export interface KalkulacijaSummary {
+  id: number;
+  redniBroj: number;
+  bookYear: number;
+  trgovackiNaziv: string;
+  kolicinaMilli: number;
+  razlikaUCeniMinor: number;
+  prodajnaVrednostSaPdvMinor: number;
+  createdAt: string;
+}

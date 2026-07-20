@@ -24,6 +24,7 @@ import type {
   ImportJobDetail,
   ImportValidationResult,
   InventoryAdjustmentResult,
+  KalkulacijaSummary,
   KepEntryView,
   KepLedger,
   KepStatus,
@@ -255,6 +256,26 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
           overrideAmountMinor,
         }),
       status: () => invoke<KepStatus>("kep_status"),
+      listKalkulacije: (bookYear) =>
+        invoke<KalkulacijaSummary[]>("kep_list_kalkulacije", { bookYear }),
+      exportKalkulacija: (id) =>
+        invoke<ExportedFile>("kep_export_kalkulacija", { id }),
+      nivelacija: (productId, newSalePriceMinor, basis) =>
+        invoke<void>("kep_nivelacija", { productId, newSalePriceMinor, basis }),
+      postAdjustment: (cause, productId, quantityMilli, basis) =>
+        invoke<void>("kep_post_adjustment", {
+          cause,
+          productId,
+          quantityMilli,
+          basis,
+        }),
+      correctEntry: (targetRedniBroj, bookYear, correctAmountMinor, basis) =>
+        invoke<void>("kep_correct_entry", {
+          targetRedniBroj,
+          bookYear,
+          correctAmountMinor,
+          basis,
+        }),
     },
     print: {
       openForPrint: (path) => openPath(path),
