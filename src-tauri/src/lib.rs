@@ -7,6 +7,7 @@ mod db;
 mod importer;
 mod kep;
 mod kep_kalkulacija;
+mod kep_storno;
 mod price_history;
 mod reklamacije;
 mod reklamacije_docs;
