@@ -127,12 +127,26 @@ pub struct KepEntryView {
 pub struct KepLedger {
     pub book_year: i64,
     pub entries: Vec<KepEntryView>,
+    pub opening_saldo_minor: i64,
     pub saldo_minor: i64,
 }
 
 /// The ledger for a book year: rows ordered by `redni_broj`, with the derived
-/// `saldo_minor = Σzaduženje − Σrazduženje` (memo §2.4).
+/// `saldo_minor = opening_saldo_minor + Σzaduženje − Σrazduženje` (memo §2.4).
+/// The `opening_saldo_minor` is the carry-in from the prior year's closure.
 pub fn list_ledger(conn: &Connection, book_year: i64) -> Result<KepLedger, AppError> {
+    // Carry-in: the prior year's krajnji saldo becomes this year's opening
+    // (§2). Computed, not stored as an `opening` entry — a late opening row
+    // would take a wrong redni broj once the new year is already trading.
+    let opening_saldo_minor: i64 = conn
+        .query_row(
+            "SELECT krajnji_saldo_minor FROM kep_closures WHERE book_year = ?1",
+            params![book_year - 1],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+
     let mut stmt = conn.prepare(
         "SELECT redni_broj, entry_date, opis, kolona, amount_minor, kind
          FROM kep_entries
@@ -151,7 +165,7 @@ pub fn list_ledger(conn: &Connection, book_year: i64) -> Result<KepLedger, AppEr
     })?;
 
     let mut entries = Vec::new();
-    let mut saldo_minor: i64 = 0;
+    let mut saldo_minor: i64 = opening_saldo_minor;
     for row in rows {
         let (redni_broj, entry_date, opis, kolona, amount_minor, kind) = row?;
         let datum = dan_mesec(&entry_date)?;
@@ -175,6 +189,7 @@ pub fn list_ledger(conn: &Connection, book_year: i64) -> Result<KepLedger, AppEr
     Ok(KepLedger {
         book_year,
         entries,
+        opening_saldo_minor,
         saldo_minor,
     })
 }
@@ -765,6 +780,45 @@ mod tests {
                 )
                 .expect("count");
             assert_eq!(total, 3);
+        });
+    }
+
+    #[test]
+    fn list_ledger_carries_forward_prior_closure() {
+        with_kep_db("list_ledger_carry_forward", |conn| {
+            // 2026 closed at krajnji saldo 15.460,00.
+            conn.execute(
+                "INSERT INTO kep_closures
+                    (book_year, krajnji_saldo_minor, entry_count, closed_at, closed_by, created_at)
+                 VALUES (2026, 1546000, 3, '2027-01-05T09:00:00Z', 1, '2027-01-05T09:00:00Z')",
+                [],
+            )
+            .expect("seed 2026 closure");
+
+            // 2027 opens empty; its opening saldo is the 2026 carry-in.
+            let empty = list_ledger(conn, 2027).expect("ledger 2027");
+            assert_eq!(empty.opening_saldo_minor, 1546000);
+            assert_eq!(
+                empty.saldo_minor, 1546000,
+                "no entries yet → saldo == carry-in"
+            );
+
+            // A 2027 receipt zaduženje of 1.000,00 lifts the running saldo above the carry-in.
+            conn.execute(
+                "INSERT INTO kep_entries
+                    (book_year, redni_broj, entry_date, opis, kolona, amount_minor, kind, entry_source, user_id, created_at)
+                 VALUES (2027, 1, '2027-01-10T00:00:00Z', 'Prijem robe', 'zaduzenje', 100000, 'receipt', 'auto', 1, '2027-01-10T00:00:00Z')",
+                [],
+            )
+            .expect("seed 2027 entry");
+
+            let ledger = list_ledger(conn, 2027).expect("ledger 2027");
+            assert_eq!(ledger.opening_saldo_minor, 1546000);
+            assert_eq!(ledger.saldo_minor, 1646000, "carry-in 1546000 + 100000");
+
+            // A year with no prior closure opens at zero.
+            let fresh = list_ledger(conn, 2026).expect("ledger 2026");
+            assert_eq!(fresh.opening_saldo_minor, 0);
         });
     }
 

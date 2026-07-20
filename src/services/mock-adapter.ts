@@ -1233,12 +1233,15 @@ export function createMockServices(): PosServices {
     // recomputes the saldo on read, and appends a razduženje per posted day.
     kep: {
       async ledger(bookYear) {
-        const saldoMinor = kepEntries.reduce(
-          (sum, entry) =>
-            sum + (entry.zaduzenjeMinor ?? 0) - (entry.razduzenjeMinor ?? 0),
-          0,
-        );
-        return { bookYear, entries: [...kepEntries], saldoMinor };
+        const openingSaldoMinor = 0;
+        const saldoMinor =
+          openingSaldoMinor +
+          kepEntries.reduce(
+            (sum, entry) =>
+              sum + (entry.zaduzenjeMinor ?? 0) - (entry.razduzenjeMinor ?? 0),
+            0,
+          );
+        return { bookYear, entries: [...kepEntries], openingSaldoMinor, saldoMinor };
       },
       async postDailySales(date, overrideAmountMinor) {
         const entry: KepEntryView = {

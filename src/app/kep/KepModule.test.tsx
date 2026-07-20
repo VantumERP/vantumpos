@@ -39,6 +39,7 @@ const dailyEntry: KepEntryView = {
 const ledger: KepLedger = {
   bookYear: 2026,
   entries: [receiptEntry, dailyEntry],
+  openingSaldoMinor: 0,
   saldoMinor: 546000,
 };
 

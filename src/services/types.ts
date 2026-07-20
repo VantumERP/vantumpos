@@ -1012,6 +1012,7 @@ export interface KepEntryView {
 export interface KepLedger {
   bookYear: number;
   entries: KepEntryView[];
+  openingSaldoMinor: number;
   saldoMinor: number;
 }
 

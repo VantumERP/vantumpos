@@ -757,7 +757,12 @@ describe("local service adapter", () => {
     const invoke = vi.fn().mockImplementation((command: string) => {
       switch (command) {
         case "kep_ledger":
-          return Promise.resolve({ bookYear: 2026, entries: [], saldoMinor: 0 });
+          return Promise.resolve({
+            bookYear: 2026,
+            entries: [],
+            openingSaldoMinor: 0,
+            saldoMinor: 0,
+          });
         case "kep_status":
           return Promise.resolve({
             overdueSalesDays: [],
