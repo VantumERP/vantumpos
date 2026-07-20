@@ -478,6 +478,36 @@ pub fn apply_inventory_adjustment(
         },
     )?;
 
+    // KEP evidencija prometa (SW-9a): only a goods receipt books a zaduženje, and
+    // it is written inside this same transaction. The basis is retail value WITH
+    // PDV (`quantity_milli * sale_price_minor / 1000`), NEVER the nabavna — that
+    // is the memo's flagged false-assurance bug. Sharing `tx` makes the movement
+    // and the ledger entry atomic: a rollback removes both, so goods can never
+    // exist un-booked. Corrections and write-offs post nothing.
+    if matches!(movement_type, InventoryMovementType::Receive) {
+        let sale_price_minor: i64 = tx.query_row(
+            "SELECT sale_price_minor FROM products WHERE id = ?1",
+            params![request.product_id],
+            |row| row.get(0),
+        )?;
+        let opis = receipt_opis(
+            reference_type.as_deref(),
+            request.reference_id,
+            reason.as_deref(),
+        );
+        crate::kep::post_receipt_zaduzenje(
+            &tx,
+            request.product_id,
+            request.quantity_milli,
+            sale_price_minor,
+            &opis,
+            None,
+            request.reference_id,
+            acting_user_id,
+            created_at,
+        )?;
+    }
+
     tx.commit()?;
 
     Ok(InventoryAdjustmentResult {
@@ -615,6 +645,23 @@ fn normalize_stock_state(value: Option<&str>) -> Result<Option<&'static str>, Ap
             "Filter stanja nije ispravan.",
             "stockState",
         )),
+    }
+}
+
+/// The `opis` (kolona 5) for a receipt zaduženje: „Prijem robe" plus a suffix
+/// naming the source document when one is linked, else the free-text reason.
+fn receipt_opis(
+    reference_type: Option<&str>,
+    reference_id: Option<i64>,
+    reason: Option<&str>,
+) -> String {
+    match (reference_type, reference_id) {
+        (Some(ref_type), Some(ref_id)) => format!("Prijem robe ({ref_type} #{ref_id})"),
+        (Some(ref_type), None) => format!("Prijem robe ({ref_type})"),
+        (None, _) => match reason {
+            Some(reason) => format!("Prijem robe — {reason}"),
+            None => "Prijem robe".to_string(),
+        },
     }
 }
 
@@ -1236,6 +1283,104 @@ mod tests {
                 "test database file {} should be removed: {error}",
                 path.display()
             )
+        });
+    }
+
+    #[test]
+    fn receiving_stock_posts_a_kep_zaduzenje_at_retail() {
+        with_connection(
+            "receiving_stock_posts_a_kep_zaduzenje_at_retail",
+            |connection| {
+                // Retail 156,00 incl. PDV — NOT the 100,00 nabavna. 50 kom -> 7.800,00.
+                connection
+                    .execute(
+                        "UPDATE products
+                         SET sale_price_minor = 15600, purchase_price_minor = 10000
+                         WHERE id = 1",
+                        [],
+                    )
+                    .expect("price update should apply");
+
+                apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::Receive,
+                    adjustment(50_000, "Prijem robe"),
+                    SEEDED_ADMIN_ID,
+                    "2026-07-04T09:00:00Z",
+                )
+                .expect("receive should succeed");
+
+                let (amount_minor, kolona, kind): (i64, String, String) = connection
+                    .query_row(
+                        "SELECT amount_minor, kolona, kind FROM kep_entries",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .expect("kep entry should query");
+
+                assert_eq!(
+                    amount_minor, 780000,
+                    "50 x 156,00 retail incl. PDV — never the nabavna basis"
+                );
+                assert_eq!(kolona, "zaduzenje");
+                assert_eq!(kind, "receipt");
+            },
+        );
+    }
+
+    #[test]
+    fn a_correction_posts_no_kep_entry() {
+        with_connection("a_correction_posts_no_kep_entry", |connection| {
+            apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Correction,
+                adjustment(500, "Korekcija popisa"),
+                SEEDED_ADMIN_ID,
+                "2026-07-04T09:00:00Z",
+            )
+            .expect("correction should succeed");
+
+            let kep_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM kep_entries", [], |row| row.get(0))
+                .expect("kep count should query");
+            assert_eq!(kep_count, 0, "only goods receipts post a KEP zaduženje");
+        });
+    }
+
+    #[test]
+    fn receive_and_kep_entry_are_atomic() {
+        with_connection("receive_and_kep_entry_are_atomic", |connection| {
+            // A receive into a nonexistent product errors inside the transaction,
+            // before the commit. Because the KEP zaduženje shares that transaction,
+            // a rollback removes both — neither a movement nor a kep_entry can
+            // persist without the other.
+            let error = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                InventoryAdjustmentRequest {
+                    product_id: 9999,
+                    quantity_milli: 1000,
+                    reason: Some("Prijem robe".to_string()),
+                    purchase_price_minor: None,
+                    reference_type: None,
+                    reference_id: None,
+                },
+                SEEDED_ADMIN_ID,
+                "2026-07-04T09:00:00Z",
+            )
+            .expect_err("receive into a nonexistent product should fail");
+            assert_eq!(CommandError::from(error).code, "not_found");
+
+            let kep_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM kep_entries", [], |row| row.get(0))
+                .expect("kep count should query");
+            let movement_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM inventory_movements", [], |row| {
+                    row.get(0)
+                })
+                .expect("movement count should query");
+            assert_eq!(kep_count, 0, "the rolled-back zaduženje leaves nothing");
+            assert_eq!(movement_count, 0, "the rolled-back movement leaves nothing");
         });
     }
 }
