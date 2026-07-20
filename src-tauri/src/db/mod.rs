@@ -129,6 +129,7 @@ mod tests {
         "campaign_items",
         "reklamacije",
         "reklamacija_events",
+        "kep_entries",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -152,6 +153,8 @@ mod tests {
         "idx_campaign_items_product",
         "idx_reklamacije_status",
         "idx_reklamacija_events_parent",
+        "idx_kep_entries_book",
+        "idx_kep_entries_date",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -778,9 +781,43 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 11);
+                assert_eq!(migration_count, 12);
             },
         );
+    }
+
+    #[test]
+    fn migration_v12_creates_kep_entries() {
+        with_test_database("migration_v12_kep", |db| {
+            let connection = db.open().expect("database should open");
+            assert!(
+                schema_object_exists(&connection, "table", "kep_entries"),
+                "expected kep_entries"
+            );
+            let schema: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='kep_entries'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("schema");
+            for token in [
+                "book_year",
+                "redni_broj",
+                "zaduzenje",
+                "razduzenje",
+                "receipt",
+                "daily_sales",
+                "nivelacija_down_storno",
+                "close_carry",
+            ] {
+                assert!(schema.contains(token), "kep_entries schema missing {token}");
+            }
+            assert!(
+                schema.contains("UNIQUE (book_year, redni_broj)"),
+                "expected UNIQUE(book_year, redni_broj)"
+            );
+        });
     }
 
     #[test]

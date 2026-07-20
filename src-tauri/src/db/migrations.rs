@@ -432,6 +432,37 @@ CREATE TABLE reklamacija_events (
 CREATE INDEX idx_reklamacija_events_parent ON reklamacija_events(reklamacija_id, event_date);
 "#,
     },
+    Migration {
+        version: 12,
+        name: "kep_entries",
+        sql: r#"
+CREATE TABLE kep_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_year INTEGER NOT NULL,
+    redni_broj INTEGER NOT NULL,
+    entry_date TEXT NOT NULL,
+    document_date TEXT,
+    opis TEXT NOT NULL,
+    kolona TEXT NOT NULL CHECK (kolona IN ('zaduzenje', 'razduzenje')),
+    amount_minor INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN (
+        'opening', 'receipt', 'daily_sales',
+        'nivelacija_up', 'nivelacija_down_storno',
+        'supplier_return_storno', 'customer_return_storno',
+        'popis_visak', 'popis_manjak', 'error_storno', 'error_correction',
+        'close_carry'
+    )),
+    entry_source TEXT NOT NULL DEFAULT 'auto' CHECK (entry_source IN ('auto', 'manual')),
+    reference_type TEXT,
+    reference_id INTEGER,
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    UNIQUE (book_year, redni_broj)
+);
+CREATE INDEX idx_kep_entries_book ON kep_entries(book_year, redni_broj);
+CREATE INDEX idx_kep_entries_date ON kep_entries(entry_date);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
