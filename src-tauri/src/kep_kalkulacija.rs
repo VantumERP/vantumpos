@@ -107,6 +107,7 @@ pub fn create_kalkulacija(
     );
 
     let book_year = book_year_of(now)?;
+    crate::kep_close::ensure_year_open(tx, book_year)?;
     let redni_broj: i64 = tx.query_row(
         "SELECT COALESCE(MAX(redni_broj), 0) + 1 FROM kalkulacije WHERE book_year = ?1",
         params![book_year],

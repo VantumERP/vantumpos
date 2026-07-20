@@ -81,6 +81,7 @@ pub fn post_receipt_zaduzenje(
 ) -> Result<(), AppError> {
     let _ = product_id; // not stored on the entry; kept for a self-describing call site
     let book_year = book_year_of(now)?;
+    crate::kep_close::ensure_year_open(tx, book_year)?;
     let redni_broj = next_redni_broj(tx, book_year)?;
     let amount_minor = quantity_milli * sale_price_minor / 1000;
     tx.execute(
@@ -237,6 +238,7 @@ pub fn post_daily_sales(
     };
 
     let book_year = book_year_of(now)?;
+    crate::kep_close::ensure_year_open(conn, book_year)?;
     let opis = format!("Dnevni promet {date}");
     let tx = conn.transaction()?;
     let redni_broj = next_redni_broj(&tx, book_year)?;
@@ -352,6 +354,9 @@ pub fn correct_entry(
     // Corrections are chronological: they book under the CURRENT book year, never
     // the target's, so a mid-January fix of a prior-year row still appends forward.
     let correction_book_year = book_year_of(now)?;
+    // Neither the frozen target year nor a frozen current year may be written.
+    crate::kep_close::ensure_year_open(tx, book_year)?;
+    crate::kep_close::ensure_year_open(tx, correction_book_year)?;
 
     // 1) Reversing crveni storno in the SAME column, negating the target.
     let reversing_redni_broj = next_redni_broj(tx, correction_book_year)?;
@@ -819,6 +824,48 @@ mod tests {
             // A year with no prior closure opens at zero.
             let fresh = list_ledger(conn, 2026).expect("ledger 2026");
             assert_eq!(fresh.opening_saldo_minor, 0);
+        });
+    }
+
+    // After a year is closed, the two posting paths that live in this module
+    // reject a write into that year with `year_closed` before inserting anything
+    // (čl. 18 prevention). The remaining paths gate identically and are covered
+    // by the command-layer test.
+    #[test]
+    fn posting_paths_reject_a_closed_year() {
+        with_kep_db("posting_paths_gated", |conn| {
+            // Close 2026.
+            crate::kep_close::close_year(
+                conn,
+                2026,
+                crate::kep_close::CLOSE_CONFIRMATION,
+                1,
+                "2026-12-31T23:59:00Z",
+            )
+            .expect("close 2026");
+
+            // A receipt zaduženje into 2026 (now inside 2026) is rejected.
+            let tx = conn.transaction().expect("tx");
+            let err = post_receipt_zaduzenje(
+                &tx,
+                1,
+                1000,
+                15600,
+                "Prijem robe",
+                None,
+                "manual",
+                None,
+                1,
+                "2026-12-31T23:59:30Z",
+            )
+            .expect_err("receipt into closed year rejects");
+            assert_eq!(err.code(), "year_closed");
+            drop(tx);
+
+            // A daily-sales post into 2026 is rejected.
+            let err = post_daily_sales(conn, "2026-12-30", Some(50000), 1, "2026-12-31T23:59:30Z")
+                .expect_err("daily sales into closed year rejects");
+            assert_eq!(err.code(), "year_closed");
         });
     }
 

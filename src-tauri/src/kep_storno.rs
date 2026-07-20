@@ -207,6 +207,7 @@ pub fn post_value_storno(
     };
 
     let book_year = book_year_of(now)?;
+    crate::kep_close::ensure_year_open(tx, book_year)?;
     let redni_broj = next_redni_broj(tx, book_year)?;
     let opis = format!("{} br. {} od {}", basis.naziv, basis.broj, basis.datum);
 
@@ -257,6 +258,12 @@ pub fn post_nivelacija(
     acting: i64,
     now: &str,
 ) -> Result<(), AppError> {
+    // Gate first: a nivelacija revalues the catalog price (an UPDATE) before it
+    // posts the KEP Δ, so the gate must precede that write — a closed-year
+    // rejection then leaves the price, price_history, and ledger untouched.
+    let book_year = book_year_of(now)?;
+    crate::kep_close::ensure_year_open(tx, book_year)?;
+
     let before = load_offering_state(tx, product_id)?
         .ok_or_else(|| AppError::not_found("Proizvod nije pronađen."))?;
     let old_sale_price_minor = before.price_minor;
@@ -309,7 +316,6 @@ pub fn post_nivelacija(
         ("nivelacija_down_storno", -magnitude)
     };
 
-    let book_year = book_year_of(now)?;
     let redni_broj = next_redni_broj(tx, book_year)?;
     let opis = format!("{} br. {} od {}", basis.naziv, basis.broj, basis.datum);
 
