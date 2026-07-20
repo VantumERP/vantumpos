@@ -24,7 +24,8 @@
 
 use crate::app_error::AppError;
 use crate::kep::{book_year_of, next_redni_broj};
-use rusqlite::{params, Transaction};
+use crate::price_history::{load_offering_state, record_offered_price_change, OfferingState};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 /// The finer legal cause of a storno — never user-chosen for its column/sign
 /// (that is `posting_for`'s job), but stored so causes sharing a `kind` (otpis
@@ -230,6 +231,107 @@ pub fn post_value_storno(
     Ok(())
 }
 
+/// Nivelacija — the ONLY storno that changes the product price (§4.4). It
+/// revalues the product's on-hand stock and books the KEP Δ in ONE transaction:
+/// it UPDATEs `products.sale_price_minor`, records the offered-price change in
+/// `price_history` (source `update`), and posts the kolona-4 delta. All three
+/// succeed or roll back together — a partial nivelacija would leave the catalog
+/// price and the KEP saldo disagreeing (the row an inspector checks first).
+///
+/// `amount = round_div(on_hand_milli × |new − old|, 1000)`, booked as a normal
+/// zaduženje (`nivelacija_up`) when the price rises or a crveni storno
+/// (`nivelacija_down_storno`, negative `amount_minor`) when it falls. `cause` is
+/// `"nivelacija"`; `opis = "{naziv} br. {broj} od {datum}"`. `new == old` is
+/// rejected. When on-hand is 0 there is no value to revalue: the price still
+/// updates but no KEP row is written.
+pub fn post_nivelacija(
+    tx: &Transaction<'_>,
+    product_id: i64,
+    new_sale_price_minor: i64,
+    basis: &BasisDoc,
+    acting: i64,
+    now: &str,
+) -> Result<(), AppError> {
+    let before = load_offering_state(tx, product_id)?
+        .ok_or_else(|| AppError::not_found("Proizvod nije pronađen."))?;
+    let old_sale_price_minor = before.price_minor;
+
+    if new_sale_price_minor == old_sale_price_minor {
+        return Err(AppError::validation(
+            "Nova cena je jednaka staroj.",
+            serde_json::json!({ "field": "newSalePriceMinor" }),
+        ));
+    }
+
+    let on_hand_milli: i64 = tx
+        .query_row(
+            "SELECT quantity_milli FROM inventory_balances WHERE product_id = ?1",
+            params![product_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+
+    // Revalue: update the catalog price and record the offered-price change,
+    // both inside this transaction (source `update`, čl. 37 st. 3 log).
+    tx.execute(
+        "UPDATE products SET sale_price_minor = ?2, updated_at = ?3 WHERE id = ?1",
+        params![product_id, new_sale_price_minor, now],
+    )?;
+    record_offered_price_change(
+        tx,
+        product_id,
+        Some(before),
+        OfferingState {
+            active: before.active,
+            price_minor: new_sale_price_minor,
+        },
+        "update",
+        Some(acting),
+        now,
+    )?;
+
+    // On-hand 0 → nothing to revalue → no KEP row (the price still updated above).
+    if on_hand_milli == 0 {
+        return Ok(());
+    }
+
+    let delta_per_unit = new_sale_price_minor - old_sale_price_minor;
+    let magnitude = round_div(on_hand_milli * delta_per_unit.abs(), 1000);
+    let (kind, amount_minor) = if new_sale_price_minor > old_sale_price_minor {
+        ("nivelacija_up", magnitude)
+    } else {
+        ("nivelacija_down_storno", -magnitude)
+    };
+
+    let book_year = book_year_of(now)?;
+    let redni_broj = next_redni_broj(tx, book_year)?;
+    let opis = format!("{} br. {} od {}", basis.naziv, basis.broj, basis.datum);
+
+    tx.execute(
+        "INSERT INTO kep_entries (
+            book_year, redni_broj, entry_date, document_date, opis,
+            kolona, amount_minor, kind, entry_source,
+            reference_type, reference_id, user_id, created_at, cause
+        ) VALUES (
+            ?1, ?2, ?3, NULL, ?4,
+            'zaduzenje', ?5, ?6, 'manual',
+            'product', ?7, ?8, ?3, 'nivelacija'
+        )",
+        params![
+            book_year,
+            redni_broj,
+            now,
+            opis,
+            amount_minor,
+            kind,
+            product_id,
+            acting,
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +372,16 @@ mod tests {
             ],
         )
         .expect("product should insert");
+    }
+
+    /// Sets a product's on-hand balance (kom in milli units).
+    fn seed_on_hand(conn: &Connection, product_id: i64, quantity_milli: i64) {
+        conn.execute(
+            "INSERT INTO inventory_balances (product_id, quantity_milli, updated_at)
+             VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
+            params![product_id, quantity_milli],
+        )
+        .expect("inventory balance should insert");
     }
 
     fn basis() -> BasisDoc {
@@ -452,6 +564,114 @@ mod tests {
             posting_for(StornoCause::ManjakOdluka).cause,
             "manjak_odluka"
         );
+    }
+
+    // §4.5: nivelacija naviše 156,00 -> 176,00 on 35 kom -> +700,00 in kolona 4,
+    // and the catalog price is revalued in the same transaction.
+    #[test]
+    fn upward_nivelacija_books_plus_700_in_kolona_4_and_updates_price() {
+        with_kep_db("nivelacija_up", |conn| {
+            seed_product(conn, 1, 15600); // 156,00
+            seed_on_hand(conn, 1, 35_000); // 35 kom
+            let tx = conn.transaction().expect("tx");
+            post_nivelacija(&tx, 1, 17600, &basis(), 1, "2026-07-08T09:00:00Z").expect("post");
+            tx.commit().expect("commit");
+
+            let (kolona, amount, kind, cause, opis) = last_row(conn);
+            assert_eq!(kolona, "zaduzenje");
+            assert_eq!(amount, 70000, "35 kom * (176,00 - 156,00) = +700,00");
+            assert_eq!(kind, "nivelacija_up");
+            assert_eq!(cause, "nivelacija");
+            assert_eq!(opis, "Popisna lista br. 4 od 05.07.2026");
+
+            let price: i64 = conn
+                .query_row(
+                    "SELECT sale_price_minor FROM products WHERE id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("price");
+            assert_eq!(price, 17600, "catalog price revalued in the same tx");
+
+            let history: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM price_history WHERE product_id = 1 AND source = 'update'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("history count");
+            assert_eq!(history, 1, "a price_history 'update' row exists");
+        });
+    }
+
+    // §4.5: nivelacija naniže 156,00 -> 136,00 on 35 kom -> -700,00 crveni storno.
+    #[test]
+    fn downward_nivelacija_books_negative_storno() {
+        with_kep_db("nivelacija_down", |conn| {
+            seed_product(conn, 1, 15600);
+            seed_on_hand(conn, 1, 35_000);
+            let tx = conn.transaction().expect("tx");
+            post_nivelacija(&tx, 1, 13600, &basis(), 1, "2026-07-08T09:00:00Z").expect("post");
+            tx.commit().expect("commit");
+
+            let (kolona, amount, kind, cause, _) = last_row(conn);
+            assert_eq!(kolona, "zaduzenje");
+            assert_eq!(
+                amount, -70000,
+                "35 kom * (136,00 - 156,00) = -700,00 storno"
+            );
+            assert_eq!(kind, "nivelacija_down_storno");
+            assert_eq!(cause, "nivelacija");
+
+            let price: i64 = conn
+                .query_row(
+                    "SELECT sale_price_minor FROM products WHERE id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("price");
+            assert_eq!(price, 13600, "catalog price revalued down");
+        });
+    }
+
+    // new == old has nothing to revalue and is rejected before any write.
+    #[test]
+    fn nivelacija_rejects_unchanged_price() {
+        with_kep_db("nivelacija_noop", |conn| {
+            seed_product(conn, 1, 15600);
+            seed_on_hand(conn, 1, 35_000);
+            let tx = conn.transaction().expect("tx");
+            let err = post_nivelacija(&tx, 1, 15600, &basis(), 1, "2026-07-08T09:00:00Z")
+                .expect_err("unchanged price must be rejected");
+            assert_eq!(err.code(), "validation_error");
+            drop(tx);
+        });
+    }
+
+    // On-hand 0: the price still updates, but there is no value to revalue, so no
+    // KEP row is written.
+    #[test]
+    fn nivelacija_with_zero_on_hand_updates_price_but_posts_no_kep_row() {
+        with_kep_db("nivelacija_zero_stock", |conn| {
+            seed_product(conn, 1, 15600); // no inventory_balances row -> on-hand 0
+            let tx = conn.transaction().expect("tx");
+            post_nivelacija(&tx, 1, 17600, &basis(), 1, "2026-07-08T09:00:00Z").expect("post");
+            tx.commit().expect("commit");
+
+            let price: i64 = conn
+                .query_row(
+                    "SELECT sale_price_minor FROM products WHERE id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("price");
+            assert_eq!(price, 17600, "price still updates with zero on-hand");
+
+            let kep_rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM kep_entries", [], |r| r.get(0))
+                .expect("count");
+            assert_eq!(kep_rows, 0, "no KEP row for a zero-stock revaluation");
+        });
     }
 
     // The two nivelacija (and PDV-rate) causes change the product price and must
