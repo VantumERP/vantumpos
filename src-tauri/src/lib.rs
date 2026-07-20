@@ -6,6 +6,7 @@ mod commands;
 mod db;
 mod importer;
 mod kep;
+mod kep_close;
 mod kep_kalkulacija;
 mod kep_storno;
 mod price_history;
