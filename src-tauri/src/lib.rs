@@ -5,6 +5,7 @@ mod clock;
 mod commands;
 mod db;
 mod importer;
+mod kep;
 mod price_history;
 mod reklamacije;
 mod reklamacije_docs;
