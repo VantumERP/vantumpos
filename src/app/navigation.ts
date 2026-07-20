@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   ArchiveIcon,
   BarChart3Icon,
+  BookIcon,
   FileSpreadsheetIcon,
   MessageSquareWarningIcon,
   PackageIcon,
@@ -44,6 +45,12 @@ export const navigationItems = [
     id: "reklamacije",
     label: "Reklamacije",
     icon: MessageSquareWarningIcon,
+    adminOnly: true,
+  },
+  {
+    id: "kep",
+    label: "KEP",
+    icon: BookIcon,
     adminOnly: true,
   },
   {

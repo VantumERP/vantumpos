@@ -19,6 +19,7 @@ import { CatalogModule } from "@/app/catalog/CatalogModule";
 import { FirstRunTaxSetup } from "@/app/FirstRunTaxSetup";
 import { ImportWizard } from "@/app/import/ImportWizard";
 import { InventoryScreen } from "@/app/inventory/InventoryScreen";
+import { KepModule } from "@/app/kep/KepModule";
 import {
   foundationCards,
   navigationItems,
@@ -464,6 +465,10 @@ function renderModule({
 
   if (activeId === "reklamacije") {
     return <ReklamacijeModule services={services} />;
+  }
+
+  if (activeId === "kep") {
+    return <KepModule services={services} />;
   }
 
   if (activeId === "campaigns") {
