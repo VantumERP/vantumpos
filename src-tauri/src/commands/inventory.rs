@@ -485,10 +485,26 @@ pub fn apply_inventory_adjustment(
     // and the ledger entry atomic: a rollback removes both, so goods can never
     // exist un-booked. Corrections and write-offs post nothing.
     if matches!(movement_type, InventoryMovementType::Receive) {
-        let sale_price_minor: i64 = tx.query_row(
-            "SELECT sale_price_minor FROM products WHERE id = ?1",
+        let (sale_price_minor, nabavna_po_jm_minor): (i64, i64) = tx.query_row(
+            "SELECT sale_price_minor, purchase_price_minor FROM products WHERE id = ?1",
             params![request.product_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        // SW-9b: generate the kalkulacija (the receipt's formal isprava) FIRST,
+        // then link the zaduženje to it (reference_type='kalkulacija'). Its
+        // element 13 == qty × sale_price == the zaduženje amount, so the ledger
+        // value is unchanged — 9b adds the isprava, not a re-post. All inside this
+        // same transaction: a rollback removes the kalkulacija, the movement and
+        // the ledger entry together.
+        let kalkulacija_id = crate::kep_kalkulacija::create_kalkulacija(
+            &tx,
+            request.product_id,
+            request.quantity_milli,
+            nabavna_po_jm_minor,
+            reference_type.as_deref(),
+            request.reference_id,
+            acting_user_id,
+            created_at,
         )?;
         let opis = receipt_opis(
             reference_type.as_deref(),
@@ -502,7 +518,8 @@ pub fn apply_inventory_adjustment(
             sale_price_minor,
             &opis,
             None,
-            request.reference_id,
+            "kalkulacija",
+            Some(kalkulacija_id),
             acting_user_id,
             created_at,
         )?;
@@ -855,6 +872,90 @@ mod tests {
                         Some(1)
                     )
                 );
+            },
+        );
+    }
+
+    // SW-9b: a goods receipt generates exactly one kalkulacija (elements 1-14,
+    // element 13 == qty × sale_price) atomically with the 9a zaduženje, and the
+    // zaduženje links that kalkulacija as its isprava. Memo §3 worked example:
+    // 50 kom @ 156,00 sa PDV -> element 13 = 7.800,00.
+    #[test]
+    fn receive_generates_kalkulacija_and_links_zaduzenje() {
+        with_connection(
+            "receive_generates_kalkulacija_and_links_zaduzenje",
+            |connection| {
+                connection
+                    .execute(
+                        "UPDATE products SET sale_price_minor = 15600 WHERE id = 1",
+                        [],
+                    )
+                    .expect("price should update");
+
+                apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::Receive,
+                    adjustment(50_000, "Prijem robe"),
+                    SEEDED_ADMIN_ID,
+                    "2026-07-04T09:00:00Z",
+                )
+                .expect("receive should succeed");
+
+                let count: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM kalkulacije", [], |row| row.get(0))
+                    .expect("kalkulacija count should query");
+                assert_eq!(count, 1, "exactly one kalkulacija per receipt");
+
+                let (kalkulacija_id, sa_pdv): (i64, i64) = connection
+                    .query_row(
+                        "SELECT id, prodajna_vrednost_sa_pdv_minor FROM kalkulacije",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("kalkulacija row should query");
+                assert_eq!(sa_pdv, 780_000, "element 13 = 50 × 156,00 sa PDV");
+
+                let (reference_type, reference_id): (String, i64) = connection
+                    .query_row(
+                        "SELECT reference_type, reference_id FROM kep_entries WHERE kind = 'receipt'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("zaduzenje row should query");
+                assert_eq!(reference_type, "kalkulacija", "zaduzenje links the isprava");
+                assert_eq!(reference_id, kalkulacija_id);
+            },
+        );
+    }
+
+    // Corrections and write-offs are not receipts — they book no zaduženje (SW-9a)
+    // and generate no kalkulacija (SW-9b).
+    #[test]
+    fn corrections_and_write_offs_generate_no_kalkulacija() {
+        with_connection(
+            "corrections_and_write_offs_generate_no_kalkulacija",
+            |connection| {
+                apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::Correction,
+                    adjustment(1000, "Popis"),
+                    SEEDED_ADMIN_ID,
+                    "2026-07-04T09:00:00Z",
+                )
+                .expect("correction should succeed");
+                apply_inventory_adjustment(
+                    connection,
+                    InventoryMovementType::WriteOff,
+                    adjustment(500, "Otpis"),
+                    SEEDED_ADMIN_ID,
+                    "2026-07-04T09:00:00Z",
+                )
+                .expect("write-off should succeed");
+
+                let count: i64 = connection
+                    .query_row("SELECT COUNT(*) FROM kalkulacije", [], |row| row.get(0))
+                    .expect("kalkulacija count should query");
+                assert_eq!(count, 0, "no kalkulacija for corrections/write-offs");
             },
         );
     }

@@ -62,6 +62,10 @@ pub fn next_redni_broj(conn: &Connection, book_year: i64) -> Result<i64, AppErro
 /// `amount_minor = quantity_milli * sale_price_minor / 1000` — the product's
 /// `sale_price_minor` (retail incl. PDV), **never** the purchase price. Written
 /// inside the caller's transaction so a receipt can never exist un-booked.
+///
+/// `reference_type` names the linking isprava: SW-9b routes it through the
+/// kalkulacija (`"kalkulacija"`, `reference_id = kalkulacija.id`); callers with
+/// no kalkulacija pass the raw movement type.
 #[allow(clippy::too_many_arguments)]
 pub fn post_receipt_zaduzenje(
     tx: &Transaction<'_>,
@@ -70,6 +74,7 @@ pub fn post_receipt_zaduzenje(
     sale_price_minor: i64,
     opis: &str,
     document_date: Option<&str>,
+    reference_type: &str,
     reference_id: Option<i64>,
     acting_user_id: i64,
     now: &str,
@@ -86,7 +91,7 @@ pub fn post_receipt_zaduzenje(
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             'zaduzenje', ?6, 'receipt', 'auto',
-            'inventory_movement', ?7, ?8, ?3
+            ?7, ?8, ?9, ?3
         )",
         params![
             book_year,
@@ -95,6 +100,7 @@ pub fn post_receipt_zaduzenje(
             document_date,
             opis,
             amount_minor,
+            reference_type,
             reference_id,
             acting_user_id,
         ],
@@ -368,6 +374,7 @@ mod tests {
                 15600,
                 "Kalkulacija br. 12",
                 Some("2026-07-03T00:00:00Z"),
+                "kalkulacija",
                 Some(7),
                 1,
                 "2026-07-04T09:00:00Z",
@@ -395,7 +402,8 @@ mod tests {
                 .enumerate()
             {
                 let tx = conn.transaction().expect("tx");
-                post_receipt_zaduzenje(&tx, 1, 1000, 10000, "x", None, None, 1, now).expect("post");
+                post_receipt_zaduzenje(&tx, 1, 1000, 10000, "x", None, "kalkulacija", None, 1, now)
+                    .expect("post");
                 tx.commit().expect("commit");
                 let _ = i;
             }
@@ -408,6 +416,7 @@ mod tests {
                 10000,
                 "x",
                 None,
+                "kalkulacija",
                 None,
                 1,
                 "2027-01-02T09:00:00Z",
