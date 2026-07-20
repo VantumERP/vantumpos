@@ -34,6 +34,11 @@ use rusqlite::{params, OptionalExtension, Transaction};
 pub enum StornoCause {
     NivelacijaUp,
     NivelacijaDown,
+    // Reserved, deliberately not reachable from the command layer in SW-9b. A
+    // „promena stope PDV" (PEP čl. 15 st. 5 tač. 5) revalues *all* stock at a
+    // tax rate at once — a bulk operation, not a per-product nivelacija — so it
+    // gets its own cycle. The column/sign is pre-wired here (kolona 4, like a
+    // nivelacija) so that later work only adds the reachable path.
     PdvRateUp,
     PdvRateDown,
     SupplierReturn,

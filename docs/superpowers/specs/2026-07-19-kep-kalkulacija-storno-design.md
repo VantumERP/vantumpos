@@ -135,6 +135,7 @@ Memo worked examples verbatim:
 - **Cause→column map is not overridable**; nivelacija updates `products.sale_price` + records `price_history`; the kalkulacija links to the zaduženje and the zaduženje value is unchanged from 9a; append-only invariant (no update/delete of a posted `kep_entries` row).
 
 ## Non-goals
+- **PDV-rate revaluation (`promena stope PDV`).** A tax-rate change revalues *all* stock at that rate at once — a bulk operation, not a per-product nivelacija — so it gets its own cycle. The `PdvRateUp/PdvRateDown` causes are pre-wired in the storno map (kolona 4, correct sign) but have no reachable command path in SW-9b, by design.
 - Campaign→KEP auto-nivelacija (deferred; manual nivelacija only).
 - Auto-applying inventory movements from a KEP storno (KEP is a value book; stock is the separate ledger; reconciled at popis in 9c).
 - Year-end freeze, full-book print with page mechanics, retention clock (9c).
