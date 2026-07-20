@@ -27,6 +27,9 @@ import type {
   ImportHeaders,
   ImportJob,
   ImportJobDetail,
+  KepEntryView,
+  KepLedger,
+  KepStatus,
   InventoryAdjustmentRequest,
   InventoryAdjustmentResult,
   LowStockReport,
@@ -216,6 +219,20 @@ export interface ReklamacijeService {
   exportNotice(): Promise<ExportedFile>;
 }
 
+/**
+ * The admin-gated KEP (evidencija prometa) value ledger. The ledger view and
+ * its running saldo are derived per-read by the backend; the three methods map
+ * 1:1 to the `kep_*` command names.
+ */
+export interface KepService {
+  ledger(bookYear: number): Promise<KepLedger>;
+  postDailySales(
+    date: string,
+    overrideAmountMinor: number | null,
+  ): Promise<KepEntryView>;
+  status(): Promise<KepStatus>;
+}
+
 export interface PrintService {
   /** Opens an exported document in the OS default handler for printing. */
   openForPrint(path: string): Promise<void>;
@@ -247,5 +264,6 @@ export interface PosServices {
   reports: ReportsService;
   campaigns: CampaignsService;
   reklamacije: ReklamacijeService;
+  kep: KepService;
   print: PrintService;
 }

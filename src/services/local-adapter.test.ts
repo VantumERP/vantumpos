@@ -748,6 +748,34 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenNthCalledWith(10, "reklamacija_export_notice");
   });
 
+  it("maps kep service methods to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "kep_ledger":
+          return Promise.resolve({ bookYear: 2026, entries: [], saldoMinor: 0 });
+        case "kep_status":
+          return Promise.resolve({
+            overdueSalesDays: [],
+            unbookedReceiptCount: 0,
+          });
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    await services.kep.ledger(2026);
+    await services.kep.postDailySales("2026-07-05", 234000);
+    await services.kep.status();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "kep_ledger", { bookYear: 2026 });
+    expect(invoke).toHaveBeenNthCalledWith(2, "kep_post_daily_sales", {
+      date: "2026-07-05",
+      overrideAmountMinor: 234000,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "kep_status");
+  });
+
   it("opens an exported document for printing through the opener plugin", async () => {
     const { openPath } = await import("@tauri-apps/plugin-opener");
     const services = createLocalServices(vi.fn());
@@ -1030,6 +1058,29 @@ describe("mock service adapter", () => {
     expect(resolved.status).toBe("resolved");
     expect(resolved.deadlines.clock).toBe("resolved");
     expect(resolved.deadlines.resolutionDue).toBeNull();
+  });
+
+  it("keeps a seeded KEP ledger and appends daily postings at mock fidelity", async () => {
+    const services = createMockServices();
+
+    const ledger = await services.kep.ledger(2026);
+    expect(ledger.bookYear).toBe(2026);
+    expect(ledger.entries.length).toBeGreaterThan(0);
+    expect(ledger.saldoMinor).toBe(ledger.entries[0].zaduzenjeMinor);
+
+    const posted = await services.kep.postDailySales("2026-07-05", 234000);
+    expect(posted.razduzenjeMinor).toBe(234000);
+    expect(posted.zaduzenjeMinor).toBeNull();
+    expect(posted.kind).toBe("daily_sales");
+
+    const after = await services.kep.ledger(2026);
+    expect(after.entries.length).toBe(ledger.entries.length + 1);
+    expect(after.saldoMinor).toBe(ledger.saldoMinor - 234000);
+
+    await expect(services.kep.status()).resolves.toEqual({
+      overdueSalesDays: [],
+      unbookedReceiptCount: 0,
+    });
   });
 
   it("exports the potvrda and notice at mock fidelity", async () => {

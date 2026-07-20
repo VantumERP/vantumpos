@@ -999,3 +999,23 @@ export type ImportJob = ImportJobSummary;
 export interface ImportJobDetail extends ImportJobSummary {
   rows: ImportRowPreview[];
 }
+
+export interface KepEntryView {
+  redniBroj: number;
+  datum: string;
+  opis: string;
+  zaduzenjeMinor: number | null;
+  razduzenjeMinor: number | null;
+  kind: string;
+}
+
+export interface KepLedger {
+  bookYear: number;
+  entries: KepEntryView[];
+  saldoMinor: number;
+}
+
+export interface KepStatus {
+  overdueSalesDays: string[];
+  unbookedReceiptCount: number;
+}

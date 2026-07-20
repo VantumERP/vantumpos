@@ -24,6 +24,9 @@ import type {
   ImportJobDetail,
   ImportValidationResult,
   InventoryAdjustmentResult,
+  KepEntryView,
+  KepLedger,
+  KepStatus,
   LowStockReport,
   PaymentMethodReport,
   PrethodnaCenaDto,
@@ -243,6 +246,15 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<ExportedFile>("reklamacija_export_potvrda", { id }),
       exportNotice: () =>
         invoke<ExportedFile>("reklamacija_export_notice"),
+    },
+    kep: {
+      ledger: (bookYear) => invoke<KepLedger>("kep_ledger", { bookYear }),
+      postDailySales: (date, overrideAmountMinor) =>
+        invoke<KepEntryView>("kep_post_daily_sales", {
+          date,
+          overrideAmountMinor,
+        }),
+      status: () => invoke<KepStatus>("kep_status"),
     },
     print: {
       openForPrint: (path) => openPath(path),

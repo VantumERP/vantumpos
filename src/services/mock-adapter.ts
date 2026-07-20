@@ -11,6 +11,7 @@ import type {
   CreateBackupRequest,
   ImportJob,
   InventoryAdjustmentRequest,
+  KepEntryView,
   PrethodnaCenaDto,
   ProductLedgerMovement,
   ProductListQuery,
@@ -88,6 +89,17 @@ export function createMockServices(): PosServices {
   const ledgerMovements = new Map<number, ProductLedgerMovement[]>();
   const campaigns: CampaignView[] = [];
   const reklamacije: ReklamacijaView[] = [];
+  // A single seeded receipt zaduženje (50 kom x 156,00 retail incl PDV).
+  const kepEntries: KepEntryView[] = [
+    {
+      redniBroj: 1,
+      datum: "04.07",
+      opis: "Prijem robe",
+      zaduzenjeMinor: 780000,
+      razduzenjeMinor: null,
+      kind: "receipt",
+    },
+  ];
   const receipt = createReceiptDetail();
   let users: UserAccount[] = [
     {
@@ -1214,6 +1226,34 @@ export function createMockServices(): PosServices {
           mimeType: "text/html" as const,
           rowCount: 0,
         };
+      },
+    },
+    // Mock fidelity only: the real ledger is derived per-read in `crate::kep`
+    // from the append-only `kep_entries`. This stub keeps an in-memory list,
+    // recomputes the saldo on read, and appends a razduženje per posted day.
+    kep: {
+      async ledger(bookYear) {
+        const saldoMinor = kepEntries.reduce(
+          (sum, entry) =>
+            sum + (entry.zaduzenjeMinor ?? 0) - (entry.razduzenjeMinor ?? 0),
+          0,
+        );
+        return { bookYear, entries: [...kepEntries], saldoMinor };
+      },
+      async postDailySales(date, overrideAmountMinor) {
+        const entry: KepEntryView = {
+          redniBroj: kepEntries.length + 1,
+          datum: `${date.slice(8, 10)}.${date.slice(5, 7)}`,
+          opis: `Dnevni promet ${date}`,
+          zaduzenjeMinor: null,
+          razduzenjeMinor: overrideAmountMinor ?? 234000,
+          kind: "daily_sales",
+        };
+        kepEntries.push(entry);
+        return entry;
+      },
+      async status() {
+        return { overdueSalesDays: [], unbookedReceiptCount: 0 };
       },
     },
     print: {
