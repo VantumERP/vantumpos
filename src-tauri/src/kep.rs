@@ -173,6 +173,121 @@ pub fn list_ledger(conn: &Connection, book_year: i64) -> Result<KepLedger, AppEr
     })
 }
 
+/// Books a trading day's razduženje (kolona 5) from the day's sales total.
+///
+/// The amount is `override_amount_minor` when given (recorded as a `manual`
+/// posting — the certified ESIR figure legally governs), otherwise the sum of
+/// completed `sale` documents on `date`. Idempotent on the **sales day**
+/// (`document_date`), not the booking time (`entry_date`): a second post for
+/// the same day is rejected while later days still book. `entry_date = now`.
+pub fn post_daily_sales(
+    conn: &mut Connection,
+    date: &str,
+    override_amount_minor: Option<i64>,
+    acting_user_id: i64,
+    now: &str,
+) -> Result<KepEntryView, AppError> {
+    let already_posted: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM kep_entries WHERE kind = 'daily_sales' AND document_date = ?1
+         )",
+        params![date],
+        |row| row.get(0),
+    )?;
+    if already_posted {
+        return Err(AppError::business(
+            "already_posted",
+            "Dnevni promet za taj dan je već proknjižen.",
+        ));
+    }
+
+    let (amount_minor, entry_source) = match override_amount_minor {
+        Some(amount) => (amount, "manual"),
+        None => {
+            let total: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(total_minor), 0) FROM sales
+                 WHERE document_type = 'sale' AND status = 'completed'
+                   AND date(created_at) = date(?1)",
+                params![date],
+                |row| row.get(0),
+            )?;
+            (total, "auto")
+        }
+    };
+
+    let book_year = book_year_of(now)?;
+    let opis = format!("Dnevni promet {date}");
+    let tx = conn.transaction()?;
+    let redni_broj = next_redni_broj(&tx, book_year)?;
+    tx.execute(
+        "INSERT INTO kep_entries (
+            book_year, redni_broj, entry_date, document_date, opis,
+            kolona, amount_minor, kind, entry_source,
+            reference_type, reference_id, user_id, created_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5,
+            'razduzenje', ?6, 'daily_sales', ?7,
+            'sales_day', NULL, ?8, ?3
+        )",
+        params![
+            book_year,
+            redni_broj,
+            now,
+            date,
+            opis,
+            amount_minor,
+            entry_source,
+            acting_user_id,
+        ],
+    )?;
+    tx.commit()?;
+
+    Ok(KepEntryView {
+        redni_broj,
+        datum: dan_mesec(now)?,
+        opis,
+        zaduzenje_minor: None,
+        razduzenje_minor: Some(amount_minor),
+        kind: "daily_sales".to_string(),
+    })
+}
+
+/// The ledger's posting-health status surfaced in the UI.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KepStatus {
+    /// Completed sales days with no `daily_sales` entry whose T+1 deadline has
+    /// elapsed (`today > day + 1`), oldest first.
+    pub overdue_sales_days: Vec<String>,
+    /// Received lots whose receipt zaduženje is missing — defensive; the atomic
+    /// hook (Task 3) guarantees zero.
+    pub unbooked_receipt_count: i64,
+}
+
+/// The T+1 overdue-posting warning (memo §2.5): completed sales days with no
+/// `daily_sales` entry whose deadline has passed (`date(created_at) <
+/// date(today, '-1 day')`, i.e. `today > day + 1`). `unbooked_receipt_count` is
+/// a defensive zero — the receipt hook shares the inventory transaction.
+pub fn kep_status(conn: &Connection, today: &str) -> Result<KepStatus, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT date(created_at) FROM sales
+         WHERE document_type = 'sale' AND status = 'completed'
+           AND date(created_at) < date(?1, '-1 day')
+           AND date(created_at) NOT IN (
+               SELECT date(document_date) FROM kep_entries WHERE kind = 'daily_sales'
+           )
+         ORDER BY date(created_at)",
+    )?;
+    let overdue_sales_days: Vec<String> = stmt
+        .query_map(params![today], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    Ok(KepStatus {
+        overdue_sales_days,
+        unbooked_receipt_count: 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +303,30 @@ mod tests {
             test(&mut connection);
         }
         std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    /// Seeds the open shift that completed sales reference (FK backstop).
+    fn seed_shift(conn: &Connection) {
+        conn.execute(
+            "INSERT OR IGNORE INTO shifts (
+                id, user_id, opened_at, opening_cash_minor, expected_cash_minor,
+                status, created_at, updated_at
+             ) VALUES (1, 1, '2026-07-01T08:00:00Z', 0, 0, 'open', '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z')",
+            [],
+        )
+        .expect("shift should insert");
+    }
+
+    /// Seeds one completed `sale` document on `created_at` for `total_minor`.
+    fn seed_completed_sale(conn: &Connection, id: i64, created_at: &str, total_minor: i64) {
+        conn.execute(
+            "INSERT INTO sales (
+                id, local_receipt_number, shift_id, cashier_id, status, fiscal_status,
+                subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at
+             ) VALUES (?1, ?2, 1, 1, 'completed', 'not_fiscalized', ?3, 0, 0, ?3, ?4, ?4)",
+            params![id, format!("VP-{id:06}"), total_minor, created_at],
+        )
+        .expect("sale should insert");
     }
 
     /// Seeds a tax rate and a product with the given retail/purchase prices.
@@ -295,6 +434,105 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(rb2027, 1, "2027 restarts");
+        });
+    }
+
+    // A trading day's razduženje (kolona 5) posts the day's sales total. The
+    // day is keyed on `document_date` (the sales day), so a second post for the
+    // same day is rejected while later days still book.
+    #[test]
+    fn daily_sales_posts_razduzenje_from_sales_total() {
+        with_kep_db("kep_daily_sales", |conn| {
+            seed_shift(conn);
+            seed_completed_sale(conn, 1, "2026-07-05T10:00:00Z", 150000);
+            seed_completed_sale(conn, 2, "2026-07-05T14:00:00Z", 84000);
+
+            let entry = post_daily_sales(conn, "2026-07-05", None, 1, "2026-07-06T09:00:00Z")
+                .expect("post");
+            assert_eq!(entry.razduzenje_minor, Some(234000), "150000 + 84000");
+            assert_eq!(entry.zaduzenje_minor, None);
+            assert_eq!(entry.kind, "daily_sales");
+
+            let source: String = conn
+                .query_row(
+                    "SELECT entry_source FROM kep_entries WHERE kind='daily_sales'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(source, "auto", "computed total is an auto posting");
+
+            // A second post for the same sales day is rejected (idempotent on
+            // the sales day, not the booking time).
+            let err = post_daily_sales(conn, "2026-07-05", None, 1, "2026-07-06T09:05:00Z")
+                .expect_err("second post must reject");
+            assert_eq!(err.code(), "already_posted");
+
+            // The next day still books (distinct document_date).
+            post_daily_sales(conn, "2026-07-06", None, 1, "2026-07-07T09:00:00Z")
+                .expect("next day still books");
+        });
+    }
+
+    #[test]
+    fn daily_sales_override_uses_amount_and_marks_manual() {
+        with_kep_db("kep_daily_override", |conn| {
+            seed_shift(conn);
+            seed_completed_sale(conn, 1, "2026-07-05T10:00:00Z", 150000);
+
+            // The certified ESIR figure governs; the override records it was set
+            // manually and uses the given amount, not the 150000 sales sum.
+            let entry =
+                post_daily_sales(conn, "2026-07-05", Some(250000), 1, "2026-07-06T09:00:00Z")
+                    .expect("post");
+            assert_eq!(entry.razduzenje_minor, Some(250000));
+
+            let source: String = conn
+                .query_row(
+                    "SELECT entry_source FROM kep_entries WHERE kind='daily_sales'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(source, "manual");
+        });
+    }
+
+    // T+1 overdue-posting warning (memo §2.5): a completed sales day with no
+    // daily_sales entry surfaces once `today > day + 1`, and drops once posted.
+    #[test]
+    fn status_flags_overdue_day_and_clears_after_posting() {
+        with_kep_db("kep_status_overdue", |conn| {
+            seed_shift(conn);
+            seed_completed_sale(conn, 1, "2026-07-05T10:00:00Z", 234000);
+
+            let status = kep_status(conn, "2026-07-08T09:00:00Z").expect("status");
+            assert_eq!(status.overdue_sales_days, vec!["2026-07-05".to_string()]);
+            assert_eq!(status.unbooked_receipt_count, 0);
+
+            post_daily_sales(conn, "2026-07-05", None, 1, "2026-07-08T09:00:00Z").expect("post");
+
+            let status = kep_status(conn, "2026-07-08T09:00:00Z").expect("status");
+            assert!(
+                status.overdue_sales_days.is_empty(),
+                "posted day is no longer overdue"
+            );
+        });
+    }
+
+    // The T+1 boundary is exclusive: today == day + 1 is not yet overdue.
+    #[test]
+    fn status_does_not_flag_a_day_before_t_plus_one_elapses() {
+        with_kep_db("kep_status_boundary", |conn| {
+            seed_shift(conn);
+            seed_completed_sale(conn, 1, "2026-07-05T10:00:00Z", 234000);
+
+            // The day after (T+1) is the deadline, not yet overdue.
+            let status = kep_status(conn, "2026-07-06T09:00:00Z").expect("status");
+            assert!(
+                status.overdue_sales_days.is_empty(),
+                "day + 1 is the deadline, not overdue yet"
+            );
         });
     }
 }
