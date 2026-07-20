@@ -430,6 +430,10 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     tx.execute("DELETE FROM inventory_movements", [])?;
     // shifts must go AFTER sales (sales.shift_id -> shifts).
     tx.execute("DELETE FROM shifts", [])?;
+    // The KEP (evidencija prometa) ledger is append-only (PEP čl. 14); the
+    // go-live reset is its one sanctioned wipe — practice postings were never a
+    // real promet and must not carry into the live book.
+    tx.execute("DELETE FROM kep_entries", [])?;
     tx.execute(
         "UPDATE inventory_balances SET quantity_milli = 0, updated_at = datetime('now')",
         [],
@@ -923,6 +927,51 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
             assert!(
                 effective_from.contains('T') && effective_from.ends_with('Z'),
                 "re-seed must be RFC3339, got {effective_from}"
+            );
+        });
+    }
+
+    #[test]
+    fn reset_trading_data_clears_kep_entries() {
+        with_state("reset_clears_kep_entries", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-kep");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            seed_trading_data(state);
+
+            // A practice-era ledger entry: a receipt zaduženje the shop booked
+            // while training. It must not survive go-live (čl. 14 append-only
+            // is suspended only for this sanctioned reset wipe).
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute(
+                    "INSERT INTO kep_entries (
+                        book_year, redni_broj, entry_date, opis,
+                        kolona, amount_minor, kind, entry_source, user_id, created_at
+                     ) VALUES (
+                        2026, 1, '2026-06-18T10:00:00Z', 'Prijem robe',
+                        'zaduzenje', 780000, 'receipt', 'auto', 1, '2026-06-18T10:00:00Z'
+                     )",
+                    [],
+                )
+                .expect("practice kep entry should seed");
+            assert_eq!(count(state, "kep_entries"), 1, "seeded a practice entry");
+
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            assert_eq!(
+                count(state, "kep_entries"),
+                0,
+                "practice KEP entries must not survive go-live"
             );
         });
     }
