@@ -463,6 +463,39 @@ CREATE INDEX idx_kep_entries_book ON kep_entries(book_year, redni_broj);
 CREATE INDEX idx_kep_entries_date ON kep_entries(entry_date);
 "#,
     },
+    Migration {
+        version: 13,
+        name: "kep_kalkulacije",
+        sql: r#"
+CREATE TABLE kalkulacije (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    redni_broj INTEGER NOT NULL,
+    book_year INTEGER NOT NULL,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    poslovno_ime TEXT NOT NULL,
+    prodajno_mesto TEXT NOT NULL,
+    pib TEXT NOT NULL,
+    trgovacki_naziv TEXT NOT NULL,
+    jedinica_mere TEXT NOT NULL,
+    kolicina_milli INTEGER NOT NULL,
+    nabavna_cena_po_jm_minor INTEGER NOT NULL,
+    vrednost_po_fakturi_minor INTEGER NOT NULL,
+    razlika_u_ceni_minor INTEGER NOT NULL,
+    prodajna_vrednost_bez_pdv_minor INTEGER NOT NULL,
+    pdv_minor INTEGER NOT NULL,
+    prodajna_vrednost_sa_pdv_minor INTEGER NOT NULL,
+    prodajna_cena_po_jm_minor INTEGER NOT NULL,
+    reference_type TEXT,
+    reference_id INTEGER,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    UNIQUE (book_year, redni_broj)
+);
+CREATE INDEX idx_kalkulacije_product ON kalkulacije(product_id, created_at);
+
+ALTER TABLE kep_entries ADD COLUMN cause TEXT;
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
