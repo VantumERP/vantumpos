@@ -392,6 +392,82 @@ describe("KepModule kalkulacije", () => {
   });
 });
 
+describe("KepModule year-end close", () => {
+  it("shows the opening carry-in row (Početno stanje) when the year carries a balance", async () => {
+    // 2026 closed at 15.460,00 → 2027 opens with that carry-in.
+    const carried: KepLedger = { ...ledger, openingSaldoMinor: 1546000 };
+
+    render(<KepModule services={servicesWith(carried)} />);
+
+    expect(await screen.findByText(/Početno stanje/i)).toBeInTheDocument();
+    // The carry-in shows as the leading donos balance.
+    expect(screen.getByText("15.460,00 RSD")).toBeInTheDocument();
+  });
+
+  it("closes the year through the typed confirmation dialog", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(ledger);
+
+    render(
+      <>
+        <KepModule services={services} />
+        <Toaster />
+      </>,
+    );
+
+    await screen.findByText("Prijem robe");
+
+    await user.click(screen.getByRole("button", { name: /Zaključi godinu/i }));
+
+    const input = await screen.findByLabelText(/Potvrda/i);
+    const confirm = screen.getByRole("button", {
+      name: /Potvrdi zaključenje/i,
+    });
+
+    // The confirm button stays disabled until the exact phrase is typed.
+    expect(confirm).toBeDisabled();
+    await user.type(input, "ZAKLJUČI KNJIGU");
+    expect(confirm).toBeEnabled();
+
+    await user.click(confirm);
+
+    // After closing, the closed-year badge appears and postings are hidden.
+    expect(await screen.findByText("Zaključena")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Proknjiži dnevni promet" }),
+    ).toBeNull();
+  });
+
+  it("disables posting actions for a closed year", async () => {
+    const services = servicesWith(ledger);
+    vi.spyOn(services.kep, "closePreview").mockResolvedValue({
+      krajnjiSaldoMinor: 546000,
+      entryCount: 2,
+      alreadyClosed: true,
+    });
+    vi.spyOn(services.kep, "listClosures").mockResolvedValue([
+      {
+        bookYear: 2026,
+        krajnjiSaldoMinor: 546000,
+        entryCount: 2,
+        closedAt: "2027-01-05T09:00:00Z",
+        purgeEligible: false,
+      },
+    ]);
+
+    render(<KepModule services={services} />);
+
+    // The badge confirms the closed state has loaded before we assert absence.
+    expect(await screen.findByText("Zaključena")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Proknjiži dnevni promet" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Zaključi godinu" }),
+    ).toBeNull();
+  });
+});
+
 describe("KepModule status", () => {
   it("surfaces overdue sales days in the warning", async () => {
     const services = servicesWith(ledger, {

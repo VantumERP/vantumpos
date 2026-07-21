@@ -1,4 +1,4 @@
-import { AlertCircleIcon, BookIcon, PrinterIcon } from "lucide-react";
+import { AlertCircleIcon, BookIcon, LockIcon, PrinterIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { toast } from "sonner";
@@ -54,6 +54,8 @@ import type {
   BasisDoc,
   ExportedFile,
   KalkulacijaSummary,
+  KepClosePreview,
+  KepClosureView,
   KepEntryView,
   KepLedger,
   KepStatus,
@@ -72,6 +74,11 @@ interface KepModuleProps {
 // a year with none.
 const BOOK_YEAR_RANGE = 5;
 
+// The exact phrase the operator must type to close a year (mirrors
+// `crate::kep_close::CLOSE_CONFIRMATION`). The backend re-validates it; this
+// guard is only to prevent an accidental irreversible close.
+const CLOSE_CONFIRMATION_PHRASE = "ZAKLJUČI KNJIGU";
+
 export function KepModule({ services }: KepModuleProps) {
   const kep = services.kep;
   const [bookYear, setBookYear] = useState(() => new Date().getFullYear());
@@ -87,6 +94,12 @@ export function KepModule({ services }: KepModuleProps) {
   const [correctionTarget, setCorrectionTarget] = useState<KepEntryView | null>(
     null,
   );
+  // The year-end close preview (krajnji saldo + whether the year is already
+  // closed) and the recorded closures list. `alreadyClosed` gates every
+  // posting/adjustment control (čl. 18) and shows the closed-year badge.
+  const [closePreview, setClosePreview] = useState<KepClosePreview | null>(null);
+  const [closures, setClosures] = useState<KepClosureView[]>([]);
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   // Bumped after a successful posting to re-derive the ledger, the
   // overdue/unbooked status, and the kalkulacije list from the append-only
   // source of truth.
@@ -164,6 +177,52 @@ export function KepModule({ services }: KepModuleProps) {
     };
   }, [kep, bookYear, reloadToken]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    kep
+      .closePreview(bookYear)
+      .then((result) => {
+        if (!cancelled) {
+          setClosePreview(result);
+        }
+      })
+      .catch(() => {
+        // A failed preview must not block the ledger; it degrades to „open"
+        // (no badge, controls enabled) — the backend gate is authoritative.
+        if (!cancelled) {
+          setClosePreview(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [kep, bookYear, reloadToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    kep
+      .listClosures()
+      .then((result) => {
+        if (!cancelled) {
+          setClosures(result);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setClosures([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [kep, reloadToken]);
+
+  const alreadyClosed = closePreview?.alreadyClosed ?? false;
+
   // SW-8 export-then-open: export the document, then hand its path to the OS
   // print handler. A failed open still leaves the saved file surfaced.
   async function runPrint(
@@ -195,7 +254,15 @@ export function KepModule({ services }: KepModuleProps) {
     <section className="flex flex-col gap-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Knjiga evidencije prometa</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold">Knjiga evidencije prometa</h2>
+            {alreadyClosed ? (
+              <Badge variant="secondary">
+                <LockIcon data-icon="inline-start" aria-hidden="true" />
+                Zaključena
+              </Badge>
+            ) : null}
+          </div>
           <p className="text-xs text-muted-foreground">
             Zaduženje se automatski knjiži iz prijema robe po maloprodajnoj
             vrednosti sa PDV-om; razduženje po danu prometa. Evidencija je
@@ -220,16 +287,22 @@ export function KepModule({ services }: KepModuleProps) {
 
       <KepStatusWarnings status={status} />
 
-      <DailyPostingForm
-        kep={kep}
-        onPosted={() => setReloadToken((token) => token + 1)}
-      />
+      {/* A closed year is frozen (čl. 18) — every posting/adjustment control is
+          hidden, mirroring the backend `ensure_year_open` gate. */}
+      {alreadyClosed ? null : (
+        <>
+          <DailyPostingForm
+            kep={kep}
+            onPosted={() => setReloadToken((token) => token + 1)}
+          />
 
-      <AdjustmentForm
-        kep={kep}
-        catalog={services.catalog}
-        onPosted={() => setReloadToken((token) => token + 1)}
-      />
+          <AdjustmentForm
+            kep={kep}
+            catalog={services.catalog}
+            onPosted={() => setReloadToken((token) => token + 1)}
+          />
+        </>
+      )}
 
       {ledgerError ? (
         <Alert variant="destructive">
@@ -244,7 +317,9 @@ export function KepModule({ services }: KepModuleProps) {
           <Spinner data-icon="inline-start" aria-hidden="true" />
           Učitavanje evidencije
         </Badge>
-      ) : ledger && ledger.entries.length === 0 ? (
+      ) : ledger &&
+        ledger.entries.length === 0 &&
+        ledger.openingSaldoMinor === 0 ? (
         <Empty>
           <EmptyHeader>
             <EmptyMedia variant="icon">
@@ -271,6 +346,31 @@ export function KepModule({ services }: KepModuleProps) {
                 </TableRow>
               </TableHeader>
               <TableBody>
+                {/* The opening carry-in (§2): the prior year's krajnji saldo,
+                    shown as the leading donos. Positive balances sit on the
+                    zaduženje side (they add to the running saldo). */}
+                {ledger.openingSaldoMinor !== 0 ? (
+                  <TableRow className="font-medium">
+                    <TableCell />
+                    <TableCell />
+                    <TableCell>Početno stanje (donos)</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {ledger.openingSaldoMinor > 0 ? (
+                        formatRsd(ledger.openingSaldoMinor)
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {ledger.openingSaldoMinor < 0 ? (
+                        formatRsd(-ledger.openingSaldoMinor)
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell />
+                  </TableRow>
+                ) : null}
                 {ledger.entries.map((entry) => (
                   <TableRow key={entry.redniBroj}>
                     <TableCell>{entry.redniBroj}</TableCell>
@@ -283,15 +383,17 @@ export function KepModule({ services }: KepModuleProps) {
                       <AmountCell minor={entry.razduzenjeMinor} />
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        aria-label={`Ispravi stavku RB ${entry.redniBroj}`}
-                        onClick={() => setCorrectionTarget(entry)}
-                      >
-                        Ispravi stavku
-                      </Button>
+                      {alreadyClosed ? null : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          aria-label={`Ispravi stavku RB ${entry.redniBroj}`}
+                          onClick={() => setCorrectionTarget(entry)}
+                        >
+                          Ispravi stavku
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -307,6 +409,47 @@ export function KepModule({ services }: KepModuleProps) {
         </>
       ) : null}
 
+      <div className="flex flex-col gap-3 rounded-md border border-border p-3">
+        <div className="flex flex-col gap-1">
+          <h3 className="text-sm font-medium">Zaključivanje godine</h3>
+          <p className="text-xs text-muted-foreground">
+            Zaključenjem se knjiga za poslovnu godinu nepovratno zaključava (čl.
+            18). Krajnji saldo se prenosi kao početno stanje naredne godine.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {alreadyClosed ? null : (
+            <Button type="button" onClick={() => setCloseDialogOpen(true)}>
+              <LockIcon data-icon="inline-start" aria-hidden="true" />
+              Zaključi godinu
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() =>
+              runPrint(
+                () => kep.exportClose(bookYear),
+                "Zaključenje nije izvezeno.",
+              )
+            }
+          >
+            <PrinterIcon data-icon="inline-start" aria-hidden="true" />
+            Štampaj zaključenje
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() =>
+              runPrint(() => kep.exportBook(bookYear), "Knjiga nije izvezena.")
+            }
+          >
+            <PrinterIcon data-icon="inline-start" aria-hidden="true" />
+            Štampaj celu knjigu
+          </Button>
+        </div>
+      </div>
+
       <Separator />
 
       <KalkulacijeSection
@@ -316,12 +459,25 @@ export function KepModule({ services }: KepModuleProps) {
         }
       />
 
+      <Separator />
+
+      <ClosuresSection closures={closures} />
+
       <CorrectionDialog
         kep={kep}
         bookYear={bookYear}
         target={correctionTarget}
         onClose={() => setCorrectionTarget(null)}
         onCorrected={() => setReloadToken((token) => token + 1)}
+      />
+
+      <CloseYearDialog
+        kep={kep}
+        bookYear={bookYear}
+        preview={closePreview}
+        open={closeDialogOpen}
+        onClose={() => setCloseDialogOpen(false)}
+        onClosed={() => setReloadToken((token) => token + 1)}
       />
     </section>
   );
@@ -1005,6 +1161,168 @@ function CorrectionDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function CloseYearDialog({
+  kep,
+  bookYear,
+  preview,
+  open,
+  onClose,
+  onClosed,
+}: {
+  kep: KepService;
+  bookYear: number;
+  preview: KepClosePreview | null;
+  open: boolean;
+  onClose: () => void;
+  onClosed: () => void;
+}) {
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState<string | undefined>();
+  const [submitting, setSubmitting] = useState(false);
+
+  // Clear the typed phrase and any error each time the dialog opens or closes,
+  // so a reopened dialog never starts pre-confirmed.
+  useEffect(() => {
+    setConfirmation("");
+    setError(undefined);
+  }, [open]);
+
+  async function handleConfirm() {
+    setError(undefined);
+    setSubmitting(true);
+    try {
+      await kep.closeYear(bookYear, confirmation);
+      onClosed();
+      onClose();
+      toast.success("Knjiga je zaključena.");
+    } catch (closeError) {
+      setError(errorMessage(closeError, "Zaključenje nije uspelo."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Zaključivanje knjige za {bookYear}</DialogTitle>
+          <DialogDescription>
+            Zaključenje je nepovratno. Krajnji saldo se prenosi kao početno
+            stanje naredne poslovne godine.
+          </DialogDescription>
+        </DialogHeader>
+        <FieldGroup>
+          {error ? <FieldError>{error}</FieldError> : null}
+          <div className="flex flex-col gap-1 rounded-md border p-3 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-muted-foreground">Krajnji saldo</span>
+              <span className="font-semibold tabular-nums">
+                {preview ? formatRsd(preview.krajnjiSaldoMinor) : "—"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-muted-foreground">Broj stavki</span>
+              <span className="tabular-nums">{preview?.entryCount ?? 0}</span>
+            </div>
+          </div>
+          <Field>
+            <FieldLabel htmlFor="kep-close-confirmation">Potvrda</FieldLabel>
+            <Input
+              id="kep-close-confirmation"
+              value={confirmation}
+              onChange={(event) => setConfirmation(event.target.value)}
+              autoComplete="off"
+            />
+            <FieldDescription>
+              Za potvrdu ukucajte tačno: ZAKLJUČI KNJIGU.
+            </FieldDescription>
+          </Field>
+        </FieldGroup>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            Odustani
+          </Button>
+          <Button
+            type="button"
+            onClick={handleConfirm}
+            disabled={submitting || confirmation !== CLOSE_CONFIRMATION_PHRASE}
+          >
+            {submitting ? (
+              <Spinner data-icon="inline-start" aria-hidden="true" />
+            ) : null}
+            Potvrdi zaključenje
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ClosuresSection({ closures }: { closures: KepClosureView[] }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1">
+        <h3 className="text-sm font-medium">Zaključene godine</h3>
+        <p className="text-xs text-muted-foreground">
+          Zaključena knjiga se čuva najmanje 5 godina. Ništa se ne briše
+          automatski — arhiviranje je odluka trgovca.
+        </p>
+      </div>
+      {closures.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Nema zaključenih godina.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Poslovna godina</TableHead>
+                <TableHead className="text-right">Krajnji saldo</TableHead>
+                <TableHead>Datum zaključenja</TableHead>
+                <TableHead>Čuvanje</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {closures.map((closure) => (
+                <TableRow key={closure.bookYear}>
+                  <TableCell>{closure.bookYear}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatRsd(closure.krajnjiSaldoMinor)}
+                  </TableCell>
+                  <TableCell>{formatDay(closure.closedAt)}</TableCell>
+                  <TableCell>
+                    {closure.purgeEligible ? (
+                      <Badge variant="outline">Može se arhivirati</Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">
+                        Čuva se do {closure.bookYear + 5}.
+                      </span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
   );
 }
 
