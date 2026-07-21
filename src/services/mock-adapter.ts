@@ -1316,6 +1316,7 @@ export function createMockServices(): PosServices {
           entryCount: kepEntries.length,
           closedAt: closure.closedAt,
           purgeEligible: false,
+          retentionUntil: `${bookYear + 5}-12-31`,
         });
         return closure;
       },

@@ -207,8 +207,13 @@ pub fn render_book_html(
     let mut html = doc_head("Knjiga evidencije prometa");
     html.push_str(&company_header(company, ledger.book_year));
 
-    let chunks: Vec<&[KepEntryView]> = ledger.entries.chunks(per_page).collect();
-    let page_total = chunks.len().max(1);
+    let mut chunks: Vec<&[KepEntryView]> = ledger.entries.chunks(per_page).collect();
+    // A quiet year (no entries) still prints one page so its DONOS (opening
+    // carry-in) and KRAJNJI SALDO appear — the statutory book is never blank.
+    if chunks.is_empty() {
+        chunks.push(&[]);
+    }
+    let page_total = chunks.len();
     // Running saldo carried across pages, seeded from the opening carry-in.
     let mut running = ledger.opening_saldo_minor;
 
@@ -336,29 +341,38 @@ pub struct KepClosureView {
     pub entry_count: i64,
     pub closed_at: String,
     pub purge_eligible: bool,
+    /// The `YYYY-MM-DD` date the retention obligation ends (the floor below).
+    pub retention_until: String,
 }
 
-/// Retention floor (§5.6): a closed book may be discarded only 5 full years
-/// after the LATER of its close date and the end of its book year. Dates are
-/// RFC3339; comparison is lexicographic on the `YYYY-MM-DD` prefix, which is
-/// correct for ISO dates. `today` on/after the floor ⇒ eligible.
-pub fn purge_eligible(book_year: i64, closed_at: &str, today: &str) -> bool {
+/// The retention floor (§5.6): the earliest `YYYY-MM-DD` on which a closed book
+/// may be discarded — the LATER of `31 Dec of book_year + 5` and
+/// `closed_at + 5 years`. Panic-safe on a malformed `closed_at` (falls back to
+/// the year-end floor rather than slicing a short string).
+pub fn retention_floor(book_year: i64, closed_at: &str) -> String {
     let year_end_floor = format!("{}-12-31", book_year + 5);
-    let closed_floor = {
-        let day = date_only(closed_at);
-        // day is YYYY-MM-DD; add 5 to the year component.
-        let year: i64 = day
-            .get(0..4)
-            .and_then(|y| y.parse().ok())
-            .unwrap_or(book_year + 1);
-        format!("{}{}", year + 5, &day[4..])
+    let day = date_only(closed_at);
+    // day is expected as YYYY-MM-DD; shift the year by 5, keep the -MM-DD tail.
+    let closed_floor = match (
+        day.get(0..4).and_then(|y| y.parse::<i64>().ok()),
+        day.get(4..),
+    ) {
+        (Some(year), Some(rest)) => format!("{}{}", year + 5, rest),
+        _ => year_end_floor.clone(),
     };
-    let floor = if closed_floor >= year_end_floor {
+    if closed_floor >= year_end_floor {
         closed_floor
     } else {
         year_end_floor
-    };
-    date_only(today) >= floor.as_str()
+    }
+}
+
+/// Retention (§5.6): a closed book may be discarded only once `today` reaches
+/// the [`retention_floor`]. Dates compare lexicographically on the ISO
+/// `YYYY-MM-DD` prefix, which is correct for ISO dates. `today` on/after the
+/// floor ⇒ eligible.
+pub fn purge_eligible(book_year: i64, closed_at: &str, today: &str) -> bool {
+    date_only(today) >= retention_floor(book_year, closed_at).as_str()
 }
 
 /// Lists recorded closures newest-first, each with its retention flag.
@@ -379,12 +393,14 @@ pub fn list_closures(conn: &Connection, today: &str) -> Result<Vec<KepClosureVie
     for row in rows {
         let (book_year, krajnji_saldo_minor, entry_count, closed_at) = row?;
         let purge_eligible = purge_eligible(book_year, &closed_at, today);
+        let retention_until = retention_floor(book_year, &closed_at);
         out.push(KepClosureView {
             book_year,
             krajnji_saldo_minor,
             entry_count,
             closed_at,
             purge_eligible,
+            retention_until,
         });
     }
     Ok(out)
@@ -503,7 +519,10 @@ mod tests {
         let html = render_close_html(&view);
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("Zaključenje knjige za 2026"));
-        assert!(html.contains("9.000,00"), "krajnji saldo 900000 minor");
+        assert!(
+            html.contains("<th>KRAJNJI SALDO</th><td class=\"amount\">9.000,00 RSD</td>"),
+            "the KRAJNJI SALDO row carries the 900000 minor krajnji saldo"
+        );
         assert!(html.contains("ODGOVORNO LICE"), "signature line");
         assert!(html.contains("Nije fiskalni dokument"));
         assert!(!html.contains("<script"));
@@ -542,11 +561,47 @@ mod tests {
             "each page but the last carries a carry-out"
         );
         assert!(html.contains("page-break-after"));
+        // The first DONOS row itself carries the 50000 opening carry-in (isolate
+        // the row so a broken opening-seed cannot pass on an incidental "500,00").
         assert!(
-            html.contains("500,00"),
-            "first DONOS shows the 50000 opening carry-in"
+            html.contains(
+                "<td>DONOS</td><td class=\"amount\"></td>\
+                 <td class=\"amount\"></td><td class=\"amount\">500,00 RSD</td>"
+            ),
+            "first DONOS row shows the 50000 opening carry-in"
         );
         assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn book_html_renders_one_page_for_empty_ledger() {
+        // A year that carried an opening balance but booked nothing still prints
+        // one page with its DONOS (opening) and a KRAJNJI SALDO equal to it.
+        let ledger = KepLedger {
+            book_year: 2027,
+            entries: Vec::new(),
+            opening_saldo_minor: 900000,
+            saldo_minor: 900000,
+        };
+        let html = render_book_html(&company(), &ledger, 30);
+        assert!(
+            html.contains("Strana 1 / 1"),
+            "a quiet year still prints one page"
+        );
+        assert!(
+            html.contains(
+                "<td>DONOS</td><td class=\"amount\"></td>\
+                 <td class=\"amount\"></td><td class=\"amount\">9.000,00 RSD</td>"
+            ),
+            "DONOS carries the opening carry-in"
+        );
+        assert!(
+            html.contains(
+                "<td>KRAJNJI SALDO</td><td class=\"amount\"></td>\
+                 <td class=\"amount\"></td><td class=\"amount\">9.000,00 RSD</td>"
+            ),
+            "krajnji saldo of a quiet year equals the opening carry-in"
+        );
     }
 
     #[test]
@@ -583,6 +638,17 @@ mod tests {
     }
 
     #[test]
+    fn retention_floor_takes_the_later_anchor() {
+        // closed_at + 5y (2032-01-05) is later than 31 Dec 2026 + 5y (2031-12-31).
+        assert_eq!(retention_floor(2026, "2027-01-05T09:00:00Z"), "2032-01-05");
+        // A close ON 31 Dec 2026: both anchors coincide at 2031-12-31.
+        assert_eq!(retention_floor(2026, "2026-12-31T23:00:00Z"), "2031-12-31");
+        // A malformed closed_at falls back to the year-end floor — never panics.
+        assert_eq!(retention_floor(2026, "bad"), "2031-12-31");
+        assert_eq!(retention_floor(2026, ""), "2031-12-31");
+    }
+
+    #[test]
     fn list_closures_reports_retention() {
         with_conn("list_closures_retention", |conn| {
             seed_zaduzenje(conn, 2026, 1, 900000);
@@ -594,6 +660,10 @@ mod tests {
             assert_eq!(recent[0].book_year, 2026);
             assert_eq!(recent[0].krajnji_saldo_minor, 900000);
             assert!(!recent[0].purge_eligible, "well within 5 years");
+            assert_eq!(
+                recent[0].retention_until, "2032-01-05",
+                "the later of closed_at+5y and 31-Dec-2026+5y"
+            );
 
             let aged = list_closures(conn, "2032-02-01T00:00:00Z").expect("list");
             assert!(aged[0].purge_eligible, "past the 5-year floor");

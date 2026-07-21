@@ -1312,7 +1312,7 @@ function ClosuresSection({ closures }: { closures: KepClosureView[] }) {
                       <Badge variant="outline">Može se arhivirati</Badge>
                     ) : (
                       <span className="text-xs text-muted-foreground">
-                        Čuva se do {closure.bookYear + 5}.
+                        Čuva se do {formatDay(closure.retentionUntil)}
                       </span>
                     )}
                   </TableCell>

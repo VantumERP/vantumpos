@@ -452,6 +452,7 @@ describe("KepModule year-end close", () => {
         entryCount: 2,
         closedAt: "2027-01-05T09:00:00Z",
         purgeEligible: false,
+        retentionUntil: "2032-01-05",
       },
     ]);
 

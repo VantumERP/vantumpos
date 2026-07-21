@@ -1044,6 +1044,8 @@ export interface KepClosureView {
   entryCount: number;
   closedAt: string;
   purgeEligible: boolean;
+  /** `YYYY-MM-DD` the retention obligation ends (later of closedAt+5y / bookYear-end+5y). */
+  retentionUntil: string;
 }
 
 /**
