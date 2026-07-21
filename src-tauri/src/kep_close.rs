@@ -194,10 +194,16 @@ pub fn render_close_html(view: &KepCloseView) -> String {
     html
 }
 
-/// The full-book paginated print (§5.5): the 5-column table split into pages of
-/// `rows_per_page`, each page after the first opening with a DONOS (running
-/// carry-in) row and each page but the last closing with a SVEGA ZA PRENOS
-/// (running carry-out) row. Pages are numbered `Strana k`.
+/// The full-book paginated print (§5.5), rendered as the statutory obrazac
+/// (§2.1 / worked example §2.7): the **fixed five columns** — RB, Datum, Opis,
+/// Zaduženje (4), Razduženje (5), with **no saldo column** — split into pages of
+/// `rows_per_page`. Every page opens with a **DONOS** (cumulative carry-in) row
+/// and closes with a **SVEGA ZA PRENOS** (cumulative carry-out) row; both carry
+/// the running Σ kolona-4 and Σ kolona-5 totals in their own columns (PEP čl. 10
+/// st. 2). The opening carry-in (prior year's krajnji saldo, čl. 17 st. 2) is
+/// the first page's DONOS kolona-4 value, with kolona 5 = 0. The **krajnji
+/// saldo** is a derived line under the last page (`Σ4 − Σ5`, čl. 16 st. 2), not
+/// a column. Pages are numbered `Strana k / n`.
 pub fn render_book_html(
     company: &CompanySettings,
     ledger: &KepLedger,
@@ -209,13 +215,17 @@ pub fn render_book_html(
 
     let mut chunks: Vec<&[KepEntryView]> = ledger.entries.chunks(per_page).collect();
     // A quiet year (no entries) still prints one page so its DONOS (opening
-    // carry-in) and KRAJNJI SALDO appear — the statutory book is never blank.
+    // carry-in) and the derived krajnji saldo appear — the book is never blank.
     if chunks.is_empty() {
         chunks.push(&[]);
     }
     let page_total = chunks.len();
-    // Running saldo carried across pages, seeded from the opening carry-in.
-    let mut running = ledger.opening_saldo_minor;
+
+    // Cumulative kolona-4 / kolona-5 totals carried across pages. The opening
+    // carry-in (prior krajnji saldo) enters as a kolona-4 zaduženje; kolona 5 = 0
+    // (§2.7 DONOS = 10.000,00 / 0,00).
+    let mut cum_zaduzenje = ledger.opening_saldo_minor;
+    let mut cum_razduzenje = 0i64;
 
     for (page_index, chunk) in chunks.iter().enumerate() {
         let page_number = page_index + 1;
@@ -227,31 +237,24 @@ pub fn render_book_html(
             "<table>\n<thead>\n<tr>\
              <th>RB</th><th>Datum</th><th>Opis</th>\
              <th class=\"amount\">Zaduženje (4)</th>\
-             <th class=\"amount\">Razduženje (5)</th>\
-             <th class=\"amount\">Saldo</th></tr>\n</thead>\n<tbody>\n",
+             <th class=\"amount\">Razduženje (5)</th></tr>\n</thead>\n<tbody>\n",
         );
 
-        // DONOS — the running carry-in for this page (every page carries it; the
-        // first page's DONOS is the year's opening carry-in).
+        // DONOS — the cumulative carry-in for this page (first page = opening
+        // stock as kolona-4 zaduženje, kolona 5 = 0).
         html.push_str(&format!(
             "<tr class=\"donos\"><td></td><td></td><td>DONOS</td>\
-             <td class=\"amount\"></td><td class=\"amount\"></td>\
-             <td class=\"amount\">{} RSD</td></tr>\n",
-            format_rsd_minor(running)
+             <td class=\"amount\">{}</td><td class=\"amount\">{}</td></tr>\n",
+            format_rsd_minor(cum_zaduzenje),
+            format_rsd_minor(cum_razduzenje)
         ));
 
-        let mut page_zaduzenje = 0i64;
-        let mut page_razduzenje = 0i64;
         for entry in chunk.iter() {
-            let zad = entry.zaduzenje_minor.unwrap_or(0);
-            let raz = entry.razduzenje_minor.unwrap_or(0);
-            running += zad - raz;
-            page_zaduzenje += zad;
-            page_razduzenje += raz;
+            cum_zaduzenje += entry.zaduzenje_minor.unwrap_or(0);
+            cum_razduzenje += entry.razduzenje_minor.unwrap_or(0);
             html.push_str(&format!(
                 "<tr><td>{}</td><td>{}</td><td>{}</td>\
-                 <td class=\"amount\">{}</td><td class=\"amount\">{}</td>\
-                 <td class=\"amount\">{} RSD</td></tr>\n",
+                 <td class=\"amount\">{}</td><td class=\"amount\">{}</td></tr>\n",
                 entry.redni_broj,
                 escape_html(&entry.datum),
                 escape_html(&entry.opis),
@@ -263,35 +266,32 @@ pub fn render_book_html(
                     .razduzenje_minor
                     .map(format_rsd_minor)
                     .unwrap_or_default(),
-                format_rsd_minor(running)
             ));
         }
 
-        // Per-page subtotal, then SVEGA ZA PRENOS on every page but the last.
+        // SVEGA ZA PRENOS — the cumulative carry-out (= the next page's DONOS).
         html.push_str(&format!(
-            "<tr class=\"svega\"><td></td><td></td><td>UKUPNO STRANA</td>\
-             <td class=\"amount\">{}</td><td class=\"amount\">{}</td>\
-             <td class=\"amount\"></td></tr>\n",
-            format_rsd_minor(page_zaduzenje),
-            format_rsd_minor(page_razduzenje)
+            "<tr class=\"svega\"><td></td><td></td><td>SVEGA ZA PRENOS</td>\
+             <td class=\"amount\">{}</td><td class=\"amount\">{}</td></tr>\n",
+            format_rsd_minor(cum_zaduzenje),
+            format_rsd_minor(cum_razduzenje)
         ));
-        if page_number < page_total {
+
+        html.push_str("</tbody>\n</table>\n");
+
+        // The krajnji saldo is a DERIVED line under the last page (saldiranje
+        // kolona 4 i 5, čl. 16 st. 2) — never a sixth column.
+        if page_number == page_total {
             html.push_str(&format!(
-                "<tr class=\"svega\"><td></td><td></td><td>SVEGA ZA PRENOS</td>\
-                 <td class=\"amount\"></td><td class=\"amount\"></td>\
-                 <td class=\"amount\">{} RSD</td></tr>\n",
-                format_rsd_minor(running)
-            ));
-        } else {
-            html.push_str(&format!(
-                "<tr class=\"svega\"><td></td><td></td><td>KRAJNJI SALDO</td>\
-                 <td class=\"amount\"></td><td class=\"amount\"></td>\
-                 <td class=\"amount\">{} RSD</td></tr>\n",
-                format_rsd_minor(running)
+                "<p class=\"meta\"><strong>KRAJNJI SALDO (kolona 4 − kolona 5): \
+                 {} − {} = {} RSD</strong></p>\n",
+                format_rsd_minor(cum_zaduzenje),
+                format_rsd_minor(cum_razduzenje),
+                format_rsd_minor(cum_zaduzenje - cum_razduzenje)
             ));
         }
 
-        html.push_str("</tbody>\n</table>\n</div>\n");
+        html.push_str("</div>\n");
     }
 
     html.push_str("<footer>Interni dokument. Nije fiskalni dokument.</footer>\n</body>\n</html>\n");
@@ -549,26 +549,37 @@ mod tests {
             saldo_minor: 700000,
         };
         let html = render_book_html(&company(), &ledger, 30);
-        assert!(html.contains("Strana 1"));
-        assert!(html.contains("Strana 3"));
+        assert!(html.contains("Strana 1 / 3"));
+        assert!(html.contains("Strana 3 / 3"));
         assert!(!html.contains("Strana 4"), "65 rows @ 30 → exactly 3 pages");
+        // The obrazac is fixed at five columns — no saldo column (§2.1).
         assert!(
-            html.contains("DONOS"),
-            "each page after the first carries a DONOS"
-        );
-        assert!(
-            html.contains("SVEGA ZA PRENOS"),
-            "each page but the last carries a carry-out"
+            !html.contains("<th class=\"amount\">Saldo</th>"),
+            "the printed KEP has no saldo column"
         );
         assert!(html.contains("page-break-after"));
-        // The first DONOS row itself carries the 50000 opening carry-in (isolate
-        // the row so a broken opening-seed cannot pass on an incidental "500,00").
+        // First DONOS carries the opening as a kolona-4 zaduženje, kolona 5 = 0
+        // (§2.7 DONOS = opening / 0,00).
         assert!(
             html.contains(
-                "<td>DONOS</td><td class=\"amount\"></td>\
-                 <td class=\"amount\"></td><td class=\"amount\">500,00 RSD</td>"
+                "<td>DONOS</td><td class=\"amount\">500,00</td>\
+                 <td class=\"amount\">0,00</td>"
             ),
-            "first DONOS row shows the 50000 opening carry-in"
+            "first DONOS = opening carry-in in kolona 4"
+        );
+        // Final SVEGA ZA PRENOS carries the cumulative kolona-4 total
+        // (50000 opening + 65×10000 = 700000) and kolona-5 total (0).
+        assert!(
+            html.contains(
+                "<td>SVEGA ZA PRENOS</td><td class=\"amount\">7.000,00</td>\
+                 <td class=\"amount\">0,00</td>"
+            ),
+            "final carry-out = cumulative Σ kolona 4 / Σ kolona 5"
+        );
+        // Krajnji saldo is a DERIVED line (Σ4 − Σ5), not a column.
+        assert!(
+            html.contains("7.000,00 − 0,00 = 7.000,00 RSD"),
+            "krajnji saldo derived under the last page"
         );
         assert!(!html.contains("<script"));
     }
@@ -576,7 +587,7 @@ mod tests {
     #[test]
     fn book_html_renders_one_page_for_empty_ledger() {
         // A year that carried an opening balance but booked nothing still prints
-        // one page with its DONOS (opening) and a KRAJNJI SALDO equal to it.
+        // one page with its DONOS (opening) and a derived KRAJNJI SALDO.
         let ledger = KepLedger {
             book_year: 2027,
             entries: Vec::new(),
@@ -590,17 +601,14 @@ mod tests {
         );
         assert!(
             html.contains(
-                "<td>DONOS</td><td class=\"amount\"></td>\
-                 <td class=\"amount\"></td><td class=\"amount\">9.000,00 RSD</td>"
+                "<td>DONOS</td><td class=\"amount\">9.000,00</td>\
+                 <td class=\"amount\">0,00</td>"
             ),
-            "DONOS carries the opening carry-in"
+            "DONOS carries the opening carry-in in kolona 4"
         );
         assert!(
-            html.contains(
-                "<td>KRAJNJI SALDO</td><td class=\"amount\"></td>\
-                 <td class=\"amount\"></td><td class=\"amount\">9.000,00 RSD</td>"
-            ),
-            "krajnji saldo of a quiet year equals the opening carry-in"
+            html.contains("9.000,00 − 0,00 = 9.000,00 RSD"),
+            "krajnji saldo of a quiet year = opening, derived as Σ4 − Σ5"
         );
     }
 
