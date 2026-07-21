@@ -768,6 +768,30 @@ describe("local service adapter", () => {
             overdueSalesDays: [],
             unbookedReceiptCount: 0,
           });
+        case "kep_close_preview":
+          return Promise.resolve({
+            krajnjiSaldoMinor: 780000,
+            entryCount: 1,
+            alreadyClosed: false,
+          });
+        case "kep_close_year":
+          return Promise.resolve({
+            bookYear: 2026,
+            krajnjiSaldoMinor: 780000,
+            entryCount: 1,
+            closedAt: "2027-01-05T09:00:00Z",
+            closedBy: 1,
+          });
+        case "kep_list_closures":
+          return Promise.resolve([]);
+        case "kep_export_close":
+        case "kep_export_book":
+          return Promise.resolve({
+            fileName: "kep-doc.html",
+            path: "exports/kep-doc.html",
+            mimeType: "text/html",
+            rowCount: 0,
+          });
         default:
           return Promise.resolve(null);
       }
@@ -777,6 +801,11 @@ describe("local service adapter", () => {
     await services.kep.ledger(2026);
     await services.kep.postDailySales("2026-07-05", 234000);
     await services.kep.status();
+    await services.kep.closePreview(2026);
+    await services.kep.closeYear(2026, "ZAKLJUČI KNJIGU");
+    await services.kep.listClosures();
+    await services.kep.exportClose(2026);
+    await services.kep.exportBook(2026);
 
     expect(invoke).toHaveBeenNthCalledWith(1, "kep_ledger", { bookYear: 2026 });
     expect(invoke).toHaveBeenNthCalledWith(2, "kep_post_daily_sales", {
@@ -784,6 +813,16 @@ describe("local service adapter", () => {
       overrideAmountMinor: 234000,
     });
     expect(invoke).toHaveBeenNthCalledWith(3, "kep_status");
+    expect(invoke).toHaveBeenCalledWith("kep_close_preview", {
+      bookYear: 2026,
+    });
+    expect(invoke).toHaveBeenCalledWith("kep_close_year", {
+      bookYear: 2026,
+      confirmation: "ZAKLJUČI KNJIGU",
+    });
+    expect(invoke).toHaveBeenCalledWith("kep_list_closures");
+    expect(invoke).toHaveBeenCalledWith("kep_export_close", { bookYear: 2026 });
+    expect(invoke).toHaveBeenCalledWith("kep_export_book", { bookYear: 2026 });
   });
 
   it("maps kep kalkulacija/nivelacija/storno methods to stable Tauri command names", async () => {

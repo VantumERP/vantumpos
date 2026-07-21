@@ -11,6 +11,8 @@ import type {
   CreateBackupRequest,
   ImportJob,
   InventoryAdjustmentRequest,
+  KepClosure,
+  KepClosureView,
   KepEntryView,
   PrethodnaCenaDto,
   ProductLedgerMovement,
@@ -100,6 +102,7 @@ export function createMockServices(): PosServices {
       kind: "receipt",
     },
   ];
+  const kepClosures: KepClosureView[] = [];
   const receipt = createReceiptDetail();
   let users: UserAccount[] = [
     {
@@ -1275,6 +1278,66 @@ export function createMockServices(): PosServices {
       async nivelacija() {},
       async postAdjustment() {},
       async correctEntry() {},
+      async closePreview(bookYear) {
+        const already = kepClosures.some((c) => c.bookYear === bookYear);
+        const saldoMinor = kepEntries.reduce(
+          (sum, entry) =>
+            sum + (entry.zaduzenjeMinor ?? 0) - (entry.razduzenjeMinor ?? 0),
+          0,
+        );
+        return {
+          krajnjiSaldoMinor: saldoMinor,
+          entryCount: kepEntries.length,
+          alreadyClosed: already,
+        };
+      },
+      async closeYear(bookYear, confirmation) {
+        if (confirmation !== "ZAKLJUČI KNJIGU") {
+          throw new Error("Potvrda nije ispravna.");
+        }
+        if (kepClosures.some((c) => c.bookYear === bookYear)) {
+          throw new Error("Godina je već zaključena.");
+        }
+        const saldoMinor = kepEntries.reduce(
+          (sum, entry) =>
+            sum + (entry.zaduzenjeMinor ?? 0) - (entry.razduzenjeMinor ?? 0),
+          0,
+        );
+        const closure: KepClosure = {
+          bookYear,
+          krajnjiSaldoMinor: saldoMinor,
+          entryCount: kepEntries.length,
+          closedAt: "2027-01-05T09:00:00Z",
+          closedBy: 1,
+        };
+        kepClosures.push({
+          bookYear,
+          krajnjiSaldoMinor: saldoMinor,
+          entryCount: kepEntries.length,
+          closedAt: closure.closedAt,
+          purgeEligible: false,
+        });
+        return closure;
+      },
+      async listClosures() {
+        return [...kepClosures];
+      },
+      async exportClose(bookYear) {
+        return {
+          fileName: `kep-zakljucenje-${bookYear}.html`,
+          path: `mock://exports/kep-zakljucenje-${bookYear}.html`,
+          mimeType: "text/html" as const,
+          rowCount: 1,
+        };
+      },
+      async exportBook(bookYear) {
+        return {
+          fileName: `kep-knjiga-${bookYear}.html`,
+          path: `mock://exports/kep-knjiga-${bookYear}.html`,
+          mimeType: "text/html" as const,
+          rowCount: kepEntries.length,
+        };
+      },
     },
     print: {
       async openForPrint() {},

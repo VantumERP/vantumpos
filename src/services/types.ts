@@ -1021,6 +1021,31 @@ export interface KepStatus {
   unbookedReceiptCount: number;
 }
 
+/** The close-preview payload — mirrors `crate::commands::kep::KepClosePreview`. */
+export interface KepClosePreview {
+  krajnjiSaldoMinor: number;
+  entryCount: number;
+  alreadyClosed: boolean;
+}
+
+/** A recorded year-end close — mirrors `crate::kep_close::KepClosure`. */
+export interface KepClosure {
+  bookYear: number;
+  krajnjiSaldoMinor: number;
+  entryCount: number;
+  closedAt: string;
+  closedBy: number | null;
+}
+
+/** A closure list row with the 5-year retention flag — `crate::kep_close::KepClosureView`. */
+export interface KepClosureView {
+  bookYear: number;
+  krajnjiSaldoMinor: number;
+  entryCount: number;
+  closedAt: string;
+  purgeEligible: boolean;
+}
+
 /**
  * The frontend cause ids for a value-only storno — the strings
  * `crate::commands::kep::parse_adjustment_cause` accepts. The cause→{kolona,

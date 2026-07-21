@@ -27,6 +27,9 @@ import type {
   ImportHeaders,
   ImportJob,
   ImportJobDetail,
+  KepClosePreview,
+  KepClosure,
+  KepClosureView,
   KepEntryView,
   KepLedger,
   KepStatus,
@@ -256,6 +259,11 @@ export interface KepService {
     correctAmountMinor: number,
     basis: BasisDoc,
   ): Promise<void>;
+  closePreview(bookYear: number): Promise<KepClosePreview>;
+  closeYear(bookYear: number, confirmation: string): Promise<KepClosure>;
+  listClosures(): Promise<KepClosureView[]>;
+  exportClose(bookYear: number): Promise<ExportedFile>;
+  exportBook(bookYear: number): Promise<ExportedFile>;
 }
 
 export interface PrintService {

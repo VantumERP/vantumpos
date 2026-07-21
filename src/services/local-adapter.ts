@@ -25,6 +25,9 @@ import type {
   ImportValidationResult,
   InventoryAdjustmentResult,
   KalkulacijaSummary,
+  KepClosePreview,
+  KepClosure,
+  KepClosureView,
   KepEntryView,
   KepLedger,
   KepStatus,
@@ -276,6 +279,15 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
           correctAmountMinor,
           basis,
         }),
+      closePreview: (bookYear) =>
+        invoke<KepClosePreview>("kep_close_preview", { bookYear }),
+      closeYear: (bookYear, confirmation) =>
+        invoke<KepClosure>("kep_close_year", { bookYear, confirmation }),
+      listClosures: () => invoke<KepClosureView[]>("kep_list_closures"),
+      exportClose: (bookYear) =>
+        invoke<ExportedFile>("kep_export_close", { bookYear }),
+      exportBook: (bookYear) =>
+        invoke<ExportedFile>("kep_export_book", { bookYear }),
     },
     print: {
       openForPrint: (path) => openPath(path),
