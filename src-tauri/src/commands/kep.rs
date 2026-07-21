@@ -17,6 +17,7 @@
 //! kalkulacija, the nivelacija revaluation — lives in `crate::kep_storno` /
 //! `crate::kep_kalkulacija`, never here.
 
+use serde::Serialize;
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
@@ -168,6 +169,126 @@ pub fn kep_correct_entry(
     )?;
     tx.commit().map_err(AppError::from)?;
     Ok(())
+}
+
+/// The close-preview payload — the saldo that will carry forward and whether the
+/// year is already closed. Read-only; computes nothing it does not also show.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KepClosePreview {
+    pub krajnji_saldo_minor: i64,
+    pub entry_count: i64,
+    pub already_closed: bool,
+}
+
+/// Previews a year-end close: the krajnji saldo (including carry-in) and entry
+/// count that would be recorded, and whether the year is already closed.
+#[tauri::command]
+pub fn kep_close_preview(
+    state: State<'_, AppState>,
+    book_year: i64,
+) -> Result<KepClosePreview, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let ledger = crate::kep::list_ledger(&connection, book_year)?;
+    let already_closed = crate::kep_close::is_year_closed(&connection, book_year)?;
+    Ok(KepClosePreview {
+        krajnji_saldo_minor: ledger.saldo_minor,
+        entry_count: ledger.entries.len() as i64,
+        already_closed,
+    })
+}
+
+/// Closes a book year irreversibly (typed confirmation required). Records the
+/// krajnji saldo; inserts no ledger entry (carry-forward is computed).
+#[tauri::command]
+pub fn kep_close_year(
+    state: State<'_, AppState>,
+    book_year: i64,
+    confirmation: String,
+) -> Result<crate::kep_close::KepClosure, CommandError> {
+    let acting = super::auth::require_admin(state.inner())?;
+    let mut connection = state.db().open().map_err(CommandError::from)?;
+    let now = crate::clock::utc_now()?;
+    crate::kep_close::close_year(&mut connection, book_year, &confirmation, acting.id, &now)
+        .map_err(Into::into)
+}
+
+/// Lists recorded closures (newest first) with the 5-year retention flag.
+#[tauri::command]
+pub fn kep_list_closures(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::kep_close::KepClosureView>, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let today = crate::clock::utc_now()?;
+    crate::kep_close::list_closures(&connection, &today).map_err(Into::into)
+}
+
+/// Renders the signable electronic-close document and writes it to `exports/`.
+#[tauri::command]
+pub fn kep_export_close(
+    state: State<'_, AppState>,
+    book_year: i64,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    if !crate::kep_close::is_year_closed(&connection, book_year)? {
+        return Err(AppError::business(
+            "invalid_state",
+            "Godina nije zaključena — nema šta da se štampa.",
+        )
+        .into());
+    }
+    let ledger = crate::kep::list_ledger(&connection, book_year)?;
+    let company = crate::commands::settings::load_company_settings(state.inner())?;
+    let closure = crate::kep_close::list_closures(&connection, &crate::clock::utc_now()?)?
+        .into_iter()
+        .find(|c| c.book_year == book_year)
+        .ok_or_else(|| AppError::not_found("Zaključenje nije pronađeno."))?;
+    let zaduzenje_total_minor: i64 = ledger
+        .entries
+        .iter()
+        .filter_map(|e| e.zaduzenje_minor)
+        .sum();
+    let razduzenje_total_minor: i64 = ledger
+        .entries
+        .iter()
+        .filter_map(|e| e.razduzenje_minor)
+        .sum();
+    let view = crate::kep_close::KepCloseView {
+        company,
+        closure: crate::kep_close::KepClosure {
+            book_year: closure.book_year,
+            krajnji_saldo_minor: closure.krajnji_saldo_minor,
+            entry_count: closure.entry_count,
+            closed_at: closure.closed_at,
+            closed_by: None,
+        },
+        opening_saldo_minor: ledger.opening_saldo_minor,
+        zaduzenje_total_minor,
+        razduzenje_total_minor,
+    };
+    let html = crate::kep_close::render_close_html(&view);
+    let file_name = format!("kep-zakljucenje-{book_year}.html");
+    super::campaigns::write_export(state.inner(), &file_name, &html, 1).map_err(Into::into)
+}
+
+/// Renders the full-book paginated print and writes it to `exports/`.
+#[tauri::command]
+pub fn kep_export_book(
+    state: State<'_, AppState>,
+    book_year: i64,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let ledger = crate::kep::list_ledger(&connection, book_year)?;
+    let company = crate::commands::settings::load_company_settings(state.inner())?;
+    let row_count = ledger.entries.len();
+    let html =
+        crate::kep_close::render_book_html(&company, &ledger, crate::kep_close::BOOK_ROWS_PER_PAGE);
+    let file_name = format!("kep-knjiga-{book_year}.html");
+    super::campaigns::write_export(state.inner(), &file_name, &html, row_count).map_err(Into::into)
 }
 
 /// Maps a frontend cause id to a value-storno `StornoCause`. The nivelacija /
@@ -500,6 +621,59 @@ mod tests {
             assert!(contents.contains("Kalkulacija cene"));
 
             std::fs::remove_file(&exported.path).expect("export file should clean up");
+        });
+    }
+
+    #[test]
+    fn kep_close_year_rejected_for_cashier() {
+        with_app("kep_close_year_rejected_for_cashier", |app| {
+            sign_in_cashier(app.state::<AppState>().inner());
+            let error = kep_close_year(app.state::<AppState>(), 2026, "ZAKLJUČI KNJIGU".into())
+                .expect_err("cashier should not close the year");
+            assert_eq!(error.code, "forbidden");
+        });
+    }
+
+    #[test]
+    fn kep_close_preview_and_close_and_gate() {
+        with_app("kep_close_preview_and_close", |app| {
+            let state = app.state::<AppState>();
+            sign_in_admin(state.inner());
+            seed_receipt_zaduzenje(state.inner(), 2026, "2026-06-01T00:00:00Z", 780000);
+
+            // Preview reports the saldo and that the year is open.
+            let preview = kep_close_preview(app.state::<AppState>(), 2026).expect("preview");
+            assert_eq!(preview.krajnji_saldo_minor, 780000);
+            assert_eq!(preview.entry_count, 1);
+            assert!(!preview.already_closed);
+
+            // Close it.
+            let closure = kep_close_year(app.state::<AppState>(), 2026, "ZAKLJUČI KNJIGU".into())
+                .expect("admin closes 2026");
+            assert_eq!(closure.krajnji_saldo_minor, 780000);
+
+            // Preview now reports it closed; a second close is invalid_state.
+            let preview2 = kep_close_preview(app.state::<AppState>(), 2026).expect("preview2");
+            assert!(preview2.already_closed);
+            let dbl = kep_close_year(app.state::<AppState>(), 2026, "ZAKLJUČI KNJIGU".into())
+                .expect_err("double close");
+            assert_eq!(dbl.code, "invalid_state");
+
+            // The closures list carries the closure.
+            let closures = kep_list_closures(app.state::<AppState>()).expect("list");
+            assert_eq!(closures.len(), 1);
+            assert_eq!(closures[0].book_year, 2026);
+
+            // Exports write HTML files.
+            let close_doc = kep_export_close(app.state::<AppState>(), 2026).expect("export close");
+            assert!(close_doc.file_name.starts_with("kep-zakljucenje-2026"));
+            let close_html = std::fs::read_to_string(&close_doc.path).expect("file");
+            assert!(close_html.contains("Zaključenje knjige za 2026"));
+            std::fs::remove_file(&close_doc.path).ok();
+
+            let book_doc = kep_export_book(app.state::<AppState>(), 2026).expect("export book");
+            assert!(book_doc.file_name.starts_with("kep-knjiga-2026"));
+            std::fs::remove_file(&book_doc.path).ok();
         });
     }
 }
