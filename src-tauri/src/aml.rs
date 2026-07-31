@@ -94,21 +94,31 @@ mod tests {
     }
 
     /// The statute says "10.000 evra ili više". A `>` comparison is a bug.
+    ///
+    /// `breached` and `near_threshold` must also stay mutually exclusive: the
+    /// till branches on one or the other, so an overlap would render the soft
+    /// "blizu praga" warning and the hard block at the same time.
     #[test]
     fn exactly_the_threshold_already_breaches() {
         let threshold = 10_000 * rate().rate_minor;
 
         let below = assess_cash_payment(threshold - 1, Some(&rate()), &preduzetnik(), 80);
         assert!(!below.breached, "one para below the cap is lawful");
+        assert!(
+            below.near_threshold,
+            "but one para below the cap is still a soft warning"
+        );
 
         let at = assess_cash_payment(threshold, Some(&rate()), &preduzetnik(), 80);
         assert!(
             at.breached,
             "exactly 10.000 EUR is ALREADY unlawful (>=, not >)"
         );
+        assert!(!at.near_threshold, "a breach is not also a soft warning");
 
         let above = assess_cash_payment(threshold + 1, Some(&rate()), &preduzetnik(), 80);
         assert!(above.breached);
+        assert!(!above.near_threshold);
     }
 
     #[test]
