@@ -202,6 +202,73 @@ mod tests {
     }
 
     #[test]
+    fn cash_deposit_tiers_are_the_verified_ranges_not_the_odgovorno_lice_row() {
+        // Zakon 68/2015 čl. 7 carries three rows, and the preduzetnik one sits
+        // between the other two. Mis-copying the odgovorno-lice row (st. 2) onto
+        // the preduzetnik is invisible to the forbidden-substring guard, because
+        // it quotes neither "privredni prestup" nor "2.000.000".
+        let preduzetnik = cash_deposit_duty(&profile(Some(PravnaForma::Preduzetnik)));
+        let penalty = preduzetnik.penalty.expect("preduzetnik penalty is known");
+        assert!(
+            penalty.contains("10.000 do 500.000"),
+            "preduzetnik range is čl. 7 st. 3: {penalty}"
+        );
+        assert!(penalty.contains("čl. 7 st. 3"), "{penalty}");
+        assert!(
+            !penalty.contains("čl. 7 st. 2"),
+            "st. 2 is the odgovorno-lice row; a preduzetnik has no odgovorno lice: {penalty}"
+        );
+        assert!(
+            !penalty.contains("5.000 do 150.000"),
+            "the odgovorno-lice range must never be quoted to a preduzetnik: {penalty}"
+        );
+        assert!(preduzetnik.is_legal_duty);
+
+        let pravno = cash_deposit_duty(&profile(Some(PravnaForma::PravnoLice)));
+        let penalty = pravno.penalty.expect("pravno lice penalty is known");
+        assert!(penalty.contains("50.000 do 2.000.000"), "{penalty}");
+        assert!(penalty.contains("čl. 7 st. 1 tač. 2"), "{penalty}");
+        assert!(
+            penalty.contains("5.000 do 150.000") && penalty.contains("čl. 7 st. 2"),
+            "the odgovorno-lice row belongs on the pravno-lice tier: {penalty}"
+        );
+        assert!(
+            !penalty.to_lowercase().contains("privredni prestup"),
+            "68/2015 contains no privredni prestup at all: {penalty}"
+        );
+    }
+
+    #[test]
+    fn defective_declaration_fixed_sums_are_tier_correct() {
+        // ZoT čl. 67 prescribes fixed amounts, not ranges — the word "fiksnom"
+        // is what puts it in prekršajni-nalog territory (ZoP čl. 168), so it is
+        // load-bearing copy, not decoration.
+        let preduzetnik = declaration_defective(&profile(Some(PravnaForma::Preduzetnik)));
+        let penalty = preduzetnik.penalty.expect("preduzetnik penalty is known");
+        assert!(penalty.contains("40.000"), "čl. 67 st. 3: {penalty}");
+        assert!(
+            penalty.contains("fiksnom"),
+            "a fixed sum, not a range: {penalty}"
+        );
+        assert!(
+            !penalty.contains("100.000"),
+            "100.000 is the pravno-lice sum (čl. 67 st. 1): {penalty}"
+        );
+
+        let pravno = declaration_defective(&profile(Some(PravnaForma::PravnoLice)));
+        let penalty = pravno.penalty.expect("pravno lice penalty is known");
+        assert!(penalty.contains("100.000"), "čl. 67 st. 1: {penalty}");
+        assert!(
+            penalty.contains("fiksnom"),
+            "a fixed sum, not a range: {penalty}"
+        );
+        assert!(
+            penalty.contains("10.000"),
+            "odgovorno lice, čl. 67 st. 2: {penalty}"
+        );
+    }
+
+    #[test]
     fn declaration_notices_separate_the_two_offences_and_carry_the_ban() {
         let p = profile(Some(PravnaForma::Preduzetnik));
 
