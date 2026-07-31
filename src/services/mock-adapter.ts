@@ -966,6 +966,7 @@ export function createMockServices(): PosServices {
               receiptCount: 2,
               cashMinor: 8000,
               cardMinor: 4000,
+              bankTransferMinor: 0,
               totalMinor: 12000,
             },
           ],

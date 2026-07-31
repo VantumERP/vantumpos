@@ -113,6 +113,7 @@ pub struct ShiftTurnoverRow {
     pub receipt_count: i64,
     pub cash_minor: i64,
     pub card_minor: i64,
+    pub bank_transfer_minor: i64,
     pub total_minor: i64,
 }
 
@@ -424,6 +425,7 @@ SELECT
     SUM(CASE WHEN s.document_type = 'sale' THEN 1 ELSE 0 END) AS receipt_count,
     COALESCE(SUM(CASE WHEN sp.payment_method = 'cash' THEN sp.amount_minor ELSE 0 END), 0) AS cash_minor,
     COALESCE(SUM(CASE WHEN sp.payment_method = 'card' THEN sp.amount_minor ELSE 0 END), 0) AS card_minor,
+    COALESCE(SUM(CASE WHEN sp.payment_method = 'bank_transfer' THEN sp.amount_minor ELSE 0 END), 0) AS bank_transfer_minor,
     SUM(CASE WHEN s.document_type = 'sale' THEN s.total_minor ELSE -s.total_minor END) AS total_minor
 FROM shifts sh
 JOIN users u ON u.id = sh.user_id
@@ -449,7 +451,8 @@ ORDER BY sh.opened_at DESC
                     receipt_count: row.get(4)?,
                     cash_minor: row.get(5)?,
                     card_minor: row.get(6)?,
-                    total_minor: row.get(7)?,
+                    bank_transfer_minor: row.get(7)?,
+                    total_minor: row.get(8)?,
                 })
             },
         )?
@@ -778,6 +781,7 @@ fn build_report_csv(
                 "Broj računa",
                 "Gotovina",
                 "Kartica",
+                "Prenos na račun",
                 "Ukupno",
             ])];
 
@@ -789,6 +793,7 @@ fn build_report_csv(
                     &row.receipt_count.to_string(),
                     &row.cash_minor.to_string(),
                     &row.card_minor.to_string(),
+                    &row.bank_transfer_minor.to_string(),
                     &row.total_minor.to_string(),
                 ]));
             }
@@ -1367,6 +1372,7 @@ mod tests {
                 assert_eq!(shifts.rows[0].cashier_name, "Ana Anic");
                 assert_eq!(shifts.rows[0].cash_minor, 1_000);
                 assert_eq!(shifts.rows[0].card_minor, 0);
+                assert_eq!(shifts.rows[0].bank_transfer_minor, 0);
                 assert_eq!(shifts.rows[0].total_minor, 1_000);
             },
         );
@@ -1549,6 +1555,72 @@ mod tests {
                 "the breakdown must reconcile to the total"
             );
             assert_eq!(report.summary.bank_transfer_minor, 70_000);
+        });
+    }
+
+    #[test]
+    fn shift_turnover_breaks_out_bank_transfer_instead_of_swallowing_it() {
+        with_reports_state("shift_turnover_bank_transfer", |conn| {
+            seed_sale_on(conn, "2026-07-31", "cash", 10_000);
+            seed_sale_on(conn, "2026-07-31", "card", 20_000);
+            seed_sale_on(conn, "2026-07-31", "bank_transfer", 70_000);
+
+            let report = super::query_shift_turnover(conn, &date_query("2026-07-31", "2026-07-31"))
+                .expect("report should run");
+            let row = &report.rows[0];
+
+            assert_eq!(row.cash_minor, 10_000);
+            assert_eq!(row.card_minor, 20_000);
+            assert_eq!(row.bank_transfer_minor, 70_000);
+            assert_eq!(
+                row.cash_minor + row.card_minor + row.bank_transfer_minor,
+                row.total_minor,
+                "the shift breakdown must reconcile to the shift total"
+            );
+        });
+    }
+
+    #[test]
+    fn export_report_csv_writes_shift_turnover_with_bank_transfer_column() {
+        with_reports_state("export_shift_turnover_bank_transfer", |connection| {
+            seed_sale_on(connection, "2026-07-31", "cash", 10_000);
+            seed_sale_on(connection, "2026-07-31", "card", 20_000);
+            seed_sale_on(connection, "2026-07-31", "bank_transfer", 70_000);
+
+            let export_dir =
+                std::env::temp_dir().join("vantumpos-report-export-test-shift-turnover");
+            let _ = fs::remove_dir_all(&export_dir);
+
+            let exported = super::export_report_csv_to_dir(
+                connection,
+                &export_dir,
+                &super::ExportReportRequest {
+                    report_type: super::ExportReportType::ShiftTurnover,
+                    query: super::ProductSalesQuery {
+                        from: "2026-07-31".to_string(),
+                        to: "2026-07-31".to_string(),
+                        category_id: None,
+                        product_id: None,
+                        shift_id: None,
+                        cashier_id: None,
+                    },
+                },
+            )
+            .expect("shift turnover csv should export");
+
+            let csv = fs::read_to_string(&exported.path).expect("csv should be readable");
+            assert!(
+                csv.starts_with(
+                    "Smena,Otvorena,Kasir,Broj računa,Gotovina,Kartica,Prenos na račun,Ukupno"
+                ),
+                "shift turnover export must name the third tender, got: {csv}"
+            );
+            assert!(
+                csv.contains(",3,10000,20000,70000,100000"),
+                "shift turnover export must carry the bank transfer bucket, got: {csv}"
+            );
+
+            fs::remove_dir_all(export_dir).expect("export dir should be removed");
         });
     }
 

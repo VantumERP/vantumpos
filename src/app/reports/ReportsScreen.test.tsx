@@ -42,6 +42,7 @@ function buildReportsService(): ReportsService {
           receiptCount: 2,
           cashMinor: 8000,
           cardMinor: 4000,
+          bankTransferMinor: 0,
           totalMinor: 12000,
         },
       ],
@@ -271,6 +272,19 @@ describe("ReportsScreen", () => {
       screen.getAllByText("Prenos na račun").length,
       "the metric card and the table column both name the third tender",
     ).toBeGreaterThan(1);
+
+    // The summary card must render the bank-transfer bucket, not some other
+    // bucket that happens to sit next to it: cash is 100,00 and card 200,00, so
+    // only a correct binding shows 700,00 under the "Prenos na račun" heading.
+    const metricCard = screen
+      .getByText("Prenos na račun", {
+        selector: "[data-slot='card-description']",
+      })
+      .closest("[data-slot='card']");
+    expect(metricCard).not.toBeNull();
+    expect(
+      within(metricCard as HTMLElement).getByText("700,00 RSD"),
+    ).toBeInTheDocument();
   });
 
   it("applies date filters through the reports service", async () => {

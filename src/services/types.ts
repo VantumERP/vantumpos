@@ -862,6 +862,7 @@ export interface ShiftTurnoverRow {
   receiptCount: number;
   cashMinor: number;
   cardMinor: number;
+  bankTransferMinor: number;
   totalMinor: number;
 }
 
