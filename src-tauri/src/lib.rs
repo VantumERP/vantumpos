@@ -1,3 +1,4 @@
+mod aml;
 mod app_error;
 mod campaign_evidence;
 mod campaigns;
