@@ -36,6 +36,7 @@ import type {
   KepEntryView,
   KepLedger,
   KepStatus,
+  LegalNotice,
   LowStockReport,
   PaymentMethodReport,
   PrethodnaCenaDto,
@@ -88,6 +89,7 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       getShopProfile: () => invoke<ShopProfile>("settings_get_shop_profile"),
       updateShopProfile: (request) =>
         invoke<ShopProfile>("settings_update_shop_profile", { request }),
+      getLpfrNotice: () => invoke<LegalNotice>("settings_lpfr_notice"),
       getEurRate: () => invoke<EurRateStatus>("settings_get_eur_rate"),
       refreshEurRate: () => invoke<EurRateStatus>("settings_refresh_eur_rate"),
       setManualEurRate: (rateMinor, rateDate) =>

@@ -261,6 +261,8 @@ describe("local service adapter", () => {
       pdvObveznik: null,
       distanceSelling: null,
       lpfrInPremises: null,
+      lpfrCarveOutInternetOnly: null,
+      lpfrCarveOutOwnUsedAssets: null,
       esirElements: [],
     };
     const invoke = vi.fn().mockResolvedValue(profile);
@@ -280,6 +282,22 @@ describe("local service adapter", () => {
         distanceSelling: true,
       }),
     });
+  });
+
+  // The ZF čl. 6 st. 4 figure is resolved in `legal.rs` and travels to the
+  // panel over this command — the frontend must never derive one.
+  it("maps the L-PFR notice to settings_lpfr_notice", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      summary: "…",
+      penalty: null,
+      citation: "Zakon o fiskalizaciji, čl. 6 st. 4; prekršaj: čl. 15 st. 1 tač. 4.",
+      isLegalDuty: true,
+    });
+    const services = createLocalServices(invoke);
+
+    await services.settings.getLpfrNotice();
+
+    expect(invoke).toHaveBeenCalledWith("settings_lpfr_notice");
   });
 
   it("maps the EUR rate surface to stable Tauri command names", async () => {

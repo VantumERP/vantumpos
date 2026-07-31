@@ -377,6 +377,8 @@ describe("CatalogModule", () => {
         pdvObveznik: false,
         distanceSelling,
         lpfrInPremises: true,
+        lpfrCarveOutInternetOnly: false,
+        lpfrCarveOutOwnUsedAssets: false,
         esirElements: [],
       });
       return services;

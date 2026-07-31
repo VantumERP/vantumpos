@@ -120,6 +120,36 @@ pub fn declaration_defective(profile: &ShopProfile) -> LegalNotice {
     }
 }
 
+/// ZF čl. 6 st. 4 — at least one L-PFR in every business premises.
+///
+/// The statute never licenses a V-PFR-only setup for a physical shop: čl. 6
+/// st. 3 joins the two device kinds with „i/ili“, and st. 4 excuses the L-PFR
+/// floor for exactly two obligors — retail conducted **exclusively** over the
+/// internet, and retail of the obligor's **own used** movable assets. Deciding
+/// whether either carve-out applies is the shop's answer to give, so this
+/// function only states the duty and resolves the tier; the surface decides
+/// whether to show it.
+///
+/// ZF prescribes prekršaji only — it contains no privredni prestup for any
+/// tier — and the preduzetnik row is čl. 15 **st. 3**, not st. 1.
+pub fn lpfr_required(profile: &ShopProfile) -> LegalNotice {
+    LegalNotice {
+        summary: "U svakom poslovnom prostoru i poslovnoj prostoriji mora da radi najmanje \
+                  jedan lokalni procesor fiskalnih računa (L-PFR) — uređaj koji izdaje račun \
+                  i bez interneta. Zakon izuzima samo obveznika koji promet na malo obavlja \
+                  isključivo putem interneta i obveznika koji obavlja promet na malo \
+                  sopstvenih korišćenih pokretnih materijalnih sredstava."
+            .to_string(),
+        penalty: tiered(
+            profile,
+            "Prekršaj: novčana kazna od 50.000 do 500.000 dinara (čl. 15 st. 3).",
+            "Prekršaj: novčana kazna od 300.000 do 2.000.000 dinara (čl. 15 st. 1).",
+        ),
+        citation: "Zakon o fiskalizaciji, čl. 6 st. 4; prekršaj: čl. 15 st. 1 tač. 4.".to_string(),
+        is_legal_duty: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,7 +170,30 @@ mod tests {
             cash_deposit_duty(p),
             declaration_missing(p),
             declaration_defective(p),
+            lpfr_required(p),
         ]
+    }
+
+    /// The enumerated list is the module's whole safety property: a notice that
+    /// is not in it is an unguarded fine figure, because neither the
+    /// forbidden-substring guard nor the UNSET guard ever sees it.
+    #[test]
+    fn every_notice_function_is_enumerated_in_the_guard() {
+        let p = profile(Some(PravnaForma::Preduzetnik));
+        let enumerated = all_notices(&p);
+
+        for notice in [
+            aml_cash_cap(&p),
+            cash_deposit_duty(&p),
+            declaration_missing(&p),
+            declaration_defective(&p),
+            lpfr_required(&p),
+        ] {
+            assert!(
+                enumerated.contains(&notice),
+                "a notice missing from all_notices is an unguarded fine figure: {notice:?}"
+            );
+        }
     }
 
     #[test]
@@ -265,6 +318,75 @@ mod tests {
         assert!(
             penalty.contains("10.000"),
             "odgovorno lice, čl. 67 st. 2: {penalty}"
+        );
+    }
+
+    /// ZF čl. 15 carries four rows and the preduzetnik one is **st. 3**. Quoting
+    /// st. 1 to a preduzetnik would multiply his floor sixfold, and ZF contains
+    /// no privredni prestup at all — every ZF sanction is a prekršaj, for every
+    /// tier.
+    #[test]
+    fn lpfr_tiers_are_the_zf_ranges_and_the_preduzetnik_row_is_st_3() {
+        let preduzetnik = lpfr_required(&profile(Some(PravnaForma::Preduzetnik)));
+        let penalty = preduzetnik.penalty.expect("preduzetnik penalty is known");
+        assert!(
+            penalty.contains("50.000 do 500.000"),
+            "preduzetnik range is čl. 15 st. 3: {penalty}"
+        );
+        assert!(penalty.contains("čl. 15 st. 3"), "{penalty}");
+        assert!(
+            !penalty.contains("300.000"),
+            "300.000 is the pravno-lice floor (čl. 15 st. 1): {penalty}"
+        );
+        assert!(preduzetnik.is_legal_duty);
+
+        let pravno = lpfr_required(&profile(Some(PravnaForma::PravnoLice)));
+        let penalty = pravno.penalty.expect("pravno lice penalty is known");
+        assert!(penalty.contains("300.000 do 2.000.000"), "{penalty}");
+        assert!(penalty.contains("čl. 15 st. 1"), "{penalty}");
+        assert!(
+            !penalty.to_lowercase().contains("privredni prestup"),
+            "ZF prescribes prekršaji only — it contains no privredni prestup: {penalty}"
+        );
+    }
+
+    /// The duty article and the offence article are different provisions, and an
+    /// operator handing a citation to an inspector needs both. The summary has
+    /// to name the two čl. 6 st. 4 carve-outs, because they are the only excuses
+    /// the statute gives — and a shop that qualifies must not read the notice as
+    /// applying to it.
+    #[test]
+    fn lpfr_notice_cites_the_duty_the_offence_and_both_carve_outs() {
+        let notice = lpfr_required(&profile(None));
+
+        assert!(
+            notice.penalty.is_none(),
+            "an UNSET legal form renders no figure: {:?}",
+            notice.penalty
+        );
+        assert!(
+            notice.citation.contains("čl. 6 st. 4"),
+            "the duty: {}",
+            notice.citation
+        );
+        assert!(
+            notice.citation.contains("čl. 15 st. 1 tač. 4"),
+            "the offence: {}",
+            notice.citation
+        );
+        assert!(
+            notice.summary.contains("isključivo putem interneta"),
+            "carve-out 1: {}",
+            notice.summary
+        );
+        assert!(
+            notice.summary.contains("sopstvenih korišćenih pokretnih"),
+            "carve-out 2: {}",
+            notice.summary
+        );
+        assert!(
+            notice.is_legal_duty,
+            "čl. 6 st. 4 is an obaveza, never a preporuka"
         );
     }
 

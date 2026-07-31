@@ -156,6 +156,12 @@ pub struct EsirElement {
 /// req 22. `false` is the LENIENT branch, so a plain `bool` would let silence
 /// select it — the inference-from-silence this type exists to prevent. `None`
 /// means "nije odgovoreno": the onboarding surface must ask, not assume.
+///
+/// `lpfr_carve_out_internet_only` and `lpfr_carve_out_own_used_assets` are the
+/// two ZF čl. 6 st. 4 carve-outs (§3 req 32). They are tri-state for the same
+/// reason: `true` is the LENIENT branch here — it excuses the shop from the
+/// per-premises L-PFR floor — so silence must never be read as either answer.
+/// An unanswered carve-out leaves the čl. 6 st. 4 duty standing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShopProfile {
@@ -168,6 +174,10 @@ pub struct ShopProfile {
     #[serde(default)]
     pub lpfr_in_premises: Option<bool>,
     #[serde(default)]
+    pub lpfr_carve_out_internet_only: Option<bool>,
+    #[serde(default)]
+    pub lpfr_carve_out_own_used_assets: Option<bool>,
+    #[serde(default)]
     pub esir_elements: Vec<EsirElement>,
 }
 
@@ -179,6 +189,10 @@ pub struct ShopProfileRequest {
     #[serde(default)]
     pub distance_selling: Option<bool>,
     pub lpfr_in_premises: Option<bool>,
+    #[serde(default)]
+    pub lpfr_carve_out_internet_only: Option<bool>,
+    #[serde(default)]
+    pub lpfr_carve_out_own_used_assets: Option<bool>,
     #[serde(default)]
     pub esir_elements: Vec<EsirElement>,
 }
@@ -254,6 +268,15 @@ pub fn settings_update_shop_profile(
     request: ShopProfileRequest,
 ) -> Result<ShopProfile, CommandError> {
     save_shop_profile(state.inner(), request).map_err(Into::into)
+}
+
+/// Read-only and never admin-gated: the profile panel has to be able to say
+/// what a missing L-PFR costs *this* shop before anything is saved.
+#[tauri::command]
+pub fn settings_lpfr_notice(
+    state: State<'_, AppState>,
+) -> Result<crate::legal::LegalNotice, CommandError> {
+    lpfr_notice(state.inner()).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -610,6 +633,16 @@ pub fn load_shop_profile(state: &AppState) -> Result<ShopProfile, AppError> {
     load_json_setting(state, SHOP_PROFILE_KEY, ShopProfile::default())
 }
 
+/// The ZF čl. 6 st. 4 notice, resolved against the **stored** legal form.
+///
+/// Only the tier is resolved here. Whether the duty is engaged at all depends on
+/// the three live answers (L-PFR present, and the two carve-outs), which the
+/// profile panel edits in place — so the gating belongs to the surface, while
+/// the figure may come from nowhere but `legal.rs`.
+pub fn lpfr_notice(state: &AppState) -> Result<crate::legal::LegalNotice, AppError> {
+    Ok(crate::legal::lpfr_required(&load_shop_profile(state)?))
+}
+
 pub fn save_shop_profile(
     state: &AppState,
     request: ShopProfileRequest,
@@ -641,6 +674,8 @@ pub fn save_shop_profile(
         pdv_obveznik: request.pdv_obveznik,
         distance_selling: request.distance_selling,
         lpfr_in_premises: request.lpfr_in_premises,
+        lpfr_carve_out_internet_only: request.lpfr_carve_out_internet_only,
+        lpfr_carve_out_own_used_assets: request.lpfr_carve_out_own_used_assets,
         esir_elements: elements,
     };
     save_json_setting(state, SHOP_PROFILE_KEY, &profile)?;
@@ -1114,6 +1149,13 @@ mod tests {
                  that silently picks the lenient walk-in branch"
             );
             assert_eq!(profile.lpfr_in_premises, None);
+            assert_eq!(
+                profile.lpfr_carve_out_internet_only, None,
+                "an unanswered carve-out must have an unanswered position — a \
+                 default `false` would silently assert the duty applies, and a \
+                 default `true` would silently excuse the shop from it"
+            );
+            assert_eq!(profile.lpfr_carve_out_own_used_assets, None);
             assert!(profile.esir_elements.is_empty());
         });
     }
@@ -1125,7 +1167,9 @@ mod tests {
                 pravna_forma: Some(PravnaForma::Preduzetnik),
                 pdv_obveznik: Some(false),
                 distance_selling: Some(true),
-                lpfr_in_premises: Some(true),
+                lpfr_in_premises: Some(false),
+                lpfr_carve_out_internet_only: Some(true),
+                lpfr_carve_out_own_used_assets: Some(false),
                 esir_elements: vec![EsirElement {
                     naziv: "Master ESIR".to_string(),
                     verzija: "2.1.4".to_string(),
@@ -1150,6 +1194,8 @@ mod tests {
 
             assert_eq!(saved.pravna_forma, Some(PravnaForma::Preduzetnik));
             assert_eq!(saved.distance_selling, Some(true));
+            assert_eq!(saved.lpfr_carve_out_internet_only, Some(true));
+            assert_eq!(saved.lpfr_carve_out_own_used_assets, Some(false));
             assert_eq!(saved.esir_elements[0].verzija, "2.1.4");
 
             let reloaded = load_shop_profile(state).expect("profile should reload");
@@ -1169,12 +1215,62 @@ mod tests {
                     pdv_obveznik: Some(true),
                     distance_selling: Some(true),
                     lpfr_in_premises: Some(true),
+                    lpfr_carve_out_internet_only: None,
+                    lpfr_carve_out_own_used_assets: None,
                     esir_elements: Vec::new(),
                 },
             )
             .expect_err("cashier is forbidden");
 
             assert_eq!(error.code(), "forbidden");
+        });
+    }
+
+    /// The panel gates the ZF čl. 6 st. 4 notice on the live answers, but the
+    /// **figure** may only ever come from `legal.rs`, resolved against the
+    /// stored legal form. An UNSET form has to yield no figure at all rather
+    /// than a plausible one.
+    #[test]
+    fn lpfr_notice_resolves_the_stored_tier_and_stays_silent_while_it_is_unset() {
+        with_state("lpfr_notice_tier", |state| {
+            sign_in_admin(state);
+
+            let notice = lpfr_notice(state).expect("notice should resolve");
+            assert!(
+                notice.penalty.is_none(),
+                "no legal form is stored yet, so no figure may be quoted: {:?}",
+                notice.penalty
+            );
+            assert!(
+                notice.citation.contains("čl. 6 st. 4"),
+                "{}",
+                notice.citation
+            );
+
+            save_shop_profile(
+                state,
+                ShopProfileRequest {
+                    pravna_forma: Some(PravnaForma::Preduzetnik),
+                    pdv_obveznik: Some(false),
+                    distance_selling: Some(false),
+                    lpfr_in_premises: Some(false),
+                    lpfr_carve_out_internet_only: Some(false),
+                    lpfr_carve_out_own_used_assets: Some(false),
+                    esir_elements: Vec::new(),
+                },
+            )
+            .expect("admin should save");
+
+            let notice = lpfr_notice(state).expect("notice should resolve");
+            let penalty = notice.penalty.expect("the stored tier is known");
+            assert!(
+                penalty.contains("50.000 do 500.000"),
+                "the preduzetnik row is ZF čl. 15 st. 3: {penalty}"
+            );
+            assert!(
+                !penalty.contains("2.000.000"),
+                "the pravno-lice ceiling must never reach a preduzetnik: {penalty}"
+            );
         });
     }
 

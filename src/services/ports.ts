@@ -40,6 +40,7 @@ import type {
   KepStatus,
   InventoryAdjustmentRequest,
   InventoryAdjustmentResult,
+  LegalNotice,
   LowStockReport,
   LoginRequest,
   OpenShiftRequest,
@@ -103,6 +104,13 @@ export interface SettingsService {
   updateSalesSettings(request: SalesSettingsRequest): Promise<SalesSettings>;
   getShopProfile(): Promise<ShopProfile>;
   updateShopProfile(request: ShopProfile): Promise<ShopProfile>;
+  /**
+   * The ZF čl. 6 st. 4 duty (≥1 L-PFR per premises) with its penalty already
+   * resolved against the **stored** legal form. Read-only and never
+   * admin-gated. The frontend never derives the figure — it decides only
+   * whether the duty is engaged, from the shop's own answers.
+   */
+  getLpfrNotice(): Promise<LegalNotice>;
   /**
    * The cached NBS middle rate the AML čl. 46 st. 1 dinar threshold is derived
    * from. Read-only and never admin-gated: the till needs to be able to say

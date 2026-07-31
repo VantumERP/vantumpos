@@ -122,6 +122,7 @@ pub fn run() {
             commands::settings::settings_update_sales,
             commands::settings::settings_get_shop_profile,
             commands::settings::settings_update_shop_profile,
+            commands::settings::settings_lpfr_notice,
             commands::settings::settings_get_eur_rate,
             commands::settings::settings_refresh_eur_rate,
             commands::settings::settings_set_manual_eur_rate,

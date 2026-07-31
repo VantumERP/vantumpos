@@ -1123,6 +1123,8 @@ mod tests {
             pdv_obveznik: Some(false),
             distance_selling: Some(false),
             lpfr_in_premises: Some(true),
+            lpfr_carve_out_internet_only: Some(false),
+            lpfr_carve_out_own_used_assets: Some(false),
             esir_elements: Vec::new(),
         }
     }

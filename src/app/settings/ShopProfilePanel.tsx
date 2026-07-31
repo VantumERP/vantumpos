@@ -37,6 +37,7 @@ import { Separator } from "@/components/ui/separator";
 import type {
   EsirElement,
   EsirTip,
+  LegalNotice,
   PravnaForma,
   ShopProfile,
 } from "@/services/types";
@@ -48,6 +49,28 @@ const REGISTAR_URL =
 /** Approval attaches to a version string, so a one-time check decays. */
 const RECHECK_AFTER_MS = 365 * 24 * 60 * 60 * 1000;
 
+/**
+ * Mirrors `legal::lpfr_required` in wording and citation only, and is used only
+ * when the backend notice has not been supplied.
+ *
+ * `penalty` is `null` and always will be: every statutory fine figure lives in
+ * `src-tauri/src/legal.rs` and nowhere else, so a second copy here could
+ * silently drift out of tier. A `null` penalty is the one answer that can never
+ * be the wrong one — and it must never turn the panel silent, because silence
+ * after a „ne“ is exactly what ZF čl. 6 st. 4 must not be met with.
+ */
+const LPFR_NOTICE_FALLBACK: LegalNotice = {
+  summary:
+    "U svakom poslovnom prostoru i poslovnoj prostoriji mora da radi najmanje " +
+    "jedan lokalni procesor fiskalnih računa (L-PFR) — uređaj koji izdaje račun " +
+    "i bez interneta. Zakon izuzima samo obveznika koji promet na malo obavlja " +
+    "isključivo putem interneta i obveznika koji obavlja promet na malo " +
+    "sopstvenih korišćenih pokretnih materijalnih sredstava.",
+  penalty: null,
+  citation: "Zakon o fiskalizaciji, čl. 6 st. 4; prekršaj: čl. 15 st. 1 tač. 4.",
+  isLegalDuty: true,
+};
+
 interface ShopProfilePanelProps {
   profile: ShopProfile;
   onSave: (request: ShopProfile) => Promise<void> | void;
@@ -56,6 +79,12 @@ interface ShopProfilePanelProps {
    * no-op inside the Tauri webview, so the link must go through the opener.
    */
   onOpenRegistry?: (url: string) => Promise<void> | void;
+  /**
+   * `settings_lpfr_notice` — the ZF čl. 6 st. 4 duty with the penalty resolved
+   * against the **stored** legal form. The panel never derives a figure; it
+   * decides only *whether* the duty is engaged, from the live answers.
+   */
+  lpfrNotice?: LegalNotice | null;
 }
 
 /** `nije` is a real answer state, never a silent `false`. */
@@ -122,10 +151,31 @@ export function ShopProfilePanel({
   profile,
   onSave,
   onOpenRegistry,
+  lpfrNotice,
 }: ShopProfilePanelProps) {
   const [form, setForm] = useState<ShopProfile>(profile);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  /**
+   * ZF čl. 6 st. 4. The duty stands unless a carve-out is affirmatively
+   * claimed: `!== true` keeps it standing for an unanswered carve-out as well
+   * as a denied one, because silence is not one of the two exemptions the
+   * statute grants.
+   */
+  const lpfrDutyEngaged =
+    form.lpfrInPremises === false &&
+    form.lpfrCarveOutInternetOnly !== true &&
+    form.lpfrCarveOutOwnUsedAssets !== true;
+
+  const notice = lpfrNotice ?? LPFR_NOTICE_FALLBACK;
+  /**
+   * The figure was resolved for the legal form as **stored**. While an unsaved
+   * radio says something else, quoting it would put the other tier's range in
+   * front of the operator — the one mistake this module exists to prevent.
+   */
+  const lpfrPenalty =
+    form.pravnaForma === profile.pravnaForma ? notice.penalty : null;
 
   useEffect(() => {
     setForm(profile);
@@ -174,6 +224,8 @@ export function ShopProfilePanel({
         pdvObveznik: form.pdvObveznik,
         distanceSelling: form.distanceSelling,
         lpfrInPremises: form.lpfrInPremises,
+        lpfrCarveOutInternetOnly: form.lpfrCarveOutInternetOnly,
+        lpfrCarveOutOwnUsedAssets: form.lpfrCarveOutOwnUsedAssets,
         esirElements: form.esirElements,
       });
     } catch (saveError) {
@@ -316,6 +368,59 @@ export function ShopProfilePanel({
                 }))
               }
             />
+
+            <TriStateField
+              idPrefix="shop-profile-lpfr-internet"
+              legend="Prodaja isključivo preko interneta"
+              description="Da li ova radnja obavlja promet na malo isključivo putem interneta? Samo tada ZF čl. 6 st. 4 ne traži lokalni PFR u prostoru."
+              ariaPrefix="Prodaja isključivo preko interneta"
+              unansweredLabel="Bez odgovora"
+              value={toTriState(form.lpfrCarveOutInternetOnly)}
+              onChange={(value) =>
+                setForm((current) => ({
+                  ...current,
+                  lpfrCarveOutInternetOnly: fromTriState(value),
+                }))
+              }
+            />
+
+            <TriStateField
+              idPrefix="shop-profile-lpfr-sopstvena"
+              legend="Prodaja sopstvenih korišćenih sredstava"
+              description="Da li je promet ove radnje promet na malo sopstvenih korišćenih pokretnih materijalnih sredstava? To je drugi izuzetak iz ZF čl. 6 st. 4."
+              ariaPrefix="Prodaja sopstvenih korišćenih sredstava"
+              unansweredLabel="Bez odgovora"
+              value={toTriState(form.lpfrCarveOutOwnUsedAssets)}
+              onChange={(value) =>
+                setForm((current) => ({
+                  ...current,
+                  lpfrCarveOutOwnUsedAssets: fromTriState(value),
+                }))
+              }
+            />
+
+            {lpfrDutyEngaged ? (
+              <Alert variant="destructive">
+                <TriangleAlertIcon aria-hidden="true" />
+                <AlertTitle>
+                  Bez lokalnog PFR-a u ovom prostoru — obaveza iz ZF čl. 6 st. 4
+                </AlertTitle>
+                <AlertDescription>
+                  <div className="flex flex-col gap-2">
+                    <p>{notice.summary}</p>
+                    {lpfrPenalty ? (
+                      <p>{lpfrPenalty}</p>
+                    ) : (
+                      <p>
+                        Izaberite pravnu formu iznad i sačuvajte profil da bi
+                        iznos kazne bio prikazan.
+                      </p>
+                    )}
+                    <p className="text-xs">{notice.citation}</p>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            ) : null}
           </FieldGroup>
         </CardContent>
       </Card>

@@ -101,6 +101,25 @@ const DECLARATION_ADVISORY =
  * copy in this double could silently drift out of tier. A `null` penalty is the
  * one answer that can never be the wrong one.
  */
+/**
+ * Mirrors `legal::lpfr_required` in wording and citation only.
+ *
+ * `penalty` is `null` whatever the legal form, for the same reason it is null
+ * in every other double here: `src-tauri/src/legal.rs` is the only place a fine
+ * figure may be decided, and a second copy could silently drift out of tier.
+ */
+const lpfrRequiredNotice: LegalNotice = {
+  summary:
+    "U svakom poslovnom prostoru i poslovnoj prostoriji mora da radi najmanje " +
+    "jedan lokalni procesor fiskalnih računa (L-PFR) — uređaj koji izdaje račun " +
+    "i bez interneta. Zakon izuzima samo obveznika koji promet na malo obavlja " +
+    "isključivo putem interneta i obveznika koji obavlja promet na malo " +
+    "sopstvenih korišćenih pokretnih materijalnih sredstava.",
+  penalty: null,
+  citation: "Zakon o fiskalizaciji, čl. 6 st. 4; prekršaj: čl. 15 st. 1 tač. 4.",
+  isLegalDuty: true,
+};
+
 const declarationMissingNotice: LegalNotice = {
   summary:
     "Prodaja robe bez deklaracije. Deklaraciju obezbeđuje proizvođač, " +
@@ -348,6 +367,8 @@ export function createMockServices(): PosServices {
     pdvObveznik: null,
     distanceSelling: null,
     lpfrInPremises: null,
+    lpfrCarveOutInternetOnly: null,
+    lpfrCarveOutOwnUsedAssets: null,
     esirElements: [],
   };
   /**
@@ -548,6 +569,9 @@ export function createMockServices(): PosServices {
       },
       async getShopProfile() {
         return shopProfile;
+      },
+      async getLpfrNotice() {
+        return lpfrRequiredNotice;
       },
       async updateShopProfile(request) {
         if (session?.user.role !== "admin") {

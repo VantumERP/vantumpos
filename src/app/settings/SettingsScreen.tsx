@@ -64,6 +64,7 @@ import type {
   CashDepositCalendar,
   CompanySettings,
   EurRateStatus,
+  LegalNotice,
   ReceiptSettings,
   SalesSettings,
   ShopProfile,
@@ -86,6 +87,12 @@ type LoadState =
       receipt: ReceiptSettings;
       sales: SalesSettings;
       shopProfile: ShopProfile;
+      /**
+       * `settings_lpfr_notice` — the ZF čl. 6 st. 4 duty with its penalty
+       * resolved against the stored legal form. Refetched after every profile
+       * save, so the tier on screen can never lag the tier on record.
+       */
+      lpfrNotice: LegalNotice;
       backupStatus: BackupStatus;
       backupJobs: BackupJob[];
     }
@@ -113,6 +120,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       services.settings.getReceiptSettings(),
       services.settings.getSalesSettings(),
       services.settings.getShopProfile(),
+      services.settings.getLpfrNotice(),
       services.backup.getBackupStatus(),
       services.backup.listBackupJobs(),
     ])
@@ -123,6 +131,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           receipt,
           sales,
           shopProfile,
+          lpfrNotice,
           backupStatus,
           backupJobs,
         ]) => {
@@ -133,6 +142,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
             receipt,
             sales,
             shopProfile,
+            lpfrNotice,
             backupStatus,
             backupJobs,
           });
@@ -243,11 +253,17 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       {activeTab === "profile" ? (
         <ShopProfilePanel
           profile={state.shopProfile}
+          lpfrNotice={state.lpfrNotice}
           onOpenRegistry={(url) => services.print.openExternalUrl(url)}
           onSave={async (request) => {
             const shopProfile = await services.settings.updateShopProfile(request);
+            // The saved legal form may have changed the tier the čl. 6 st. 4
+            // figure is resolved at, so the notice is refetched with it.
+            const lpfrNotice = await services.settings.getLpfrNotice();
             setState((current) =>
-              current.status === "ready" ? { ...current, shopProfile } : current,
+              current.status === "ready"
+                ? { ...current, shopProfile, lpfrNotice }
+                : current,
             );
             toast.success("Profil radnje je sačuvan.");
           }}

@@ -79,6 +79,15 @@ export interface ShopProfile {
   /** `null` = nije odgovoreno. Never coalesce it to `false` — see §3 req 31 / §5 Q-8. */
   distanceSelling: boolean | null;
   lpfrInPremises: boolean | null;
+  /**
+   * The two ZF čl. 6 st. 4 carve-outs (§3 req 32): retail conducted
+   * exclusively over the internet, and retail of the shop's own used movable
+   * assets. `true` is the LENIENT branch — it excuses the per-premises L-PFR
+   * floor — so `null` must never be read as either answer. An unanswered
+   * carve-out leaves the čl. 6 st. 4 duty standing.
+   */
+  lpfrCarveOutInternetOnly: boolean | null;
+  lpfrCarveOutOwnUsedAssets: boolean | null;
   esirElements: EsirElement[];
 }
 
