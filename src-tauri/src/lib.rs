@@ -2,6 +2,7 @@ mod aml;
 mod app_error;
 mod campaign_evidence;
 mod campaigns;
+mod cash_deposit;
 mod clock;
 mod commands;
 mod db;
