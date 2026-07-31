@@ -204,14 +204,22 @@ pub struct DepositBucket {
 }
 
 /// Builds the deposit buckets, oldest first, and draws every polog down against
-/// the oldest bucket that still has a remainder.
+/// the oldest bucket it is *eligible* for.
+///
+/// A polog may only discharge cash the shop had already received when it was
+/// made — buckets whose `trading_date` is at or before `deposit.date`. Čl. 3
+/// st. 1 runs from receipt, so a deposit cannot satisfy the duty for takings
+/// that did not exist yet. Deposits are therefore applied chronologically, and
+/// among the eligible buckets the oldest is drawn down first (§3 rule 12); the
+/// ascending sort below is load-bearing, not cosmetic.
 ///
 /// Partial deposits are lawful — the duty is not all-or-nothing — so a polog
-/// smaller than the bucket leaves a remainder rather than clearing or failing
-/// (§3 rule 12). A polog larger than everything outstanding simply has nothing
-/// left to discharge: outstanding saturates at zero and never goes negative,
-/// because a negative "outstanding" would read as credit against future takings
-/// that the statute does not grant.
+/// smaller than the bucket leaves a remainder rather than clearing or failing.
+/// Amount that no eligible bucket can absorb is **dropped**, not carried
+/// forward: outstanding saturates at zero and no later bucket is credited,
+/// because either would be credit against future takings that the statute does
+/// not grant, and would hand the owner a false "clean" state. Over-reporting an
+/// obaveza is the safe direction; a silently pre-paid bucket is not.
 ///
 /// A trading date whose documented payouts consumed the whole take carries no
 /// duty and gets no bucket.
@@ -253,6 +261,13 @@ pub fn build_buckets(
         for bucket in buckets.iter_mut() {
             if remaining == 0 {
                 break;
+            }
+            // Both are `yyyy-MM-dd`, so lexicographic order is chronological —
+            // the same property the BTreeMap above relies on. `continue`, not
+            // `break`: eligibility is a per-bucket test, so the walk must not
+            // depend on the buckets happening to be sorted.
+            if bucket.trading_date.as_str() > deposit.date.as_str() {
+                continue;
             }
             let applied = remaining.min(bucket.outstanding_minor);
             if applied <= 0 {
@@ -470,5 +485,91 @@ mod tests {
             &config(),
         );
         assert_eq!(buckets[0].outstanding_minor, 0);
+    }
+
+    /// Čl. 3 st. 1 runs from *receipt* of the cash: a polog made before the
+    /// money existed cannot have deposited it. Without the eligibility guard a
+    /// `bank_deposit` row that predates the sales — pre-migration takings, the
+    /// owner paying in his own dinars, a deposit recorded ahead of the pazar —
+    /// becomes a standing credit that marks every later bucket satisfied, which
+    /// is exactly the false "clean" state §3 rule 10 forbids.
+    #[test]
+    fn a_deposit_cannot_discharge_cash_received_after_it() {
+        let buckets = build_buckets(
+            &[inflow("2026-08-10", 100_000)],
+            &[deposit("2026-08-01", 100_000)],
+            &config(),
+        );
+
+        assert_eq!(
+            buckets[0].deposited_minor, 0,
+            "the polog predates the take, so it deposited none of it"
+        );
+        assert_eq!(
+            buckets[0].outstanding_minor, 100_000,
+            "the whole take is still outstanding"
+        );
+    }
+
+    /// The excess is dropped, not carried forward. Over-reporting an obaveza is
+    /// the safe direction; a future bucket silently pre-paid is not.
+    #[test]
+    fn over_depositing_is_not_credited_against_a_later_trading_date() {
+        let buckets = build_buckets(
+            &[inflow("2026-08-03", 10_000), inflow("2026-08-20", 500_000)],
+            &[deposit("2026-08-04", 999_000)],
+            &config(),
+        );
+
+        assert_eq!(buckets[0].outstanding_minor, 0, "03.08 is covered");
+        assert_eq!(
+            buckets[1].outstanding_minor, 500_000,
+            "the 04.08 excess cannot pay for cash received on 20.08"
+        );
+        assert_eq!(buckets[1].deposited_minor, 0);
+    }
+
+    /// Ineligibility is per polog, not permanent: the bucket an early deposit
+    /// could not lawfully reach is still discharged by a later one. Dropping the
+    /// early excess must not also drop the duty.
+    #[test]
+    fn a_later_polog_discharges_a_bucket_the_earlier_one_could_not_reach() {
+        let buckets = build_buckets(
+            &[inflow("2026-08-03", 10_000), inflow("2026-08-20", 30_000)],
+            &[
+                deposit("2026-08-04", 100_000),
+                deposit("2026-08-21", 30_000),
+            ],
+            &config(),
+        );
+
+        assert_eq!(buckets[0].outstanding_minor, 0, "04.08 covers 03.08");
+        assert_eq!(
+            buckets[1].deposited_minor, 30_000,
+            "21.08 is after the take, so it may discharge it"
+        );
+        assert_eq!(buckets[1].outstanding_minor, 0);
+    }
+
+    /// With eligibility in play the ascending deposit order is load-bearing:
+    /// applying 06.08's 150.000 first would clear both buckets, whereas the
+    /// lawful chronological pass leaves 03.08's remainder for it.
+    #[test]
+    fn deposits_are_applied_in_chronological_order() {
+        let inflows = vec![inflow("2026-08-03", 100_000), inflow("2026-08-05", 60_000)];
+        let deposits = vec![
+            deposit("2026-08-06", 150_000),
+            deposit("2026-08-04", 40_000),
+        ];
+
+        let buckets = build_buckets(&inflows, &deposits, &config());
+
+        assert_eq!(buckets[0].outstanding_minor, 0);
+        assert_eq!(buckets[1].outstanding_minor, 0);
+        assert_eq!(
+            buckets[0].deposited_minor, 100_000,
+            "04.08 pays 40.000 toward 03.08; 06.08 finishes it"
+        );
+        assert_eq!(buckets[1].deposited_minor, 60_000);
     }
 }
