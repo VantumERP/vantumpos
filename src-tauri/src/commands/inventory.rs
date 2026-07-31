@@ -88,8 +88,10 @@ pub struct DeclarationWarning {
 }
 
 /// Kept next to the struct so the qualifier can never drift away from the notice
-/// it qualifies.
-const DECLARATION_ADVISORY: &str = "U sistemu nisu evidentirani podaci sa deklaracije. \
+/// it qualifies. Shared with the catalog deklaracija-gaps report, which shows the
+/// same notice about the same two blank columns: two copies of this sentence would
+/// let one surface soften the čl. 69a wording the other one hardened.
+pub(crate) const DECLARATION_ADVISORY: &str = "U sistemu nisu evidentirani podaci sa deklaracije. \
      Ako roba fizički nosi ispravnu deklaraciju, prekršaja nema — unesite podatke sa \
      deklaracije ili evidentirajte proveru deklaracije (olakšavajuća okolnost, čl. 69a).";
 

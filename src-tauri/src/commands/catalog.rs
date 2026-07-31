@@ -178,14 +178,32 @@ pub struct ProductListResult {
     pub total: usize,
 }
 
+/// Why an article is on the deklaracija-gaps list. Explicit so the UI branches on
+/// the reason instead of inferring it from the flags below — §3 req 26 requires the
+/// two states to stay visibly apart, and only `MissingIdentityData` may **ever**
+/// carry a penalty figure: see `DeclarationGapRow::notice`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeclarationGapReason {
+    /// A ZoT čl. 34 st. 1 identity field the shop has left blank.
+    MissingIdentityData,
+    /// The article carries a barcode nobody has classified. The deklaracija data
+    /// itself may well be complete.
+    BarcodeUnclassified,
+    /// A code *asserted* to be a GTIN that fails its modulo-10 check digit.
+    GtinCheckDigitInvalid,
+}
+
 /// One article whose deklaracija evidence in the catalog is incomplete.
 ///
-/// Data only, and deliberately **no fine figure**: §4 item 11 leaves it
-/// unresolved which penalty tier a bare missing GTIN falls under (fixed 40.000
-/// vs 50.000–500.000 plus shop closure), and §3 req 26 forbids collapsing the
-/// two. A blank column here is a gap in the shop's own records, not proof that
-/// the goods on the shelf carry no deklaracija — the čl. 34 st. 1 data lives on
-/// the packaging.
+/// A blank column here is a gap in the shop's own records, not proof that the goods
+/// on the shelf carry no deklaracija — the čl. 34 st. 1 data lives on the packaging.
+///
+/// **The penalty figure is per row, never per report.** §4 item 11 and §3 req 26
+/// leave the tier for a bare barcode defect unresolved between
+/// `legal::declaration_defective` and `legal::declaration_missing`, and forbid
+/// collapsing the two; a report-level notice would print the harsher tier next to
+/// every barcode-only row. No amount is repeated here — legal.rs owns every figure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeclarationGapRow {
@@ -204,6 +222,20 @@ pub struct DeclarationGapRow {
     /// digit. Always `false` for `internal`, `none` and an unclassified code —
     /// an in-house printed code must never be reported as a broken GTIN.
     pub gtin_check_digit_invalid: bool,
+    /// Never empty — a row with no reason is not a gap and is not returned. The
+    /// three flags above are the same facts in a shape the UI cannot switch on.
+    pub reasons: Vec<DeclarationGapReason>,
+    /// The record-vs-reality qualifier, shared verbatim with the goods-receipt
+    /// warning. `Some` exactly when `notice` is: the UI must render it *with* the
+    /// notice and never the notice alone (§3 req 26 `[ACCURACY]`).
+    pub advisory: Option<String>,
+    /// The exposure the blank identity fields leave unverified, tier-resolved from
+    /// the shop's own `pravna_forma` so an unknown legal form renders no figure.
+    ///
+    /// `Some` **only** for `MissingIdentityData`. `None` when the row's sole defect
+    /// is an unclassified barcode or a broken check digit: §4 item 11 attaches no
+    /// figure to a bare missing GTIN.
+    pub notice: Option<crate::legal::LegalNotice>,
 }
 
 struct NormalizedProductRequest {
@@ -1349,9 +1381,18 @@ pub fn is_valid_gtin(code: &str) -> bool {
 /// deklaracija, so an archived article is not a gap the shop can act on, and
 /// padding the list with dead rows would bury the ones that matter.
 ///
-/// Never blocks anything and carries no fine figure — see `DeclarationGapRow`.
+/// Never blocks anything. The čl. 68 st. 1 tač. 9 notice rides along **per row**,
+/// and only on a row with a blank identity field — see `DeclarationGapRow::notice`.
+///
+/// The profile is read once and the notice built once, off the connection that is
+/// already open. A `shop_profile` row that will not deserialize fails the whole
+/// report loudly, as it does for the čl. 34 st. 5 gate: nothing is in flight here
+/// that an error could strand, and a silent `ShopProfile::default()` would swap the
+/// shop's real tier for a blank one behind the operator's back.
 pub fn declaration_gaps(db: &Db) -> Result<Vec<DeclarationGapRow>, AppError> {
     let connection = db.open()?;
+    let profile = load_shop_profile_for_connection(&connection)?;
+    let notice = crate::legal::declaration_missing(&profile);
     let mut statement = connection.prepare(
         r#"
 SELECT
@@ -1387,9 +1428,30 @@ ORDER BY p.name, p.id
             .map(|(_, field)| field.to_string())
             .collect::<Vec<_>>();
 
-            let barcode_unclassified = barcode.is_some() && barcode_kind.is_none();
+            // A blank barcode is no barcode, trimmed on the same rule as the two
+            // fields above: „nema klasifikovan barkod" next to an empty code sends
+            // the operator looking for something that was never there, and an empty
+            // string is not a broken GTIN either.
+            let scannable = barcode
+                .as_deref()
+                .map(str::trim)
+                .filter(|code| !code.is_empty());
+
+            let barcode_unclassified = scannable.is_some() && barcode_kind.is_none();
             let gtin_check_digit_invalid = barcode_kind.as_deref() == Some("gtin")
-                && barcode.as_deref().is_some_and(|code| !is_valid_gtin(code));
+                && scannable.is_some_and(|code| !is_valid_gtin(code));
+
+            let identity_data_missing = !missing_fields.is_empty();
+            let mut reasons = Vec::new();
+            if identity_data_missing {
+                reasons.push(DeclarationGapReason::MissingIdentityData);
+            }
+            if barcode_unclassified {
+                reasons.push(DeclarationGapReason::BarcodeUnclassified);
+            }
+            if gtin_check_digit_invalid {
+                reasons.push(DeclarationGapReason::GtinCheckDigitInvalid);
+            }
 
             Ok(DeclarationGapRow {
                 product_id: row.get(0)?,
@@ -1400,17 +1462,19 @@ ORDER BY p.name, p.id
                 missing_fields,
                 barcode_unclassified,
                 gtin_check_digit_invalid,
+                reasons,
+                // Both hang off the identity gap alone: a barcode defect is the
+                // unresolved tier, and §4 item 11 lets no figure near it.
+                advisory: identity_data_missing
+                    .then(|| super::inventory::DECLARATION_ADVISORY.to_string()),
+                notice: identity_data_missing.then(|| notice.clone()),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(rows
         .into_iter()
-        .filter(|row| {
-            !row.missing_fields.is_empty()
-                || row.barcode_unclassified
-                || row.gtin_check_digit_invalid
-        })
+        .filter(|row| !row.reasons.is_empty())
         .collect())
 }
 
@@ -1594,12 +1658,12 @@ mod tests {
         catalog_create_product, catalog_declaration_gaps, catalog_save_category,
         catalog_update_product, create_product, declaration_gaps, get_product, is_valid_gtin,
         list_products, lookup_suggestion_from_open_food_facts_json, prethodna_cena, save_category,
-        search_products, set_product_active, update_product, ProductExternalSourceRequest,
-        ProductListQuery, ProductSearchQuery, ProductSummary, SaveCategoryRequest,
-        SaveProductRequest,
+        search_products, set_product_active, update_product, DeclarationGapReason,
+        ProductExternalSourceRequest, ProductListQuery, ProductSearchQuery, ProductSummary,
+        SaveCategoryRequest, SaveProductRequest,
     };
     use crate::commands::settings::{
-        save_shop_profile, PravnaForma, ShopProfileRequest, SHOP_PROFILE_KEY,
+        save_shop_profile, PravnaForma, ShopProfile, ShopProfileRequest, SHOP_PROFILE_KEY,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -2813,6 +2877,213 @@ mod tests {
             assert!(
                 row.missing_fields.is_empty(),
                 "the identity data is on file; only the GTIN is wrong"
+            );
+        });
+    }
+
+    /// The one branch of the row filter nothing else covers: the čl. 34 st. 1 data
+    /// is complete and the only defect is a barcode nobody has classified. Without
+    /// this test the whole `barcode_unclassified` arm could be deleted and every
+    /// other gaps test would still pass.
+    #[test]
+    fn an_unclassified_barcode_is_a_gap_on_its_own() {
+        with_catalog_state("declaration_gaps_unclassified_only", |state| {
+            sign_in_admin(state);
+
+            let unclassified = create_product_as_admin(
+                state,
+                SaveProductRequest {
+                    barcode: Some("4006381333931".to_string()),
+                    barcode_kind: None,
+                    ..product_request_with_declaration("DEK-GAP-UNCLASSIFIED")
+                },
+            )
+            .expect("an article with complete declaration data should save")
+            .id;
+
+            let rows = declaration_gaps(state.db()).expect("report should run");
+
+            let row = rows
+                .iter()
+                .find(|row| row.product_id == unclassified)
+                .expect("an unclassified barcode is a gap even with the identity data on file");
+            assert!(
+                row.missing_fields.is_empty(),
+                "the čl. 34 st. 1 data is on file: {:?}",
+                row.missing_fields
+            );
+            assert!(row.barcode_unclassified);
+            assert!(
+                !row.gtin_check_digit_invalid,
+                "an unclassified code is never check-digit tested (§3 req 24)"
+            );
+            assert_eq!(
+                row.reasons,
+                vec![DeclarationGapReason::BarcodeUnclassified],
+                "the UI must be able to branch on the reason, not infer it from three flags"
+            );
+            assert!(
+                row.notice.is_none(),
+                "§4 item 11: no figure may hang off a bare barcode gap"
+            );
+        });
+    }
+
+    /// §4 item 11 / §3 req 26: `legal::declaration_missing` renders the čl. 68 st. 3
+    /// range and the zabrana vršenja delatnosti. It may reach the operator only for
+    /// a row whose čl. 34 st. 1 identity data is actually blank — never for a row
+    /// whose only defect is an unclassified or malformed barcode, where the tier is
+    /// unresolved. A single report-level notice would put that figure next to every
+    /// GTIN-only row, which is the collapse req 26 forbids.
+    #[test]
+    fn only_an_identity_data_gap_carries_the_legal_notice() {
+        with_catalog_state("declaration_gaps_notice", |state| {
+            sign_in_admin(state);
+            let missing = seed_product_without_declaration(state);
+            let bad_gtin = create_product_as_admin(
+                state,
+                SaveProductRequest {
+                    barcode: Some("8600000000041".to_string()),
+                    barcode_kind: Some("gtin".to_string()),
+                    ..product_request_with_declaration("DEK-GAP-NOTICE-GTIN")
+                },
+            )
+            .expect("product declared as GTIN should save")
+            .id;
+
+            let rows = declaration_gaps(state.db()).expect("report should run");
+
+            let gtin_only = rows
+                .iter()
+                .find(|row| row.product_id == bad_gtin)
+                .expect("a broken GTIN is listed");
+            assert_eq!(
+                gtin_only.reasons,
+                vec![DeclarationGapReason::GtinCheckDigitInvalid]
+            );
+            assert!(
+                gtin_only.notice.is_none(),
+                "the penalty tier for a bare barcode defect is unresolved: no figure"
+            );
+            assert!(
+                gtin_only.advisory.is_none(),
+                "the advisory qualifies the notice; with no notice it has nothing to qualify"
+            );
+
+            let identity = rows
+                .iter()
+                .find(|row| row.product_id == missing)
+                .expect("a blank identity field is listed");
+            assert!(identity
+                .reasons
+                .contains(&DeclarationGapReason::MissingIdentityData));
+            let notice = identity
+                .notice
+                .as_ref()
+                .expect("an identity-data gap carries the tier-resolved notice");
+            assert!(
+                notice.is_legal_duty,
+                "selling goods without a deklaracija IS an offence"
+            );
+            // Compared against the constructor rather than to literal text: no fine
+            // figure may live outside legal.rs. `is_legal_duty` alone would not
+            // notice a swap to the čl. 67 defective tier.
+            assert_eq!(
+                *notice,
+                crate::legal::declaration_missing(&ShopProfile::default()),
+                "the notice must be the čl. 68 st. 1 tač. 9 missing-declaration tier"
+            );
+            assert!(
+                notice.penalty.is_none(),
+                "pravna forma is unanswered here, so no plausible figure may render: {:?}",
+                notice.penalty
+            );
+            assert!(
+                identity
+                    .advisory
+                    .as_deref()
+                    .is_some_and(|line| line.contains("prekršaja nema")),
+                "a blank column is a record gap, not a proven offence: {:?}",
+                identity.advisory
+            );
+        });
+    }
+
+    /// The tier comes from the shop's own `pravna_forma`, resolved by legal.rs. A
+    /// hardcoded `ShopProfile::default()` would satisfy every assertion in the test
+    /// above, so the preduzetnik tier has to be pinned separately.
+    #[test]
+    fn the_declaration_gap_notice_renders_the_shops_own_tier() {
+        with_catalog_state("declaration_gaps_tier", |state| {
+            sign_in_admin(state);
+            save_shop_profile(state, walk_in_profile_request()).expect("profile saves");
+            let missing = seed_product_without_declaration(state);
+
+            let rows = declaration_gaps(state.db()).expect("report should run");
+
+            let row = rows
+                .iter()
+                .find(|row| row.product_id == missing)
+                .expect("gap listed");
+            let notice = row
+                .notice
+                .as_ref()
+                .expect("identity gap carries the notice");
+            assert_eq!(
+                *notice,
+                crate::legal::declaration_missing(&ShopProfile {
+                    pravna_forma: Some(PravnaForma::Preduzetnik),
+                    ..ShopProfile::default()
+                }),
+                "the preduzetnik must see the preduzetnik tier, resolved by legal.rs"
+            );
+            assert!(
+                notice.penalty.is_some(),
+                "a known legal form does get a figure"
+            );
+        });
+    }
+
+    /// A blank barcode is no barcode. „Nema klasifikovan barkod" next to an empty
+    /// code is a phantom gap that sends the operator looking for a barcode that was
+    /// never there. The write paths normalise whitespace away, but no CHECK
+    /// constraint forbids the row, so the report has to trim before it decides —
+    /// exactly as it already does for the two identity fields.
+    #[test]
+    fn a_blank_barcode_is_not_an_unclassified_barcode() {
+        with_catalog_state("declaration_gaps_blank_barcode", |state| {
+            let blank = {
+                let connection = state.db().open().expect("database should open");
+                connection
+                    .execute(
+                        "INSERT INTO products (
+                            name,
+                            sku,
+                            barcode,
+                            category_id,
+                            unit_of_measure,
+                            sale_price_minor,
+                            purchase_price_minor,
+                            tax_rate_id,
+                            minimum_stock_milli,
+                            active,
+                            manufacturer_name,
+                            country_of_origin,
+                            created_at,
+                            updated_at
+                         )
+                         VALUES ('Sir 500 g', 'SIR-500', '   ', 1, 'kom', 30000, 20000, 1, 0, 1, 'Mlekara Šabac d.o.o.', 'Srbija', '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z')",
+                        [],
+                    )
+                    .expect("a whitespace-only barcode should insert: no constraint forbids it");
+                connection.last_insert_rowid()
+            };
+
+            let rows = declaration_gaps(state.db()).expect("report should run");
+
+            assert!(
+                rows.iter().all(|row| row.product_id != blank),
+                "a whitespace-only barcode is not a barcode nobody has classified"
             );
         });
     }
