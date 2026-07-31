@@ -209,13 +209,19 @@ pub fn inventory_write_off(
 /// deklaracija. The stamp is an audit record of *who looked and when* — it is not
 /// an assertion that the catalog fields are transcribed, because the st. 1 data
 /// lives on the packaging and the shop may lawfully hold goods it has not typed
-/// in. Admin-gated: it is evidence a shop would show an inspector.
+/// in.
+///
+/// Session-gated, not admin-gated. The čl. 69a tač. 4 mitigation record belongs
+/// where the goods are received, and `inventory_receive` admits the cashier; an
+/// admin-only stamp would be reachable only by someone who is not at the pallet.
+/// `mark_declaration_checked` derives the acting user from the session itself,
+/// so the record still names whoever actually looked.
 #[tauri::command]
 pub fn inventory_mark_declaration_checked(
     state: State<'_, AppState>,
     product_id: i64,
 ) -> Result<(), CommandError> {
-    super::auth::require_admin(state.inner())?;
+    super::auth::require_session(state.inner())?;
     let now = now_utc_string()?;
     mark_declaration_checked(state.inner(), product_id, &now).map_err(Into::into)
 }
@@ -852,9 +858,9 @@ mod tests {
     use crate::app_error::CommandError;
     use crate::commands::inventory::{
         apply_inventory_adjustment, get_product_ledger_for_connection, inventory_correct,
-        inventory_receive, inventory_write_off, list_stock_for_connection,
-        mark_declaration_checked, write_stock_movement, InventoryAdjustmentRequest,
-        InventoryMovementType, StockListQuery, StockMovementWrite,
+        inventory_mark_declaration_checked, inventory_receive, inventory_write_off,
+        list_stock_for_connection, mark_declaration_checked, write_stock_movement,
+        InventoryAdjustmentRequest, InventoryMovementType, StockListQuery, StockMovementWrite,
     };
     use crate::commands::settings::{PravnaForma, ShopProfile};
     use crate::db::{test_database_path, Db};
@@ -1893,6 +1899,66 @@ mod tests {
 
             assert_eq!(at, "2026-07-31T10:00:00Z");
             assert_eq!(by, admin_id);
+        }
+
+        std::fs::remove_file(&path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                path.display()
+            )
+        });
+    }
+
+    /// §3 req 25 puts the čl. 69a tač. 4 record at goods receipt because that is
+    /// where the operator is standing — and `inventory_receive` admits the
+    /// cashier. An admin-only stamp would be reachable only by someone who is
+    /// not at the pallet, so the command must take the session, not the role.
+    #[test]
+    fn marking_the_declaration_check_is_open_to_the_cashier_who_receives_the_goods() {
+        let path = test_database_path("declaration_check_stamp_cashier");
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            {
+                let mut connection = db.open().expect("database should open");
+                seed_required_data(&mut connection);
+            }
+
+            let state = AppState::new(db);
+            sign_in_cashier(&state);
+
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app should build");
+
+            inventory_mark_declaration_checked(app.state::<AppState>(), 1)
+                .expect("the cashier at the pallet should be able to record the check");
+
+            let conn = app
+                .state::<AppState>()
+                .db()
+                .open()
+                .expect("database should open");
+            let (at, by): (String, i64) = conn
+                .query_row(
+                    "SELECT declaration_checked_at, declaration_checked_by
+                     FROM products WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("stamp should exist");
+            let cashier_id: i64 = conn
+                .query_row("SELECT id FROM users WHERE username = 'marko'", [], |row| {
+                    row.get(0)
+                })
+                .expect("cashier should exist");
+
+            assert!(!at.is_empty(), "the stamp records when the operator looked");
+            assert_eq!(
+                by, cashier_id,
+                "the stamp records the operator who looked, not an administrator"
+            );
         }
 
         std::fs::remove_file(&path).unwrap_or_else(|error| {

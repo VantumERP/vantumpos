@@ -472,6 +472,19 @@ function InventoryAdjustmentDialog({
     }
   }, [adjustment]);
 
+  // Clearing on close, not on the next open: the effect above runs *after*
+  // paint, so a dialog reopened for another article would render one frame
+  // carrying the previous article's čl. 34 warning. The effect stays as
+  // belt-and-braces for state arriving any other way.
+  function handleOpenChange(open: boolean) {
+    if (!open) {
+      setDeclarationWarnings([]);
+      setMarkingChecked(false);
+    }
+
+    onOpenChange(open);
+  }
+
   const copy = adjustment ? adjustmentCopy(adjustment.mode) : null;
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -507,7 +520,7 @@ function InventoryAdjustmentDialog({
       if (warnings.length > 0) {
         setDeclarationWarnings(warnings);
       } else {
-        onOpenChange(false);
+        handleOpenChange(false);
       }
 
       await onSaved(adjustment.item.productId);
@@ -530,7 +543,7 @@ function InventoryAdjustmentDialog({
         adjustment.item.productId,
       );
       toast.success("Provera deklaracije je evidentirana.");
-      onOpenChange(false);
+      handleOpenChange(false);
     } catch (unknownError) {
       toast.error(getCommandMessage(unknownError));
     } finally {
@@ -539,14 +552,14 @@ function InventoryAdjustmentDialog({
   }
 
   return (
-    <Dialog open={Boolean(adjustment)} onOpenChange={onOpenChange}>
+    <Dialog open={Boolean(adjustment)} onOpenChange={handleOpenChange}>
       <DialogContent>
         {declarationWarnings.length > 0 ? (
           <DeclarationWarningPanel
             warnings={declarationWarnings}
             marking={markingChecked}
             onMarkChecked={handleMarkChecked}
-            onClose={() => onOpenChange(false)}
+            onClose={() => handleOpenChange(false)}
           />
         ) : copy && adjustment ? (
           <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
@@ -593,7 +606,11 @@ function InventoryAdjustmentDialog({
             </FieldGroup>
 
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleOpenChange(false)}
+              >
                 Odustani
               </Button>
               <Button type="submit" disabled={submitting}>

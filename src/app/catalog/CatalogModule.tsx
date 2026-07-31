@@ -1160,6 +1160,7 @@ function DeclarationGapsReport({
   const [rows, setRows] = useState<DeclarationGapRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [forbidden, setForbidden] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1167,6 +1168,7 @@ function DeclarationGapsReport({
     async function load() {
       setLoading(true);
       setError(null);
+      setForbidden(false);
 
       try {
         const gaps = await services.catalog.declarationGaps();
@@ -1175,7 +1177,18 @@ function DeclarationGapsReport({
         }
       } catch (unknownError) {
         if (!cancelled) {
-          setError(commandMessage(unknownError, "Izveštaj nije učitan."));
+          // `catalog_declaration_gaps` is admin-gated while the "Artikli"
+          // screen is not, so a cashier reaches this tab. A refusal is a
+          // permission boundary, not a broken report — saying so plainly beats
+          // a destructive alert carrying a raw backend error.
+          if (
+            isCommandError(unknownError) &&
+            unknownError.code === "forbidden"
+          ) {
+            setForbidden(true);
+          } else {
+            setError(commandMessage(unknownError, "Izveštaj nije učitan."));
+          }
         }
       } finally {
         if (!cancelled) {
@@ -1203,7 +1216,16 @@ function DeclarationGapsReport({
         </p>
       </div>
 
-      {error ? (
+      {forbidden ? (
+        <Alert>
+          <AlertTitle>Izveštaj je dostupan samo administratoru.</AlertTitle>
+          <AlertDescription>
+            Prijavite se kao administrator da biste videli artikle bez podataka
+            deklaracije. Prijem robe i evidentiranje provere deklaracije ostaju
+            dostupni i kasiru.
+          </AlertDescription>
+        </Alert>
+      ) : error ? (
         <Alert variant="destructive">
           <AlertTitle>Izveštaj nije učitan</AlertTitle>
           <AlertDescription>{error}</AlertDescription>

@@ -844,6 +844,15 @@ export function createMockServices(): PosServices {
         } satisfies PrethodnaCenaDto;
       },
       async declarationGaps() {
+        // `catalog_declaration_gaps` is `require_admin` — the double models the
+        // gate so the report's permission branch is testable.
+        if (session?.user.role !== "admin") {
+          throw {
+            code: "forbidden",
+            message: "Samo administrator može da izvrši ovu akciju.",
+          };
+        }
+
         return declarationGapsFor(products);
       },
     },
@@ -919,6 +928,9 @@ export function createMockServices(): PosServices {
           movements: ledgerMovements.get(productId) ?? [],
         };
       },
+      // No role gate: `inventory_mark_declaration_checked` is session-gated, not
+      // admin-gated — the čl. 69a tač. 4 record belongs to whoever stands at the
+      // pallet, and `inventory_receive` admits the cashier too.
       async markDeclarationChecked(productId) {
         findProduct(productId);
       },

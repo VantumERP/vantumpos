@@ -545,10 +545,15 @@ describe("CatalogModule", () => {
           gtinCheckDigitInvalid: false,
           reasons: ["missingIdentityData", "barcodeUnclassified"],
           advisory: "U sistemu nisu evidentirani podaci sa deklaracije.",
+          // `legal::declaration_missing` verbatim, with `penalty: null`: one
+          // čl. 34 state (roba bez deklaracije, čl. 68) and no figure — every
+          // amount lives in src-tauri/src/legal.rs.
           notice: {
-            summary: "Zabranjeno je prodavati robu bez deklaracije.",
-            penalty: "Novčana kazna za preduzetnika: 50.000 do 500.000 dinara.",
-            citation: "Zakon o trgovini, čl. 34 st. 1; kazne čl. 68 st. 1 tač. 9.",
+            summary:
+              "Prodaja robe bez deklaracije. Deklaraciju obezbeđuje proizvođač, " +
+              "odnosno uvoznik, ali za prodaju takve robe odgovara trgovac.",
+            penalty: null,
+            citation: "Zakon o trgovini, čl. 34 st. 1–2, čl. 68 st. 1 tač. 9.",
             isLegalDuty: true,
           },
         },
@@ -568,7 +573,12 @@ describe("CatalogModule", () => {
       ).toBeInTheDocument();
       expect(
         screen.getByText(
-          "Novčana kazna za preduzetnika: 50.000 do 500.000 dinara.",
+          "Prodaja robe bez deklaracije. Deklaraciju obezbeđuje proizvođač, odnosno uvoznik, ali za prodaju takve robe odgovara trgovac.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "Unesite pravnu formu u Podešavanja → Profil za pun prikaz.",
         ),
       ).toBeInTheDocument();
     });
@@ -622,6 +632,28 @@ describe("CatalogModule", () => {
           "Svi aktivni artikli imaju evidentirane podatke deklaracije.",
         ),
       ).toBeInTheDocument();
+    });
+
+    // `catalog_declaration_gaps` is admin-gated but the "Artikli" screen is not,
+    // so a cashier can reach this tab. A permission refusal is not a broken
+    // report and must not be dressed as one.
+    it("tells a cashier the report is an administrator view instead of showing a load failure", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      await services.auth.login({ username: "marko", credential: "1234" });
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+      await user.click(
+        await screen.findByRole("tab", { name: "Deklaracije" }),
+      );
+
+      expect(
+        await screen.findByText("Izveštaj je dostupan samo administratoru."),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("Izveštaj nije učitan")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("Samo administrator može da izvrši ovu akciju."),
+      ).not.toBeInTheDocument();
     });
   });
 });

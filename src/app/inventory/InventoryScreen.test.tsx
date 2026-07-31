@@ -64,6 +64,19 @@ describe("InventoryScreen", () => {
       "deklaracije ili evidentirajte proveru deklaracije (olakšavajuća " +
       "okolnost, čl. 69a).";
 
+    // `legal::declaration_missing` verbatim, with `penalty: null` — the fixture
+    // names one čl. 34 state (roba bez deklaracije, čl. 68) and never welds it
+    // to the neuredna-deklaracija state (čl. 67), and it carries no figure of
+    // its own: every amount comes from src-tauri/src/legal.rs.
+    const missingNotice = {
+      summary:
+        "Prodaja robe bez deklaracije. Deklaraciju obezbeđuje proizvođač, " +
+        "odnosno uvoznik, ali za prodaju takve robe odgovara trgovac.",
+      penalty: null,
+      citation: "Zakon o trgovini, čl. 34 st. 1–2, čl. 68 st. 1 tač. 9.",
+      isLegalDuty: true,
+    };
+
     function receiptWithWarning() {
       return {
         productId: 1,
@@ -79,14 +92,7 @@ describe("InventoryScreen", () => {
             productName: "Mleko 1 l",
             missingFields: ["manufacturerName", "countryOfOrigin"],
             advisory,
-            notice: {
-              summary:
-                "Zabranjeno je prodavati robu bez deklaracije ili sa " +
-                "nepotpunom deklaracijom.",
-              penalty: "Novčana kazna za preduzetnika: 50.000 do 500.000 dinara.",
-              citation: "Zakon o trgovini, čl. 34 st. 1; kazne čl. 68 st. 1 tač. 9.",
-              isLegalDuty: true,
-            },
+            notice: missingNotice,
           },
         ],
       };
@@ -130,19 +136,17 @@ describe("InventoryScreen", () => {
       await receiveMleko(user);
 
       expect(await screen.findByText(advisory)).toBeInTheDocument();
+      expect(screen.getByText(missingNotice.summary)).toBeInTheDocument();
+      // No tier resolved, so no figure is invented — the panel says where the
+      // legal form is entered instead.
       expect(
         screen.getByText(
-          "Zabranjeno je prodavati robu bez deklaracije ili sa nepotpunom deklaracijom.",
+          "Unesite pravnu formu u Podešavanja → Profil da bi kazna bila prikazana.",
         ),
       ).toBeInTheDocument();
       expect(
         screen.getByText(
-          "Novčana kazna za preduzetnika: 50.000 do 500.000 dinara.",
-        ),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          "Zakon o trgovini, čl. 34 st. 1; kazne čl. 68 st. 1 tač. 9.",
+          "Zakon o trgovini, čl. 34 st. 1–2, čl. 68 st. 1 tač. 9.",
         ),
       ).toBeInTheDocument();
       expect(
@@ -175,16 +179,26 @@ describe("InventoryScreen", () => {
       await waitFor(() => expect(markDeclarationChecked).toHaveBeenCalledWith(1));
     });
 
+    // „Mleko 1 l" in the demo catalogue has no proizvođač, so the warning path
+    // is the *default* here — the empty-warning receipt has to be arranged
+    // explicitly, or this test asserts nothing about closing.
     it("closes as usual when the receipt carries no warning", async () => {
       const user = userEvent.setup();
       const services = createMockServices();
+      vi.spyOn(services.inventory, "receiveStock").mockResolvedValue({
+        ...receiptWithWarning(),
+        declarationWarnings: [],
+      });
 
       render(<InventoryScreen services={services} />);
       await receiveMleko(user);
 
       await waitFor(() =>
-        expect(screen.queryByLabelText("Količina")).not.toBeInTheDocument(),
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
       );
+      expect(
+        screen.queryByText("Prijem je upisan — nedostaju podaci deklaracije"),
+      ).not.toBeInTheDocument();
     });
   });
 });
