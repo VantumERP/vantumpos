@@ -45,10 +45,22 @@ pub struct CloseShiftRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CashMovementRequest {
-    pub direction: String, // "pay_in" | "pay_out"
+    /// One of [`CASH_MOVEMENT_DIRECTIONS`].
+    pub direction: String,
     pub amount_minor: i64,
     pub reason: Option<String>,
+    /// Broj izvoda / uplatnice for the two bank directions. Optional — a shop
+    /// that records the polog before the bank confirms it must not be blocked.
+    #[serde(default)]
+    pub bank_reference: Option<String>,
 }
+
+/// The four movement types `cash_movements.movement_type` accepts (migration
+/// v15). `bank_withdrawal` is a podizanje sa računa: money leaves the bank and
+/// enters the drawer, so it counts like a pay_in. `bank_deposit` is a polog:
+/// money leaves the drawer, so it counts like a pay_out.
+const CASH_MOVEMENT_DIRECTIONS: [&str; 4] =
+    ["pay_in", "pay_out", "bank_deposit", "bank_withdrawal"];
 
 #[tauri::command]
 pub fn shift_get_current(state: State<'_, AppState>) -> Result<Option<ShiftSummary>, CommandError> {
@@ -104,7 +116,7 @@ pub fn record_cash_movement(
     user_id: i64,
     request: CashMovementRequest,
 ) -> Result<ShiftSummary, CommandError> {
-    if request.direction != "pay_in" && request.direction != "pay_out" {
+    if !CASH_MOVEMENT_DIRECTIONS.contains(&request.direction.as_str()) {
         return Err(CommandError::new(
             "validation_error",
             "Nepoznat tip transakcije.",
@@ -120,18 +132,20 @@ pub fn record_cash_movement(
         .ok_or_else(|| CommandError::new("shift_required", "Smena nije otvorena."))?;
     let now = utc_now().map_err(CommandError::from)?;
     let note = normalized_note(request.reason);
+    let bank_reference = normalized_note(request.bank_reference);
     state
         .db()
         .open()
         .map_err(CommandError::from)?
         .execute(
-            "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, reason, user_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, reason, bank_reference, user_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 summary.id,
                 request.direction,
                 request.amount_minor,
                 note,
+                bank_reference,
                 user_id,
                 now
             ],
@@ -358,8 +372,12 @@ SELECT
     sh.closing_note,
     COALESCE(SUM(CASE WHEN sp.payment_method = 'cash' THEN sp.amount_minor ELSE 0 END), 0),
     COALESCE(SUM(CASE WHEN sp.payment_method = 'card' THEN sp.amount_minor ELSE 0 END), 0),
-    COALESCE((SELECT SUM(amount_minor) FROM cash_movements WHERE shift_id = sh.id AND movement_type = 'pay_in'), 0),
-    COALESCE((SELECT SUM(amount_minor) FROM cash_movements WHERE shift_id = sh.id AND movement_type = 'pay_out'), 0)
+    -- A bank_withdrawal (podizanje sa računa) fills the drawer, so it lands in
+    -- paid_in; a bank_deposit (polog) empties it, so it lands in paid_out.
+    COALESCE((SELECT SUM(amount_minor) FROM cash_movements
+              WHERE shift_id = sh.id AND movement_type IN ('pay_in', 'bank_withdrawal')), 0),
+    COALESCE((SELECT SUM(amount_minor) FROM cash_movements
+              WHERE shift_id = sh.id AND movement_type IN ('pay_out', 'bank_deposit')), 0)
 FROM shifts sh
 JOIN users u ON u.id = sh.user_id
 LEFT JOIN sales s ON s.shift_id = sh.id
@@ -847,6 +865,7 @@ mod tests {
                     direction: "pay_in".to_string(),
                     amount_minor: 5000,
                     reason: Some("Sitan novac".to_string()),
+                    bank_reference: None,
                 },
             )
             .expect("pay_in should record");
@@ -858,6 +877,7 @@ mod tests {
                     direction: "pay_out".to_string(),
                     amount_minor: 2000,
                     reason: None,
+                    bank_reference: None,
                 },
             )
             .expect("pay_out should record");
@@ -893,6 +913,7 @@ mod tests {
                     direction: "pay_in".to_string(),
                     amount_minor: 5000,
                     reason: None,
+                    bank_reference: None,
                 },
             )
             .expect_err("cash movement without an open shift should fail");
@@ -924,6 +945,7 @@ mod tests {
                         direction: "pay_in".to_string(),
                         amount_minor: 0,
                         reason: None,
+                        bank_reference: None,
                     },
                 )
                 .expect_err("non-positive amount should fail");
@@ -954,6 +976,7 @@ mod tests {
                     direction: "refund".to_string(),
                     amount_minor: 1000,
                     reason: None,
+                    bank_reference: None,
                 },
             )
             .expect_err("unknown direction should fail");
@@ -985,6 +1008,7 @@ mod tests {
                     direction: "pay_in".to_string(),
                     amount_minor: 3000,
                     reason: Some("Sitan novac".to_string()),
+                    bank_reference: None,
                 },
             )
             .expect("pay_in should record");
@@ -996,6 +1020,7 @@ mod tests {
                     direction: "pay_out".to_string(),
                     amount_minor: 1000,
                     reason: Some("Isplata dobavljaču".to_string()),
+                    bank_reference: None,
                 },
             )
             .expect("pay_out should record");
@@ -1007,6 +1032,60 @@ mod tests {
             assert_eq!(summary.paid_in_minor, 3000);
             assert_eq!(summary.paid_out_minor, 1000);
             assert_eq!(summary.expected_cash_minor, 5000 + 1000 + 3000 - 1000);
+        });
+    }
+
+    /// A polog taken to the bank mid-shift leaves the drawer; a podizanje sa
+    /// računa (kusur) enters it. If the summary ignored either one, a shop that
+    /// deposits during the shift would show a phantom manjak at close — a false
+    /// positive in the anti-theft check.
+    #[test]
+    fn bank_movements_change_expected_cash_in_the_right_direction() {
+        with_state("expected_cash_bank_movements", |state| {
+            let cashier_id = seed_cashier(state);
+            open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 100_000,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "bank_withdrawal".to_string(),
+                    amount_minor: 20_000,
+                    reason: Some("Kusur".to_string()),
+                    bank_reference: Some("izvod-7".to_string()),
+                },
+            )
+            .expect("withdrawal should record");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "bank_deposit".to_string(),
+                    amount_minor: 50_000,
+                    reason: Some("Polog pazara".to_string()),
+                    bank_reference: Some("uplatnica-3".to_string()),
+                },
+            )
+            .expect("deposit should record");
+
+            let summary = current_shift_for_user(state, cashier_id)
+                .expect("summary should query")
+                .expect("open shift summary should exist");
+
+            assert_eq!(
+                summary.expected_cash_minor,
+                100_000 + 20_000 - 50_000,
+                "podizanje sa računa puni kasu, polog je prazni"
+            );
         });
     }
 
@@ -1033,6 +1112,7 @@ mod tests {
                     direction: "pay_in".to_string(),
                     amount_minor: 3000,
                     reason: None,
+                    bank_reference: None,
                 },
             )
             .expect("pay_in should record");
@@ -1044,6 +1124,7 @@ mod tests {
                     direction: "pay_out".to_string(),
                     amount_minor: 1000,
                     reason: None,
+                    bank_reference: None,
                 },
             )
             .expect("pay_out should record");
@@ -1091,6 +1172,7 @@ mod tests {
                     direction: "pay_in".to_string(),
                     amount_minor: 3000,
                     reason: None,
+                    bank_reference: None,
                 },
             )
             .expect("pay_in should record");
@@ -1102,6 +1184,7 @@ mod tests {
                     direction: "pay_out".to_string(),
                     amount_minor: 1000,
                     reason: None,
+                    bank_reference: None,
                 },
             )
             .expect("pay_out should record");
