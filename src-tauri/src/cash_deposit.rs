@@ -45,8 +45,16 @@ pub const DEPOSIT_WINDOW_WORKING_DAYS: i64 = 7;
 
 /// Serbian state holidays for 2026 and 2027, per *Zakon o državnim i drugim
 /// praznicima u Republici Srbiji* ("Sl. glasnik RS", br. 43/2001, 101/2007,
-/// 92/2011): fixed dates plus that year's Veliki petak and Vaskrsni ponedeljak,
-/// which move with the Orthodox (Julian) Pascha — 12.04.2026 and 02.05.2027.
+/// 92/2011): the fixed dates plus that year's whole Vaskršnji span, which the
+/// act declares non-working "počev od Velikog petka zaključno sa drugim danom
+/// Vaskrsa" — so Veliki petak, Velika subota and Vaskrsni ponedeljak are all
+/// seeded (Vaskrs itself is a Sunday, already non-working by weekday). The span
+/// moves with the Orthodox (Julian) Pascha: 12.04.2026 and 02.05.2027. Velika
+/// subota especially must be listed, because Saturdays count as radni dani by
+/// default and would otherwise swallow a state holiday.
+///
+/// 2027 needs no separate Velika subota row: it falls on 01.05.2027, already
+/// present as Praznik rada.
 ///
 /// Deliberately **not** seeded past 2027, and deliberately without čl. 3a's
 /// "holiday falls on a Sunday, so the next working day is also non-working"
@@ -60,6 +68,7 @@ const DEFAULT_NON_WORKING_DAYS: &[(&str, &str)] = &[
     ("2026-02-15", "Dan državnosti Srbije"),
     ("2026-02-16", "Dan državnosti Srbije"),
     ("2026-04-10", "Veliki petak"),
+    ("2026-04-11", "Velika subota"),
     ("2026-04-13", "Vaskrsni ponedeljak"),
     ("2026-05-01", "Praznik rada"),
     ("2026-05-02", "Praznik rada"),
@@ -188,6 +197,28 @@ mod tests {
 
     fn holidays(days: &[&str]) -> BTreeSet<String> {
         days.iter().map(|d| (*d).to_string()).collect()
+    }
+
+    /// The shipped calendar, as the arithmetic sees it after a seed.
+    fn seeded_calendar() -> BTreeSet<String> {
+        DEFAULT_NON_WORKING_DAYS
+            .iter()
+            .map(|(day, _)| (*day).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_seeded_calendar_covers_the_whole_2026_vaskrsnji_span() {
+        // Vaskrs 2026 is Sunday 12.04, so the non-working span runs Veliki petak
+        // 10.04, Velika subota 11.04, Vaskrs 12.04, Vaskrsni ponedeljak 13.04.
+        // From Thursday 09.04 the first radni dan is therefore Tuesday 14.04 —
+        // and it stays Tuesday even with Saturdays counting, which is the case
+        // a missing Velika subota would silently break.
+        let due = add_working_days("2026-04-09", 1, &seeded_calendar(), true).expect("date");
+        assert_eq!(
+            due, "2026-04-14",
+            "Velika subota is inside the Vaskršnji span, so it cannot be a radni dan"
+        );
     }
 
     #[test]
