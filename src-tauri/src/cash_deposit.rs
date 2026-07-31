@@ -158,11 +158,23 @@ fn format_iso_date(date: Date) -> String {
 /// and whether čl. 3 st. 1 reaches it at all.
 ///
 /// `subject == false` is the Pravilnik 77/2011 čl. 5 st. 2 float carve-out —
-/// dinars paid out of the shop's own tekući račun per čl. 2 st. 2 i 3. **The
-/// caller decides**, because the exclusion turns on how the withdrawal was
-/// documented, not on the movement type alone (§3 rule 14), and because the
+/// dinars paid out of the shop's own tekući račun per čl. 2 st. 2 i 3. The
 /// relief is bylaw-level: the statute's own "po bilo kom osnovu" and its kazna
-/// (čl. 7 st. 1 tač. 2) contain no exclusion.
+/// (čl. 7 st. 1 tač. 2) contain no exclusion at all.
+///
+/// **Known over-reach, deliberately visible.** The carve-out turns on how the
+/// withdrawal was documented, not on the movement type alone, and §3 rule 14 is
+/// explicit that not all bank withdrawals may be excluded. `load_cash_inflows`
+/// nevertheless sets `subject = false` for **every** `bank_withdrawal` row,
+/// because the schema carries no per-movement "documented per čl. 2 st. 2/st. 3"
+/// flag — that flag is still owed, and adding it is what would let this decision
+/// be made on the evidence rather than on the movement type. Until then the
+/// exclusion is wider than the bylaw grants, it under-reports the čl. 3 st. 1
+/// base by any undocumented withdrawal, and the report footer states the
+/// condition so the operator checks the paperwork per excluded amount.
+///
+/// A caller constructing `CashInflow` values by hand still decides `subject`
+/// itself; nothing here forces the loader's blanket rule on it.
 ///
 /// `amount_minor` may be negative — a documented payout out of the till reduces
 /// that trading date's base.
@@ -339,11 +351,19 @@ const FOOTER_AGGREGATION_IS_A_CONVENTION: &str =
     "Zbir po danu prometa je konvencija ove aplikacije, a ne zakonska kategorija: rok teče od \
      prijema gotovine, a ni Zakon 68/2015 ni Pravilnik 77/2011 ne poznaju dnevni izveštaj.";
 
-/// §3 rule 14 — the carve-out the app relies on lives one level below the act.
+/// §3 rule 14 — the carve-out the app relies on lives one level below the act,
+/// **and carries a condition**. Pravilnik čl. 5 st. 2 excludes only dinars paid
+/// out per čl. 2 st. 2 (against documentation submitted to the bank na uvid i
+/// overu) or st. 3 (the undocumented daily lane). The app has no
+/// per-movement documentation flag, so it excludes every `bank_withdrawal`;
+/// naming the condition here is what keeps that from reading as an
+/// unconditional exclusion, and puts the per-amount check on the operator.
 const FOOTER_FLOAT_EXCLUSION_IS_BYLAW_RELIEF: &str =
     "Gotovina podignuta sa tekućeg računa radnje izuzeta je iz osnovice po Pravilniku 77/2011 \
-     čl. 5 st. 2 — to je olakšica na nivou podzakonskog akta; sam zakon („po bilo kom osnovu“) \
-     i kazna iz čl. 7 ne sadrže nijedan izuzetak.";
+     čl. 5 st. 2, ali samo ako je isplata izvršena u skladu sa čl. 2 st. 2 ili st. 3 tog \
+     pravilnika — proverite dokumentaciju za svaki izuzeti iznos. To je olakšica na nivou \
+     podzakonskog akta; sam zakon („po bilo kom osnovu“) i kazna iz čl. 7 ne sadrže nijedan \
+     izuzetak.";
 
 /// §3 rule 16 — advisory, supervised by Poreska uprava, blocking nothing.
 const FOOTER_ADVISORY_ONLY: &str =
@@ -396,7 +416,8 @@ pub struct CashDepositReport {
     pub footer: String,
 }
 
-/// Every dinar of cash the shop received, aggregated per trading date.
+/// Every dinar of cash the shop received **up to and including `as_of`**,
+/// aggregated per trading date.
 ///
 /// "Po bilo kom osnovu" (čl. 3 st. 1) is wider than the pazar, so the base is
 /// receipt cash **plus** cash paid into the drawer by hand (`pay_in`) — a
@@ -405,6 +426,11 @@ pub struct CashDepositReport {
 /// drawn from the shop's own račun (`bank_withdrawal`) is carried with
 /// `subject = false`: reported, never aged.
 ///
+/// `as_of` is a real cut-off, not a caption. Cash the shop had not yet received
+/// on the presek date is no part of that date's obligation, and a report headed
+/// "Presek na dan …" that swept in later takings would be reading the future.
+/// The bound must be `yyyy-MM-dd`; the caller validates it (`cash_deposit_report`).
+///
 /// The receipt arm deliberately does **not** filter on `sales.status`. A void
 /// and a return each write a linked document row carrying the *negative*
 /// payment, so summing every `sale_payments` row nets the cash the shop
@@ -412,34 +438,50 @@ pub struct CashDepositReport {
 /// whole original receipt the moment a **partial** return flipped it to
 /// `refunded`, erasing cash that never left the drawer — the false "clean"
 /// state §3 rule 10 forbids.
-pub fn load_cash_inflows(connection: &Connection) -> Result<Vec<CashInflow>, AppError> {
+///
+/// **The `bank_withdrawal` arm currently excludes every such row.** Pravilnik
+/// 77/2011 čl. 5 st. 2 only reaches dinars paid out per čl. 2 st. 2 (against
+/// documentation submitted to the bank) or st. 3 (the undocumented daily lane),
+/// and §3 rule 14 says in terms: do not exclude all bank withdrawals. There is
+/// no per-movement "documented" flag in the schema yet, so the distinction
+/// cannot be drawn here; until one exists the exclusion is wider than the bylaw
+/// and the report footer carries that condition in words so the operator checks
+/// the paperwork per excluded amount.
+pub fn load_cash_inflows(
+    connection: &Connection,
+    as_of: &str,
+) -> Result<Vec<CashInflow>, AppError> {
     let mut statement = connection.prepare(
         r#"
 SELECT substr(s.created_at, 1, 10) AS day, SUM(sp.amount_minor) AS amount_minor, 1 AS subject
   FROM sales s
   JOIN sale_payments sp ON sp.sale_id = s.id
  WHERE sp.payment_method = 'cash'
+   AND substr(s.created_at, 1, 10) <= ?1
  GROUP BY day
 UNION ALL
 SELECT substr(created_at, 1, 10), SUM(amount_minor), 1
   FROM cash_movements
  WHERE movement_type = 'pay_in'
+   AND substr(created_at, 1, 10) <= ?1
  GROUP BY substr(created_at, 1, 10)
 UNION ALL
 SELECT substr(created_at, 1, 10), -SUM(amount_minor), 1
   FROM cash_movements
  WHERE movement_type = 'pay_out'
+   AND substr(created_at, 1, 10) <= ?1
  GROUP BY substr(created_at, 1, 10)
 UNION ALL
 SELECT substr(created_at, 1, 10), SUM(amount_minor), 0
   FROM cash_movements
  WHERE movement_type = 'bank_withdrawal'
+   AND substr(created_at, 1, 10) <= ?1
  GROUP BY substr(created_at, 1, 10)
 "#,
     )?;
 
     let inflows = statement
-        .query_map([], |row| {
+        .query_map(params![as_of], |row| {
             Ok(CashInflow {
                 date: row.get(0)?,
                 amount_minor: row.get(1)?,
@@ -451,18 +493,30 @@ SELECT substr(created_at, 1, 10), SUM(amount_minor), 0
     Ok(inflows)
 }
 
-/// Every polog onto the shop's own račun kod banke, per calendar date.
-pub fn load_cash_deposits(connection: &Connection) -> Result<Vec<CashDeposit>, AppError> {
+/// Every polog onto the shop's own račun kod banke made **up to and including
+/// `as_of`**, per calendar date.
+///
+/// The cut-off is what makes the retrospective question answerable. A polog
+/// made after the presek did not exist on the presek date, so crediting it
+/// would show the shop clean on a day its money was still in the drawer and
+/// already past the rok — the false "clean" state §3 rule 10 forbids, in the
+/// artefact §3 rule 17 designates for the knjigovođa and for a documentary
+/// Poreska uprava check.
+pub fn load_cash_deposits(
+    connection: &Connection,
+    as_of: &str,
+) -> Result<Vec<CashDeposit>, AppError> {
     let mut statement = connection.prepare(
         "SELECT substr(created_at, 1, 10) AS day, SUM(amount_minor)
            FROM cash_movements
           WHERE movement_type = 'bank_deposit'
+            AND substr(created_at, 1, 10) <= ?1
           GROUP BY day
           ORDER BY day",
     )?;
 
     let deposits = statement
-        .query_map([], |row| {
+        .query_map(params![as_of], |row| {
             Ok(CashDeposit {
                 date: row.get(0)?,
                 amount_minor: row.get(1)?,
@@ -474,6 +528,10 @@ pub fn load_cash_deposits(connection: &Connection) -> Result<Vec<CashDeposit>, A
 }
 
 /// Ages every open bucket against `as_of` (`yyyy-MM-dd`).
+///
+/// `as_of` is the presek: only cash received on or before it, and only pologe
+/// made on or before it, enter the report. Running it for a past date therefore
+/// answers "was I late then?" rather than "am I late now?".
 ///
 /// Admin-gated here rather than in the command wrapper, so the gate cannot be
 /// bypassed by any other caller of the report. A bucket is late only once
@@ -493,8 +551,8 @@ pub fn cash_deposit_report(state: &AppState, as_of: &str) -> Result<CashDepositR
     let deposits;
     {
         let connection = state.db().open()?;
-        inflows = load_cash_inflows(&connection)?;
-        deposits = load_cash_deposits(&connection)?;
+        inflows = load_cash_inflows(&connection, as_of)?;
+        deposits = load_cash_deposits(&connection, as_of)?;
     }
 
     let saturday_is_working = saturday_is_working_day(state)?;
@@ -558,8 +616,15 @@ pub fn report_to_csv(report: &CashDepositReport) -> String {
     ])];
 
     for bucket in &report.buckets {
+        // `due_on == None` means the deadline could not be computed at all, so
+        // `is_overdue` is `false` for want of a date, not because the money is
+        // inside a rok. Saying "U roku" there would be a positive affirmation
+        // next to an empty Rok column — false reassurance in the knjigovođa's
+        // own copy. The unknown must stay visible as an unknown.
         let status = if bucket.outstanding_minor == 0 {
             "Položeno"
+        } else if bucket.due_on.is_none() {
+            "Rok nije izračunat"
         } else if bucket.is_overdue {
             "Kasni"
         } else {
@@ -591,6 +656,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    use crate::commands::settings::ShopProfile;
     use crate::db::{test_database_path, Db};
 
     fn holidays(days: &[&str]) -> BTreeSet<String> {
@@ -744,6 +810,25 @@ mod tests {
                 params![created_at, original_sale_id],
             )
             .expect("original receipt should flip to refunded");
+    }
+
+    /// A cash movement of any type on `day`. `amount_minor` is CHECK-constrained
+    /// positive; the sign of a `pay_out` is applied by the query, not here.
+    fn seed_cash_movement_on(state: &AppState, day: &str, kind: &str, amount_minor: i64) {
+        let connection = state.db().open().expect("database should open");
+        let user_id = admin_id(state);
+        let shift_id = ensure_shift(&connection, user_id);
+        let created_at = format!("{day}T16:00:00Z");
+
+        connection
+            .execute(
+                "INSERT INTO cash_movements (
+                    shift_id, movement_type, amount_minor, reason, user_id, created_at
+                 )
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+                params![shift_id, kind, amount_minor, user_id, created_at],
+            )
+            .expect("cash movement should insert");
     }
 
     fn inflow(date: &str, amount_minor: i64) -> CashInflow {
@@ -1011,6 +1096,70 @@ mod tests {
                 report.footer.contains("Pravilnik"),
                 "the float exclusion is bylaw-level relief and must be labelled"
             );
+            assert!(
+                report.footer.contains("čl. 2"),
+                "the carve-out only reaches withdrawals made per Pravilnik čl. 2 st. 2 or st. 3, \
+                 so the footer must carry the condition, not just the relief: {}",
+                report.footer
+            );
+        });
+    }
+
+    /// `as_of` is a presek, not a caption. Cash the shop had not yet received on
+    /// that date cannot be part of that date's obligation, so a trading date
+    /// after the presek must not appear at all — a report headed "Presek na dan
+    /// 25.07." that carries a 30.07. bucket is reading the future.
+    #[test]
+    fn the_presek_excludes_cash_received_after_it() {
+        with_state("cash_deposit_as_of_future_take", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-07-20", 100_000);
+            seed_cash_sale_on(state, "2026-07-30", 40_000);
+
+            let report = cash_deposit_report(state, "2026-07-25").expect("report should run");
+
+            let dates: Vec<&str> = report
+                .buckets
+                .iter()
+                .map(|bucket| bucket.trading_date.as_str())
+                .collect();
+            assert_eq!(
+                dates,
+                vec!["2026-07-20"],
+                "30.07. is five days after the presek and cannot be in it"
+            );
+            assert_eq!(
+                report.outstanding_minor, 100_000,
+                "only cash received by 25.07. is outstanding on 25.07."
+            );
+        });
+    }
+
+    /// The retrospective question — "was I late on that date?" — is the whole
+    /// point of the report (§3 rule 17, a documentary Poreska uprava check). A
+    /// polog made weeks later must not reach back and discharge the bucket, or
+    /// the presek shows the shop clean on a day it was three days past the rok:
+    /// the false "clean" state §3 rule 10 forbids.
+    #[test]
+    fn a_polog_made_after_the_presek_does_not_clear_it() {
+        with_state("cash_deposit_as_of_future_polog", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-07-20", 100_000);
+            seed_cash_movement_on(state, "2026-09-15", "bank_deposit", 100_000);
+
+            let report = cash_deposit_report(state, "2026-07-31").expect("report should run");
+
+            assert_eq!(report.buckets.len(), 1, "one trading date, one bucket");
+            assert_eq!(
+                report.buckets[0].deposited_minor, 0,
+                "the polog is seven weeks after the presek"
+            );
+            assert_eq!(report.outstanding_minor, 100_000);
+            assert_eq!(
+                report.overdue_minor, 100_000,
+                "the rok was 28.07., so on 31.07. the money was already late"
+            );
+            assert!(report.buckets[0].is_overdue);
         });
     }
 
@@ -1067,5 +1216,46 @@ mod tests {
                 "the pravni osnov must travel with the export: {csv}"
             );
         });
+    }
+
+    /// A bucket whose trading date could not be parsed — a hand-edited or
+    /// migrated `sales.created_at` — has no computed rok. `is_overdue` is
+    /// `false` there because the deadline is *unknown*, not because it is in the
+    /// future, so the export must not turn that silence into "U roku": an empty
+    /// Rok column beside a positive affirmation is false reassurance in the one
+    /// copy the knjigovođa reads.
+    #[test]
+    fn the_csv_never_says_u_roku_without_a_computed_rok() {
+        let report = CashDepositReport {
+            as_of: "2026-08-03".to_string(),
+            buckets: vec![DepositBucket {
+                trading_date: "not-a-date".to_string(),
+                subject_minor: 100_000,
+                deposited_minor: 0,
+                outstanding_minor: 100_000,
+                due_on: None,
+                is_overdue: false,
+            }],
+            outstanding_minor: 100_000,
+            overdue_minor: 0,
+            excluded_float_minor: 0,
+            saturday_is_working: true,
+            calendar_horizon_year: SEEDED_CALENDAR_HORIZON_YEAR,
+            beyond_seeded_calendar: false,
+            notice: cash_deposit_duty(&ShopProfile::default()),
+            footer: report_footer(false),
+        };
+
+        let csv = report_to_csv(&report);
+        let row = csv.lines().nth(1).expect("one bucket row");
+
+        assert!(
+            !row.ends_with("U roku"),
+            "a bucket with no computed rok must not be affirmed as inside one: {row}"
+        );
+        assert!(
+            row.contains("Rok nije izračunat"),
+            "the export must say the deadline is unknown: {row}"
+        );
     }
 }
