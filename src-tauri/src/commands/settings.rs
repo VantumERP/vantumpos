@@ -147,6 +147,14 @@ pub struct EsirElement {
 /// "not yet answered" — it is NEVER inferred (e.g. from the PIB), because
 /// guessing the tier is exactly what produced the penalty errors corrected in
 /// commit 3d5aede. Legal copy renders no figure at all while it is None.
+///
+/// `distance_selling` is tri-state for the same reason. It is a `[LEGAL]` fact
+/// question to the shop (§3 req 31, §5 Q-8): answering it "yes" flips the
+/// manufacturer / importer / origin fields from `[PRUDENTIAL]` aids into a
+/// statutory pre-purchase display duty (ZoT čl. 34 st. 5) and reverses §3
+/// req 22. `false` is the LENIENT branch, so a plain `bool` would let silence
+/// select it — the inference-from-silence this type exists to prevent. `None`
+/// means "nije odgovoreno": the onboarding surface must ask, not assume.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShopProfile {
@@ -155,7 +163,7 @@ pub struct ShopProfile {
     #[serde(default)]
     pub pdv_obveznik: Option<bool>,
     #[serde(default)]
-    pub distance_selling: bool,
+    pub distance_selling: Option<bool>,
     #[serde(default)]
     pub lpfr_in_premises: Option<bool>,
     #[serde(default)]
@@ -168,7 +176,7 @@ pub struct ShopProfileRequest {
     pub pravna_forma: Option<PravnaForma>,
     pub pdv_obveznik: Option<bool>,
     #[serde(default)]
-    pub distance_selling: bool,
+    pub distance_selling: Option<bool>,
     pub lpfr_in_premises: Option<bool>,
     #[serde(default)]
     pub esir_elements: Vec<EsirElement>,
@@ -947,7 +955,12 @@ mod tests {
                 "legal form must never be inferred"
             );
             assert_eq!(profile.pdv_obveznik, None);
-            assert!(!profile.distance_selling, "distance selling defaults off");
+            assert_eq!(
+                profile.distance_selling, None,
+                "distance selling must read as UNANSWERED, never as an implicit 'no' \
+                 that silently picks the lenient walk-in branch"
+            );
+            assert_eq!(profile.lpfr_in_premises, None);
             assert!(profile.esir_elements.is_empty());
         });
     }
@@ -958,7 +971,7 @@ mod tests {
             let request = ShopProfileRequest {
                 pravna_forma: Some(PravnaForma::Preduzetnik),
                 pdv_obveznik: Some(false),
-                distance_selling: true,
+                distance_selling: Some(true),
                 lpfr_in_premises: Some(true),
                 esir_elements: vec![EsirElement {
                     naziv: "Master ESIR".to_string(),
@@ -983,11 +996,32 @@ mod tests {
             let saved = save_shop_profile(state, request).expect("admin should save");
 
             assert_eq!(saved.pravna_forma, Some(PravnaForma::Preduzetnik));
-            assert!(saved.distance_selling);
+            assert_eq!(saved.distance_selling, Some(true));
             assert_eq!(saved.esir_elements[0].verzija, "2.1.4");
 
             let reloaded = load_shop_profile(state).expect("profile should reload");
             assert_eq!(reloaded, saved);
+        });
+    }
+
+    #[test]
+    fn shop_profile_save_rejected_for_cashier() {
+        with_state("shop_profile_forbidden_for_cashier", |state| {
+            sign_in_cashier(state);
+
+            let error = save_shop_profile(
+                state,
+                ShopProfileRequest {
+                    pravna_forma: Some(PravnaForma::PravnoLice),
+                    pdv_obveznik: Some(true),
+                    distance_selling: Some(true),
+                    lpfr_in_premises: Some(true),
+                    esir_elements: Vec::new(),
+                },
+            )
+            .expect_err("cashier is forbidden");
+
+            assert_eq!(error.code(), "forbidden");
         });
     }
 }
