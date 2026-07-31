@@ -441,6 +441,16 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
         "UPDATE inventory_balances SET quantity_milli = 0, updated_at = datetime('now')",
         [],
     )?;
+    // A deklaracija check (SW-15) attests that a physical label was read on
+    // goods that were physically present. Practice stock was zeroed a line
+    // above, so a surviving stamp would vouch for a label nobody ever saw on
+    // the live goods — the check must be re-performed on real receipt.
+    // The AML provenance columns (aml_cash_minor / aml_rate_* / aml_ack_reason)
+    // live on `sales` and go with the wipe above; no separate clear is needed.
+    tx.execute(
+        "UPDATE products SET declaration_checked_at = NULL, declaration_checked_by = NULL",
+        [],
+    )?;
     // Reset the receipt counter, preserving the shop's prefix.
     tx.execute(
         "UPDATE settings
@@ -474,6 +484,10 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
          WHERE active = 1",
         [],
     )?;
+    // Deliberately untouched: the `shop_profile` and `eur_rate` settings keys and
+    // the `non_working_days` table. Those are configuration the operator answered
+    // once, not practice trading data — wiping them would silently drop the shop
+    // back to `pravna_forma = None` and re-seed praznici the admin had deleted.
     let detail = serde_json::json!({
         "note": "Go-live reset (SW-3).",
         "retention": "10y (ZoRač čl. 28; ZPDV čl. 47)",
@@ -657,6 +671,10 @@ fn validate_backup_type(backup_type: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cash_deposit::seed_default_non_working_days;
+    use crate::commands::settings::{
+        load_shop_profile, save_shop_profile, PravnaForma, ShopProfileRequest,
+    };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
 
@@ -1079,6 +1097,123 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
                 )
                 .expect("compliance event should exist");
             assert_eq!(event_type, "trading_data_reset");
+        });
+    }
+
+    fn preduzetnik_profile_request() -> ShopProfileRequest {
+        ShopProfileRequest {
+            pravna_forma: Some(PravnaForma::Preduzetnik),
+            pdv_obveznik: Some(false),
+            distance_selling: Some(false),
+            lpfr_in_premises: Some(true),
+            esir_elements: Vec::new(),
+        }
+    }
+
+    /// A practice sale carrying the AML provenance `sales_complete` stamps on
+    /// the row (SW-15): the cash leg, the NBS rate it was measured against and
+    /// where that rate came from.
+    fn seed_sale_with_aml_provenance(state: &AppState) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .execute(
+                "UPDATE sales
+                 SET aml_cash_minor = 12000,
+                     aml_rate_minor = 11720,
+                     aml_rate_date = '2026-07-30',
+                     aml_rate_source = 'manual'
+                 WHERE id = 1",
+                [],
+            )
+            .expect("aml provenance should seed");
+    }
+
+    /// A deklaracija check performed while practising (SW-15): it attests a
+    /// physical label on practice stock, so it must not vouch for live goods.
+    fn seed_declaration_checked_product(state: &AppState) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .execute(
+                "UPDATE products
+                 SET declaration_checked_at = '2026-07-30T10:00:00Z',
+                     declaration_checked_by = 1
+                 WHERE id = 1",
+                [],
+            )
+            .expect("declaration stamp should seed");
+    }
+
+    #[test]
+    fn go_live_reset_keeps_the_profile_and_holidays_but_clears_trading_compliance_state() {
+        with_state("reset_preserves_configuration", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-configuration");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            save_shop_profile(state, preduzetnik_profile_request()).expect("profile saves");
+            seed_default_non_working_days(state, "2026-07-31T00:00:00Z").expect("holidays seed");
+            seed_trading_data(state);
+            seed_sale_with_aml_provenance(state);
+            seed_declaration_checked_product(state);
+
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            let profile = load_shop_profile(state).expect("profile loads");
+            assert_eq!(
+                profile.pravna_forma,
+                Some(PravnaForma::Preduzetnik),
+                "the shop profile is configuration, not trading data"
+            );
+
+            assert!(
+                count(state, "non_working_days") > 0,
+                "the holiday table is configuration too"
+            );
+
+            let conn = state.db().open().expect("db opens");
+            let stamps: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM products
+                     WHERE declaration_checked_at IS NOT NULL
+                        OR declaration_checked_by IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count");
+            assert_eq!(
+                stamps, 0,
+                "declaration check stamps are trading state and must clear"
+            );
+
+            let aml: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sales
+                     WHERE aml_cash_minor IS NOT NULL
+                        OR aml_rate_minor IS NOT NULL
+                        OR aml_rate_date IS NOT NULL
+                        OR aml_rate_source IS NOT NULL
+                        OR aml_ack_reason IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count");
+            assert_eq!(
+                aml, 0,
+                "AML provenance lives on the sale row and goes with the sales wipe"
+            );
+
+            // The catalog itself is configuration and survives.
+            assert_eq!(count(state, "products"), 1);
         });
     }
 
