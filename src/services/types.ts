@@ -100,6 +100,22 @@ export interface EurRate {
 }
 
 /**
+ * `commands::settings::EurRateStatus` — the cached rate plus the staleness
+ * verdict for the day it was judged against.
+ *
+ * An absent `rate` is `isStale: true`, never "fine": the AML čl. 46 st. 1
+ * threshold is derived from the rate, so silence reads as „nepoznato", not as
+ * „kurs nije potreban". `checkedFor` travels with the verdict so the surface
+ * can name *which* day the rate was judged against instead of implying „sada".
+ */
+export interface EurRateStatus {
+  rate: EurRate | null;
+  isStale: boolean;
+  /** `YYYY-MM-DD` — the day `isStale` was judged against. */
+  checkedFor: string;
+}
+
+/**
  * The verdict of `sales_assess_cash_payment` (AML čl. 46 st. 1). Advisory:
  * `breached` never rejects the sale, it only demands an acknowledgement, and
  * `rateUnavailable` degrades the check instead of blocking the till.

@@ -22,6 +22,7 @@ import type {
   CompletedSale,
   DailyTurnoverReport,
   DeclarationGapRow,
+  EurRateStatus,
   ExportedFile,
   ImportHeaders,
   ImportJob,
@@ -87,6 +88,13 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       getShopProfile: () => invoke<ShopProfile>("settings_get_shop_profile"),
       updateShopProfile: (request) =>
         invoke<ShopProfile>("settings_update_shop_profile", { request }),
+      getEurRate: () => invoke<EurRateStatus>("settings_get_eur_rate"),
+      refreshEurRate: () => invoke<EurRateStatus>("settings_refresh_eur_rate"),
+      setManualEurRate: (rateMinor, rateDate) =>
+        invoke<EurRateStatus>("settings_set_manual_eur_rate", {
+          rateMinor,
+          rateDate,
+        }),
       getCashDepositCalendar: () =>
         invoke<CashDepositCalendar>("cash_deposit_calendar"),
       setSaturdayIsWorking: (counts) =>

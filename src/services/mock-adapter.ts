@@ -17,6 +17,7 @@ import type {
   DeclarationWarning,
   DepositBucket,
   EurRate,
+  EurRateStatus,
   ImportJob,
   LegalNotice,
   InventoryAdjustmentRequest,
@@ -44,6 +45,12 @@ import type {
 } from "./types";
 
 const now = "2026-06-18T10:00:00Z";
+/**
+ * The day this double judges rate staleness against. Frozen to `now` rather
+ * than read off the wall clock so `isStale` is reproducible — the real backend
+ * uses `commands::settings::today_utc`.
+ */
+const MOCK_TODAY = now.slice(0, 10);
 
 const AML_CAP_EUR = 10_000;
 const AML_SOFT_RATIO_PERCENT = 80;
@@ -51,11 +58,33 @@ const AML_SOFT_RATIO_PERCENT = 80;
 const AML_FALLBACK_RATE_MINOR = 10_000;
 
 /** The demo rate, dated to `now` so the till shows no staleness warning. */
-const mockEurRate: EurRate = {
+const DEFAULT_MOCK_EUR_RATE: EurRate = {
   rateMinor: 11723,
-  rateDate: "2026-06-18",
+  rateDate: MOCK_TODAY,
   source: "nbs",
 };
+
+/**
+ * `commands::settings::MANUAL_RATE_BAND_PARA` — 50–500 RSD/EUR in para. A typo
+ * guard, **not a legal figure**: no statute names it. It catches the extra
+ * digit, which is the dangerous direction, because a tenfold rate multiplies
+ * the AML čl. 46 st. 1 dinar threshold by ten and lets an unlawful cash amount
+ * through unwarned.
+ */
+const MANUAL_RATE_MIN_PARA = 5_000;
+const MANUAL_RATE_MAX_PARA = 50_000;
+
+/** `nbs_rate::is_iso_date` — `YYYY-MM-DD`, month 1–12, day 1–31. */
+function isIsoDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) {
+    return false;
+  }
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
 
 /** Verbatim `commands::inventory::DECLARATION_ADVISORY`. One sentence, one
  *  wording: two copies would let one surface soften what the other hardened. */
@@ -321,6 +350,13 @@ export function createMockServices(): PosServices {
     lpfrInPremises: null,
     esirElements: [],
   };
+  /**
+   * The cached EUR middle rate — mutable, so a test can drive the whole
+   * round trip (absent -> manual -> fresh) instead of reading one frozen
+   * constant. `null` is the real shape of a fresh install: no rate has ever
+   * been fetched, so the AML check cannot run at all.
+   */
+  let eurRate: EurRate | null = { ...DEFAULT_MOCK_EUR_RATE };
   // Saturday counts by default: „radni dan" is statutorily undefined and
   // counting Saturdays yields the earlier, conservative deadline.
   let cashDepositCalendar: CashDepositCalendar = {
@@ -344,6 +380,19 @@ export function createMockServices(): PosServices {
     automaticBackupEnabled: true,
   };
   let backupJobs: BackupJob[] = [];
+
+  /**
+   * Mirrors `commands::settings::eur_rate_status`. An absent rate is stale —
+   * never "fine" — because the AML threshold is derived from it, so silence
+   * has to read as „nepoznato".
+   */
+  function eurRateStatus(): EurRateStatus {
+    return {
+      rate: eurRate === null ? null : { ...eurRate },
+      isStale: eurRate === null || eurRate.rateDate !== MOCK_TODAY,
+      checkedFor: MOCK_TODAY,
+    };
+  }
 
   /** Mirrors `commands::auth::require_admin` — the only admin gate. */
   function requireAdmin() {
@@ -527,6 +576,44 @@ export function createMockServices(): PosServices {
           })),
         };
         return shopProfile;
+      },
+      async getEurRate() {
+        return eurRateStatus();
+      },
+      async refreshEurRate() {
+        requireAdmin();
+        // A reachable NBS. An unreachable one is modelled by overriding this
+        // method in the test — it must resolve with the cached rate, never
+        // reject, because a dead network may not block the till.
+        eurRate = { ...DEFAULT_MOCK_EUR_RATE };
+        return eurRateStatus();
+      },
+      async setManualEurRate(rateMinor, rateDate) {
+        requireAdmin();
+        // `settings_set_manual_eur_rate` trims before validating.
+        const trimmedDate = rateDate.trim();
+
+        if (!Number.isInteger(rateMinor) || rateMinor <= 0) {
+          throw {
+            code: "validation_error",
+            message: "Kurs mora biti veći od nule.",
+          };
+        }
+        if (rateMinor < MANUAL_RATE_MIN_PARA || rateMinor > MANUAL_RATE_MAX_PARA) {
+          throw {
+            code: "validation_error",
+            message: "Kurs mora biti između 50 i 500 dinara za 1 evro.",
+          };
+        }
+        if (!isIsoDate(trimmedDate)) {
+          throw {
+            code: "validation_error",
+            message: "Datum kursa mora biti u obliku GGGG-MM-DD.",
+          };
+        }
+
+        eurRate = { rateMinor, rateDate: trimmedDate, source: "manual" };
+        return eurRateStatus();
       },
       async getCashDepositCalendar() {
         requireAdmin();
@@ -962,7 +1049,7 @@ export function createMockServices(): PosServices {
         };
       },
       async assessCashPayment(cashMinor) {
-        return assessCashPayment(cashMinor, mockEurRate, shopProfile);
+        return assessCashPayment(cashMinor, eurRate, shopProfile);
       },
     },
     inventory: {

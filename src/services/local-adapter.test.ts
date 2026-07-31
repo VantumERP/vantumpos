@@ -282,6 +282,72 @@ describe("local service adapter", () => {
     });
   });
 
+  it("maps the EUR rate surface to stable Tauri command names", async () => {
+    const status = {
+      rate: { rateMinor: 11_723, rateDate: "2026-07-31", source: "nbs" },
+      isStale: false,
+      checkedFor: "2026-07-31",
+    };
+    const invoke = vi.fn().mockResolvedValue(status);
+    const services = createLocalServices(invoke);
+
+    await services.settings.getEurRate();
+    await services.settings.refreshEurRate();
+    await services.settings.setManualEurRate(11_723, "2026-07-31");
+
+    expect(invoke).toHaveBeenCalledWith("settings_get_eur_rate");
+    expect(invoke).toHaveBeenCalledWith("settings_refresh_eur_rate");
+    // Flat args, not `{ request }` — `settings_set_manual_eur_rate` takes
+    // `rate_minor` and `rate_date` as two parameters.
+    expect(invoke).toHaveBeenCalledWith("settings_set_manual_eur_rate", {
+      rateMinor: 11_723,
+      rateDate: "2026-07-31",
+    });
+  });
+
+  it("round-trips the mock EUR rate instead of freezing one constant", async () => {
+    const services = createMockServices();
+
+    // A fresh install has no rate at all: the AML check cannot run, and the
+    // double has to be able to express that, not only the happy path.
+    await services.settings.setManualEurRate(20_000, "2026-06-01");
+    const stale = await services.settings.getEurRate();
+
+    expect(stale.rate).toEqual({
+      rateMinor: 20_000,
+      rateDate: "2026-06-01",
+      source: "manual",
+    });
+    expect(
+      stale.isStale,
+      "a rate carrying a past date is stale even right after it was entered",
+    ).toBe(true);
+
+    // The threshold the till warns on must follow the stored rate, not the
+    // seeded demo one: 10.000 EUR x 200,00 RSD/EUR.
+    const assessment = await services.sales.assessCashPayment(200_000_000);
+    expect(assessment.thresholdMinor).toBe(200_000_000);
+    expect(assessment.rateUnavailable).toBe(false);
+    expect(assessment.breached).toBe(true);
+
+    const fresh = await services.settings.setManualEurRate(11_723, "2026-06-18");
+    expect(fresh.isStale).toBe(false);
+    expect(fresh.checkedFor).toBe("2026-06-18");
+  });
+
+  it("refuses a mock manual rate outside the typo-guard band", async () => {
+    const services = createMockServices();
+
+    // 1.172,30 RSD/EUR — a tenfold typo. Accepting it would multiply the AML
+    // čl. 46 st. 1 dinar threshold by ten and let an unlawful cash amount pass.
+    await expect(
+      services.settings.setManualEurRate(117_230, "2026-06-18"),
+    ).rejects.toMatchObject({ code: "validation_error" });
+    await expect(
+      services.settings.setManualEurRate(11_723, "18.06.2026"),
+    ).rejects.toMatchObject({ code: "validation_error" });
+  });
+
   it("seeds the mock shop profile as fully unset", async () => {
     const services = createMockServices();
 

@@ -26,6 +26,7 @@ import type {
   DailyTurnoverReport,
   DeclarationGapRow,
   EndCampaignOverride,
+  EurRateStatus,
   ExportedFile,
   ExportReportRequest,
   ImportHeaders,
@@ -102,6 +103,26 @@ export interface SettingsService {
   updateSalesSettings(request: SalesSettingsRequest): Promise<SalesSettings>;
   getShopProfile(): Promise<ShopProfile>;
   updateShopProfile(request: ShopProfile): Promise<ShopProfile>;
+  /**
+   * The cached NBS middle rate the AML čl. 46 st. 1 dinar threshold is derived
+   * from. Read-only and never admin-gated: the till needs to be able to say
+   * *why* the check could not run.
+   */
+  getEurRate(): Promise<EurRateStatus>;
+  /**
+   * Refetches from the NBS. Admin-gated backend-side, and **degrading**: a
+   * failed fetch resolves with the cached rate plus `isStale` instead of
+   * rejecting, because an unreachable NBS must never read as an error the
+   * operator has to clear before selling.
+   */
+  refreshEurRate(): Promise<EurRateStatus>;
+  /**
+   * The manual fallback for the days the NBS is unreachable. `rateMinor` is
+   * para per 1 EUR; `rateDate` is `YYYY-MM-DD`. Admin-gated, band-checked and
+   * date-checked backend-side — this value sets the dinar threshold the AML
+   * warning is computed from, so a mistyped digit is the dangerous case.
+   */
+  setManualEurRate(rateMinor: number, rateDate: string): Promise<EurRateStatus>;
   /**
    * The calendar the seven-working-day deposit deadline is counted against.
    * Admin-gated backend-side, and seeded with the Serbian state holidays on

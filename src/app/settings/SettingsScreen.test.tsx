@@ -321,6 +321,161 @@ describe("SettingsScreen deposit calendar", () => {
   });
 });
 
+/**
+ * The NBS rate surface is the control the till points a cashier at when the
+ * AML čl. 46 st. 1 check cannot run. If it does not exist, `load_eur_rate`
+ * stays `None` forever, every AML column on `sales` stays NULL, and the till's
+ * own error copy names a control that is not there — so these tests are about
+ * the control existing and round-tripping, not only about wording.
+ */
+describe("SettingsScreen EUR rate", () => {
+  it("shows the cached rate, its date and its source", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Kurs evra za proveru gotovine",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/117,23 RSD za 1 EUR/)).toBeInTheDocument();
+    expect(screen.getByText(/18\.06\.2026/)).toBeInTheDocument();
+    expect(screen.getByText(/Izvor: NBS/)).toBeInTheDocument();
+  });
+
+  it("says plainly that a failed refresh does not block selling", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+
+    expect(
+      await screen.findByText(/ne blokira prodaju/i),
+      "an unreachable NBS may never read as something the cashier must clear first",
+    ).toBeInTheDocument();
+  });
+
+  it("round-trips a manual rate and clears staleness for that date", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const setManualEurRate = vi.spyOn(services.settings, "setManualEurRate");
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+    await user.clear(await screen.findByLabelText("Kurs (RSD za 1 EUR)"));
+    await user.type(screen.getByLabelText("Kurs (RSD za 1 EUR)"), "119,50");
+    await user.clear(screen.getByLabelText("Datum kursa"));
+    await user.type(screen.getByLabelText("Datum kursa"), "2026-06-18");
+    await user.click(screen.getByRole("button", { name: "Sačuvaj ručni kurs" }));
+
+    // Para per 1 EUR, never a float.
+    await waitFor(() =>
+      expect(setManualEurRate).toHaveBeenCalledWith(11_950, "2026-06-18"),
+    );
+
+    expect(await screen.findByText(/119,50 RSD za 1 EUR/)).toBeInTheDocument();
+    expect(screen.getByText(/Izvor: ručno/)).toBeInTheDocument();
+    expect(
+      screen.queryByText("Kurs nije od današnjeg dana"),
+      "a rate entered for today is not stale",
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns when the stored rate is not today's", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+    await user.clear(await screen.findByLabelText("Kurs (RSD za 1 EUR)"));
+    await user.type(screen.getByLabelText("Kurs (RSD za 1 EUR)"), "119,50");
+    await user.clear(screen.getByLabelText("Datum kursa"));
+    await user.type(screen.getByLabelText("Datum kursa"), "2026-06-01");
+    await user.click(screen.getByRole("button", { name: "Sačuvaj ručni kurs" }));
+
+    const warning = await screen.findByText("Kurs nije od današnjeg dana");
+    const alert = warning.closest('[data-slot="alert"]');
+    expect(alert).toHaveTextContent(/nosi datum 01\.06\.2026/);
+    // The day the verdict was judged against, never an implied „sada".
+    expect(alert).toHaveTextContent(/izvršena za 18\.06\.2026/);
+  });
+
+  it("refreshes from the NBS through the settings service", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const refreshEurRate = vi.spyOn(services.settings, "refreshEurRate");
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Osveži kurs sa NBS-a" }),
+    );
+
+    await waitFor(() => expect(refreshEurRate).toHaveBeenCalled());
+  });
+
+  it("names the absent rate as the reason the check cannot run, and does not call it a breach", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    services.settings.getEurRate = async () => ({
+      rate: null,
+      isStale: true,
+      checkedFor: "2026-06-18",
+    });
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+
+    expect(await screen.findByText("Kurs nije poznat")).toBeInTheDocument();
+    expect(
+      screen.getByText(/provera limita gotovine ne može da se izvrši/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/prodaja nije blokirana/i),
+      "an unknown rate is an unrun check, never a breach",
+    ).toBeInTheDocument();
+  });
+
+  it("rejects a mistyped rate without pretending it was saved", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+    await user.clear(await screen.findByLabelText("Kurs (RSD za 1 EUR)"));
+    // A tenfold typo: it would multiply the AML dinar threshold by ten.
+    await user.type(screen.getByLabelText("Kurs (RSD za 1 EUR)"), "1172,30");
+    await user.clear(screen.getByLabelText("Datum kursa"));
+    await user.type(screen.getByLabelText("Datum kursa"), "2026-06-18");
+    await user.click(screen.getByRole("button", { name: "Sačuvaj ručni kurs" }));
+
+    expect(
+      await screen.findByText("Kurs mora biti između 50 i 500 dinara za 1 evro."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/117,23 RSD za 1 EUR/)).toBeInTheDocument();
+  });
+
+  it("says the law names neither the rate nor the conversion day", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+
+    const citation = await screen.findByText(
+      /Zakon o sprečavanju pranja novca i finansiranja terorizma/i,
+    );
+    expect(citation).toHaveTextContent(/čl\. 46 st\. 1/);
+    expect(
+      screen.getByText(/ne imenuje ni kurs ni dan preračuna/i),
+      "the srednji-kurs-on-transaction-date rule is inferred from čl. 8 st. 1 tač. 2, not verbatim in čl. 46",
+    ).toBeInTheDocument();
+    // No fine figure may live outside legal.rs.
+    expect(screen.queryByText(/dinara kazn/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("SettingsScreen VAT rates", () => {
   it("edits an existing VAT rate and threads its id to saveTaxRate", async () => {
     const user = userEvent.setup();

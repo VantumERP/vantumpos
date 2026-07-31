@@ -899,8 +899,8 @@ function AmlNotice({
       <Alert>
         <AlertTitle>Provera limita gotovine nije izvršena</AlertTitle>
         <AlertDescription>
-          Provera nije mogla da se izvrši — unesite kurs u Podešavanjima.
-          Prodaja se može završiti.
+          Kurs evra nije poznat, pa provera nije mogla da se izvrši. Unesite ili
+          osvežite kurs u Podešavanja → Kurs. Prodaja se može završiti.
         </AlertDescription>
       </Alert>
     );
@@ -936,7 +936,7 @@ function AmlNotice({
             <p className="text-xs">
               Upozorenje: primenjen je kurs od{" "}
               {formatRateDate(assessment.rate.rateDate)}, a ne današnji.
-              Osvežite kurs u Podešavanjima.
+              Osvežite kurs u Podešavanja → Kurs.
             </p>
           )}
           {assessment.breached && (

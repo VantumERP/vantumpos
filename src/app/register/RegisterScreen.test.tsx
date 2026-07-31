@@ -764,7 +764,9 @@ describe("RegisterScreen", () => {
     await awaitCashPrefill("1000000.00");
 
     expect(
-      await screen.findByText(/unesite kurs u podešavanjima/i, undefined, {
+      // The copy must name a control that exists — `SettingsScreen`'s „Kurs"
+      // tab — not a vague „Podešavanja".
+      await screen.findByText(/osvežite kurs u podešavanja → kurs/i, undefined, {
         timeout: AML_WAIT_MS,
       }),
     ).toBeInTheDocument();

@@ -56,12 +56,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { formatRsd, parseRsdInput } from "@/lib/money";
 import type { PosServices, SettingsService } from "@/services/ports";
 import type {
   BackupJob,
   BackupStatus,
   CashDepositCalendar,
   CompanySettings,
+  EurRateStatus,
   ReceiptSettings,
   SalesSettings,
   ShopProfile,
@@ -94,6 +96,7 @@ type SettingsTab =
   | "profile"
   | "vat"
   | "receipts"
+  | "rate"
   | "calendar"
   | "users"
   | "backup";
@@ -197,6 +200,12 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           onSelect={() => setActiveTab("receipts")}
         >
           Računi
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "rate"}
+          onSelect={() => setActiveTab("rate")}
+        >
+          Kurs
         </SettingsTabButton>
         <SettingsTabButton
           active={activeTab === "calendar"}
@@ -305,6 +314,8 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           </div>
         </div>
       ) : null}
+
+      {activeTab === "rate" ? <EurRatePanel settings={services.settings} /> : null}
 
       {activeTab === "calendar" ? (
         <DepositCalendarPanel settings={services.settings} />
@@ -833,6 +844,235 @@ function ReceiptSettingsPanel({
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * The NBS middle rate the AML čl. 46 st. 1 dinar threshold is derived from.
+ *
+ * This panel is the control the till points at. When no rate has ever been
+ * cached, `sales_assess_cash_payment` reports `rateUnavailable` and every AML
+ * column on the sale stays NULL — so the operator must be able to *fix* that
+ * here, not merely be told about it.
+ *
+ * Three things it has to keep straight. First, **an unknown rate is an unrun
+ * check, never a breach** — the copy says the sale is not blocked, because a
+ * dead NBS must not read as something the cashier has to clear before selling.
+ * Second, **the statute names neither the rate nor the conversion day**: čl. 46
+ * is silent and the "zvanični srednji kurs NBS on the transaction date" rule is
+ * imported from čl. 8 st. 1 tač. 2, so it is presented as the reading applied,
+ * not as a quoted rule. Third, the manual entry is band-checked backend-side —
+ * a tenfold typo would multiply the threshold by ten and silently pass an
+ * unlawful cash amount — and this panel never second-guesses that verdict, it
+ * renders it.
+ *
+ * No fine figure appears here. Penalties live in `src-tauri/src/legal.rs`.
+ */
+function EurRatePanel({ settings }: { settings: SettingsService }) {
+  const [status, setStatus] = useState<EurRateStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [rateInput, setRateInput] = useState("");
+  const [dateInput, setDateInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    settings.getEurRate().then(
+      (loaded) => {
+        if (active) {
+          setStatus(loaded);
+        }
+      },
+      (loadError) => {
+        if (active) {
+          setError(errorMessage(loadError, "Kurs nije učitan."));
+        }
+      },
+    );
+
+    return () => {
+      active = false;
+    };
+  }, [settings]);
+
+  async function run(
+    action: () => Promise<EurRateStatus>,
+    success: string,
+    failure: string,
+  ) {
+    setBusy(true);
+    try {
+      setStatus(await action());
+      setError(null);
+      toast.success(success);
+    } catch (actionError) {
+      setError(errorMessage(actionError, failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveManual(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    let rateMinor: number;
+    try {
+      rateMinor = parseRsdInput(rateInput);
+    } catch {
+      setError("Unesite kurs u obliku 117,23.");
+      return;
+    }
+    if (!dateInput) {
+      setError("Unesite datum kursa.");
+      return;
+    }
+
+    await run(
+      () => settings.setManualEurRate(rateMinor, dateInput),
+      "Ručni kurs je sačuvan.",
+      "Ručni kurs nije sačuvan.",
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          <h2>Kurs evra za proveru gotovine</h2>
+        </CardTitle>
+        <CardDescription>
+          Kurs se koristi samo da bi se izračunao dinarski limit za prijem
+          gotovine. Zakon o sprečavanju pranja novca i finansiranja terorizma,
+          čl. 46 st. 1; nadzor: tržišna inspekcija (čl. 110 st. 6). Sam čl. 46
+          ne imenuje ni kurs ni dan preračuna — primenjuje se zvanični srednji
+          kurs Narodne banke Srbije na dan transakcije, po definiciji iz čl. 8
+          st. 1 tač. 2 istog zakona.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {error ? (
+          <Alert variant="destructive">
+            <ShieldAlertIcon aria-hidden="true" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        <p className="text-xs text-muted-foreground">
+          Neuspešno osvežavanje kursa ne blokira prodaju. Račun se može završiti
+          i kada kurs nije poznat — u tom slučaju se provera limita gotovine ne
+          izvršava i to piše na kasi.
+        </p>
+
+        {status === null ? (
+          <Badge variant="outline" className="w-fit">
+            <Spinner data-icon="inline-start" aria-hidden="true" />
+            Učitavanje kursa
+          </Badge>
+        ) : (
+          <>
+            {status.rate === null ? (
+              <Alert>
+                <AlertTitle>Kurs nije poznat</AlertTitle>
+                <AlertDescription>
+                  Provera limita gotovine ne može da se izvrši dok kurs nije
+                  poznat. Osvežite kurs sa NBS-a ili ga unesite ručno. Prodaja
+                  nije blokirana.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <div className="flex flex-col gap-1 rounded-md border p-4 text-sm">
+                <span className="font-medium">
+                  {formatRsd(status.rate.rateMinor)} za 1 EUR
+                </span>
+                <span className="text-muted-foreground">
+                  Datum kursa: {formatRateDate(status.rate.rateDate)}
+                </span>
+                <span className="text-muted-foreground">
+                  Izvor: {status.rate.source === "nbs" ? "NBS" : "ručno"}
+                </span>
+              </div>
+            )}
+
+            {status.rate !== null && status.isStale ? (
+              <Alert>
+                <AlertTitle>Kurs nije od današnjeg dana</AlertTitle>
+                <AlertDescription>
+                  Provera je izvršena za {formatRateDate(status.checkedFor)}, a
+                  sačuvani kurs nosi datum{" "}
+                  {formatRateDate(status.rate.rateDate)}. Osvežite ga sa NBS-a
+                  ili unesite današnji kurs ručno; do tada se limit gotovine
+                  računa po starijem kursu.
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            <div>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() =>
+                  void run(
+                    () => settings.refreshEurRate(),
+                    "Kurs je osvežen.",
+                    "Kurs nije osvežen.",
+                  )
+                }
+              >
+                <RotateCcwIcon data-icon="inline-start" />
+                Osveži kurs sa NBS-a
+              </Button>
+            </div>
+
+            <Separator />
+
+            <form className="flex flex-col gap-4" onSubmit={saveManual}>
+              <FieldGroup className="grid gap-3 md:grid-cols-[12rem_12rem_auto] md:items-end">
+                <Field>
+                  <FieldLabel htmlFor="manual-eur-rate">
+                    Kurs (RSD za 1 EUR)
+                  </FieldLabel>
+                  <Input
+                    id="manual-eur-rate"
+                    inputMode="decimal"
+                    value={rateInput}
+                    onChange={(event) => setRateInput(event.target.value)}
+                  />
+                  <FieldDescription>
+                    Unesite zvanični srednji kurs, na primer 117,23.
+                  </FieldDescription>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="manual-eur-rate-date">
+                    Datum kursa
+                  </FieldLabel>
+                  <Input
+                    id="manual-eur-rate-date"
+                    type="date"
+                    value={dateInput}
+                    onChange={(event) => setDateInput(event.target.value)}
+                  />
+                </Field>
+                <Field>
+                  <Button type="submit" disabled={busy}>
+                    <SaveIcon data-icon="inline-start" />
+                    Sačuvaj ručni kurs
+                  </Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** `2026-07-01` -> `01.07.2026`, without going through a Date (no TZ shift). */
+function formatRateDate(value: string): string {
+  const [year, month, day] = value.split("-");
+
+  return year && month && day ? `${day}.${month}.${year}` : value;
 }
 
 /**
