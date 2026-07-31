@@ -901,7 +901,9 @@ fn build_report_csv(
     }
 }
 
-fn csv_line(fields: &[&str]) -> String {
+/// Shared with `crate::cash_deposit`, so the two CSV exports cannot disagree
+/// about quoting.
+pub(crate) fn csv_line(fields: &[&str]) -> String {
     fields
         .iter()
         .map(|field| csv_escape(field))

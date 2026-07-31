@@ -149,6 +149,8 @@ pub fn run() {
             commands::campaigns::campaigns_export_labels,
             commands::campaigns::campaigns_correction_report,
             commands::campaigns::campaigns_export_correction_report,
+            commands::cash_deposit::cash_deposit_report,
+            commands::cash_deposit::cash_deposit_export_csv,
             commands::reklamacije::reklamacija_list,
             commands::reklamacije::reklamacija_get,
             commands::reklamacije::reklamacija_create,

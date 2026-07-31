@@ -22,20 +22,23 @@
 //! reads the system clock, and `seed_default_non_working_days` takes the RFC3339
 //! stamp it writes.
 //!
-//! Consumed by the bucket builder and the aging report (Tasks 17 and 19), so
-//! `dead_code` is allowed until that wiring lands — mirroring the other domain
-//! modules.
+//! The aging report and its CSV export live here too, behind `require_admin`,
+//! and are exposed through `crate::commands::cash_deposit`. The holiday-table
+//! seed and the Saturday setter are still unwired — they belong to the Settings
+//! surface — so `dead_code` stays allowed, mirroring the other domain modules.
 
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use time::{Date, Month, Weekday};
 
 use crate::app_error::AppError;
-use crate::commands::settings::{load_json_setting, save_json_setting};
+use crate::commands::reports::csv_line;
+use crate::commands::settings::{load_json_setting, load_shop_profile, save_json_setting};
+use crate::legal::{cash_deposit_duty, LegalNotice};
 use crate::state::AppState;
 
 /// Whether Saturday counts as a "radni dan" for čl. 3 st. 1. Default `true`.
@@ -201,6 +204,14 @@ pub struct DepositBucket {
     /// `None` only when `trading_date` is not strictly `yyyy-MM-dd`; the report
     /// then shows no deadline rather than a guessed one.
     pub due_on: Option<String>,
+    /// Whether the deadline has passed on the report's as-of date, with money
+    /// still outstanding.
+    ///
+    /// `build_buckets` cannot decide this — being late is a fact about a date
+    /// the pure builder is never given — so it always emits `false` and
+    /// `cash_deposit_report` sets it. A bucket obtained any other way must be
+    /// read as "not yet assessed", never as "in roku".
+    pub is_overdue: bool,
 }
 
 /// Builds the deposit buckets, oldest first, and draws every polog down against
@@ -250,6 +261,7 @@ pub fn build_buckets(
                 &config.non_working_days,
                 config.saturday_is_working,
             ),
+            is_overdue: false,
         })
         .collect();
 
@@ -322,13 +334,416 @@ pub fn set_saturday_is_working_day(state: &AppState, counts: bool) -> Result<(),
     save_json_setting(state, SATURDAY_IS_WORKING_DAY_KEY, &counts)
 }
 
+/// §3 rule 11 — the per-trading-date roll-up is ours, not the law's.
+const FOOTER_AGGREGATION_IS_A_CONVENTION: &str =
+    "Zbir po danu prometa je konvencija ove aplikacije, a ne zakonska kategorija: rok teče od \
+     prijema gotovine, a ni Zakon 68/2015 ni Pravilnik 77/2011 ne poznaju dnevni izveštaj.";
+
+/// §3 rule 14 — the carve-out the app relies on lives one level below the act.
+const FOOTER_FLOAT_EXCLUSION_IS_BYLAW_RELIEF: &str =
+    "Gotovina podignuta sa tekućeg računa radnje izuzeta je iz osnovice po Pravilniku 77/2011 \
+     čl. 5 st. 2 — to je olakšica na nivou podzakonskog akta; sam zakon („po bilo kom osnovu“) \
+     i kazna iz čl. 7 ne sadrže nijedan izuzetak.";
+
+/// §3 rule 16 — advisory, supervised by Poreska uprava, blocking nothing.
+const FOOTER_ADVISORY_ONLY: &str =
+    "Izveštaj je informativan: nadzor vrši Poreska uprava, a rok ne blokira prodaju, \
+     zatvaranje smene ni fiskalizaciju.";
+
+/// The copy that must travel with every rendering of this report — screen,
+/// print and CSV alike — because each sentence corrects something the table of
+/// numbers would otherwise imply.
+fn report_footer(beyond_seeded_calendar: bool) -> String {
+    let mut parts = vec![
+        FOOTER_AGGREGATION_IS_A_CONVENTION.to_string(),
+        FOOTER_FLOAT_EXCLUSION_IS_BYLAW_RELIEF.to_string(),
+        FOOTER_ADVISORY_ONLY.to_string(),
+    ];
+    if beyond_seeded_calendar {
+        parts.push(format!(
+            "Rok koji pada posle {SEEDED_CALENDAR_HORIZON_YEAR}. godine izračunat je bez tabele \
+             praznika za tu godinu — dopunite listu neradnih dana u Podešavanjima."
+        ));
+    }
+    parts.join(" ")
+}
+
+/// The undeposited-cash aging report (§3 rule 17): every open trading-date
+/// bucket, its deadline, and the honesty labels that must be rendered with it.
+///
+/// Advisory by construction — it carries no blocking flag, because čl. 3 st. 1
+/// is fiscal hygiene supervised by Poreska uprava, not a condition of a valid
+/// sale (§3 rule 16).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CashDepositReport {
+    /// The date the deadlines were assessed against, `yyyy-MM-dd`.
+    pub as_of: String,
+    pub buckets: Vec<DepositBucket>,
+    pub outstanding_minor: i64,
+    /// Of the outstanding total, the part whose deadline has already passed.
+    pub overdue_minor: i64,
+    /// Cash the Pravilnik čl. 5 st. 2 carve-out kept out of the base. Shown so
+    /// the operator can see what was excluded instead of having to trust that
+    /// nothing was.
+    pub excluded_float_minor: i64,
+    pub saturday_is_working: bool,
+    pub calendar_horizon_year: i32,
+    /// A deadline falls past the seeded holiday table, so the count for it is
+    /// arithmetically sound but calendar-blind.
+    pub beyond_seeded_calendar: bool,
+    pub notice: LegalNotice,
+    pub footer: String,
+}
+
+/// Every dinar of cash the shop received, aggregated per trading date.
+///
+/// "Po bilo kom osnovu" (čl. 3 st. 1) is wider than the pazar, so the base is
+/// receipt cash **plus** cash paid into the drawer by hand (`pay_in`) — a
+/// supplier refund, cash rent, the proceeds of an asset sale (§3 rule 10).
+/// Documented payouts (`pay_out`) come back off that date's base, and cash
+/// drawn from the shop's own račun (`bank_withdrawal`) is carried with
+/// `subject = false`: reported, never aged.
+///
+/// The receipt arm deliberately does **not** filter on `sales.status`. A void
+/// and a return each write a linked document row carrying the *negative*
+/// payment, so summing every `sale_payments` row nets the cash the shop
+/// actually kept. Filtering to `status = 'completed'` would instead drop the
+/// whole original receipt the moment a **partial** return flipped it to
+/// `refunded`, erasing cash that never left the drawer — the false "clean"
+/// state §3 rule 10 forbids.
+pub fn load_cash_inflows(connection: &Connection) -> Result<Vec<CashInflow>, AppError> {
+    let mut statement = connection.prepare(
+        r#"
+SELECT substr(s.created_at, 1, 10) AS day, SUM(sp.amount_minor) AS amount_minor, 1 AS subject
+  FROM sales s
+  JOIN sale_payments sp ON sp.sale_id = s.id
+ WHERE sp.payment_method = 'cash'
+ GROUP BY day
+UNION ALL
+SELECT substr(created_at, 1, 10), SUM(amount_minor), 1
+  FROM cash_movements
+ WHERE movement_type = 'pay_in'
+ GROUP BY substr(created_at, 1, 10)
+UNION ALL
+SELECT substr(created_at, 1, 10), -SUM(amount_minor), 1
+  FROM cash_movements
+ WHERE movement_type = 'pay_out'
+ GROUP BY substr(created_at, 1, 10)
+UNION ALL
+SELECT substr(created_at, 1, 10), SUM(amount_minor), 0
+  FROM cash_movements
+ WHERE movement_type = 'bank_withdrawal'
+ GROUP BY substr(created_at, 1, 10)
+"#,
+    )?;
+
+    let inflows = statement
+        .query_map([], |row| {
+            Ok(CashInflow {
+                date: row.get(0)?,
+                amount_minor: row.get(1)?,
+                subject: row.get::<_, i64>(2)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+
+    Ok(inflows)
+}
+
+/// Every polog onto the shop's own račun kod banke, per calendar date.
+pub fn load_cash_deposits(connection: &Connection) -> Result<Vec<CashDeposit>, AppError> {
+    let mut statement = connection.prepare(
+        "SELECT substr(created_at, 1, 10) AS day, SUM(amount_minor)
+           FROM cash_movements
+          WHERE movement_type = 'bank_deposit'
+          GROUP BY day
+          ORDER BY day",
+    )?;
+
+    let deposits = statement
+        .query_map([], |row| {
+            Ok(CashDeposit {
+                date: row.get(0)?,
+                amount_minor: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+
+    Ok(deposits)
+}
+
+/// Ages every open bucket against `as_of` (`yyyy-MM-dd`).
+///
+/// Admin-gated here rather than in the command wrapper, so the gate cannot be
+/// bypassed by any other caller of the report. A bucket is late only once
+/// `as_of` is strictly **past** its `due_on`: the polog is still lawful on the
+/// deadline day itself.
+pub fn cash_deposit_report(state: &AppState, as_of: &str) -> Result<CashDepositReport, AppError> {
+    crate::commands::auth::require_admin(state)?;
+
+    if parse_iso_date(as_of).is_none() {
+        return Err(AppError::validation(
+            "Datum preseka mora biti u obliku gggg-MM-dd.",
+            serde_json::json!({ "asOf": as_of }),
+        ));
+    }
+
+    let inflows;
+    let deposits;
+    {
+        let connection = state.db().open()?;
+        inflows = load_cash_inflows(&connection)?;
+        deposits = load_cash_deposits(&connection)?;
+    }
+
+    let saturday_is_working = saturday_is_working_day(state)?;
+    let config = BucketConfig {
+        non_working_days: load_non_working_days(state)?,
+        saturday_is_working,
+    };
+
+    let mut buckets = build_buckets(&inflows, &deposits, &config);
+    for bucket in &mut buckets {
+        bucket.is_overdue = bucket.outstanding_minor > 0
+            && bucket
+                .due_on
+                .as_deref()
+                .is_some_and(|due_on| due_on < as_of);
+    }
+
+    let outstanding_minor = buckets.iter().map(|bucket| bucket.outstanding_minor).sum();
+    let overdue_minor = buckets
+        .iter()
+        .filter(|bucket| bucket.is_overdue)
+        .map(|bucket| bucket.outstanding_minor)
+        .sum();
+    let excluded_float_minor = inflows
+        .iter()
+        .filter(|inflow| !inflow.subject)
+        .map(|inflow| inflow.amount_minor)
+        .sum();
+    let beyond_seeded_calendar = buckets
+        .iter()
+        .filter_map(|bucket| bucket.due_on.as_deref())
+        .filter_map(|due_on| due_on.get(0..4).and_then(|year| year.parse::<i32>().ok()))
+        .any(|year| year > SEEDED_CALENDAR_HORIZON_YEAR);
+
+    Ok(CashDepositReport {
+        as_of: as_of.to_string(),
+        buckets,
+        outstanding_minor,
+        overdue_minor,
+        excluded_float_minor,
+        saturday_is_working,
+        calendar_horizon_year: SEEDED_CALENDAR_HORIZON_YEAR,
+        beyond_seeded_calendar,
+        notice: cash_deposit_duty(&load_shop_profile(state)?),
+        footer: report_footer(beyond_seeded_calendar),
+    })
+}
+
+/// The knjigovođa's copy (§3 rule 17). Amounts are in para, matching every
+/// other CSV export in the app. The footer and the pravni osnov are appended
+/// below a blank line so an export can never separate the labels from the
+/// numbers.
+pub fn report_to_csv(report: &CashDepositReport) -> String {
+    let mut lines = vec![csv_line(&[
+        "Datum prometa",
+        "Primljeno",
+        "Položeno",
+        "Ostatak",
+        "Rok",
+        "Status",
+    ])];
+
+    for bucket in &report.buckets {
+        let status = if bucket.outstanding_minor == 0 {
+            "Položeno"
+        } else if bucket.is_overdue {
+            "Kasni"
+        } else {
+            "U roku"
+        };
+        lines.push(csv_line(&[
+            bucket.trading_date.as_str(),
+            &bucket.subject_minor.to_string(),
+            &bucket.deposited_minor.to_string(),
+            &bucket.outstanding_minor.to_string(),
+            bucket.due_on.as_deref().unwrap_or(""),
+            status,
+        ]));
+    }
+
+    lines.push(String::new());
+    lines.push(csv_line(&["Presek na dan", report.as_of.as_str()]));
+    lines.push(csv_line(&["Napomena", report.footer.as_str()]));
+    lines.push(csv_line(&["Pravni osnov", report.notice.citation.as_str()]));
+    if let Some(penalty) = report.notice.penalty.as_deref() {
+        lines.push(csv_line(&["Kazna", penalty]));
+    }
+
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    use crate::db::{test_database_path, Db};
+
     fn holidays(days: &[&str]) -> BTreeSet<String> {
         days.iter().map(|d| (*d).to_string()).collect()
+    }
+
+    fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
+        let path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let state = AppState::new(db);
+            test(&state);
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    fn admin_id(state: &AppState) -> i64 {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist")
+    }
+
+    fn sign_in_admin(state: &AppState) {
+        state
+            .set_session_user_id(admin_id(state))
+            .expect("admin session should set");
+    }
+
+    /// The report reads whole trading dates, so one long-lived shift is enough;
+    /// `sales.shift_id` is `NOT NULL` and foreign keys are on.
+    fn ensure_shift(connection: &Connection, user_id: i64) -> i64 {
+        let existing: Option<i64> = connection
+            .query_row("SELECT id FROM shifts ORDER BY id LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .ok();
+        if let Some(id) = existing {
+            return id;
+        }
+
+        connection
+            .execute(
+                "INSERT INTO shifts (
+                    user_id, opened_at, opening_cash_minor, expected_cash_minor,
+                    status, created_at, updated_at
+                 )
+                 VALUES (?1, '2026-07-01T08:00:00Z', 0, 0, 'open',
+                         '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z')",
+                params![user_id],
+            )
+            .expect("shift should insert");
+        connection.last_insert_rowid()
+    }
+
+    /// A completed cash sale received on `day` (`yyyy-MM-dd`), at midday so the
+    /// stamp is unambiguously inside that trading date. Returns the sale id so
+    /// a return can be linked to it.
+    fn seed_cash_sale_on(state: &AppState, day: &str, amount_minor: i64) -> i64 {
+        let connection = state.db().open().expect("database should open");
+        let cashier_id = admin_id(state);
+        let shift_id = ensure_shift(&connection, cashier_id);
+        let created_at = format!("{day}T12:00:00Z");
+        let sequence: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0))
+            .expect("sales should count");
+
+        connection
+            .execute(
+                "INSERT INTO sales (
+                    local_receipt_number, shift_id, cashier_id, status,
+                    subtotal_minor, tax_minor, total_minor, created_at, updated_at
+                 )
+                 VALUES (?1, ?2, ?3, 'completed', ?4, 0, ?4, ?5, ?5)",
+                params![
+                    format!("VP-{:06}", sequence + 1),
+                    shift_id,
+                    cashier_id,
+                    amount_minor,
+                    created_at
+                ],
+            )
+            .expect("sale should insert");
+        let sale_id = connection.last_insert_rowid();
+
+        connection
+            .execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, 'cash', ?2, ?3)",
+                params![sale_id, amount_minor, created_at],
+            )
+            .expect("cash payment should insert");
+
+        sale_id
+    }
+
+    /// A partial cash return on the same trading date, written exactly the way
+    /// `receipts::return_items` writes one: a linked `return` document carrying
+    /// the negative payment, and the original receipt flipped to `refunded`.
+    fn seed_partial_cash_return_on(
+        state: &AppState,
+        original_sale_id: i64,
+        day: &str,
+        amount_minor: i64,
+    ) {
+        let connection = state.db().open().expect("database should open");
+        let cashier_id = admin_id(state);
+        let shift_id = ensure_shift(&connection, cashier_id);
+        let created_at = format!("{day}T15:00:00Z");
+        let sequence: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0))
+            .expect("sales should count");
+
+        connection
+            .execute(
+                "INSERT INTO sales (
+                    local_receipt_number, shift_id, cashier_id, status, document_type,
+                    original_sale_id, subtotal_minor, tax_minor, total_minor,
+                    created_at, updated_at
+                 )
+                 VALUES (?1, ?2, ?3, 'refunded', 'return', ?4, ?5, 0, ?5, ?6, ?6)",
+                params![
+                    format!("POV-{:06}", sequence + 1),
+                    shift_id,
+                    cashier_id,
+                    original_sale_id,
+                    amount_minor,
+                    created_at
+                ],
+            )
+            .expect("return document should insert");
+        let return_sale_id = connection.last_insert_rowid();
+
+        connection
+            .execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, 'cash', ?2, ?3)",
+                params![return_sale_id, -amount_minor, created_at],
+            )
+            .expect("refund payment should insert");
+
+        connection
+            .execute(
+                "UPDATE sales SET status = 'refunded', updated_at = ?1 WHERE id = ?2",
+                params![created_at, original_sale_id],
+            )
+            .expect("original receipt should flip to refunded");
     }
 
     fn inflow(date: &str, amount_minor: i64) -> CashInflow {
@@ -571,5 +986,86 @@ mod tests {
             "04.08 pays 40.000 toward 03.08; 06.08 finishes it"
         );
         assert_eq!(buckets[1].deposited_minor, 60_000);
+    }
+
+    #[test]
+    fn report_flags_only_buckets_past_their_deadline() {
+        with_state("cash_deposit_report", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-07-20", 100_000);
+            seed_cash_sale_on(state, "2026-07-30", 40_000);
+
+            let report = cash_deposit_report(state, "2026-08-03").expect("report should run");
+
+            let overdue: Vec<&DepositBucket> =
+                report.buckets.iter().filter(|b| b.is_overdue).collect();
+            assert_eq!(
+                overdue.len(),
+                1,
+                "only the 20.07 bucket is past +7 radnih dana"
+            );
+            assert_eq!(overdue[0].trading_date, "2026-07-20");
+
+            assert!(report.notice.is_legal_duty);
+            assert!(
+                report.footer.contains("Pravilnik"),
+                "the float exclusion is bylaw-level relief and must be labelled"
+            );
+        });
+    }
+
+    /// A partial return flips the **original** receipt to `refunded` while the
+    /// linked document carries only the refunded part. Aging the base off
+    /// `sales.status = 'completed'` would therefore drop the whole receipt and
+    /// report a clean day, while 70.000 dinara sat undeposited in the drawer —
+    /// the false "clean" state §3 rule 10 forbids.
+    #[test]
+    fn a_partial_return_reduces_the_base_instead_of_erasing_it() {
+        with_state("cash_deposit_partial_return", |state| {
+            sign_in_admin(state);
+            let sale_id = seed_cash_sale_on(state, "2026-07-20", 100_000);
+            seed_partial_cash_return_on(state, sale_id, "2026-07-20", 30_000);
+
+            let report = cash_deposit_report(state, "2026-08-03").expect("report should run");
+
+            assert_eq!(report.buckets.len(), 1, "one trading date, one bucket");
+            assert_eq!(
+                report.buckets[0].subject_minor, 70_000,
+                "the shop kept 70.000 in cash; only the refunded 30.000 leaves the base"
+            );
+            assert_eq!(report.outstanding_minor, 70_000);
+        });
+    }
+
+    /// The knjigovođa's copy must carry the labels, not just the numbers: an
+    /// export that sheds the "konvencija" and "podzakonski akt" notices would
+    /// present this application's aggregation as the statute's own.
+    #[test]
+    fn the_csv_carries_the_bucket_rows_and_the_honesty_labels() {
+        with_state("cash_deposit_csv", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-07-20", 100_000);
+
+            let report = cash_deposit_report(state, "2026-08-03").expect("report should run");
+            let csv = report_to_csv(&report);
+            let mut lines = csv.lines();
+
+            assert_eq!(
+                lines.next(),
+                Some("Datum prometa,Primljeno,Položeno,Ostatak,Rok,Status")
+            );
+            assert_eq!(
+                lines.next(),
+                Some("2026-07-20,100000,0,100000,2026-07-28,Kasni")
+            );
+            assert!(
+                csv.contains("Pravilnik 77/2011"),
+                "the bylaw-level relief must be named in the export: {csv}"
+            );
+            assert!(
+                csv.contains("68/2015"),
+                "the pravni osnov must travel with the export: {csv}"
+            );
+        });
     }
 }
