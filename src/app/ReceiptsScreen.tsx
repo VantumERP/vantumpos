@@ -117,14 +117,18 @@ const fiscalSummaryLabels = {
   failed: "Fiskalna greška",
 };
 
-const paymentLabels = {
+// Exhaustive over PaymentMethod on purpose: an unmapped tender renders a
+// blank cell on a settled receipt, which reads as "no payment recorded".
+const paymentLabels: Record<PaymentMethod, string> = {
   cash: "Gotovina",
   card: "Kartica",
+  bank_transfer: "Prenos na račun",
 };
 
-const paymentSummaryLabels = {
+const paymentSummaryLabels: Record<PaymentMethod, string> = {
   cash: "Gotovinom",
   card: "Karticom",
+  bank_transfer: "Prenosom na račun",
 };
 
 export function ReceiptsScreen({ receipts }: ReceiptsScreenProps) {
@@ -136,7 +140,7 @@ export function ReceiptsScreen({ receipts }: ReceiptsScreenProps) {
   const [voidError, setVoidError] = useState<string | undefined>();
   const [returnOpen, setReturnOpen] = useState(false);
   const [returnReason, setReturnReason] = useState("");
-  const [refundTender, setRefundTender] = useState<"cash" | "card">("cash");
+  const [refundTender, setRefundTender] = useState<PaymentMethod>("cash");
   const [returnQuantities, setReturnQuantities] = useState<Record<number, string>>({});
   const [returnError, setReturnError] = useState<string | undefined>();
   const [listStatus, setListStatus] = useState<"loading" | "ready" | "error">(
@@ -399,6 +403,9 @@ export function ReceiptsScreen({ receipts }: ReceiptsScreenProps) {
                   Gotovinsko plaćanje
                 </NativeSelectOption>
                 <NativeSelectOption value="card">Kartica</NativeSelectOption>
+                <NativeSelectOption value="bank_transfer">
+                  Prenos na račun
+                </NativeSelectOption>
               </NativeSelect>
             </Field>
             <Field>
@@ -579,11 +586,14 @@ export function ReceiptsScreen({ receipts }: ReceiptsScreenProps) {
                   aria-label="Način povrata"
                   value={refundTender}
                   onChange={(event) =>
-                    setRefundTender(event.target.value as "cash" | "card")
+                    setRefundTender(event.target.value as PaymentMethod)
                   }
                 >
                   <NativeSelectOption value="cash">Gotovina</NativeSelectOption>
                   <NativeSelectOption value="card">Kartica</NativeSelectOption>
+                  <NativeSelectOption value="bank_transfer">
+                    Prenos na račun
+                  </NativeSelectOption>
                 </NativeSelect>
               </Field>
               <Field data-invalid={Boolean(returnError)}>

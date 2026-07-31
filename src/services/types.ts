@@ -89,6 +89,31 @@ export interface LegalNotice {
   isLegalDuty: boolean;
 }
 
+export type RateSource = "nbs" | "manual";
+
+export interface EurRate {
+  /** Para per 1 EUR (117,2345 RSD/EUR -> 11723), floored — never rounded up. */
+  rateMinor: number;
+  /** `YYYY-MM-DD`. A date other than today's makes the check stale. */
+  rateDate: string;
+  source: RateSource;
+}
+
+/**
+ * The verdict of `sales_assess_cash_payment` (AML čl. 46 st. 1). Advisory:
+ * `breached` never rejects the sale, it only demands an acknowledgement, and
+ * `rateUnavailable` degrades the check instead of blocking the till.
+ */
+export interface AmlAssessment {
+  cashMinor: number;
+  thresholdMinor: number;
+  breached: boolean;
+  nearThreshold: boolean;
+  rateUnavailable: boolean;
+  rate: EurRate | null;
+  notice: LegalNotice;
+}
+
 export interface BackupSettings {
   backupFolder: string;
   automaticBackupEnabled: boolean;
@@ -123,7 +148,7 @@ export interface BackupStatus extends BackupSettings {
   lastFailedBackup: BackupJob | null;
 }
 
-export type PaymentMethod = "cash" | "card";
+export type PaymentMethod = "cash" | "card" | "bank_transfer";
 
 export type UserRole = "admin" | "cashier";
 
@@ -626,6 +651,11 @@ export interface SalePaymentDraft {
 export interface CompleteSaleRequest extends SaleDraftRequest {
   payments: SalePaymentDraft[];
   allowStockOverride?: boolean;
+  /**
+   * What the operator typed when acknowledging the AML cash-cap warning.
+   * Recorded, never required — the sale is never rejected on an AML result.
+   */
+  amlAckReason?: string;
 }
 
 export interface CompletedSale extends SalePreview {
@@ -814,7 +844,7 @@ export interface ReturnItemsRequest {
   receiptId: number;
   reason: string;
   items: ReturnItemRequest[];
-  refundTender?: "cash" | "card";
+  refundTender?: PaymentMethod;
 }
 
 export interface ReportDateQuery {

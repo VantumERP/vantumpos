@@ -1,4 +1,5 @@
 import type {
+  AmlAssessment,
   AppHealth,
   AuthSession,
   BackupJob,
@@ -147,6 +148,12 @@ export interface CatalogService {
 export interface SalesService {
   createSalePreview(request: SaleDraftRequest): Promise<SalePreview>;
   completeSale(request: CompleteSaleRequest): Promise<CompletedSale>;
+  /**
+   * AML čl. 46 st. 1 verdict for the **cash line** of the tender, never the
+   * invoice total. Advisory only: the till warns and asks for a reason, it
+   * never refuses the sale.
+   */
+  assessCashPayment(cashMinor: number): Promise<AmlAssessment>;
 }
 
 export interface InventoryService {

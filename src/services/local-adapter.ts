@@ -3,6 +3,7 @@ import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 
 import type { PosServices } from "./ports";
 import type {
+  AmlAssessment,
   AppHealth,
   AuthSession,
   BackupJob,
@@ -146,6 +147,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<SalePreview>("sales_preview", { request }),
       completeSale: (request) =>
         invoke<CompletedSale>("sales_complete", { request }),
+      assessCashPayment: (cashMinor) =>
+        invoke<AmlAssessment>("sales_assess_cash_payment", { cashMinor }),
     },
     inventory: {
       listStock: (query) => invoke<StockListResult>("inventory_list_stock", { query }),

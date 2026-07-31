@@ -5,8 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import { RegisterScreen } from "@/app/register/RegisterScreen";
 import type { PosServices } from "@/services/ports";
 import type {
+  AmlAssessment,
   CompleteSaleRequest,
   CompletedSale,
+  PravnaForma,
   ProductSearchQuery,
   ProductSummary,
   SaleDraftRequest,
@@ -77,10 +79,13 @@ function createRegisterServices(
   } as unknown as PosServices;
 }
 
-function createSalePreview(request: SaleDraftRequest): SalePreview {
+function createSalePreview(
+  request: SaleDraftRequest,
+  priced: ProductSummary = product,
+): SalePreview {
   const items = request.items.map((item) => {
     const lineSubtotalMinor = Math.round(
-      (product.salePriceMinor * item.quantityMilli) / 1000,
+      (priced.salePriceMinor * item.quantityMilli) / 1000,
     );
     const discountMinor =
       item.discount?.type === "amount"
@@ -91,15 +96,15 @@ function createSalePreview(request: SaleDraftRequest): SalePreview {
     const totalMinor = lineSubtotalMinor - discountMinor;
 
     return {
-      productId: product.id,
-      productName: product.name,
-      productSku: product.sku,
-      productBarcode: product.barcode,
+      productId: priced.id,
+      productName: priced.name,
+      productSku: priced.sku,
+      productBarcode: priced.barcode,
       quantityMilli: item.quantityMilli,
       quantityLabel: `${item.quantityMilli / 1000} kom`,
-      unitPriceMinor: product.salePriceMinor,
+      unitPriceMinor: priced.salePriceMinor,
       discountMinor,
-      taxRateBasisPoints: product.taxRateBasisPoints,
+      taxRateBasisPoints: priced.taxRateBasisPoints,
       taxMinor: Math.round((totalMinor * 2000) / 12000),
       totalMinor,
     };
@@ -156,6 +161,133 @@ async function createCompletedSale(
     cashReceivedMinor,
     changeDueMinor: Math.max(cashReceivedMinor - preview.totalMinor, 0),
   };
+}
+
+/**
+ * The AML fixtures below stand in for the Rust `sales_assess_cash_payment`
+ * command. The copy is verbatim from `src-tauri/src/legal.rs::aml_cash_cap` —
+ * the till must render whatever the backend hands it, and the operator must
+ * see the preduzetnik tier, never "privredni prestup".
+ */
+const amlSummary =
+  "Zabranjeno je primiti gotovinu u iznosu od 10.000 evra ili više u dinarskoj protivvrednosti. Iznos se mora uplatiti na tekući račun.";
+const amlPreduzetnikPenalty =
+  "Prekršaj: novčana kazna od 100.000 do 300.000 dinara (čl. 120 st. 2), a u srazmeri s vrednošću robe i više (čl. 120 st. 8).";
+const amlCitation =
+  "Zakon o sprečavanju pranja novca i finansiranja terorizma, čl. 46 st. 1. Nadzor: tržišna inspekcija (čl. 110 st. 6).";
+
+/**
+ * The till debounces the assessment call, so the warning lands a `setTimeout`
+ * after the last keystroke. Under full vitest parallelism this worker can be
+ * starved for seconds at a time, and the default 1s findBy budget is
+ * wall-clock, so it expires while the timer is still queued. These budgets are
+ * slack for a starved box, not an expectation — the warning renders in well
+ * under a second when the machine is idle.
+ */
+const AML_WAIT_MS = 5_000;
+const AML_TEST_TIMEOUT_MS = 20_000;
+
+/** 10.000,00 RSD, so a rate of 100 para/EUR puts one unit exactly on the cap. */
+const capPricedProduct: ProductSummary = {
+  ...product,
+  id: 2,
+  name: "Zlatni set",
+  sku: "ZLATO-1",
+  barcode: "8600000000027",
+  salePriceMinor: 1_000_000,
+};
+
+function todayIso(): string {
+  const now = new Date();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  const day = `${now.getDate()}`.padStart(2, "0");
+
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+interface AmlServiceOptions {
+  /** `null` stands for "no rate cached" — the check cannot run. */
+  eurRateMinor?: number | null;
+  rateDate?: string;
+  pravnaForma?: PravnaForma | null;
+  completeSale?: Parameters<typeof createRegisterServices>[0];
+}
+
+function createAmlServices(options: AmlServiceOptions = {}): PosServices {
+  const {
+    eurRateMinor = 100,
+    rateDate = todayIso(),
+    pravnaForma = "preduzetnik",
+    completeSale = vi.fn(createCompletedSale),
+  } = options;
+  const services = createRegisterServices(completeSale);
+
+  services.catalog.searchProducts = async () => ({
+    items: [capPricedProduct],
+    categories: [],
+    taxRates: [],
+    total: 1,
+  });
+  services.sales.createSalePreview = async (request: SaleDraftRequest) =>
+    createSalePreview(request, capPricedProduct);
+  services.sales.assessCashPayment = async (
+    cashMinor: number,
+  ): Promise<AmlAssessment> => {
+    const notice = {
+      summary: amlSummary,
+      penalty: pravnaForma === "preduzetnik" ? amlPreduzetnikPenalty : null,
+      citation: amlCitation,
+      isLegalDuty: true,
+    };
+
+    if (eurRateMinor === null) {
+      return {
+        cashMinor,
+        thresholdMinor: 0,
+        breached: false,
+        nearThreshold: false,
+        rateUnavailable: true,
+        rate: null,
+        notice,
+      };
+    }
+
+    // Mirrors `aml::assess_cash_payment` exactly: inclusive `>=`, 80% soft line.
+    const thresholdMinor = 10_000 * eurRateMinor;
+    const softMinor = Math.floor((thresholdMinor * 80) / 100);
+
+    return {
+      cashMinor,
+      thresholdMinor,
+      breached: cashMinor >= thresholdMinor,
+      nearThreshold: cashMinor >= softMinor && cashMinor < thresholdMinor,
+      rateUnavailable: false,
+      rate: { rateMinor: eurRateMinor, rateDate, source: "nbs" },
+      notice,
+    };
+  };
+
+  return services;
+}
+
+async function addCapPricedItem(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(
+    screen.getByRole("searchbox", {
+      name: "Skeniraj barkod ili pretraži artikal",
+    }),
+    "8600000000027{enter}",
+  );
+
+  expect(await screen.findByText("Zlatni set")).toBeInTheDocument();
+}
+
+async function tenderCash(
+  user: ReturnType<typeof userEvent.setup>,
+  amount: string,
+) {
+  const cashField = screen.getByLabelText(/gotovina primljeno/i);
+  await user.clear(cashField);
+  await user.type(cashField, amount);
 }
 
 async function addProductToCart(user: ReturnType<typeof userEvent.setup>) {
@@ -435,6 +567,135 @@ describe("RegisterScreen", () => {
     await user.click(screen.getByRole("button", { name: /Sačuvaj broj/i }));
     expect(setEsirNumber).toHaveBeenCalledWith(expect.any(Number), "ФБ12-1");
   });
+
+  it("warns at exactly the cap and requires a reason before completing", async () => {
+    const user = userEvent.setup();
+    // rate 100 para/EUR -> threshold 1.000.000 para
+    const completeSale = vi.fn(createCompletedSale);
+    const services = createAmlServices({
+      eurRateMinor: 100,
+      pravnaForma: "preduzetnik",
+      completeSale,
+    });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    await tenderCash(user, "10000");
+
+    expect(
+      await screen.findByText(/10\.000 evra ili više/i, undefined, {
+        timeout: AML_WAIT_MS,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/100\.000 do 300\.000/)).toBeInTheDocument();
+    expect(screen.queryByText(/privredni prestup/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
+
+    expect(
+      screen.getByText(/unesite razlog/i),
+      "the soft block asks for a reason, it does not forbid the sale",
+    ).toBeInTheDocument();
+    expect(completeSale).not.toHaveBeenCalled();
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("completes the breached sale once a reason is entered and records it", async () => {
+    const user = userEvent.setup();
+    const completeSale = vi.fn(createCompletedSale);
+    const services = createAmlServices({ eurRateMinor: 100, completeSale });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    await tenderCash(user, "10000");
+    await screen.findByText(/10\.000 evra ili više/i, undefined, {
+      timeout: AML_WAIT_MS,
+    });
+
+    await user.type(
+      screen.getByLabelText(/razlog prijema gotovine/i),
+      "Kupac je odbio prenos na račun.",
+    );
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
+
+    await waitFor(() =>
+      expect(completeSale).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amlAckReason: "Kupac je odbio prenos na račun.",
+        }),
+      ),
+    );
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("shows a staleness warning when the rate is not today's", async () => {
+    const user = userEvent.setup();
+    const services = createAmlServices({
+      eurRateMinor: 100,
+      rateDate: "2026-07-01",
+    });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    await tenderCash(user, "10000");
+
+    expect(
+      await screen.findByText(/kurs od 01\.07\.2026/i, undefined, {
+        timeout: AML_WAIT_MS,
+      }),
+    ).toBeInTheDocument();
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("says the check could not run when no rate is cached, and still sells", async () => {
+    const user = userEvent.setup();
+    const completeSale = vi.fn(createCompletedSale);
+    const services = createAmlServices({ eurRateMinor: null, completeSale });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    await tenderCash(user, "10000");
+
+    expect(
+      await screen.findByText(/provera nije mogla da se izvrši/i, undefined, {
+        timeout: AML_WAIT_MS,
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
+
+    await waitFor(() => expect(completeSale).toHaveBeenCalled());
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("offers the bank-transfer tender as the lawful alternative", async () => {
+    const services = createAmlServices({ eurRateMinor: 100 });
+
+    render(<RegisterScreen services={services} />);
+
+    expect(
+      screen.getByLabelText(/uplata na tekući račun/i),
+    ).toBeInTheDocument();
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("sends the bank-transfer amount as its own payment line", async () => {
+    const user = userEvent.setup();
+    const completeSale = vi.fn(createCompletedSale);
+    const services = createAmlServices({ eurRateMinor: 100, completeSale });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    await user.type(screen.getByLabelText(/uplata na tekući račun/i), "10000");
+    await waitFor(() =>
+      expect(screen.getByLabelText(/gotovina primljeno/i)).toHaveValue("0.00"),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
+
+    await waitFor(() =>
+      expect(completeSale).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payments: [{ method: "bank_transfer", amountMinor: 1_000_000 }],
+        }),
+      ),
+    );
+  }, AML_TEST_TIMEOUT_MS);
 
   it("reports when nothing matches", async () => {
     const user = userEvent.setup();

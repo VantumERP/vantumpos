@@ -1,5 +1,6 @@
 import type { PosServices } from "./ports";
 import type {
+  AmlAssessment,
   AuthSession,
   BackupJob,
   BackupSettings,
@@ -9,7 +10,9 @@ import type {
   CategorySummary,
   CompanySettings,
   CreateBackupRequest,
+  EurRate,
   ImportJob,
+  LegalNotice,
   InventoryAdjustmentRequest,
   KepClosure,
   KepClosureView,
@@ -35,6 +38,16 @@ import type {
 } from "./types";
 
 const now = "2026-06-18T10:00:00Z";
+
+const AML_CAP_EUR = 10_000;
+const AML_SOFT_RATIO_PERCENT = 80;
+
+/** The demo rate, dated to `now` so the till shows no staleness warning. */
+const mockEurRate: EurRate = {
+  rateMinor: 11723,
+  rateDate: "2026-06-18",
+  source: "nbs",
+};
 
 export function createMockServices(): PosServices {
   let categories: CategorySummary[] = [
@@ -732,6 +745,9 @@ export function createMockServices(): PosServices {
           cashReceivedMinor,
           changeDueMinor: Math.max(cashReceivedMinor - preview.totalMinor, 0),
         };
+      },
+      async assessCashPayment(cashMinor) {
+        return assessCashPayment(cashMinor, mockEurRate, shopProfile);
       },
     },
     inventory: {
@@ -1733,6 +1749,60 @@ function toStockItem(product: ProductSummary): StockListItem {
 
 function ledgerLatest(_productId: number): string | null {
   return null;
+}
+
+/**
+ * Mirrors `src-tauri/src/aml.rs::assess_cash_payment` exactly — inclusive
+ * `>=` on the cap ("10.000 evra **ili više**") and the 80% soft line. The mock
+ * must not warn where the real backend would stay silent, or the reverse.
+ *
+ * `penalty` is deliberately `null` here whatever the legal form: every
+ * statutory fine figure lives in `src-tauri/src/legal.rs` and nowhere else, so
+ * a second copy in this double could silently drift out of tier — which is
+ * exactly the defect the 31.07.2026 penalty-tier sweep corrected. A `null`
+ * penalty is the one answer that can never be the wrong tier, and the till
+ * already renders it as "set your legal form in Podešavanja → Profil".
+ */
+function assessCashPayment(
+  cashMinor: number,
+  rate: EurRate | null,
+  _profile: ShopProfile,
+): AmlAssessment {
+  const notice: LegalNotice = {
+    summary:
+      "Zabranjeno je primiti gotovinu u iznosu od 10.000 evra ili više u " +
+      "dinarskoj protivvrednosti. Iznos se mora uplatiti na tekući račun.",
+    penalty: null,
+    citation:
+      "Zakon o sprečavanju pranja novca i finansiranja terorizma, čl. 46 st. 1. " +
+      "Nadzor: tržišna inspekcija (čl. 110 st. 6).",
+    isLegalDuty: true,
+  };
+
+  if (!rate) {
+    return {
+      cashMinor,
+      thresholdMinor: 0,
+      breached: false,
+      nearThreshold: false,
+      rateUnavailable: true,
+      rate: null,
+      notice,
+    };
+  }
+
+  const thresholdMinor = AML_CAP_EUR * rate.rateMinor;
+  const softMinor = Math.floor((thresholdMinor * AML_SOFT_RATIO_PERCENT) / 100);
+
+  return {
+    cashMinor,
+    thresholdMinor,
+    breached: cashMinor >= thresholdMinor,
+    nearThreshold: cashMinor >= softMinor && cashMinor < thresholdMinor,
+    rateUnavailable: false,
+    rate,
+    notice,
+  };
 }
 
 function createSalePreview(

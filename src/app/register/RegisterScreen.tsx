@@ -29,7 +29,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Empty, EmptyContent, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   InputGroup,
@@ -47,16 +53,26 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { formatRsd, parseRsdInput } from "@/lib/money";
 import type { PosServices } from "@/services/ports";
 import type {
+  AmlAssessment,
   CommandError,
   CompletedSale,
   DiscountDraft,
+  SalePaymentDraft,
   ProductSummary,
   SaleDraftItem,
   SalePreview,
 } from "@/services/types";
+
+/**
+ * The till asks the backend for an AML verdict as the operator types, so the
+ * debounce has to be short enough that the warning is on screen before the
+ * money changes hands.
+ */
+const AML_ASSESS_DEBOUNCE_MS = 200;
 
 interface RegisterScreenProps {
   services: PosServices;
@@ -88,6 +104,10 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   const [cashInput, setCashInput] = useState("");
   const [cashTouched, setCashTouched] = useState(false);
   const [cardInput, setCardInput] = useState("");
+  const [bankTransferInput, setBankTransferInput] = useState("");
+  const [assessment, setAssessment] = useState<AmlAssessment | null>(null);
+  const [amlReason, setAmlReason] = useState("");
+  const [amlReasonError, setAmlReasonError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [isCompleting, setIsCompleting] = useState(false);
   const [overrideOpen, setOverrideOpen] = useState(false);
@@ -149,19 +169,67 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   const previewTotalMinor = preview?.totalMinor;
   const cashMinor = parseOptionalMoney(cashInput);
   const cardMinor = parseOptionalMoney(cardInput);
+  const bankTransferMinor = parseOptionalMoney(bankTransferInput);
+  const tenderedMinor = cashMinor + cardMinor + bankTransferMinor;
   const changeMinor =
-    preview && cashMinor + cardMinor > preview.totalMinor
-      ? cashMinor + cardMinor - preview.totalMinor
+    preview && tenderedMinor > preview.totalMinor
+      ? tenderedMinor - preview.totalMinor
       : 0;
 
   useEffect(() => {
     if (!cashTouched && previewTotalMinor !== undefined) {
-      // Prefill only the cash still due after any card amount, so a card-only
-      // sale prefills 0 and never shows phantom change.
-      const cashDueMinor = Math.max(0, previewTotalMinor - cardMinor);
+      // Prefill only the cash still due after any cashless amount, so a
+      // card- or transfer-only sale prefills 0 and never shows phantom change.
+      // It is also what lets the operator clear an AML breach by moving the
+      // money to the bank-transfer line (čl. 46 st. 1's lawful alternative).
+      const cashDueMinor = Math.max(
+        0,
+        previewTotalMinor - cardMinor - bankTransferMinor,
+      );
       setCashInput((cashDueMinor / 100).toFixed(2));
     }
-  }, [previewTotalMinor, cardMinor, cashTouched]);
+  }, [previewTotalMinor, cardMinor, bankTransferMinor, cashTouched]);
+
+  // AML čl. 46 st. 1 keys to the CASH line, never the invoice total. The
+  // verdict is advisory: a failed or unavailable check degrades to a note and
+  // never blocks the till.
+  useEffect(() => {
+    if (cashMinor <= 0) {
+      setAssessment(null);
+      return;
+    }
+
+    let active = true;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const verdict = await services.sales.assessCashPayment(cashMinor);
+
+          if (active) {
+            setAssessment(verdict);
+          }
+        } catch {
+          if (active) {
+            setAssessment(null);
+          }
+        }
+      })();
+    }, AML_ASSESS_DEBOUNCE_MS);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [cashMinor, services]);
+
+  const amlBreached = assessment?.breached ?? false;
+  const amlWarns = amlBreached || (assessment?.nearThreshold ?? false);
+
+  useEffect(() => {
+    if (!amlBreached) {
+      setAmlReasonError(null);
+    }
+  }, [amlBreached]);
 
   async function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -284,21 +352,39 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       return;
     }
 
+    const reason = amlReason.trim();
+
+    // A soft block: the sale is lawful to record either way, but a breach of
+    // čl. 46 st. 1 must not go into the books unexplained.
+    if (amlBreached && !reason) {
+      setAmlReasonError(
+        "Unesite razlog prijema gotovine pre nego što završite prodaju.",
+      );
+      return;
+    }
+
+    setAmlReasonError(null);
     setMessage(null);
     setIsCompleting(true);
+
+    const payments: SalePaymentDraft[] = [
+      ...(cashMinor > 0
+        ? [{ method: "cash" as const, amountMinor: cashMinor }]
+        : []),
+      ...(cardMinor > 0
+        ? [{ method: "card" as const, amountMinor: cardMinor }]
+        : []),
+      ...(bankTransferMinor > 0
+        ? [{ method: "bank_transfer" as const, amountMinor: bankTransferMinor }]
+        : []),
+    ];
 
     try {
       const sale = await services.sales.completeSale({
         ...draft,
-        payments: [
-          ...(cashMinor > 0
-            ? [{ method: "cash" as const, amountMinor: cashMinor }]
-            : []),
-          ...(cardMinor > 0
-            ? [{ method: "card" as const, amountMinor: cardMinor }]
-            : []),
-        ],
+        payments,
         ...(allowStockOverride ? { allowStockOverride: true } : {}),
+        ...(amlWarns && reason ? { amlAckReason: reason } : {}),
       });
       setCompletedSale(sale);
       setCart([]);
@@ -306,6 +392,9 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       setCashInput("");
       setCashTouched(false);
       setCardInput("");
+      setBankTransferInput("");
+      setAssessment(null);
+      setAmlReason("");
       setReceiptDiscountInput("");
       setOverrideOpen(false);
     } catch (error) {
@@ -554,7 +643,35 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
                 <InputGroupAddon align="inline-end">RSD</InputGroupAddon>
               </InputGroup>
             </Field>
+            <Field>
+              {/* The lawful alternative čl. 46 st. 1 commands when the cash
+                  cap is reached: the amount goes to the shop's bank account. */}
+              <FieldLabel htmlFor="bank-transfer-amount">
+                Prenos na račun — uplata na tekući račun prodavnice
+              </FieldLabel>
+              <InputGroup>
+                <InputGroupInput
+                  id="bank-transfer-amount"
+                  inputMode="decimal"
+                  value={bankTransferInput}
+                  onChange={(event) => setBankTransferInput(event.target.value)}
+                />
+                <InputGroupAddon align="inline-end">RSD</InputGroupAddon>
+              </InputGroup>
+            </Field>
           </FieldGroup>
+
+          {assessment && (assessment.rateUnavailable || amlWarns) && (
+            <AmlNotice
+              assessment={assessment}
+              reason={amlReason}
+              reasonError={amlReasonError}
+              onReasonChange={(value) => {
+                setAmlReason(value);
+                setAmlReasonError(null);
+              }}
+            />
+          )}
           <div className="rounded-md bg-muted p-3">
             <div className="flex items-center justify-between text-sm">
               <span>Kusur</span>
@@ -707,6 +824,111 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       </Dialog>
     </div>
   );
+}
+
+interface AmlNoticeProps {
+  assessment: AmlAssessment;
+  reason: string;
+  reasonError: string | null;
+  onReasonChange: (value: string) => void;
+}
+
+/**
+ * The till-side rendering of the AML čl. 46 st. 1 verdict.
+ *
+ * Legal: every figure and every word of the penalty comes from the backend
+ * (`legal.rs`), never from this file — a preduzetnik must never be shown the
+ * pravno-lice "privredni prestup" tier. When the legal form is unanswered the
+ * penalty is `null` and we point at Podešavanja → Profil instead of guessing.
+ */
+function AmlNotice({
+  assessment,
+  reason,
+  reasonError,
+  onReasonChange,
+}: AmlNoticeProps) {
+  if (assessment.rateUnavailable) {
+    return (
+      <Alert>
+        <AlertTitle>Provera limita gotovine nije izvršena</AlertTitle>
+        <AlertDescription>
+          Provera nije mogla da se izvrši — unesite kurs u Podešavanjima.
+          Prodaja se može završiti.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  const stale =
+    assessment.rate !== null && assessment.rate.rateDate !== todayIsoDate();
+
+  return (
+    <Alert variant={assessment.breached ? "destructive" : "default"}>
+      <AlertTitle>
+        {assessment.breached
+          ? "Prekoračen limit za gotovinu"
+          : "Blizu limita za gotovinu"}
+      </AlertTitle>
+      <AlertDescription>
+        <div className="flex flex-col gap-2">
+          <p>{assessment.notice.summary}</p>
+          <p>
+            Limit: {formatRsd(assessment.thresholdMinor)} · Primljeno u
+            gotovini: {formatRsd(assessment.cashMinor)}
+          </p>
+          {assessment.notice.penalty ? (
+            <p>{assessment.notice.penalty}</p>
+          ) : (
+            <p>
+              Unesite pravnu formu u Podešavanja → Profil da bi kazna bila
+              prikazana.
+            </p>
+          )}
+          <p className="text-xs">{assessment.notice.citation}</p>
+          {stale && assessment.rate && (
+            <p className="text-xs">
+              Upozorenje: primenjen je kurs od{" "}
+              {formatRateDate(assessment.rate.rateDate)}, a ne današnji.
+              Osvežite kurs u Podešavanjima.
+            </p>
+          )}
+          {assessment.breached && (
+            <Field data-invalid={Boolean(reasonError)}>
+              <FieldLabel htmlFor="aml-reason">
+                Razlog prijema gotovine
+              </FieldLabel>
+              <Textarea
+                id="aml-reason"
+                value={reason}
+                aria-invalid={Boolean(reasonError)}
+                onChange={(event) => onReasonChange(event.target.value)}
+              />
+              <FieldDescription>
+                Umesto gotovine ponudite kupcu uplatu na tekući račun
+                prodavnice.
+              </FieldDescription>
+              <FieldError>{reasonError}</FieldError>
+            </Field>
+          )}
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function todayIsoDate(): string {
+  const now = new Date();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  const day = `${now.getDate()}`.padStart(2, "0");
+
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/** `2026-07-01` -> `01.07.2026`, without going through a Date (no TZ shift). */
+function formatRateDate(value: string): string {
+  const [year, month, day] = value.split("-");
+
+  return year && month && day ? `${day}.${month}.${year}` : value;
 }
 
 function Totals({ preview }: { preview?: SalePreview }) {
