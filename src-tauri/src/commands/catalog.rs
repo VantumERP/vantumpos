@@ -6,6 +6,7 @@ use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
 use crate::clock::utc_now;
+use crate::commands::settings::{ShopProfile, SHOP_PROFILE_KEY};
 use crate::db::Db;
 use crate::price_history::{
     compute_prethodna_cena, load_offering_state, record_offered_price_change, IncomputableReason,
@@ -62,6 +63,25 @@ pub struct SaveProductRequest {
     #[serde(default)]
     pub perishable_justification: Option<String>,
     pub external_source: Option<ProductExternalSourceRequest>,
+    /// ZoT čl. 34 st. 1 identity data. Nullable and `#[serde(default)]`: for
+    /// walk-in retail the marking duty is the proizvođač's / uvoznik's (st. 2),
+    /// so an operator who never fills these in must still be able to save.
+    /// `validate_declaration` is what turns them into a requirement, and only
+    /// for a shop that has answered „prodajem na daljinu" with yes.
+    #[serde(default)]
+    pub manufacturer_name: Option<String>,
+    #[serde(default)]
+    pub importer_name: Option<String>,
+    #[serde(default)]
+    pub country_of_origin: Option<String>,
+    /// Reserved for the future jedinstveni šifarnik robe. Stored, never
+    /// validated and never synced — the register does not exist yet.
+    #[serde(default)]
+    pub official_goods_code: Option<String>,
+    /// `gtin` | `internal` | `none`. An in-house printed code must never be
+    /// recorded as a GTIN, so the kind is asserted rather than guessed.
+    #[serde(default)]
+    pub barcode_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +162,11 @@ pub struct ProductSummary {
     pub perishable: bool,
     pub perishable_justification: Option<String>,
     pub external_source: Option<ProductExternalSource>,
+    pub manufacturer_name: Option<String>,
+    pub importer_name: Option<String>,
+    pub country_of_origin: Option<String>,
+    pub official_goods_code: Option<String>,
+    pub barcode_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -168,6 +193,11 @@ struct NormalizedProductRequest {
     perishable: bool,
     perishable_justification: Option<String>,
     external_source: Option<ProductExternalSourceRequest>,
+    manufacturer_name: Option<String>,
+    importer_name: Option<String>,
+    country_of_origin: Option<String>,
+    official_goods_code: Option<String>,
+    barcode_kind: Option<String>,
 }
 
 #[tauri::command]
@@ -364,6 +394,7 @@ pub fn create_product(
 ) -> Result<ProductSummary, AppError> {
     let mut connection = db.open()?;
     let normalized = normalize_product_request(request)?;
+    validate_declaration(&load_shop_profile_for_connection(&connection)?, &normalized)?;
     let now = utc_now()?;
     let tx = connection.transaction()?;
 
@@ -393,10 +424,15 @@ pub fn create_product(
             external_source_barcode,
             external_source_fetched_at,
             external_source_accepted_fields_json,
+            manufacturer_name,
+            importer_name,
+            country_of_origin,
+            official_goods_code,
+            barcode_kind,
             created_at,
             updated_at
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?19)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24)",
         params![
             normalized.name,
             normalized.sku,
@@ -428,6 +464,11 @@ pub fn create_product(
                 .as_ref()
                 .map(|source| source.fetched_at.as_str()),
             external_source_accepted_fields_json,
+            normalized.manufacturer_name,
+            normalized.importer_name,
+            normalized.country_of_origin,
+            normalized.official_goods_code,
+            normalized.barcode_kind,
             now,
         ],
     )?;
@@ -465,6 +506,7 @@ pub fn update_product(
 
     let mut connection = db.open()?;
     let normalized = normalize_product_request(request)?;
+    validate_declaration(&load_shop_profile_for_connection(&connection)?, &normalized)?;
     let now = utc_now()?;
     let tx = connection.transaction()?;
 
@@ -503,8 +545,13 @@ pub fn update_product(
              external_source_barcode = ?16,
              external_source_fetched_at = ?17,
              external_source_accepted_fields_json = ?18,
-             updated_at = ?19
-         WHERE id = ?20",
+             manufacturer_name = ?19,
+             importer_name = ?20,
+             country_of_origin = ?21,
+             official_goods_code = ?22,
+             barcode_kind = ?23,
+             updated_at = ?24
+         WHERE id = ?25",
         params![
             normalized.name,
             normalized.sku,
@@ -536,6 +583,11 @@ pub fn update_product(
                 .as_ref()
                 .map(|source| source.fetched_at.as_str()),
             external_source_accepted_fields_json,
+            normalized.manufacturer_name,
+            normalized.importer_name,
+            normalized.country_of_origin,
+            normalized.official_goods_code,
+            normalized.barcode_kind,
             now,
             id,
         ],
@@ -784,7 +836,12 @@ pub fn list_products_for_connection(
              p.external_source_fetched_at,
              p.external_source_accepted_fields_json,
              p.perishable,
-             p.perishable_justification
+             p.perishable_justification,
+             p.manufacturer_name,
+             p.importer_name,
+             p.country_of_origin,
+             p.official_goods_code,
+             p.barcode_kind
          FROM products p
          JOIN tax_rates tr ON tr.id = p.tax_rate_id
          LEFT JOIN categories c ON c.id = p.category_id
@@ -856,7 +913,12 @@ fn product_by_id_for_connection(
                  p.external_source_fetched_at,
                  p.external_source_accepted_fields_json,
                  p.perishable,
-                 p.perishable_justification
+                 p.perishable_justification,
+                 p.manufacturer_name,
+                 p.importer_name,
+                 p.country_of_origin,
+                 p.official_goods_code,
+                 p.barcode_kind
              FROM products p
              JOIN tax_rates tr ON tr.id = p.tax_rate_id
              LEFT JOIN categories c ON c.id = p.category_id
@@ -1051,6 +1113,12 @@ fn normalize_product_request(
     let external_source = normalize_external_source(request.external_source)?;
     let perishable_justification =
         normalized_optional_text(request.perishable_justification.as_deref());
+    let manufacturer_name = normalized_optional_text(request.manufacturer_name.as_deref());
+    let importer_name = normalized_optional_text(request.importer_name.as_deref());
+    let country_of_origin = normalized_optional_text(request.country_of_origin.as_deref());
+    let official_goods_code = normalized_optional_text(request.official_goods_code.as_deref());
+    let barcode_kind = normalized_optional_text(request.barcode_kind.as_deref())
+        .map(|kind| kind.to_ascii_lowercase());
 
     if name.is_empty() {
         return Err(validation_error("Naziv je obavezan.", "name"));
@@ -1106,6 +1174,15 @@ fn normalize_product_request(
         ));
     }
 
+    if let Some(kind) = barcode_kind.as_deref() {
+        if !matches!(kind, "gtin" | "internal" | "none") {
+            return Err(validation_error(
+                "Vrsta barkoda mora biti GTIN, interni ili bez barkoda.",
+                "barcodeKind",
+            ));
+        }
+    }
+
     Ok(NormalizedProductRequest {
         name,
         sku,
@@ -1126,7 +1203,75 @@ fn normalize_product_request(
             .then_some(perishable_justification)
             .flatten(),
         external_source,
+        manufacturer_name,
+        importer_name,
+        country_of_origin,
+        official_goods_code,
+        barcode_kind,
     })
+}
+
+/// ZoT čl. 34 st. 5: in daljinska trgovina the trgovac must himself display the
+/// deklaracija and keep the st. 1 data continuously available before purchase.
+/// For walk-in retail the marking duty is the proizvođač's/uvoznik's (st. 2),
+/// so these fields are an aid, not a record — do not require them.
+///
+/// Only an explicit `Some(true)` blocks. `None` means the shop has not been
+/// asked yet (§5 Q-8) and must be treated like walk-in retail: §4 item 12
+/// forbids a hard block there, and inferring "yes" from silence would strand
+/// legitimate stock just as inferring "no" would hide a real duty.
+fn validate_declaration(
+    profile: &ShopProfile,
+    input: &NormalizedProductRequest,
+) -> Result<(), AppError> {
+    if profile.distance_selling != Some(true) {
+        return Ok(());
+    }
+
+    for (value, field, label) in [
+        (
+            &input.manufacturer_name,
+            "manufacturerName",
+            "Poslovno ime proizvođača",
+        ),
+        (
+            &input.country_of_origin,
+            "countryOfOrigin",
+            "Zemlja proizvodnje",
+        ),
+    ] {
+        if value.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return Err(AppError::validation(
+                format!("{label} je obavezno za prodaju na daljinu."),
+                serde_json::json!({ "field": field }),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// The profile is one JSON blob in `settings`, and `load_shop_profile` takes the
+/// `AppState` the catalog writers do not hold — they take a `&Db`. Read it off
+/// the connection that is already open instead of widening every signature.
+///
+/// A value that will not deserialize degrades to the default rather than
+/// erroring. `ShopProfile::default()` has `distance_selling: None`, which is the
+/// advisory branch, so a corrupt row can never invent a hard block that §4
+/// item 12 forbids — nor can it lock the operator out of his own catalogue.
+/// Genuine SQL errors still propagate.
+fn load_shop_profile_for_connection(connection: &Connection) -> Result<ShopProfile, AppError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![SHOP_PROFILE_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    Ok(stored
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default())
 }
 
 fn product_from_row(row: &Row<'_>) -> rusqlite::Result<ProductSummary> {
@@ -1150,6 +1295,11 @@ fn product_from_row(row: &Row<'_>) -> rusqlite::Result<ProductSummary> {
         external_source: external_source_from_row(row, 16)?,
         perishable: row.get::<_, i64>(21)? == 1,
         perishable_justification: row.get(22)?,
+        manufacturer_name: row.get(23)?,
+        importer_name: row.get(24)?,
+        country_of_origin: row.get(25)?,
+        official_goods_code: row.get(26)?,
+        barcode_kind: row.get(27)?,
     })
 }
 
@@ -1304,9 +1454,10 @@ mod tests {
         catalog_create_product, catalog_save_category, catalog_update_product, create_product,
         get_product, list_products, lookup_suggestion_from_open_food_facts_json, prethodna_cena,
         save_category, search_products, set_product_active, update_product,
-        ProductExternalSourceRequest, ProductListQuery, ProductSearchQuery, SaveCategoryRequest,
-        SaveProductRequest,
+        ProductExternalSourceRequest, ProductListQuery, ProductSearchQuery, ProductSummary,
+        SaveCategoryRequest, SaveProductRequest,
     };
+    use crate::commands::settings::{save_shop_profile, PravnaForma, ShopProfileRequest};
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
 
@@ -1425,7 +1576,227 @@ mod tests {
             perishable: false,
             perishable_justification: None,
             external_source: None,
+            manufacturer_name: None,
+            importer_name: None,
+            country_of_origin: None,
+            official_goods_code: None,
+            barcode_kind: None,
         }
+    }
+
+    /// The declaration gate reads `shop_profile` out of `settings`, and
+    /// `save_shop_profile` is admin-gated, so these tests need a real
+    /// `AppState` with a session rather than the bare `Db` the older catalog
+    /// tests use.
+    fn with_catalog_state(test_name: &str, test: impl FnOnce(&AppState)) {
+        let db_path = test_database_path(test_name);
+
+        {
+            let db = Db::new(db_path.clone()).expect("database should initialize");
+            seed_catalog(&db);
+            let state = AppState::new(db);
+            test(&state);
+        }
+
+        std::fs::remove_file(&db_path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                db_path.display()
+            )
+        });
+    }
+
+    fn sign_in_admin(state: &AppState) {
+        state
+            .set_session_user_id(admin_id(state.db()))
+            .expect("admin session should set");
+    }
+
+    fn create_product_as_admin(
+        state: &AppState,
+        request: SaveProductRequest,
+    ) -> Result<ProductSummary, AppError> {
+        let acting = admin_id(state.db());
+        create_product(state.db(), request, acting)
+    }
+
+    fn update_product_as_admin(
+        state: &AppState,
+        id: i64,
+        request: SaveProductRequest,
+    ) -> Result<ProductSummary, AppError> {
+        let acting = admin_id(state.db());
+        update_product(state.db(), id, request, acting)
+    }
+
+    fn walk_in_profile_request() -> ShopProfileRequest {
+        ShopProfileRequest {
+            pravna_forma: Some(PravnaForma::Preduzetnik),
+            pdv_obveznik: Some(false),
+            distance_selling: Some(false),
+            lpfr_in_premises: Some(true),
+            esir_elements: Vec::new(),
+        }
+    }
+
+    fn distance_selling_profile_request() -> ShopProfileRequest {
+        ShopProfileRequest {
+            distance_selling: Some(true),
+            ..walk_in_profile_request()
+        }
+    }
+
+    fn product_request_without_declaration(sku: &str) -> SaveProductRequest {
+        product_request(sku, None)
+    }
+
+    fn product_request_with_declaration(sku: &str) -> SaveProductRequest {
+        SaveProductRequest {
+            manufacturer_name: Some("Mlekara Šabac d.o.o.".to_string()),
+            importer_name: Some("Uvoznik Beograd d.o.o.".to_string()),
+            country_of_origin: Some("Srbija".to_string()),
+            official_goods_code: Some("SIF-0001".to_string()),
+            barcode_kind: Some("internal".to_string()),
+            ..product_request(sku, None)
+        }
+    }
+
+    #[test]
+    fn declaration_fields_are_advisory_for_walk_in_retail() {
+        with_catalog_state("declaration_advisory", |state| {
+            sign_in_admin(state);
+            save_shop_profile(state, walk_in_profile_request()).expect("profile saves");
+            // distance_selling: Some(false) — the shop was asked and said no
+
+            let product =
+                create_product_as_admin(state, product_request_without_declaration("DEK-WALKIN"))
+                    .expect("a walk-in shop can save a product with no declaration data");
+
+            assert_eq!(product.manufacturer_name, None);
+        });
+    }
+
+    #[test]
+    fn declaration_fields_never_block_while_distance_selling_is_unanswered() {
+        with_catalog_state("declaration_unanswered", |state| {
+            sign_in_admin(state);
+            // distance_selling stays None — the profile was never filled in
+
+            create_product_as_admin(state, product_request_without_declaration("DEK-UNANSWERED"))
+                .expect(
+                    "an unanswered profile must not block: §4 item 12 forbids a walk-in block, \
+                     and silence is not an assertion that the shop sells at distance",
+                );
+        });
+    }
+
+    #[test]
+    fn declaration_fields_are_required_once_the_shop_sells_at_distance() {
+        with_catalog_state("declaration_required_at_distance", |state| {
+            sign_in_admin(state);
+            save_shop_profile(state, distance_selling_profile_request()).expect("profile saves");
+
+            let error =
+                create_product_as_admin(state, product_request_without_declaration("DEK-DISTANCE"))
+                    .expect_err(
+                        "cl. 34 st. 5 requires the st. 1 data to be available pre-purchase",
+                    );
+
+            assert!(matches!(error, AppError::Validation { .. }));
+            let AppError::Validation { details, .. } = error else {
+                unreachable!()
+            };
+            assert_eq!(
+                details.expect("field details")["field"],
+                serde_json::json!("manufacturerName")
+            );
+        });
+    }
+
+    #[test]
+    fn declaration_gate_also_guards_the_update_path() {
+        with_catalog_state("declaration_required_on_update", |state| {
+            sign_in_admin(state);
+
+            // Saved while the shop still traded only over the counter.
+            let product =
+                create_product_as_admin(state, product_request_without_declaration("DEK-UPDATE"))
+                    .expect("walk-in save is allowed");
+
+            save_shop_profile(state, distance_selling_profile_request()).expect("profile saves");
+
+            let error = update_product_as_admin(
+                state,
+                product.id,
+                product_request_without_declaration("DEK-UPDATE"),
+            )
+            .expect_err("editing an article for a distance seller must demand the st. 1 data");
+
+            assert!(matches!(error, AppError::Validation { .. }));
+        });
+    }
+
+    #[test]
+    fn country_of_origin_accepts_the_literal_eu() {
+        with_catalog_state("declaration_accepts_eu", |state| {
+            sign_in_admin(state);
+            save_shop_profile(state, distance_selling_profile_request()).expect("profile saves");
+
+            let mut request = product_request_with_declaration("DEK-EU");
+            request.country_of_origin = Some("EU".to_string());
+
+            create_product_as_admin(state, request)
+                .expect("ZoT cl. 34 st. 7 permits the literal 'EU'");
+        });
+    }
+
+    #[test]
+    fn declaration_fields_round_trip_through_create_update_and_read() {
+        with_catalog_state("declaration_round_trip", |state| {
+            sign_in_admin(state);
+
+            let created =
+                create_product_as_admin(state, product_request_with_declaration("DEK-RT"))
+                    .expect("product should create");
+
+            assert_eq!(
+                created.manufacturer_name.as_deref(),
+                Some("Mlekara Šabac d.o.o.")
+            );
+            assert_eq!(
+                created.importer_name.as_deref(),
+                Some("Uvoznik Beograd d.o.o.")
+            );
+            assert_eq!(created.country_of_origin.as_deref(), Some("Srbija"));
+            assert_eq!(created.official_goods_code.as_deref(), Some("SIF-0001"));
+            assert_eq!(created.barcode_kind.as_deref(), Some("internal"));
+
+            let reloaded = get_product(state.db(), created.id)
+                .expect("product should read")
+                .expect("product exists");
+            assert_eq!(reloaded.country_of_origin.as_deref(), Some("Srbija"));
+
+            let mut edited = product_request_with_declaration("DEK-RT");
+            edited.country_of_origin = Some("Nemačka".to_string());
+            let updated =
+                update_product_as_admin(state, created.id, edited).expect("product should update");
+            assert_eq!(updated.country_of_origin.as_deref(), Some("Nemačka"));
+        });
+    }
+
+    #[test]
+    fn declaration_barcode_kind_rejects_a_value_the_column_cannot_hold() {
+        with_catalog_state("declaration_barcode_kind_guard", |state| {
+            sign_in_admin(state);
+
+            let mut request = product_request_without_declaration("DEK-KIND");
+            request.barcode_kind = Some("qr".to_string());
+
+            let error = create_product_as_admin(state, request)
+                .expect_err("only gtin/internal/none may reach the column's CHECK");
+
+            assert!(matches!(error, AppError::Validation { .. }));
+        });
     }
 
     fn admin_id(db: &Db) -> i64 {
