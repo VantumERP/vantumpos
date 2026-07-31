@@ -130,6 +130,7 @@ pub fn run() {
             commands::catalog::catalog_create_product,
             commands::catalog::catalog_update_product,
             commands::catalog::catalog_set_product_active,
+            commands::catalog::catalog_declaration_gaps,
             commands::catalog::catalog_lookup_product_by_barcode,
             commands::catalog::catalog_list_categories,
             commands::catalog::catalog_save_category,

@@ -178,6 +178,34 @@ pub struct ProductListResult {
     pub total: usize,
 }
 
+/// One article whose deklaracija evidence in the catalog is incomplete.
+///
+/// Data only, and deliberately **no fine figure**: §4 item 11 leaves it
+/// unresolved which penalty tier a bare missing GTIN falls under (fixed 40.000
+/// vs 50.000–500.000 plus shop closure), and §3 req 26 forbids collapsing the
+/// two. A blank column here is a gap in the shop's own records, not proof that
+/// the goods on the shelf carry no deklaracija — the čl. 34 st. 1 data lives on
+/// the packaging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclarationGapRow {
+    pub product_id: i64,
+    pub sku: String,
+    pub name: String,
+    pub barcode: Option<String>,
+    pub barcode_kind: Option<String>,
+    /// camelCase names of the blank ZoT čl. 34 st. 1 fields, so the UI can point
+    /// at the very input that has to be filled in.
+    pub missing_fields: Vec<String>,
+    /// The article carries a barcode nobody has classified. `NULL` means
+    /// „unclassified", never „is a GTIN" (§3 req 24).
+    pub barcode_unclassified: bool,
+    /// The barcode was *asserted* to be a GTIN and fails the modulo-10 check
+    /// digit. Always `false` for `internal`, `none` and an unclassified code —
+    /// an in-house printed code must never be reported as a broken GTIN.
+    pub gtin_check_digit_invalid: bool,
+}
+
 struct NormalizedProductRequest {
     name: String,
     sku: String,
@@ -251,6 +279,16 @@ pub fn catalog_set_product_active(
 ) -> Result<ProductSummary, CommandError> {
     let acting = super::auth::require_admin(state.inner())?;
     set_product_active(state.db(), id, active, acting.id).map_err(Into::into)
+}
+
+/// „Artikli bez podataka deklaracije". Admin-gated: it enumerates the shop's own
+/// compliance gaps and is a management view, not a till view.
+#[tauri::command]
+pub fn catalog_declaration_gaps(
+    state: State<'_, AppState>,
+) -> Result<Vec<DeclarationGapRow>, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    declaration_gaps(state.db()).map_err(Into::into)
 }
 
 /// Flat DTO for the frontend. The domain uses a Rust enum; flattening here
@@ -1283,6 +1321,99 @@ pub(crate) fn load_shop_profile_for_connection(
     }
 }
 
+/// GTIN-8/12/13/14 modulo-10 check digit. Runs ONLY for `barcode_kind = 'gtin'`
+/// — an in-house printed code must never be validated as, or reported as, a GTIN
+/// (§3 req 24).
+pub fn is_valid_gtin(code: &str) -> bool {
+    if !matches!(code.len(), 8 | 12 | 13 | 14) || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let digits: Vec<u32> = code.bytes().map(|b| u32::from(b - b'0')).collect();
+    let (body, check) = digits.split_at(digits.len() - 1);
+    // Weights run 3,1,3,1,… from the rightmost body digit, which is the same
+    // rule for every GTIN length.
+    let sum: u32 = body
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(index, digit)| if index % 2 == 0 { digit * 3 } else { *digit })
+        .sum();
+    (10 - (sum % 10)) % 10 == check[0]
+}
+
+/// The articles whose deklaracija evidence is incomplete: a blank čl. 34 st. 1
+/// identity field, a barcode nobody has classified, or a code asserted to be a
+/// GTIN that fails its check digit.
+///
+/// Active articles only. Čl. 68 st. 1 tač. 9 punishes *selling* goods without a
+/// deklaracija, so an archived article is not a gap the shop can act on, and
+/// padding the list with dead rows would bury the ones that matter.
+///
+/// Never blocks anything and carries no fine figure — see `DeclarationGapRow`.
+pub fn declaration_gaps(db: &Db) -> Result<Vec<DeclarationGapRow>, AppError> {
+    let connection = db.open()?;
+    let mut statement = connection.prepare(
+        r#"
+SELECT
+    p.id,
+    p.sku,
+    p.name,
+    p.barcode,
+    p.barcode_kind,
+    p.manufacturer_name,
+    p.country_of_origin
+FROM products p
+WHERE p.active = 1
+ORDER BY p.name, p.id
+"#,
+    )?;
+
+    let rows = statement
+        .query_map([], |row| {
+            let barcode: Option<String> = row.get(3)?;
+            let barcode_kind: Option<String> = row.get(4)?;
+            let manufacturer_name: Option<String> = row.get(5)?;
+            let country_of_origin: Option<String> = row.get(6)?;
+
+            // The same two fields the čl. 34 st. 5 gate and the goods-receipt
+            // warning use, so the three surfaces can never disagree about what
+            // „nedostaje" means.
+            let missing_fields = [
+                (manufacturer_name, "manufacturerName"),
+                (country_of_origin, "countryOfOrigin"),
+            ]
+            .into_iter()
+            .filter(|(value, _)| value.as_deref().map(str::trim).unwrap_or("").is_empty())
+            .map(|(_, field)| field.to_string())
+            .collect::<Vec<_>>();
+
+            let barcode_unclassified = barcode.is_some() && barcode_kind.is_none();
+            let gtin_check_digit_invalid = barcode_kind.as_deref() == Some("gtin")
+                && barcode.as_deref().is_some_and(|code| !is_valid_gtin(code));
+
+            Ok(DeclarationGapRow {
+                product_id: row.get(0)?,
+                sku: row.get(1)?,
+                name: row.get(2)?,
+                barcode,
+                barcode_kind,
+                missing_fields,
+                barcode_unclassified,
+                gtin_check_digit_invalid,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            !row.missing_fields.is_empty()
+                || row.barcode_unclassified
+                || row.gtin_check_digit_invalid
+        })
+        .collect())
+}
+
 fn product_from_row(row: &Row<'_>) -> rusqlite::Result<ProductSummary> {
     Ok(ProductSummary {
         id: row.get(0)?,
@@ -1460,11 +1591,12 @@ mod tests {
 
     use crate::app_error::{AppError, CommandError};
     use crate::commands::catalog::{
-        catalog_create_product, catalog_save_category, catalog_update_product, create_product,
-        get_product, list_products, lookup_suggestion_from_open_food_facts_json, prethodna_cena,
-        save_category, search_products, set_product_active, update_product,
-        ProductExternalSourceRequest, ProductListQuery, ProductSearchQuery, ProductSummary,
-        SaveCategoryRequest, SaveProductRequest,
+        catalog_create_product, catalog_declaration_gaps, catalog_save_category,
+        catalog_update_product, create_product, declaration_gaps, get_product, is_valid_gtin,
+        list_products, lookup_suggestion_from_open_food_facts_json, prethodna_cena, save_category,
+        search_products, set_product_active, update_product, ProductExternalSourceRequest,
+        ProductListQuery, ProductSearchQuery, ProductSummary, SaveCategoryRequest,
+        SaveProductRequest,
     };
     use crate::commands::settings::{
         save_shop_profile, PravnaForma, ShopProfileRequest, SHOP_PROFILE_KEY,
@@ -2564,6 +2696,153 @@ mod tests {
             assert_eq!(dto.reason, Some("too_new_in_assortment"));
             assert_eq!(dto.age_days, Some(6));
             assert_eq!(dto.price_minor, None);
+        });
+    }
+
+    /// A barcode nobody has classified, and no čl. 34 st. 1 data at all.
+    fn seed_product_without_declaration(state: &AppState) -> i64 {
+        create_product_as_admin(
+            state,
+            SaveProductRequest {
+                barcode: Some("8600000000027".to_string()),
+                ..product_request_without_declaration("DEK-GAP-MISSING")
+            },
+        )
+        .expect("product without declaration data should save")
+        .id
+    }
+
+    /// Nothing to report: the identity fields are filled in and the barcode is
+    /// asserted to be a GTIN that passes its check digit.
+    fn seed_product_with_declaration(state: &AppState) -> i64 {
+        create_product_as_admin(
+            state,
+            SaveProductRequest {
+                barcode: Some("4006381333931".to_string()),
+                barcode_kind: Some("gtin".to_string()),
+                ..product_request_with_declaration("DEK-GAP-COMPLETE")
+            },
+        )
+        .expect("product with declaration data should save")
+        .id
+    }
+
+    #[test]
+    fn gtin_check_digit_is_validated_only_for_real_gtins() {
+        assert!(is_valid_gtin("4006381333931"), "valid EAN-13");
+        assert!(is_valid_gtin("96385074"), "valid EAN-8");
+        assert!(is_valid_gtin("036000291452"), "valid UPC-A (GTIN-12)");
+        assert!(is_valid_gtin("10614141000415"), "valid GTIN-14");
+        assert!(!is_valid_gtin("4006381333932"), "wrong check digit");
+        assert!(!is_valid_gtin("123"), "wrong length");
+        assert!(!is_valid_gtin("40063813339A1"), "non-digit");
+        assert!(!is_valid_gtin(""), "empty");
+    }
+
+    #[test]
+    fn declaration_gaps_report_separates_unclassified_barcodes_from_missing_data() {
+        with_catalog_state("declaration_gaps", |state| {
+            sign_in_admin(state);
+            let missing = seed_product_without_declaration(state);
+            let complete = seed_product_with_declaration(state);
+
+            let rows = declaration_gaps(state.db()).expect("report should run");
+
+            let row = rows
+                .iter()
+                .find(|row| row.product_id == missing)
+                .expect("gap listed");
+            assert!(row.missing_fields.contains(&"manufacturerName".to_string()));
+            assert!(row.missing_fields.contains(&"countryOfOrigin".to_string()));
+            assert!(
+                row.barcode_unclassified,
+                "NULL means unclassified, never 'is a GTIN'"
+            );
+            assert!(
+                !row.gtin_check_digit_invalid,
+                "an unclassified barcode is never check-digit tested"
+            );
+
+            assert!(
+                rows.iter().all(|row| row.product_id != complete),
+                "a complete product is not a gap"
+            );
+        });
+    }
+
+    #[test]
+    fn declaration_gaps_never_check_digit_tests_an_in_house_code() {
+        with_catalog_state("declaration_gaps_internal_code", |state| {
+            sign_in_admin(state);
+            // An in-house printed code that would fail the GTIN check digit.
+            let internal = create_product_as_admin(
+                state,
+                SaveProductRequest {
+                    barcode: Some("4006381333932".to_string()),
+                    barcode_kind: Some("internal".to_string()),
+                    ..product_request_with_declaration("DEK-GAP-INTERNAL")
+                },
+            )
+            .expect("in-house coded product should save")
+            .id;
+
+            let declared_gtin = create_product_as_admin(
+                state,
+                SaveProductRequest {
+                    barcode: Some("8600000000041".to_string()),
+                    barcode_kind: Some("gtin".to_string()),
+                    ..product_request_with_declaration("DEK-GAP-BAD-GTIN")
+                },
+            )
+            .expect("product declared as GTIN should save")
+            .id;
+
+            let rows = declaration_gaps(state.db()).expect("report should run");
+
+            assert!(
+                rows.iter().all(|row| row.product_id != internal),
+                "an in-house code must never be reported as a broken GTIN"
+            );
+
+            let row = rows
+                .iter()
+                .find(|row| row.product_id == declared_gtin)
+                .expect("a barcode asserted to be a GTIN is check-digit tested");
+            assert!(row.gtin_check_digit_invalid);
+            assert!(!row.barcode_unclassified, "the kind was asserted");
+            assert!(
+                row.missing_fields.is_empty(),
+                "the identity data is on file; only the GTIN is wrong"
+            );
+        });
+    }
+
+    #[test]
+    fn catalog_declaration_gaps_rejected_for_cashier() {
+        let path = test_database_path("catalog_declaration_gaps_rejected_for_cashier");
+
+        {
+            let db = Db::new(path.clone()).expect("database should initialize");
+            seed_catalog(&db);
+            let state = AppState::new(db);
+            sign_in_cashier(&state);
+
+            let app = tauri::test::mock_builder()
+                .manage(state)
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("mock app should build");
+
+            let error = catalog_declaration_gaps(app.state::<AppState>())
+                .expect_err("cashier should not read the declaration-gaps report");
+
+            assert_eq!(error.code, "forbidden");
+        }
+
+        std::fs::remove_file(&path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                path.display()
+            )
         });
     }
 }
