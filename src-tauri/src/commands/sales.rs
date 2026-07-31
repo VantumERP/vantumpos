@@ -553,6 +553,12 @@ struct AmlProvenance {
 /// The AML inputs are read on the sale's own connection: this runs inside the
 /// sale transaction, and `complete_sale_transaction` holds a `Db` rather than
 /// the `AppState` the settings loaders take.
+///
+/// A stored value that will not deserialize degrades to `default_value` instead
+/// of erroring. An AML verdict must never reject a sale, so a corrupt
+/// `shop_profile` or `eur_rate` row has to land in the `rate_unavailable` path
+/// rather than turn the register into a till that cannot sell anything. Genuine
+/// SQL errors still propagate.
 fn read_json_setting<T>(connection: &Connection, key: &str, default_value: T) -> Result<T, AppError>
 where
     T: serde::de::DeserializeOwned,
@@ -565,12 +571,9 @@ where
         )
         .optional()?;
 
-    match stored {
-        Some(value) => serde_json::from_str(&value).map_err(|source| {
-            AppError::InvalidState(format!("Podešavanja nisu ispravna: {source}"))
-        }),
-        None => Ok(default_value),
-    }
+    Ok(stored
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or(default_value))
 }
 
 /// Assesses the cash line and reduces the verdict to what the sale row keeps.
@@ -894,6 +897,7 @@ mod tests {
     };
     use crate::commands::settings::{
         save_eur_rate, save_shop_profile, PravnaForma, ShopProfile, ShopProfileRequest,
+        EUR_RATE_KEY, SHOP_PROFILE_KEY,
     };
     use crate::db::{test_database_path, Db};
     use crate::nbs_rate::{EurRate, RateSource};
@@ -1516,6 +1520,119 @@ mod tests {
             assert_eq!(
                 cash, None,
                 "no assessment fired, so no provenance is written"
+            );
+        });
+    }
+
+    /// §3 req 1 [LEGAL]: čl. 46 st. 1 keys to the **cash line** of the split,
+    /// never the grand total. This sale's total sits exactly on the cap, but
+    /// only 300.000 para of it is cash — below even the soft line — so nothing
+    /// fires and no provenance is written. Assessing
+    /// `computation.preview.total_minor` here would invent a breach that the
+    /// statute does not describe.
+    #[test]
+    fn completion_assesses_the_cash_line_not_the_invoice_total() {
+        with_state("aml_completion_reads_the_cash_line", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+            save_shop_profile(state, preduzetnik_profile_request()).expect("profile saves");
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 100,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate saves");
+            // threshold = 10_000 * 100 = 1_000_000 para; soft line = 800_000.
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 1_000_000)],
+                    receipt_discount: None,
+                    payments: vec![
+                        PaymentDraft {
+                            method: PaymentMethod::Card,
+                            amount_minor: 700_000,
+                        },
+                        PaymentDraft {
+                            method: PaymentMethod::Cash,
+                            amount_minor: 300_000,
+                        },
+                    ],
+                    allow_stock_override: None,
+                    aml_ack_reason: None,
+                },
+            )
+            .expect("sale completes");
+
+            let conn = state.db().open().expect("db opens");
+            let cash: Option<i64> = conn
+                .query_row(
+                    "SELECT aml_cash_minor FROM sales WHERE id = ?1",
+                    params![sale.id],
+                    |row| row.get(0),
+                )
+                .expect("row exists");
+
+            assert_eq!(
+                cash, None,
+                "§3 req 1: the invoice total is on the cap but the cash line is \
+                 300.000 para — assessing the total would fire a false breach"
+            );
+        });
+    }
+
+    /// A verdict never rejects the sale (§3 req 1). A settings row that will not
+    /// deserialize must therefore degrade to "no rate, no profile" — the
+    /// `rate_unavailable` path — rather than leaving the register unable to sell
+    /// anything.
+    #[test]
+    fn a_corrupt_settings_row_never_blocks_the_till() {
+        with_state("aml_corrupt_settings", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+
+            {
+                let conn = state.db().open().expect("db opens");
+                for key in [EUR_RATE_KEY, SHOP_PROFILE_KEY] {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO settings (key, value_json, updated_at)
+                         VALUES (?1, '{not json', '2026-07-31T09:00:00Z')",
+                        params![key],
+                    )
+                    .expect("corrupt setting should insert");
+                }
+            }
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 5_000_000)],
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::Cash,
+                        amount_minor: 5_000_000,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: None,
+                },
+            )
+            .expect("a corrupt settings row must not turn the till into a dead register");
+
+            let conn = state.db().open().expect("db opens");
+            let cash: Option<i64> = conn
+                .query_row(
+                    "SELECT aml_cash_minor FROM sales WHERE id = ?1",
+                    params![sale.id],
+                    |row| row.get(0),
+                )
+                .expect("row exists");
+            assert_eq!(
+                cash, None,
+                "without a usable rate nothing fires, so nothing is persisted"
             );
         });
     }

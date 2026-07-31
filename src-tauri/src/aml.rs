@@ -6,11 +6,6 @@
 //! 1. The subject is the **cash tendered**, never the invoice total. A 15.000 €
 //!    sale settled 5.000 cash + 10.000 card does not breach st. 1.
 //! 2. The operator is **`>=`** — "u iznosu od 10.000 evra **ili više**".
-//!
-//! Wired into the till by Task 8, so `dead_code` is allowed here until that
-//! lands — mirroring `legal.rs`.
-
-#![allow(dead_code)]
 
 use serde::Serialize;
 
