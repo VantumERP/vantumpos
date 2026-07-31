@@ -1043,7 +1043,7 @@ mod tests {
     fn bank_movements_change_expected_cash_in_the_right_direction() {
         with_state("expected_cash_bank_movements", |state| {
             let cashier_id = seed_cashier(state);
-            open_shift_for_user(
+            let opened = open_shift_for_user(
                 state,
                 cashier_id,
                 OpenShiftRequest {
@@ -1085,6 +1085,77 @@ mod tests {
                 summary.expected_cash_minor,
                 100_000 + 20_000 - 50_000,
                 "podizanje sa računa puni kasu, polog je prazni"
+            );
+
+            // Broj izvoda / uplatnice must survive the INSERT: the aging report
+            // and its CSV export surface it as the documentary trace of the
+            // polog, so a dropped column lands as an empty compliance field.
+            let connection = state.db().open().expect("database should open");
+            let stored_reference = |movement_type: &str| -> Option<String> {
+                connection
+                    .query_row(
+                        "SELECT bank_reference FROM cash_movements
+                         WHERE shift_id = ?1 AND movement_type = ?2",
+                        params![opened.id, movement_type],
+                        |row| row.get(0),
+                    )
+                    .expect("cash movement should query")
+            };
+
+            assert_eq!(
+                stored_reference("bank_withdrawal"),
+                Some("izvod-7".to_string()),
+                "broj izvoda mora biti sačuvan uz podizanje sa računa"
+            );
+            assert_eq!(
+                stored_reference("bank_deposit"),
+                Some("uplatnica-3".to_string()),
+                "broj uplatnice mora biti sačuvan uz polog"
+            );
+        });
+    }
+
+    /// A shop that records the polog before the bank confirms it leaves the
+    /// reference box empty. A blank string must land as SQL NULL, not as a
+    /// whitespace value that the aging report would print as a bogus izvod.
+    #[test]
+    fn blank_bank_reference_is_stored_as_null() {
+        with_state("blank_bank_reference_is_null", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 100_000,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "bank_deposit".to_string(),
+                    amount_minor: 10_000,
+                    reason: Some("Polog pazara".to_string()),
+                    bank_reference: Some("   ".to_string()),
+                },
+            )
+            .expect("deposit should record");
+
+            let connection = state.db().open().expect("database should open");
+            let stored: Option<String> = connection
+                .query_row(
+                    "SELECT bank_reference FROM cash_movements WHERE shift_id = ?1",
+                    params![opened.id],
+                    |row| row.get(0),
+                )
+                .expect("cash movement should query");
+
+            assert_eq!(
+                stored, None,
+                "prazan broj uplatnice mora biti NULL, ne razmak"
             );
         });
     }
