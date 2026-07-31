@@ -99,6 +99,7 @@ pub fn run() {
             commands::inventory::inventory_receive,
             commands::inventory::inventory_correct,
             commands::inventory::inventory_write_off,
+            commands::inventory::inventory_mark_declaration_checked,
             commands::receipts::receipts_search,
             commands::receipts::receipts_get,
             commands::receipts::receipts_void,

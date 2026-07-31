@@ -1264,7 +1264,9 @@ fn validate_declaration(
 /// `settings::load_json_setting` raises for the identical row: degrading to
 /// `ShopProfile::default()` would silently pick the lenient §3 req 22 branch and
 /// switch the [LEGAL] čl. 34 st. 5 gate off with no signal anywhere.
-fn load_shop_profile_for_connection(connection: &Connection) -> Result<ShopProfile, AppError> {
+pub(crate) fn load_shop_profile_for_connection(
+    connection: &Connection,
+) -> Result<ShopProfile, AppError> {
     let stored: Option<String> = connection
         .query_row(
             "SELECT value_json FROM settings WHERE key = ?1",

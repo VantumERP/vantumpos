@@ -66,6 +66,21 @@ pub struct InventoryAdjustmentRequest {
     pub reference_id: Option<i64>,
 }
 
+/// ZoT čl. 34 st. 1–2 puts the marking duty on the proizvođač/uvoznik, but čl. 68
+/// st. 1 tač. 9 punishes the *trgovac* who sells goods without a deklaracija. The
+/// goods receipt is the last moment the shop can refuse the pallet, so this is
+/// where the operator is told — and only told. Blocking the receipt would strand
+/// stock the shop already physically holds and is not what the law asks for.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclarationWarning {
+    pub product_id: i64,
+    pub product_name: String,
+    /// camelCase field names, so the UI can point at the very input that is blank.
+    pub missing_fields: Vec<String>,
+    pub notice: crate::legal::LegalNotice,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InventoryAdjustmentResult {
@@ -76,6 +91,9 @@ pub struct InventoryAdjustmentResult {
     pub previous_quantity_milli: i64,
     pub new_quantity_milli: i64,
     pub created_at: String,
+    /// Advisory only. Always empty for corrections and write-offs — nothing new
+    /// arrives through those doors.
+    pub declaration_warnings: Vec<DeclarationWarning>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -171,6 +189,43 @@ pub fn inventory_write_off(
         &created_at,
     )
     .map_err(Into::into)
+}
+
+/// ZoT čl. 34: the operator confirms by hand that the delivered goods carry a
+/// deklaracija. The stamp is an audit record of *who looked and when* — it is not
+/// an assertion that the catalog fields are transcribed, because the st. 1 data
+/// lives on the packaging and the shop may lawfully hold goods it has not typed
+/// in. Admin-gated: it is evidence a shop would show an inspector.
+#[tauri::command]
+pub fn inventory_mark_declaration_checked(
+    state: State<'_, AppState>,
+    product_id: i64,
+) -> Result<(), CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let now = now_utc_string()?;
+    mark_declaration_checked(state.inner(), product_id, &now).map_err(Into::into)
+}
+
+pub fn mark_declaration_checked(
+    state: &AppState,
+    product_id: i64,
+    now: &str,
+) -> Result<(), AppError> {
+    let acting_user_id = super::auth::require_session(state)?;
+    let connection = state.db().open()?;
+    let updated = connection.execute(
+        "UPDATE products
+         SET declaration_checked_at = ?1,
+             declaration_checked_by = ?2
+         WHERE id = ?3",
+        params![now, acting_user_id, product_id],
+    )?;
+
+    if updated == 0 {
+        return Err(AppError::not_found("Artikal nije pronađen."));
+    }
+
+    Ok(())
 }
 
 pub fn list_stock_for_connection(
@@ -452,6 +507,7 @@ pub fn apply_inventory_adjustment(
     };
     let reason = normalized_optional_text(request.reason.as_deref());
     let reference_type = normalized_optional_text(request.reference_type.as_deref());
+    let mut declaration_warnings = Vec::new();
     let tx = connection.transaction()?;
 
     if let Some(purchase_price_minor) = request.purchase_price_minor {
@@ -523,6 +579,12 @@ pub fn apply_inventory_adjustment(
             acting_user_id,
             created_at,
         )?;
+
+        // SW-11c: the last moment the shop can still refuse the pallet. Collected
+        // inside the transaction so the warning describes exactly the row that was
+        // received, but it can never fail the receipt — see the doc comment on
+        // `collect_declaration_warnings`.
+        declaration_warnings = collect_declaration_warnings(&tx, request.product_id)?;
     }
 
     tx.commit()?;
@@ -535,7 +597,55 @@ pub fn apply_inventory_adjustment(
         previous_quantity_milli: outcome.previous_quantity_milli,
         new_quantity_milli: outcome.new_quantity_milli,
         created_at: created_at.to_string(),
+        declaration_warnings,
     })
+}
+
+/// A blank `manufacturer_name` or `country_of_origin` means the shop holds no
+/// record of the ZoT čl. 34 st. 1 identity data for goods it just took in. That
+/// is a warning and only a warning: čl. 68 st. 1 tač. 9 punishes *selling* such
+/// goods, not receiving them, and a hard block would strand a pallet that is
+/// already in the stockroom.
+///
+/// The notice is tier-resolved from the shop profile, so a shop whose pravna
+/// forma is unset is shown the duty with no figure rather than a plausible one.
+fn collect_declaration_warnings(
+    connection: &Connection,
+    product_id: i64,
+) -> Result<Vec<DeclarationWarning>, AppError> {
+    let row: Option<(String, Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT name, manufacturer_name, country_of_origin FROM products WHERE id = ?1",
+            params![product_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+
+    let Some((product_name, manufacturer_name, country_of_origin)) = row else {
+        return Ok(Vec::new());
+    };
+
+    let missing_fields = [
+        (manufacturer_name, "manufacturerName"),
+        (country_of_origin, "countryOfOrigin"),
+    ]
+    .into_iter()
+    .filter(|(value, _)| value.as_deref().map(str::trim).unwrap_or("").is_empty())
+    .map(|(_, field)| field.to_string())
+    .collect::<Vec<_>>();
+
+    if missing_fields.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let profile = super::catalog::load_shop_profile_for_connection(connection)?;
+
+    Ok(vec![DeclarationWarning {
+        product_id,
+        product_name,
+        missing_fields,
+        notice: crate::legal::declaration_missing(&profile),
+    }])
 }
 
 #[derive(Clone, Debug)]
@@ -711,8 +821,9 @@ mod tests {
     use crate::app_error::CommandError;
     use crate::commands::inventory::{
         apply_inventory_adjustment, get_product_ledger_for_connection, inventory_correct,
-        inventory_receive, inventory_write_off, list_stock_for_connection, write_stock_movement,
-        InventoryAdjustmentRequest, InventoryMovementType, StockListQuery, StockMovementWrite,
+        inventory_receive, inventory_write_off, list_stock_for_connection,
+        mark_declaration_checked, write_stock_movement, InventoryAdjustmentRequest,
+        InventoryMovementType, StockListQuery, StockMovementWrite,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -733,6 +844,13 @@ mod tests {
                 path.display()
             )
         });
+    }
+
+    fn sign_in_admin(state: &AppState) -> i64 {
+        state
+            .set_session_user_id(SEEDED_ADMIN_ID)
+            .expect("admin session should set");
+        SEEDED_ADMIN_ID
     }
 
     fn sign_in_cashier(state: &AppState) {
@@ -1482,6 +1600,125 @@ mod tests {
                 .expect("movement count should query");
             assert_eq!(kep_count, 0, "the rolled-back zaduženje leaves nothing");
             assert_eq!(movement_count, 0, "the rolled-back movement leaves nothing");
+        });
+    }
+
+    /// The seeded product carries no declaration identity data at all.
+    fn seed_product_without_declaration(_connection: &Connection) -> i64 {
+        1
+    }
+
+    fn seed_product_with_declaration(connection: &Connection) -> i64 {
+        connection
+            .execute(
+                "UPDATE products
+                 SET manufacturer_name = 'Mlekara Šabac d.o.o.',
+                     country_of_origin = 'Srbija'
+                 WHERE id = 1",
+                [],
+            )
+            .expect("declaration data should update");
+        1
+    }
+
+    #[test]
+    fn receiving_a_product_without_declaration_data_warns_but_never_blocks() {
+        with_connection("receive_declaration_check_warning", |connection| {
+            let product_id = seed_product_without_declaration(connection);
+
+            let result = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                adjustment(5_000, "Prijem robe"),
+                SEEDED_ADMIN_ID,
+                "2026-07-31T10:00:00Z",
+            )
+            .expect(
+                "the receipt must succeed — the duty is the supplier's, \
+                 and a block would strand stock",
+            );
+
+            assert_eq!(result.declaration_warnings.len(), 1);
+            let warning = &result.declaration_warnings[0];
+            assert_eq!(warning.product_id, product_id);
+            assert!(
+                warning.notice.is_legal_duty,
+                "selling such goods IS an offence"
+            );
+            assert!(
+                warning
+                    .missing_fields
+                    .contains(&"manufacturerName".to_string()),
+                "the operator must be told which field is blank: {:?}",
+                warning.missing_fields
+            );
+
+            // Warn only: the goods are on the shelf and in the KEP either way.
+            assert_eq!(result.new_quantity_milli, 5_000);
+            assert_eq!(current_balance(connection), 5_000);
+        });
+    }
+
+    #[test]
+    fn receiving_a_product_with_declaration_data_raises_no_declaration_check_warning() {
+        with_connection("receive_declaration_check_silent", |connection| {
+            seed_product_with_declaration(connection);
+
+            let result = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                adjustment(5_000, "Prijem robe"),
+                SEEDED_ADMIN_ID,
+                "2026-07-31T10:00:00Z",
+            )
+            .expect("receive should succeed");
+
+            assert!(
+                result.declaration_warnings.is_empty(),
+                "a complete declaration must not nag: {:?}",
+                result.declaration_warnings
+            );
+        });
+    }
+
+    #[test]
+    fn marking_the_declaration_check_stamps_who_and_when() {
+        let path = test_database_path("declaration_check_stamp");
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            {
+                let mut connection = db.open().expect("database should open");
+                seed_required_data(&mut connection);
+                seed_product_with_declaration(&connection);
+            }
+
+            let state = AppState::new(db);
+            let admin_id = sign_in_admin(&state);
+            let product_id = 1;
+
+            mark_declaration_checked(&state, product_id, "2026-07-31T10:00:00Z")
+                .expect("the check should record");
+
+            let conn = state.db().open().expect("db opens");
+            let (at, by): (String, i64) = conn
+                .query_row(
+                    "SELECT declaration_checked_at, declaration_checked_by
+                     FROM products WHERE id = ?1",
+                    params![product_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("stamp should exist");
+
+            assert_eq!(at, "2026-07-31T10:00:00Z");
+            assert_eq!(by, admin_id);
+        }
+
+        std::fs::remove_file(&path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                path.display()
+            )
         });
     }
 }
