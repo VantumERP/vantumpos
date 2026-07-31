@@ -107,6 +107,13 @@ export interface EurRate {
 export interface AmlAssessment {
   cashMinor: number;
   thresholdMinor: number;
+  /**
+   * A conservative stand-in cap (10.000 EUR at a 100,00 RSD/EUR floor) computed
+   * in `src-tauri/src/aml.rs` — never in the frontend, because the figure is a
+   * legal decision. Advisory surfaces use it to decide whether an *unavailable*
+   * check is worth mentioning at all; nothing may use it to assert a breach.
+   */
+  fallbackThresholdMinor: number;
   breached: boolean;
   nearThreshold: boolean;
   rateUnavailable: boolean;

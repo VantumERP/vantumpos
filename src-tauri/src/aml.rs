@@ -15,11 +15,25 @@ use crate::nbs_rate::EurRate;
 
 pub const AML_CAP_EUR: i64 = 10_000;
 
+/// A deliberate floor on the EUR rate, in para: 100,00 RSD per EUR.
+///
+/// It is NOT an exchange rate and never computes a verdict. Its only job is to
+/// give a till with no cached rate a conservative stand-in cap, so it can tell
+/// a 200 RSD loaf of bread from a sale where a failed check actually matters.
+/// The dinar has been managed far above this floor for the whole life of the
+/// currency band, so the stand-in cap always sits below the real one — gating
+/// a notice on it can only warn early, never hide a breach.
+const AML_FALLBACK_RATE_MINOR: i64 = 10_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AmlAssessment {
     pub cash_minor: i64,
     pub threshold_minor: i64,
+    /// The stand-in cap described on [`AML_FALLBACK_RATE_MINOR`]. Advisory
+    /// surfaces use it to decide whether to mention an *unavailable* check;
+    /// nothing may use it to assert a breach.
+    pub fallback_threshold_minor: i64,
     pub breached: bool,
     pub near_threshold: bool,
     pub rate_unavailable: bool,
@@ -34,11 +48,13 @@ pub fn assess_cash_payment(
     soft_ratio_percent: i64,
 ) -> AmlAssessment {
     let notice = aml_cash_cap(profile);
+    let fallback_threshold_minor = AML_CAP_EUR.saturating_mul(AML_FALLBACK_RATE_MINOR);
 
     let Some(rate) = rate else {
         return AmlAssessment {
             cash_minor,
             threshold_minor: 0,
+            fallback_threshold_minor,
             breached: false,
             near_threshold: false,
             rate_unavailable: true,
@@ -53,6 +69,7 @@ pub fn assess_cash_payment(
     AmlAssessment {
         cash_minor,
         threshold_minor,
+        fallback_threshold_minor,
         breached: cash_minor >= threshold_minor,
         near_threshold: cash_minor >= soft_minor && cash_minor < threshold_minor,
         rate_unavailable: false,
@@ -135,6 +152,31 @@ mod tests {
         assert!(!a.breached, "we must not assert a breach we cannot compute");
         assert!(a.rate_unavailable, "and we must not silently pass either");
         assert!(a.rate.is_none());
+    }
+
+    /// A till with no cached rate still has to decide whether an unavailable
+    /// check is worth interrupting the operator over — otherwise it nags on
+    /// every loaf of bread and the real warning gets dismissed on sight.
+    ///
+    /// The stand-in cap must therefore sit BELOW any real one, so gating a
+    /// notice on it can only ever warn early, never hide a genuine breach.
+    #[test]
+    fn the_stand_in_cap_is_conservative_and_always_present() {
+        let unavailable = assess_cash_payment(0, None, &preduzetnik(), 80);
+        assert_eq!(
+            unavailable.fallback_threshold_minor, 100_000_000,
+            "10.000 EUR at the 100,00 RSD/EUR floor"
+        );
+
+        let known = assess_cash_payment(0, Some(&rate()), &preduzetnik(), 80);
+        assert_eq!(
+            known.fallback_threshold_minor, unavailable.fallback_threshold_minor,
+            "the stand-in cap does not depend on the rate being known"
+        );
+        assert!(
+            known.fallback_threshold_minor < known.threshold_minor,
+            "a stand-in above the real cap would hide breaches"
+        );
     }
 
     #[test]

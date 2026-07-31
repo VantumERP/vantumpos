@@ -17,6 +17,15 @@ export default defineConfig(async () => ({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     css: true,
+    // Agent worktrees live INSIDE the repo (`.claude/worktrees/<name>`), so the
+    // default glob picks up every stale copy of every test file and reports
+    // their failures as ours. The gate must only ever run this checkout.
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/.claude/worktrees/**",
+      "**/.codex/worktrees/**",
+    ],
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

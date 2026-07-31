@@ -106,6 +106,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   const [cardInput, setCardInput] = useState("");
   const [bankTransferInput, setBankTransferInput] = useState("");
   const [assessment, setAssessment] = useState<AmlAssessment | null>(null);
+  const [assessFailed, setAssessFailed] = useState(false);
   const [amlReason, setAmlReason] = useState("");
   const [amlReasonError, setAmlReasonError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -175,6 +176,16 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
     preview && tenderedMinor > preview.totalMinor
       ? tenderedMinor - preview.totalMinor
       : 0;
+  // The cash the shop actually KEEPS — the tender minus the change handed
+  // back. `complete_sale_transaction` assesses exactly this (its
+  // `stored_cash_minor` = total - card - transfer), so assessing the raw
+  // tender here would warn about sales the record shows as lawful.
+  const retainedCashMinor = preview
+    ? Math.max(
+        0,
+        Math.min(cashMinor, preview.totalMinor - cardMinor - bankTransferMinor),
+      )
+    : 0;
 
   useEffect(() => {
     if (!cashTouched && previewTotalMinor !== undefined) {
@@ -194,8 +205,9 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   // verdict is advisory: a failed or unavailable check degrades to a note and
   // never blocks the till.
   useEffect(() => {
-    if (cashMinor <= 0) {
+    if (retainedCashMinor <= 0) {
       setAssessment(null);
+      setAssessFailed(false);
       return;
     }
 
@@ -203,14 +215,25 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
     const timer = setTimeout(() => {
       void (async () => {
         try {
-          const verdict = await services.sales.assessCashPayment(cashMinor);
+          const verdict =
+            await services.sales.assessCashPayment(retainedCashMinor);
 
           if (active) {
             setAssessment(verdict);
+            setAssessFailed(false);
           }
         } catch {
           if (active) {
+            // A check that could not run is NOT a check that passed. `aml.rs`
+            // and `sales.rs` both degrade to a visible verdict rather than to
+            // silence; rendering nothing here would put the silent pass back
+            // one layer up, where the operator reads it as an all-clear.
+            //
+            // Unlike a missing rate this is never a steady state — the backend
+            // answers even a corrupt settings row — so it is worth saying at
+            // any amount rather than only past the stand-in cap.
             setAssessment(null);
+            setAssessFailed(true);
           }
         }
       })();
@@ -220,14 +243,26 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       active = false;
       clearTimeout(timer);
     };
-  }, [cashMinor, services]);
+  }, [retainedCashMinor, services]);
 
   const amlBreached = assessment?.breached ?? false;
   const amlWarns = amlBreached || (assessment?.nearThreshold ?? false);
+  // A cached rate is missing on every fresh install, so saying so on a 200 RSD
+  // bread sale would fire on every transaction forever and train the cashier
+  // to dismiss the AML alert on sight. The stand-in cap comes from `aml.rs`;
+  // it sits below any real cap, so a genuine breach is still unmissable.
+  const amlCheckUnavailable =
+    assessment !== null &&
+    assessment.rateUnavailable &&
+    retainedCashMinor >= assessment.fallbackThresholdMinor;
 
   useEffect(() => {
     if (!amlBreached) {
       setAmlReasonError(null);
+      // The acknowledgement belongs to the tender it was typed for. Keeping it
+      // would attach a breach explanation to a sale whose breach the operator
+      // already cleared — and never saw acknowledged.
+      setAmlReason("");
     }
   }, [amlBreached]);
 
@@ -384,7 +419,9 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
         ...draft,
         payments,
         ...(allowStockOverride ? { allowStockOverride: true } : {}),
-        ...(amlWarns && reason ? { amlAckReason: reason } : {}),
+        // Only a breach is ever acknowledged — the reason field is the only
+        // place a reason can be typed, and it only renders on a breach.
+        ...(amlBreached && reason ? { amlAckReason: reason } : {}),
       });
       setCompletedSale(sale);
       setCart([]);
@@ -394,6 +431,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       setCardInput("");
       setBankTransferInput("");
       setAssessment(null);
+      setAssessFailed(false);
       setAmlReason("");
       setReceiptDiscountInput("");
       setOverrideOpen(false);
@@ -661,7 +699,16 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
             </Field>
           </FieldGroup>
 
-          {assessment && (assessment.rateUnavailable || amlWarns) && (
+          {assessFailed && (
+            <Alert>
+              <AlertTitle>Provera limita gotovine nije izvršena</AlertTitle>
+              <AlertDescription>
+                Provera nije uspela zbog greške u sistemu. Prodaja se može
+                završiti.
+              </AlertDescription>
+            </Alert>
+          )}
+          {assessment && (amlCheckUnavailable || amlWarns) && (
             <AmlNotice
               assessment={assessment}
               reason={amlReason}

@@ -41,6 +41,8 @@ const now = "2026-06-18T10:00:00Z";
 
 const AML_CAP_EUR = 10_000;
 const AML_SOFT_RATIO_PERCENT = 80;
+/** `aml.rs::AML_FALLBACK_RATE_MINOR` — a 100,00 RSD/EUR floor, in para. */
+const AML_FALLBACK_RATE_MINOR = 10_000;
 
 /** The demo rate, dated to `now` so the till shows no staleness warning. */
 const mockEurRate: EurRate = {
@@ -1779,10 +1781,13 @@ function assessCashPayment(
     isLegalDuty: true,
   };
 
+  const fallbackThresholdMinor = AML_CAP_EUR * AML_FALLBACK_RATE_MINOR;
+
   if (!rate) {
     return {
       cashMinor,
       thresholdMinor: 0,
+      fallbackThresholdMinor,
       breached: false,
       nearThreshold: false,
       rateUnavailable: true,
@@ -1797,6 +1802,7 @@ function assessCashPayment(
   return {
     cashMinor,
     thresholdMinor,
+    fallbackThresholdMinor,
     breached: cashMinor >= thresholdMinor,
     nearThreshold: cashMinor >= softMinor && cashMinor < thresholdMinor,
     rateUnavailable: false,
