@@ -530,9 +530,19 @@ pub fn eur_rate_status(state: &AppState, today: &str) -> Result<EurRateStatus, A
 /// itself. The admin gate runs BEFORE the fetch, so a cashier cannot trigger
 /// the outbound call at all.
 pub fn refresh_eur_rate(state: &AppState, today: &str) -> Result<EurRateStatus, AppError> {
+    refresh_eur_rate_with(state, today, crate::nbs_rate::fetch_nbs_middle_rate)
+}
+
+/// `refresh_eur_rate` with the fetch injected, so the degrade-never-block
+/// behaviour above is testable without a network.
+pub fn refresh_eur_rate_with(
+    state: &AppState,
+    today: &str,
+    fetch: impl FnOnce() -> Result<crate::nbs_rate::EurRate, AppError>,
+) -> Result<EurRateStatus, AppError> {
     super::auth::require_admin(state)?;
 
-    match crate::nbs_rate::fetch_nbs_middle_rate() {
+    match fetch() {
         Ok(rate) => {
             save_eur_rate(state, &rate)?;
         }
@@ -544,8 +554,23 @@ pub fn refresh_eur_rate(state: &AppState, today: &str) -> Result<EurRateStatus, 
     eur_rate_status(state, today)
 }
 
+/// The plausible RSD/EUR band a hand-typed rate has to fall in, in para
+/// (50–500 RSD/EUR). This is a **typo guard, not a legal figure**: no statute
+/// names it, it is not a fine, and it must never move to `legal.rs`.
+///
+/// Its job is the extra digit. A rate entered ten times too high multiplies the
+/// AML čl. 46 st. 1 dinar threshold (Task 7 computes `10_000 * rate_minor`) by
+/// ten, so an already-unlawful cash amount passes with no warning and the sale
+/// records the bogus rate as its own justification. Over-entry is the dangerous
+/// direction; under-entry only over-warns.
+const MANUAL_RATE_BAND_PARA: std::ops::RangeInclusive<i64> = 5_000..=50_000;
+
 /// The manual fallback for the days the NBS is unreachable. Admin-only: this
 /// value sets the dinar threshold the AML block is computed from.
+///
+/// `rate_date` clears the same bar the NBS path holds its own date to — it is
+/// persisted as `aml_rate_date` on the sale and compared against today for
+/// staleness, so a free-text date would jam the fallback permanently.
 pub fn set_manual_eur_rate(
     state: &AppState,
     rate_minor: i64,
@@ -556,6 +581,18 @@ pub fn set_manual_eur_rate(
         return Err(AppError::validation(
             "Kurs mora biti veći od nule.",
             serde_json::json!({ "field": "rateMinor" }),
+        ));
+    }
+    if !MANUAL_RATE_BAND_PARA.contains(&rate_minor) {
+        return Err(AppError::validation(
+            "Kurs mora biti između 50 i 500 dinara za 1 evro.",
+            serde_json::json!({ "field": "rateMinor" }),
+        ));
+    }
+    if !crate::nbs_rate::is_iso_date(rate_date) {
+        return Err(AppError::validation(
+            "Datum kursa mora biti u obliku GGGG-MM-DD.",
+            serde_json::json!({ "field": "rateDate" }),
         ));
     }
     save_eur_rate(
@@ -1211,6 +1248,129 @@ mod tests {
             let error = set_manual_eur_rate(state, 0, "2026-07-31")
                 .expect_err("a zero rate must be rejected");
             assert!(matches!(error, AppError::Validation { .. }));
+        });
+    }
+
+    /// The manual fallback writes the same `rate_date` the NBS path does, and
+    /// Task 8 persists it as `aml_rate_date` on the sale. A free-text date — most
+    /// plausibly `31.07.2026`, the format NBS itself renders — would be stale
+    /// forever (it can never equal today's ISO date), so the fallback could never
+    /// clear the staleness warning it exists to clear.
+    #[test]
+    fn manual_rate_rejects_a_date_that_is_not_iso() {
+        with_state("eur_rate_manual_date_shape", |state| {
+            sign_in_admin(state);
+
+            for bad_date in [
+                "31.07.2026",
+                "",
+                "2026-7-31",
+                "2026-13-01",
+                "2026-07-32",
+                "danas",
+                "2026-07-31T00:00:00Z",
+            ] {
+                let result = set_manual_eur_rate(state, 11_723, bad_date);
+                assert!(
+                    matches!(&result, Err(AppError::Validation { .. })),
+                    "'{bad_date}' must be rejected as a validation error, got {result:?}"
+                );
+            }
+
+            assert!(
+                load_eur_rate(state).expect("rate should load").is_none(),
+                "a rejected date must not have written a rate"
+            );
+        });
+    }
+
+    /// A fat-fingered extra digit (117_230 instead of 11_723) multiplies the AML
+    /// čl. 46 st. 1 dinar threshold by ten, so an already-unlawful cash amount
+    /// passes with no warning — and the sale records the bogus rate as its own
+    /// justification. The band is a typo guard, not a legal figure.
+    #[test]
+    fn manual_rate_rejects_an_implausible_magnitude() {
+        with_state("eur_rate_manual_band", |state| {
+            sign_in_admin(state);
+
+            let error = set_manual_eur_rate(state, 117_230, "2026-07-31")
+                .expect_err("1.172,30 RSD/EUR is a typo, not a rate");
+            assert!(matches!(error, AppError::Validation { .. }));
+            assert!(
+                load_eur_rate(state).expect("rate should load").is_none(),
+                "an out-of-band rate must not be written"
+            );
+
+            let error = set_manual_eur_rate(state, 1_172, "2026-07-31")
+                .expect_err("11,72 RSD/EUR is a typo, not a rate");
+            assert!(matches!(error, AppError::Validation { .. }));
+
+            set_manual_eur_rate(state, 11_723, "2026-07-31").expect("an in-band rate saves");
+            assert_eq!(
+                load_eur_rate(state)
+                    .expect("rate should load")
+                    .expect("the in-band rate is cached")
+                    .rate_minor,
+                11_723
+            );
+        });
+    }
+
+    /// An unreachable NBS may only leave the cached rate standing and stale — it
+    /// must never surface as a command error, because that would block the
+    /// surface the AML check hangs off (VERIFIED-RULES §3 SW-11(a) item 3).
+    #[test]
+    fn a_failed_fetch_degrades_to_the_cached_rate_instead_of_erroring() {
+        with_state("eur_rate_refresh_degrades", |state| {
+            sign_in_admin(state);
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 11_723,
+                    rate_date: "2026-07-30".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate should save");
+
+            let status = refresh_eur_rate_with(state, "2026-07-31", || {
+                Err(AppError::business(
+                    "nbs_rate_unavailable",
+                    "Kurs NBS-a trenutno nije dostupan.",
+                ))
+            })
+            .expect("a dead network must degrade, never block");
+
+            let rate = status.rate.expect("the cached rate still stands");
+            assert_eq!(rate.rate_minor, 11_723);
+            assert_eq!(rate.rate_date, "2026-07-30");
+            assert!(
+                status.is_stale,
+                "the cached rate is yesterday's, so the operator must be warned"
+            );
+        });
+    }
+
+    #[test]
+    fn a_successful_fetch_replaces_the_cached_rate() {
+        with_state("eur_rate_refresh_saves", |state| {
+            sign_in_admin(state);
+
+            let status = refresh_eur_rate_with(state, "2026-07-31", || {
+                Ok(EurRate {
+                    rate_minor: 11_800,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                })
+            })
+            .expect("a fetched rate should save");
+
+            assert!(!status.is_stale, "today's rate is fresh");
+            let cached = load_eur_rate(state)
+                .expect("rate should load")
+                .expect("the fetched rate is cached");
+            assert_eq!(cached.rate_minor, 11_800);
+            assert_eq!(cached.source, RateSource::Nbs);
         });
     }
 

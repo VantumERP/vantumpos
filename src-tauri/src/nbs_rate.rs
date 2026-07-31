@@ -158,6 +158,26 @@ fn normalize_nbs_date(raw: &str) -> Option<String> {
     Some(format!("{year}-{month:02}-{day:02}"))
 }
 
+/// `yyyy-MM-dd`, every field validated to the same bar `normalize_nbs_date`
+/// holds the NBS response to.
+///
+/// The manual fallback in `commands/settings.rs` writes the very same
+/// `rate_date` field, which is persisted as `aml_rate_date` on the sale and has
+/// to be reproducible at inspection. A free-text or `dd.MM.yyyy` date there can
+/// never equal today's ISO date, so the rate would read stale forever and every
+/// date comparison over the AML trail would silently break.
+pub(crate) fn is_iso_date(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let all_digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    if !all_digits(0..4) || !all_digits(5..7) || !all_digits(8..10) {
+        return false;
+    }
+    date_field(&raw[5..7], 1, 12).is_some() && date_field(&raw[8..10], 1, 31).is_some()
+}
+
 /// A `dd` or `MM` field: one or two ASCII digits inside the given range.
 fn date_field(raw: &str, min: u32, max: u32) -> Option<u32> {
     let raw = raw.trim();
