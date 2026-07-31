@@ -22,10 +22,11 @@
 //! reads the system clock, and `seed_default_non_working_days` takes the RFC3339
 //! stamp it writes.
 //!
-//! The aging report and its CSV export live here too, behind `require_admin`,
-//! and are exposed through `crate::commands::cash_deposit`. The holiday-table
-//! seed and the Saturday setter are still unwired — they belong to the Settings
-//! surface — so `dead_code` stays allowed, mirroring the other domain modules.
+//! The aging report, its CSV export and the admin-editable calendar all live
+//! here behind `require_admin` — the gate sits inside each function rather than
+//! in `crate::commands::cash_deposit`, so no other caller can go around it.
+//! `dead_code` stays allowed for the pure helpers the tests exercise directly,
+//! mirroring the other domain modules.
 
 #![allow(dead_code)]
 
@@ -342,8 +343,116 @@ pub fn saturday_is_working_day(state: &AppState) -> Result<bool, AppError> {
     load_json_setting(state, SATURDAY_IS_WORKING_DAY_KEY, true)
 }
 
-pub fn set_saturday_is_working_day(state: &AppState, counts: bool) -> Result<(), AppError> {
-    save_json_setting(state, SATURDAY_IS_WORKING_DAY_KEY, &counts)
+/// One admin-editable non-working day. `day` is the primary key, so a re-seed
+/// never overwrites an edit.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NonWorkingDay {
+    pub day: String,
+    pub label: String,
+}
+
+/// The calendar the seven-working-day count runs against, as the Settings
+/// surface sees it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CashDepositCalendar {
+    pub saturday_is_working: bool,
+    /// Chronological, so the operator reads it the way a calendar reads.
+    pub days: Vec<NonWorkingDay>,
+    pub horizon_year: i32,
+}
+
+/// Reads the calendar for the Settings surface.
+///
+/// Admin-gated **here**, like the report, so no other caller can reach the
+/// figures that decide a statutory deadline by going around the command layer.
+pub fn calendar(state: &AppState) -> Result<CashDepositCalendar, AppError> {
+    crate::commands::auth::require_admin(state)?;
+
+    let conn = state.db().open()?;
+    let mut statement = conn.prepare("SELECT day, label FROM non_working_days ORDER BY day")?;
+    let days = statement
+        .query_map([], |row| {
+            Ok(NonWorkingDay {
+                day: row.get(0)?,
+                label: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+
+    Ok(CashDepositCalendar {
+        saturday_is_working: saturday_is_working_day(state)?,
+        days,
+        horizon_year: SEEDED_CALENDAR_HORIZON_YEAR,
+    })
+}
+
+/// Sets whether Saturday counts as a radni dan. Never defaulted to `false`:
+/// "radni dan" is statutorily undefined (§5 Q-5), and excluding Saturdays moves
+/// every deadline later — the unsafe direction.
+pub fn set_saturday_is_working(
+    state: &AppState,
+    counts: bool,
+) -> Result<CashDepositCalendar, AppError> {
+    crate::commands::auth::require_admin(state)?;
+    save_json_setting(state, SATURDAY_IS_WORKING_DAY_KEY, &counts)?;
+    calendar(state)
+}
+
+/// Adds or relabels one non-working day.
+///
+/// `day` must be a real `yyyy-MM-dd`: the arithmetic compares it as a string
+/// against ISO dates it generates itself, so a rendered "05.08.2026." would sit
+/// in the table forever and never match anything. The label is required —
+/// an unlabelled day cannot be re-checked by the operator or the knjigovođa.
+pub fn save_non_working_day(
+    state: &AppState,
+    day: &str,
+    label: &str,
+    now: &str,
+) -> Result<CashDepositCalendar, AppError> {
+    crate::commands::auth::require_admin(state)?;
+
+    if parse_iso_date(day).is_none() {
+        return Err(AppError::validation(
+            "Datum neradnog dana mora biti u obliku gggg-MM-dd.",
+            serde_json::json!({ "day": day }),
+        ));
+    }
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(AppError::validation(
+            "Unesite naziv neradnog dana.",
+            serde_json::json!({ "day": day }),
+        ));
+    }
+
+    state.db().open()?.execute(
+        "INSERT INTO non_working_days (day, label, created_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(day) DO UPDATE SET label = excluded.label",
+        params![day, label, now],
+    )?;
+
+    calendar(state)
+}
+
+/// Removes one non-working day. Deleting pulls every deadline that spans it
+/// *earlier*, so it is the conservative direction and needs no confirmation
+/// beyond the admin gate.
+pub fn delete_non_working_day(
+    state: &AppState,
+    day: &str,
+) -> Result<CashDepositCalendar, AppError> {
+    crate::commands::auth::require_admin(state)?;
+
+    state
+        .db()
+        .open()?
+        .execute("DELETE FROM non_working_days WHERE day = ?1", params![day])?;
+
+    calendar(state)
 }
 
 /// §3 rule 11 — the per-trading-date roll-up is ours, not the law's.
@@ -1257,5 +1366,120 @@ mod tests {
             row.contains("Rok nije izračunat"),
             "the export must say the deadline is unknown: {row}"
         );
+    }
+
+    #[test]
+    fn the_calendar_reports_the_seeded_days_and_the_conservative_saturday_default() {
+        with_state("cash_deposit_calendar_reads", |state| {
+            sign_in_admin(state);
+            seed_default_non_working_days(state, "2026-07-31T00:00:00Z").expect("seed");
+
+            let calendar = calendar(state).expect("calendar should read");
+
+            assert!(
+                calendar.saturday_is_working,
+                "counting Saturdays yields the earlier deadline and is the default"
+            );
+            assert_eq!(calendar.horizon_year, SEEDED_CALENDAR_HORIZON_YEAR);
+            assert!(
+                calendar
+                    .days
+                    .iter()
+                    .any(|entry| entry.day == "2026-01-07" && entry.label == "Božić"),
+                "the seeded table must reach the operator"
+            );
+            let mut sorted = calendar.days.clone();
+            sorted.sort_by(|left, right| left.day.cmp(&right.day));
+            assert_eq!(
+                calendar.days.iter().map(|d| &d.day).collect::<Vec<_>>(),
+                sorted.iter().map(|d| &d.day).collect::<Vec<_>>(),
+                "days are listed chronologically"
+            );
+        });
+    }
+
+    /// The table is `[PRUDENTIAL]` and annual, so the shop must be able to
+    /// correct it — including removing a day it does not observe, which pulls
+    /// the deadline *earlier* rather than later.
+    #[test]
+    fn an_admin_edits_the_calendar_and_the_edit_changes_the_deadline() {
+        with_state("cash_deposit_calendar_edits", |state| {
+            sign_in_admin(state);
+
+            let after_add =
+                save_non_working_day(state, "2026-08-05", "Slava radnje", "2026-07-31T00:00:00Z")
+                    .expect("day should save");
+            assert!(after_add
+                .days
+                .iter()
+                .any(|entry| entry.day == "2026-08-05" && entry.label == "Slava radnje"));
+
+            let with_holiday = load_non_working_days(state).expect("days should load");
+            assert_eq!(
+                add_working_days(
+                    "2026-07-31",
+                    DEPOSIT_WINDOW_WORKING_DAYS,
+                    &with_holiday,
+                    true
+                ),
+                Some("2026-08-10".to_string()),
+                "the added non-working day pushes the deadline one day later"
+            );
+
+            let after_delete =
+                delete_non_working_day(state, "2026-08-05").expect("day should delete");
+            assert!(!after_delete
+                .days
+                .iter()
+                .any(|entry| entry.day == "2026-08-05"));
+        });
+    }
+
+    #[test]
+    fn the_saturday_assumption_is_settable_and_read_back() {
+        with_state("cash_deposit_calendar_saturday", |state| {
+            sign_in_admin(state);
+
+            let updated = set_saturday_is_working(state, false).expect("flag should save");
+
+            assert!(!updated.saturday_is_working);
+            assert!(
+                !calendar(state)
+                    .expect("calendar should read")
+                    .saturday_is_working
+            );
+        });
+    }
+
+    #[test]
+    fn the_calendar_refuses_a_day_that_is_not_an_iso_date_or_carries_no_label() {
+        with_state("cash_deposit_calendar_validates", |state| {
+            sign_in_admin(state);
+
+            assert!(
+                save_non_working_day(state, "05.08.2026.", "Slava", "2026-07-31T00:00:00Z")
+                    .is_err(),
+                "a rendered date must never be stored as a key the arithmetic reads"
+            );
+            assert!(
+                save_non_working_day(state, "2026-08-05", "   ", "2026-07-31T00:00:00Z").is_err(),
+                "an unlabelled day cannot be checked by the operator later"
+            );
+        });
+    }
+
+    /// The calendar decides a statutory deadline, so reading and writing it are
+    /// both admin-gated inside these functions — not in the command wrappers,
+    /// which any other caller could bypass.
+    #[test]
+    fn the_calendar_is_closed_to_a_caller_without_an_admin_session() {
+        with_state("cash_deposit_calendar_admin_only", |state| {
+            assert!(calendar(state).is_err());
+            assert!(set_saturday_is_working(state, false).is_err());
+            assert!(
+                save_non_working_day(state, "2026-08-05", "Slava", "2026-07-31T00:00:00Z").is_err()
+            );
+            assert!(delete_non_working_day(state, "2026-08-05").is_err());
+        });
     }
 }

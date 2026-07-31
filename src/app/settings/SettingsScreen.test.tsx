@@ -191,6 +191,82 @@ describe("SettingsScreen", () => {
   });
 });
 
+describe("SettingsScreen deposit calendar", () => {
+  it("counts Saturday by default and says the law never defined a radni dan", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Kalendar" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Rok za polog gotovine" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Subota je radni dan")).toBeChecked();
+    expect(screen.getByText(/nije definisan/i)).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "Božić" })).toBeInTheDocument();
+  });
+
+  it("stores a Saturday change through the settings service", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const setSaturdayIsWorking = vi.spyOn(
+      services.settings,
+      "setSaturdayIsWorking",
+    );
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Kalendar" }));
+    await user.click(await screen.findByLabelText("Subota je radni dan"));
+
+    await waitFor(() =>
+      expect(setSaturdayIsWorking).toHaveBeenCalledWith(false),
+    );
+    expect(
+      await screen.findByText(/pomera kasnije/i),
+      "excluding Saturdays moves every deadline later — the operator must be told",
+    ).toBeInTheDocument();
+  });
+
+  it("adds and removes a non-working day", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const saveNonWorkingDay = vi.spyOn(services.settings, "saveNonWorkingDay");
+    const deleteNonWorkingDay = vi.spyOn(
+      services.settings,
+      "deleteNonWorkingDay",
+    );
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Kalendar" }));
+    await user.type(await screen.findByLabelText("Datum"), "2026-08-05");
+    await user.type(screen.getByLabelText("Naziv"), "Slava radnje");
+    await user.click(screen.getByRole("button", { name: "Dodaj neradni dan" }));
+
+    await waitFor(() =>
+      expect(saveNonWorkingDay).toHaveBeenCalledWith("2026-08-05", "Slava radnje"),
+    );
+
+    const addedRow = await screen.findByRole("row", { name: /Slava radnje/ });
+    await user.click(within(addedRow).getByRole("button", { name: "Ukloni" }));
+
+    await waitFor(() =>
+      expect(deleteNonWorkingDay).toHaveBeenCalledWith("2026-08-05"),
+    );
+  });
+
+  it("frames the holiday table as this shop's list, not a statutory one", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Kalendar" }));
+
+    expect(
+      await screen.findByText(/proverite listu za svaku godinu/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/blagajnički maksimum/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("SettingsScreen VAT rates", () => {
   it("edits an existing VAT rate and threads its id to saveTaxRate", async () => {
     const user = userEvent.setup();

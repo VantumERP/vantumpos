@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Toaster } from "@/components/ui/sonner";
 import type { ReportsService, UsersService } from "@/services/ports";
-import type { UserAccount } from "@/services/types";
+import type { CashDepositReport, UserAccount } from "@/services/types";
 
 import { ReportsScreen } from "./ReportsScreen";
 
@@ -115,8 +115,47 @@ function buildReportsService(): ReportsService {
         cashierName: "Mira Kasir",
       },
     ]),
+    getCashDepositReport: vi.fn().mockResolvedValue(cashDepositReport),
+    exportCashDepositCsv: vi.fn().mockResolvedValue({
+      fileName: "nedeponovani-gotov-novac-2026-06-17.csv",
+      path: "C:/exports/nedeponovani-gotov-novac-2026-06-17.csv",
+      mimeType: "text/csv",
+      rowCount: 1,
+    }),
   };
 }
+
+const cashDepositReport: CashDepositReport = {
+  asOf: "2026-06-17",
+  buckets: [
+    {
+      tradingDate: "2026-06-05",
+      subjectMinor: 180_000,
+      depositedMinor: 0,
+      outstandingMinor: 180_000,
+      dueOn: "2026-06-15",
+      isOverdue: true,
+    },
+  ],
+  outstandingMinor: 180_000,
+  overdueMinor: 180_000,
+  excludedFloatMinor: 0,
+  saturdayIsWorking: true,
+  calendarHorizonYear: 2027,
+  beyondSeededCalendar: false,
+  notice: {
+    summary:
+      "Dinare primljene u gotovom po bilo kom osnovu treba uplatiti na tekući račun u roku od sedam radnih dana.",
+    penalty: null,
+    citation:
+      "Zakon o obavljanju plaćanja pravnih lica, preduzetnika i fizičkih lica koja ne obavljaju delatnost (Sl. glasnik RS, br. 68/2015), čl. 3 st. 1. Nadzor: Poreska uprava (čl. 6).",
+    isLegalDuty: true,
+  },
+  footer:
+    "Zbir po danu prometa je konvencija ove aplikacije, a ne zakonska kategorija. " +
+    "Gotovina podignuta sa tekućeg računa radnje izuzeta je iz osnovice po Pravilniku 77/2011 čl. 5 st. 2. " +
+    "Izveštaj je informativan: nadzor vrši Poreska uprava, a rok ne blokira prodaju, zatvaranje smene ni fiskalizaciju.",
+};
 
 function buildUsersService(): UsersService {
   return {
@@ -516,6 +555,48 @@ describe("ReportsScreen", () => {
 
     expect(
       await screen.findByText("Izvestaj nije dostupan."),
+    ).toBeInTheDocument();
+  });
+
+  it("ages the undeposited cash against the presek date and exports it", async () => {
+    const user = userEvent.setup();
+    const reports = renderReports();
+
+    await screen.findByRole("heading", { name: "Dnevni promet" });
+    await user.click(screen.getByRole("tab", { name: "Polog" }));
+
+    expect(reports.getCashDepositReport).toHaveBeenCalledWith("2026-06-17");
+    expect(
+      await screen.findByRole("heading", { name: "Nedeponovan gotov novac" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("15.06.2026.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /izvezi csv/i }));
+
+    expect(reports.exportCashDepositCsv).toHaveBeenCalledWith("2026-06-17");
+    expect(await screen.findByText(/CSV izvezen/)).toBeInTheDocument();
+  });
+
+  /**
+   * The aging report is advisory. A backend that cannot produce it must cost
+   * the operator that one card, never the whole reports screen.
+   */
+  it("keeps the other reports when the deposit report cannot be read", async () => {
+    const user = userEvent.setup();
+    const reports = buildReportsService();
+    reports.getCashDepositReport = vi.fn().mockRejectedValue({
+      code: "database_error",
+      message: "Izveštaj o pologu nije dostupan.",
+    });
+    renderReports(reports);
+
+    expect(
+      await screen.findByRole("heading", { name: "Dnevni promet" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Polog" }));
+    expect(
+      await screen.findByText("Izveštaj o pologu nije dostupan."),
     ).toBeInTheDocument();
   });
 });

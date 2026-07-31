@@ -9,6 +9,8 @@ import type {
   CampaignSummary,
   CampaignValidationReport,
   CampaignView,
+  CashDepositCalendar,
+  CashDepositReport,
   CashierTurnoverReport,
   CorrectionReport,
   CashMovementRequest,
@@ -100,6 +102,16 @@ export interface SettingsService {
   updateSalesSettings(request: SalesSettingsRequest): Promise<SalesSettings>;
   getShopProfile(): Promise<ShopProfile>;
   updateShopProfile(request: ShopProfile): Promise<ShopProfile>;
+  /**
+   * The calendar the seven-working-day deposit deadline is counted against.
+   * Admin-gated backend-side, and seeded with the Serbian state holidays on
+   * first read. Every method returns the whole calendar so the panel can never
+   * drift from what was stored.
+   */
+  getCashDepositCalendar(): Promise<CashDepositCalendar>;
+  setSaturdayIsWorking(counts: boolean): Promise<CashDepositCalendar>;
+  saveNonWorkingDay(day: string, label: string): Promise<CashDepositCalendar>;
+  deleteNonWorkingDay(day: string): Promise<CashDepositCalendar>;
 }
 
 export interface BackupService {
@@ -309,6 +321,14 @@ export interface ReportsService {
   getLowStock(): Promise<LowStockReport>;
   listShifts(): Promise<ShiftListItem[]>;
   exportReportCsv(request: ExportReportRequest): Promise<ExportedFile>;
+  /**
+   * „Izveštaj o nedeponovanom gotovom novcu" as of `asOf` (`YYYY-MM-DD`) —
+   * the presek is a real cut-off, so a past date answers „was I late then?".
+   * Advisory: nothing in the app may gate a sale, a day-close or a
+   * fiscalization on it.
+   */
+  getCashDepositReport(asOf: string): Promise<CashDepositReport>;
+  exportCashDepositCsv(asOf: string): Promise<ExportedFile>;
 }
 
 export interface PosServices {

@@ -7,12 +7,15 @@ import type {
   CampaignInput,
   CampaignItemView,
   CampaignView,
+  CashDepositCalendar,
+  CashDepositReport,
   CategorySummary,
   CompanySettings,
   CreateBackupRequest,
   DeclarationGapReason,
   DeclarationGapRow,
   DeclarationWarning,
+  DepositBucket,
   EurRate,
   ImportJob,
   LegalNotice,
@@ -318,11 +321,39 @@ export function createMockServices(): PosServices {
     lpfrInPremises: null,
     esirElements: [],
   };
+  // Saturday counts by default: „radni dan" is statutorily undefined and
+  // counting Saturdays yields the earlier, conservative deadline.
+  let cashDepositCalendar: CashDepositCalendar = {
+    saturdayIsWorking: true,
+    days: [
+      { day: "2026-01-01", label: "Nova godina" },
+      { day: "2026-01-02", label: "Nova godina" },
+      { day: "2026-01-07", label: "Božić" },
+      { day: "2026-02-15", label: "Dan državnosti Srbije" },
+      { day: "2026-02-16", label: "Dan državnosti Srbije" },
+      { day: "2026-05-01", label: "Praznik rada" },
+      { day: "2026-05-02", label: "Praznik rada" },
+      { day: "2026-11-11", label: "Dan primirja u Prvom svetskom ratu" },
+    ],
+    horizonYear: 2027,
+  };
+  /** Pologe recorded through `shiftCashMovement`, in para. */
+  let mockDepositedMinor = 0;
   let backupSettings: BackupSettings = {
     backupFolder: "mock://backups",
     automaticBackupEnabled: true,
   };
   let backupJobs: BackupJob[] = [];
+
+  /** Mirrors `commands::auth::require_admin` — the only admin gate. */
+  function requireAdmin() {
+    if (session?.user.role !== "admin") {
+      throw {
+        code: "forbidden",
+        message: "Samo administrator može da izvrši ovu akciju.",
+      };
+    }
+  }
 
   function findProduct(productId: number) {
     const product = products.find((item) => item.id === productId);
@@ -496,6 +527,49 @@ export function createMockServices(): PosServices {
           })),
         };
         return shopProfile;
+      },
+      async getCashDepositCalendar() {
+        requireAdmin();
+        return cashDepositCalendar;
+      },
+      async setSaturdayIsWorking(counts) {
+        requireAdmin();
+        cashDepositCalendar = {
+          ...cashDepositCalendar,
+          saturdayIsWorking: counts,
+        };
+        return cashDepositCalendar;
+      },
+      async saveNonWorkingDay(day, label) {
+        requireAdmin();
+
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          throw {
+            code: "validation_error",
+            message: "Datum neradnog dana mora biti u obliku gggg-MM-dd.",
+          };
+        }
+        if (!label.trim()) {
+          throw {
+            code: "validation_error",
+            message: "Unesite naziv neradnog dana.",
+          };
+        }
+
+        const days = cashDepositCalendar.days
+          .filter((entry) => entry.day !== day)
+          .concat({ day, label: label.trim() })
+          .sort((left, right) => left.day.localeCompare(right.day));
+        cashDepositCalendar = { ...cashDepositCalendar, days };
+        return cashDepositCalendar;
+      },
+      async deleteNonWorkingDay(day) {
+        requireAdmin();
+        cashDepositCalendar = {
+          ...cashDepositCalendar,
+          days: cashDepositCalendar.days.filter((entry) => entry.day !== day),
+        };
+        return cashDepositCalendar;
       },
     },
     backup: {
@@ -725,20 +799,25 @@ export function createMockServices(): PosServices {
           };
         }
 
-        const delta =
-          request.direction === "pay_in"
-            ? request.amountMinor
-            : -request.amountMinor;
+        // A podizanje sa računa fills the drawer like a pay_in; a polog empties
+        // it like a pay_out — the same mapping `commands::shifts` uses.
+        const fillsDrawer =
+          request.direction === "pay_in" ||
+          request.direction === "bank_withdrawal";
+        const delta = fillsDrawer ? request.amountMinor : -request.amountMinor;
         const updated: ShiftSummary = {
           ...session.currentShift,
           expectedCashMinor: session.currentShift.expectedCashMinor + delta,
           paidInMinor:
             session.currentShift.paidInMinor +
-            (request.direction === "pay_in" ? request.amountMinor : 0),
+            (fillsDrawer ? request.amountMinor : 0),
           paidOutMinor:
             session.currentShift.paidOutMinor +
-            (request.direction === "pay_out" ? request.amountMinor : 0),
+            (fillsDrawer ? 0 : request.amountMinor),
         };
+        if (request.direction === "bank_deposit") {
+          mockDepositedMinor += request.amountMinor;
+        }
         currentShift = updated;
         session = { ...session, currentShift: updated };
         return updated;
@@ -1208,6 +1287,24 @@ export function createMockServices(): PosServices {
         return {
           fileName: `${request.reportType}-2026-06-17-2026-06-17.csv`,
           path: `mock://exports/${request.reportType}-2026-06-17-2026-06-17.csv`,
+          mimeType: "text/csv" as const,
+          rowCount: 1,
+        };
+      },
+      async getCashDepositReport(asOf) {
+        requireAdmin();
+        return buildMockCashDepositReport(
+          asOf,
+          mockDepositedMinor,
+          cashDepositCalendar,
+          shopProfile,
+        );
+      },
+      async exportCashDepositCsv(asOf) {
+        requireAdmin();
+        return {
+          fileName: `nedeponovani-gotov-novac-${asOf}.csv`,
+          path: `mock://exports/nedeponovani-gotov-novac-${asOf}.csv`,
           mimeType: "text/csv" as const,
           rowCount: 1,
         };
@@ -1891,6 +1988,89 @@ function toStockItem(product: ProductSummary): StockListItem {
 
 function ledgerLatest(_productId: number): string | null {
   return null;
+}
+
+/** Verbatim `cash_deposit.rs::report_footer` — one wording, so the demo cannot
+ *  soften a label the real report hardened. */
+const CASH_DEPOSIT_FOOTER =
+  "Zbir po danu prometa je konvencija ove aplikacije, a ne zakonska kategorija: " +
+  "rok teče od prijema gotovine, a ni Zakon 68/2015 ni Pravilnik 77/2011 ne " +
+  "poznaju dnevni izveštaj. Gotovina podignuta sa tekućeg računa radnje izuzeta " +
+  "je iz osnovice po Pravilniku 77/2011 čl. 5 st. 2, ali samo ako je isplata " +
+  "izvršena u skladu sa čl. 2 st. 2 ili st. 3 tog pravilnika — proverite " +
+  "dokumentaciju za svaki izuzeti iznos. To je olakšica na nivou podzakonskog " +
+  "akta; sam zakon („po bilo kom osnovu“) i kazna iz čl. 7 ne sadrže nijedan " +
+  "izuzetak. Izveštaj je informativan: nadzor vrši Poreska uprava, a rok ne " +
+  "blokira prodaju, zatvaranje smene ni fiskalizaciju.";
+
+/**
+ * The demo double for `cash_deposit_report`.
+ *
+ * The seven-working-day arithmetic is **not** reimplemented here: a second copy
+ * of a statutory count would drift from the one in
+ * `src-tauri/src/cash_deposit.rs` that decides the real deadline. The demo
+ * buckets carry fixed deadlines, and the only thing that moves is how much of
+ * them a polog recorded in this session has discharged — oldest bucket first,
+ * the way `build_buckets` draws them down.
+ *
+ * `penalty` is `null` for the same reason it is null in the AML double: every
+ * fine figure lives in `legal.rs` and nowhere else.
+ */
+function buildMockCashDepositReport(
+  asOf: string,
+  depositedMinor: number,
+  calendar: CashDepositCalendar,
+  _profile: ShopProfile,
+): CashDepositReport {
+  const demoInflows = [
+    { tradingDate: "2026-06-08", subjectMinor: 180_000, dueOn: "2026-06-16" },
+    { tradingDate: "2026-06-17", subjectMinor: 120_000, dueOn: "2026-06-25" },
+  ];
+
+  let remaining = Math.max(depositedMinor, 0);
+  const buckets: DepositBucket[] = demoInflows.map((inflow) => {
+    const applied = Math.min(remaining, inflow.subjectMinor);
+    remaining -= applied;
+    const outstandingMinor = inflow.subjectMinor - applied;
+
+    return {
+      tradingDate: inflow.tradingDate,
+      subjectMinor: inflow.subjectMinor,
+      depositedMinor: applied,
+      outstandingMinor,
+      dueOn: inflow.dueOn,
+      // The polog is still lawful on the deadline day itself.
+      isOverdue: outstandingMinor > 0 && inflow.dueOn < asOf,
+    };
+  });
+
+  return {
+    asOf,
+    buckets,
+    outstandingMinor: buckets.reduce(
+      (sum, bucket) => sum + bucket.outstandingMinor,
+      0,
+    ),
+    overdueMinor: buckets
+      .filter((bucket) => bucket.isOverdue)
+      .reduce((sum, bucket) => sum + bucket.outstandingMinor, 0),
+    excludedFloatMinor: 0,
+    saturdayIsWorking: calendar.saturdayIsWorking,
+    calendarHorizonYear: calendar.horizonYear,
+    beyondSeededCalendar: false,
+    notice: {
+      summary:
+        "Dinare primljene u gotovom po bilo kom osnovu treba uplatiti na " +
+        "tekući račun u roku od sedam radnih dana.",
+      penalty: null,
+      citation:
+        "Zakon o obavljanju plaćanja pravnih lica, preduzetnika i fizičkih " +
+        "lica koja ne obavljaju delatnost (Sl. glasnik RS, br. 68/2015), " +
+        "čl. 3 st. 1. Nadzor: Poreska uprava (čl. 6).",
+      isLegalDuty: true,
+    },
+    footer: CASH_DEPOSIT_FOOTER,
+  };
 }
 
 /**

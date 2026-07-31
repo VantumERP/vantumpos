@@ -321,6 +321,62 @@ describe("AppShell", () => {
     }
   });
 
+  it("records a polog on the shift screen with its broj uplatnice", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const shiftCashMovement = vi.spyOn(services.shifts, "shiftCashMovement");
+    render(<AppShell services={services} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+    await user.selectOptions(
+      screen.getByLabelText("Vrsta transakcije"),
+      "bank_deposit",
+    );
+    await user.type(screen.getByLabelText("Iznos"), "1500");
+    await user.type(
+      screen.getByLabelText("Broj izvoda / uplatnice"),
+      "uplatnica-7",
+    );
+    await user.click(screen.getByRole("button", { name: "Polog na račun" }));
+
+    await waitFor(() =>
+      expect(shiftCashMovement).toHaveBeenCalledWith({
+        direction: "bank_deposit",
+        amountMinor: 150000,
+        reason: null,
+        bankReference: "uplatnica-7",
+      }),
+    );
+  });
+
+  it("offers a podizanje sa računa and never calls it a pazar", async () => {
+    const user = userEvent.setup();
+    render(<AppShell services={createMockServices()} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+    await user.selectOptions(
+      screen.getByLabelText("Vrsta transakcije"),
+      "bank_withdrawal",
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Podizanje sa računa" }),
+    ).toBeInTheDocument();
+    // The bylaw carve-out is conditional, so the form must not promise the
+    // money is out of the deposit base — it says what to check instead.
+    expect(screen.getByText(/Pravilnik\w* 77\/2011/)).toBeInTheDocument();
+  });
+
+  it("keeps the broj uplatnice field out of a plain cash movement", async () => {
+    render(<AppShell services={createMockServices()} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+
+    expect(
+      screen.queryByLabelText("Broj izvoda / uplatnice"),
+    ).not.toBeInTheDocument();
+  });
+
   it("opens Podesavanja with company, VAT, receipt, users, and backup tabs", async () => {
     const user = userEvent.setup();
     render(<AppShell services={createMockServices()} />);

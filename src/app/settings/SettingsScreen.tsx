@@ -56,10 +56,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { PosServices } from "@/services/ports";
+import type { PosServices, SettingsService } from "@/services/ports";
 import type {
   BackupJob,
   BackupStatus,
+  CashDepositCalendar,
   CompanySettings,
   ReceiptSettings,
   SalesSettings,
@@ -93,6 +94,7 @@ type SettingsTab =
   | "profile"
   | "vat"
   | "receipts"
+  | "calendar"
   | "users"
   | "backup";
 
@@ -197,6 +199,12 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           Računi
         </SettingsTabButton>
         <SettingsTabButton
+          active={activeTab === "calendar"}
+          onSelect={() => setActiveTab("calendar")}
+        >
+          Kalendar
+        </SettingsTabButton>
+        <SettingsTabButton
           active={activeTab === "users"}
           onSelect={() => setActiveTab("users")}
         >
@@ -296,6 +304,10 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
             />
           </div>
         </div>
+      ) : null}
+
+      {activeTab === "calendar" ? (
+        <DepositCalendarPanel settings={services.settings} />
       ) : null}
 
       {activeTab === "users" ? usersPanel : null}
@@ -818,6 +830,220 @@ function ReceiptSettingsPanel({
             </Field>
           </FieldGroup>
         </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * The calendar the seven-working-day deposit deadline (Zakon 68/2015, čl. 3
+ * st. 1) is counted against.
+ *
+ * Two things this panel must keep straight. First, **"radni dan" is
+ * statutorily undefined** — neither the Zakon nor Pravilnik 77/2011 defines it
+ * — so whether Saturday counts is an assumption the shop makes, defaulted to
+ * counting because that yields the earlier and therefore conservative deadline.
+ * Second, the holiday list is **this shop's list**: the app ships the state
+ * holidays for the years it knows, but a wrong future holiday pushes a deadline
+ * *later*, which is the unsafe direction, so the operator is asked to check it
+ * per year rather than told it is authoritative.
+ *
+ * There is no blagajnički maksimum here and there must never be one: no propis
+ * prescribes a cash-on-hand ceiling.
+ */
+function DepositCalendarPanel({ settings }: { settings: SettingsService }) {
+  const [calendar, setCalendar] = useState<CashDepositCalendar | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [day, setDay] = useState("");
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    settings.getCashDepositCalendar().then(
+      (loaded) => {
+        if (active) {
+          setCalendar(loaded);
+        }
+      },
+      (loadError) => {
+        if (active) {
+          setError(errorMessage(loadError, "Kalendar nije učitan."));
+        }
+      },
+    );
+
+    return () => {
+      active = false;
+    };
+  }, [settings]);
+
+  async function run(
+    action: () => Promise<CashDepositCalendar>,
+    success: string,
+    failure: string,
+  ) {
+    setBusy(true);
+    try {
+      setCalendar(await action());
+      setError(null);
+      toast.success(success);
+    } catch (actionError) {
+      setError(errorMessage(actionError, failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addDay(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!day || !label.trim()) {
+      setError("Unesite datum i naziv neradnog dana.");
+      return;
+    }
+
+    await run(
+      () => settings.saveNonWorkingDay(day, label.trim()),
+      "Neradni dan je sačuvan.",
+      "Neradni dan nije sačuvan.",
+    );
+    setDay("");
+    setLabel("");
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          <h2>Rok za polog gotovine</h2>
+        </CardTitle>
+        <CardDescription>
+          Gotovina primljena po bilo kom osnovu uplaćuje se na tekući račun u
+          roku od sedam radnih dana (Zakon 68/2015, čl. 3 st. 1; nadzor: Poreska
+          uprava). Ova podešavanja određuju kako se ti radni dani broje.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {error ? (
+          <Alert variant="destructive">
+            <ShieldAlertIcon aria-hidden="true" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        {calendar === null ? (
+          <Badge variant="outline" className="w-fit">
+            <Spinner data-icon="inline-start" aria-hidden="true" />
+            Učitavanje kalendara
+          </Badge>
+        ) : (
+          <>
+            <div className="flex items-center justify-between rounded-md border p-4">
+              <div className="flex flex-col gap-1">
+                <span className="text-sm font-medium">Subota je radni dan</span>
+                <span className="text-xs text-muted-foreground">
+                  „Radni dan" nije definisan ni u Zakonu 68/2015 ni u Pravilniku
+                  77/2011. Podrazumevano se subota računa, jer tako rok pada
+                  ranije.
+                </span>
+                {calendar.saturdayIsWorking ? null : (
+                  <span className="text-xs text-muted-foreground">
+                    Subota se ne računa kao radni dan, pa se rok pomera kasnije
+                    nego po podrazumevanoj pretpostavci.
+                  </span>
+                )}
+              </div>
+              <Switch
+                aria-label="Subota je radni dan"
+                checked={calendar.saturdayIsWorking}
+                disabled={busy}
+                onCheckedChange={(checked) =>
+                  void run(
+                    () => settings.setSaturdayIsWorking(checked),
+                    "Pretpostavka o suboti je sačuvana.",
+                    "Pretpostavka o suboti nije sačuvana.",
+                  )
+                }
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <span className="text-sm font-medium">Neradni dani</span>
+              <span className="text-xs text-muted-foreground">
+                Lista je pripremljena zaključno sa {calendar.horizonYear}.
+                godinom — proverite listu za svaku godinu i dopunite je, jer se
+                pokretni praznici pomeraju. Dodatni neradni dan pomera rok
+                kasnije, a uklonjen ga vraća ranije.
+              </span>
+              <div className="overflow-x-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Datum</TableHead>
+                      <TableHead>Naziv</TableHead>
+                      <TableHead className="w-24" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {calendar.days.map((entry) => (
+                      <TableRow key={entry.day}>
+                        <TableCell>{entry.day}</TableCell>
+                        <TableCell>{entry.label}</TableCell>
+                        <TableCell>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() =>
+                              void run(
+                                () => settings.deleteNonWorkingDay(entry.day),
+                                "Neradni dan je uklonjen.",
+                                "Neradni dan nije uklonjen.",
+                              )
+                            }
+                          >
+                            Ukloni
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+
+            <form className="flex flex-col gap-4" onSubmit={addDay}>
+              <FieldGroup className="grid gap-3 md:grid-cols-[12rem_1fr_auto] md:items-end">
+                <Field>
+                  <FieldLabel htmlFor="non-working-day">Datum</FieldLabel>
+                  <Input
+                    id="non-working-day"
+                    type="date"
+                    value={day}
+                    onChange={(event) => setDay(event.target.value)}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="non-working-label">Naziv</FieldLabel>
+                  <Input
+                    id="non-working-label"
+                    value={label}
+                    onChange={(event) => setLabel(event.target.value)}
+                  />
+                </Field>
+                <Field>
+                  <Button type="submit" disabled={busy}>
+                    <PlusIcon data-icon="inline-start" />
+                    Dodaj neradni dan
+                  </Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          </>
+        )}
       </CardContent>
     </Card>
   );

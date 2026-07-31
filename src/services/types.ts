@@ -121,6 +121,67 @@ export interface AmlAssessment {
   notice: LegalNotice;
 }
 
+/**
+ * One trading date's cash and how much of it has reached the bank
+ * (`crate::cash_deposit::DepositBucket`).
+ *
+ * The per-trading-date roll-up is an implementation convention, not a statutory
+ * category — čl. 3 st. 1 runs from receipt of the cash — and every rendering
+ * must say so.
+ */
+export interface DepositBucket {
+  tradingDate: string;
+  subjectMinor: number;
+  depositedMinor: number;
+  outstandingMinor: number;
+  /** `null` when the deadline could not be computed. Never read as „u roku". */
+  dueOn: string | null;
+  isOverdue: boolean;
+}
+
+/**
+ * „Izveštaj o nedeponovanom gotovom novcu" (`cash_deposit_report`). Advisory by
+ * construction: it carries no blocking flag, because the seven-working-day duty
+ * is fiscal hygiene supervised by Poreska uprava, not a condition of a valid
+ * sale.
+ */
+export interface CashDepositReport {
+  /** The presek date the deadlines were assessed against, `YYYY-MM-DD`. */
+  asOf: string;
+  buckets: DepositBucket[];
+  outstandingMinor: number;
+  /** Of the outstanding total, the part whose deadline has already passed. */
+  overdueMinor: number;
+  /** Cash the Pravilnik 77/2011 čl. 5 st. 2 carve-out kept out of the base. */
+  excludedFloatMinor: number;
+  saturdayIsWorking: boolean;
+  calendarHorizonYear: number;
+  /** A deadline falls past the seeded holiday table for that year. */
+  beyondSeededCalendar: boolean;
+  notice: LegalNotice;
+  /** The honesty labels that must travel with every rendering of the numbers. */
+  footer: string;
+}
+
+export interface NonWorkingDay {
+  /** `YYYY-MM-DD`. */
+  day: string;
+  label: string;
+}
+
+/**
+ * The calendar the seven-working-day deadline is counted against. „Radni dan"
+ * is statutorily undefined, so `saturdayIsWorking` is a configurable
+ * assumption — defaulted to `true` because counting Saturdays yields the
+ * earlier, conservative deadline.
+ */
+export interface CashDepositCalendar {
+  saturdayIsWorking: boolean;
+  days: NonWorkingDay[];
+  /** Last year the shipped holiday table covers. */
+  horizonYear: number;
+}
+
 export interface BackupSettings {
   backupFolder: string;
   automaticBackupEnabled: boolean;
@@ -221,10 +282,28 @@ export interface CloseShiftRequest {
   note?: string | null;
 }
 
+/**
+ * `bank_withdrawal` is a podizanje sa računa — money leaves the bank and enters
+ * the drawer, so it counts like a pay_in. `bank_deposit` is a polog: money
+ * leaves the drawer for the shop's own račun, so it counts like a pay_out and
+ * draws down the oldest open deposit bucket.
+ */
+export type CashMovementDirection =
+  | "pay_in"
+  | "pay_out"
+  | "bank_deposit"
+  | "bank_withdrawal";
+
 export interface CashMovementRequest {
-  direction: "pay_in" | "pay_out";
+  direction: CashMovementDirection;
   amountMinor: number;
   reason?: string | null;
+  /**
+   * Broj izvoda / uplatnice for the two bank directions — the evidence trail
+   * per polog. Optional: a shop that records the polog before the bank
+   * confirms it must not be blocked.
+   */
+  bankReference?: string | null;
 }
 
 export interface SaveUserRequest {

@@ -14,7 +14,8 @@ use std::path::Path;
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
-use crate::cash_deposit::CashDepositReport;
+use crate::cash_deposit::{CashDepositCalendar, CashDepositReport};
+use crate::clock::utc_now;
 use crate::commands::reports::ExportedFile;
 use crate::state::AppState;
 
@@ -53,4 +54,46 @@ pub fn cash_deposit_export_csv(
         mime_type: "text/csv",
         row_count: report.buckets.len(),
     })
+}
+
+/// The Settings surface for the calendar the deadline is counted against. The
+/// holiday table is `[PRUDENTIAL]` and annual, so it is seeded on first read
+/// rather than at install: a shop that upgrades mid-year must not be handed an
+/// empty table, and the seed is idempotent, so an admin edit survives it.
+#[tauri::command]
+pub fn cash_deposit_calendar(
+    state: State<'_, AppState>,
+) -> Result<CashDepositCalendar, CommandError> {
+    let state = state.inner();
+    // Gate first: seeding is a write, and an unauthenticated caller must not
+    // provoke one.
+    crate::commands::auth::require_admin(state)?;
+    crate::cash_deposit::seed_default_non_working_days(state, &utc_now()?)?;
+    crate::cash_deposit::calendar(state).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn cash_deposit_set_saturday_is_working(
+    state: State<'_, AppState>,
+    counts: bool,
+) -> Result<CashDepositCalendar, CommandError> {
+    crate::cash_deposit::set_saturday_is_working(state.inner(), counts).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn cash_deposit_save_non_working_day(
+    state: State<'_, AppState>,
+    day: String,
+    label: String,
+) -> Result<CashDepositCalendar, CommandError> {
+    crate::cash_deposit::save_non_working_day(state.inner(), &day, &label, &utc_now()?)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn cash_deposit_delete_non_working_day(
+    state: State<'_, AppState>,
+    day: String,
+) -> Result<CashDepositCalendar, CommandError> {
+    crate::cash_deposit::delete_non_working_day(state.inner(), &day).map_err(Into::into)
 }

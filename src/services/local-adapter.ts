@@ -12,6 +12,8 @@ import type {
   CampaignSummary,
   CampaignValidationReport,
   CampaignView,
+  CashDepositCalendar,
+  CashDepositReport,
   CashierTurnoverReport,
   CategorySummary,
   CategorySalesReport,
@@ -85,6 +87,21 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       getShopProfile: () => invoke<ShopProfile>("settings_get_shop_profile"),
       updateShopProfile: (request) =>
         invoke<ShopProfile>("settings_update_shop_profile", { request }),
+      getCashDepositCalendar: () =>
+        invoke<CashDepositCalendar>("cash_deposit_calendar"),
+      setSaturdayIsWorking: (counts) =>
+        invoke<CashDepositCalendar>("cash_deposit_set_saturday_is_working", {
+          counts,
+        }),
+      saveNonWorkingDay: (day, label) =>
+        invoke<CashDepositCalendar>("cash_deposit_save_non_working_day", {
+          day,
+          label,
+        }),
+      deleteNonWorkingDay: (day) =>
+        invoke<CashDepositCalendar>("cash_deposit_delete_non_working_day", {
+          day,
+        }),
     },
     backup: {
       getBackupStatus: () => invoke<BackupStatus>("backup_get_status"),
@@ -201,6 +218,10 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       listShifts: () => invoke<ShiftListItem[]>("reports_list_shifts"),
       exportReportCsv: (request) =>
         invoke<ExportedFile>("reports_export_csv", { request }),
+      getCashDepositReport: (asOf) =>
+        invoke<CashDepositReport>("cash_deposit_report", { asOf }),
+      exportCashDepositCsv: (asOf) =>
+        invoke<ExportedFile>("cash_deposit_export_csv", { asOf }),
     },
     campaigns: {
       listCampaigns: () => invoke<CampaignSummary[]>("campaigns_list"),

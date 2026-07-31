@@ -64,6 +64,7 @@ import {
 import { formatRsd } from "@/lib/money";
 import type { ReportsService, UsersService } from "@/services/ports";
 import type {
+  CashDepositReport as CashDepositReportDto,
   CashierTurnoverReport,
   CategorySalesReport,
   DailyTurnoverReport,
@@ -77,6 +78,8 @@ import type {
   ShiftTurnoverReport,
   UserAccount,
 } from "@/services/types";
+
+import { CashDepositReport } from "./CashDepositReport";
 
 const turnoverChartConfig = {
   totalMinor: {
@@ -136,6 +139,14 @@ export function ReportsScreen({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [shiftOptions, setShiftOptions] = useState<ShiftListItem[]>([]);
   const [cashierOptions, setCashierOptions] = useState<UserAccount[]>([]);
+  const [cashDeposit, setCashDeposit] = useState<CashDepositReportDto | null>(
+    null,
+  );
+  const [cashDepositError, setCashDepositError] = useState<string | null>(null);
+  const [exportingCashDeposit, setExportingCashDeposit] = useState(false);
+  // The aging report is an as-of report, not a range report: its presek is the
+  // end of the selected range, and only cash received on or before it counts.
+  const presekDate = appliedQuery.to;
 
   const loadReports = useCallback(
     async (query: ReportDateQuery) => {
@@ -219,6 +230,36 @@ export function ReportsScreen({
     };
   }, [currentUser.role, reports, users]);
 
+  // Loaded on its own, and its failure kept to itself: the deposit aging report
+  // is advisory, so a backend that cannot produce it must cost the operator one
+  // card, never the whole reports screen.
+  useEffect(() => {
+    if (currentUser.role !== "admin") {
+      return;
+    }
+
+    let active = true;
+    setCashDeposit(null);
+    setCashDepositError(null);
+
+    reports.getCashDepositReport(presekDate).then(
+      (report) => {
+        if (active) {
+          setCashDeposit(report);
+        }
+      },
+      (error) => {
+        if (active) {
+          setCashDepositError(errorToMessage(error));
+        }
+      },
+    );
+
+    return () => {
+      active = false;
+    };
+  }, [currentUser.role, presekDate, reports]);
+
   const applyQuery = useCallback(
     (query: ReportDateQuery) => {
       const validationError = validateDateRange(query);
@@ -263,6 +304,22 @@ export function ReportsScreen({
       toast.error("CSV export nije uspeo", {
         description: errorToMessage(error),
       });
+    }
+  }
+
+  async function exportCashDepositCsv() {
+    setExportingCashDeposit(true);
+    try {
+      const exported = await reports.exportCashDepositCsv(presekDate);
+      toast.success("CSV izvezen", {
+        description: exported.path,
+      });
+    } catch (error) {
+      toast.error("CSV export nije uspeo", {
+        description: errorToMessage(error),
+      });
+    } finally {
+      setExportingCashDeposit(false);
     }
   }
 
@@ -374,6 +431,7 @@ export function ReportsScreen({
             <TabsTrigger value="turnover">Promet</TabsTrigger>
             <TabsTrigger value="items">Artikli</TabsTrigger>
             <TabsTrigger value="stock">Lager</TabsTrigger>
+            <TabsTrigger value="deposits">Polog</TabsTrigger>
             <TabsTrigger value="export">Izvoz</TabsTrigger>
           </TabsList>
 
@@ -393,6 +451,24 @@ export function ReportsScreen({
 
           <TabsContent value="stock" className="flex flex-col gap-4">
             <LowStockTable report={data.lowStock} />
+          </TabsContent>
+
+          <TabsContent value="deposits" className="flex flex-col gap-4">
+            {cashDepositError ? (
+              <Alert variant="destructive">
+                <AlertCircleIcon data-icon="inline-start" />
+                <AlertTitle>Izveštaj o pologu nije učitan</AlertTitle>
+                <AlertDescription>{cashDepositError}</AlertDescription>
+              </Alert>
+            ) : cashDeposit ? (
+              <CashDepositReport
+                report={cashDeposit}
+                exporting={exportingCashDeposit}
+                onExportCsv={() => void exportCashDepositCsv()}
+              />
+            ) : (
+              <Skeleton className="h-64 w-full" />
+            )}
           </TabsContent>
 
           <TabsContent value="export" className="grid gap-3 md:grid-cols-3">

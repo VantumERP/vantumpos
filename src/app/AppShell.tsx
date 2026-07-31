@@ -102,6 +102,7 @@ import type { PosServices } from "@/services/ports";
 import type {
   AppSession,
   BackupStatus,
+  CashMovementDirection,
   CommandError,
   SaveUserRequest,
   ShiftSummary,
@@ -943,6 +944,44 @@ function CloseShiftPanel({
   );
 }
 
+const CASH_MOVEMENT_LABELS: Record<CashMovementDirection, string> = {
+  pay_in: "Uplata u kasu",
+  pay_out: "Isplata iz kase",
+  bank_deposit: "Polog na račun",
+  bank_withdrawal: "Podizanje sa računa",
+};
+
+const CASH_MOVEMENT_DONE: Record<CashMovementDirection, string> = {
+  pay_in: "Uplata u kasu je zabeležena.",
+  pay_out: "Isplata iz kase je zabeležena.",
+  bank_deposit: "Polog na račun je zabeležen.",
+  bank_withdrawal: "Podizanje sa računa je zabeleženo.",
+};
+
+/**
+ * The two bank directions carry a broj izvoda / uplatnice, because the polog is
+ * the evidence a documentary Poreska uprava check asks for. The note under the
+ * field never promises more than the propis gives: the deposit duty is real and
+ * unconditional, while the exclusion of a podizanje from the deposit base lives
+ * in a bylaw and only holds if the payout itself complied with Pravilnik 77/2011
+ * čl. 2 st. 2 or st. 3 — a condition the operator, not the app, can check.
+ */
+const BANK_DIRECTION_NOTES: Record<"bank_deposit" | "bank_withdrawal", string> =
+  {
+    bank_deposit:
+      "Polog umanjuje obavezu iz čl. 3 st. 1 Zakona 68/2015 počev od najstarijeg dana prometa. " +
+      "Delimičan polog je dozvoljen.",
+    bank_withdrawal:
+      "Gotovina podignuta sa računa radnje izuzima se iz osnovice po Pravilniku 77/2011 čl. 5 st. 2 " +
+      "samo ako je isplata izvršena u skladu sa čl. 2 st. 2 ili st. 3 tog pravilnika — sačuvajte dokumentaciju.",
+  };
+
+function isBankDirection(
+  direction: CashMovementDirection,
+): direction is "bank_deposit" | "bank_withdrawal" {
+  return direction === "bank_deposit" || direction === "bank_withdrawal";
+}
+
 function CashMovementForm({
   services,
   onShiftUpdate,
@@ -950,11 +989,13 @@ function CashMovementForm({
   services: PosServices;
   onShiftUpdate: (shift: ShiftSummary) => void;
 }) {
-  const [direction, setDirection] = useState<"pay_in" | "pay_out">("pay_in");
+  const [direction, setDirection] = useState<CashMovementDirection>("pay_in");
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
+  const [bankReference, setBankReference] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const bankDirection = isBankDirection(direction);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -977,15 +1018,15 @@ function CashMovementForm({
         direction,
         amountMinor,
         reason: reason.trim() || null,
+        // A shop that records the polog before the bank confirms it must not be
+        // blocked, so the reference stays optional — blank means „not yet".
+        bankReference: bankDirection ? bankReference.trim() || null : null,
       });
       onShiftUpdate(updated);
       setAmount("");
       setReason("");
-      toast.success(
-        direction === "pay_in"
-          ? "Uplata u kasu je zabeležena."
-          : "Isplata iz kase je zabeležena.",
-      );
+      setBankReference("");
+      toast.success(CASH_MOVEMENT_DONE[direction]);
     } catch (movementError) {
       setError(errorMessage(movementError, "Transakcija nije izvršena."));
     } finally {
@@ -1011,11 +1052,21 @@ function CashMovementForm({
             value={direction}
             className="w-full"
             onChange={(event) =>
-              setDirection(event.target.value as "pay_in" | "pay_out")
+              setDirection(event.target.value as CashMovementDirection)
             }
           >
-            <NativeSelectOption value="pay_in">Uplata u kasu</NativeSelectOption>
-            <NativeSelectOption value="pay_out">Isplata iz kase</NativeSelectOption>
+            <NativeSelectOption value="pay_in">
+              {CASH_MOVEMENT_LABELS.pay_in}
+            </NativeSelectOption>
+            <NativeSelectOption value="pay_out">
+              {CASH_MOVEMENT_LABELS.pay_out}
+            </NativeSelectOption>
+            <NativeSelectOption value="bank_deposit">
+              {CASH_MOVEMENT_LABELS.bank_deposit}
+            </NativeSelectOption>
+            <NativeSelectOption value="bank_withdrawal">
+              {CASH_MOVEMENT_LABELS.bank_withdrawal}
+            </NativeSelectOption>
           </NativeSelect>
         </Field>
         <Field data-invalid={!!error}>
@@ -1028,6 +1079,21 @@ function CashMovementForm({
             onChange={(event) => setAmount(event.target.value)}
           />
         </Field>
+        {bankDirection ? (
+          <Field>
+            <FieldLabel htmlFor="cash-movement-bank-reference">
+              Broj izvoda / uplatnice
+            </FieldLabel>
+            <Input
+              id="cash-movement-bank-reference"
+              value={bankReference}
+              onChange={(event) => setBankReference(event.target.value)}
+            />
+            <FieldDescription>
+              {BANK_DIRECTION_NOTES[direction]}
+            </FieldDescription>
+          </Field>
+        ) : null}
         <Field>
           <FieldLabel htmlFor="cash-movement-reason">Razlog</FieldLabel>
           <Input
@@ -1041,7 +1107,7 @@ function CashMovementForm({
             {submitting ? (
               <Spinner data-icon="inline-start" aria-hidden="true" />
             ) : null}
-            {direction === "pay_in" ? "Uplata u kasu" : "Isplata iz kase"}
+            {CASH_MOVEMENT_LABELS[direction]}
           </Button>
         </Field>
       </FieldGroup>
