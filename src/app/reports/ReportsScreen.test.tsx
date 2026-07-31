@@ -15,6 +15,7 @@ function buildReportsService(): ReportsService {
         totalMinor: 12000,
         cashMinor: 8000,
         cardMinor: 4000,
+        bankTransferMinor: 0,
         receiptCount: 2,
         averageReceiptMinor: 6000,
       },
@@ -24,6 +25,7 @@ function buildReportsService(): ReportsService {
           receiptCount: 2,
           cashMinor: 8000,
           cardMinor: 4000,
+          bankTransferMinor: 0,
           totalMinor: 12000,
           refundsOrVoidsMinor: -3000,
           refundsOrVoidsCount: 1,
@@ -159,6 +161,7 @@ function buildEmptyReportsService(): ReportsService {
       totalMinor: 0,
       cashMinor: 0,
       cardMinor: 0,
+      bankTransferMinor: 0,
       receiptCount: 0,
       averageReceiptMinor: 0,
     },
@@ -211,6 +214,63 @@ describe("ReportsScreen", () => {
     await user.click(screen.getByRole("tab", { name: "Lager" }));
     const lowStockRow = await screen.findByRole("row", { name: /Kafa 200g/i });
     expect(within(lowStockRow).getByText("-2 kom")).toBeInTheDocument();
+  });
+
+  it("labels a bank-transfer payment row as Prenos na račun, never Kartica", async () => {
+    const reports = buildReportsService();
+    reports.getPaymentMethodTurnover = vi.fn().mockResolvedValue({
+      rows: [
+        { paymentMethod: "bank_transfer", receiptCount: 1, totalMinor: 70000 },
+      ],
+    });
+    renderReports(reports);
+
+    await screen.findByRole("heading", { name: "Dnevni promet" });
+    const paymentsCard = screen
+      .getByText("Plaćanja")
+      .closest("[data-slot='card']");
+    expect(paymentsCard).not.toBeNull();
+
+    expect(
+      within(paymentsCard as HTMLElement).getByText("Prenos na račun"),
+    ).toBeInTheDocument();
+    expect(
+      within(paymentsCard as HTMLElement).queryByText("Kartica"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("breaks bank transfer out of daily turnover instead of swallowing it", async () => {
+    const reports = buildReportsService();
+    reports.getDailyTurnover = vi.fn().mockResolvedValue({
+      summary: {
+        totalMinor: 100000,
+        cashMinor: 10000,
+        cardMinor: 20000,
+        bankTransferMinor: 70000,
+        receiptCount: 3,
+        averageReceiptMinor: 33333,
+      },
+      rows: [
+        {
+          day: "2026-07-31",
+          receiptCount: 3,
+          cashMinor: 10000,
+          cardMinor: 20000,
+          bankTransferMinor: 70000,
+          totalMinor: 100000,
+          refundsOrVoidsMinor: 0,
+          refundsOrVoidsCount: 0,
+        },
+      ],
+    });
+    renderReports(reports);
+
+    const turnoverRow = await screen.findByRole("row", { name: /2026-07-31/ });
+    expect(within(turnoverRow).getByText("700,00 RSD")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Prenos na račun").length,
+      "the metric card and the table column both name the third tender",
+    ).toBeGreaterThan(1);
   });
 
   it("applies date filters through the reports service", async () => {

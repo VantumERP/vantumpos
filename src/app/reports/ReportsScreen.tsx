@@ -91,7 +91,17 @@ const turnoverChartConfig = {
     label: "Kartica",
     color: "var(--chart-4)",
   },
+  bankTransferMinor: {
+    label: "Prenos na račun",
+    color: "var(--chart-5)",
+  },
 } satisfies ChartConfig;
+
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: "Gotovina",
+  card: "Kartica",
+  bank_transfer: "Prenos na račun",
+};
 
 const ALL_OPTION = "all";
 
@@ -453,10 +463,14 @@ function FilterSelect({
 function DailyTurnoverSection({ report }: { report: DailyTurnoverReport }) {
   return (
     <section className="flex flex-col gap-3">
-      <div className="grid gap-3 md:grid-cols-5">
+      <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
         <MetricCard title="Ukupan promet" value={formatRsd(report.summary.totalMinor)} />
         <MetricCard title="Gotovina" value={formatRsd(report.summary.cashMinor)} />
         <MetricCard title="Kartica" value={formatRsd(report.summary.cardMinor)} />
+        <MetricCard
+          title="Prenos na račun"
+          value={formatRsd(report.summary.bankTransferMinor)}
+        />
         <MetricCard title="Računi" value={report.summary.receiptCount.toString()} />
         <MetricCard
           title="Prosečan račun"
@@ -516,7 +530,9 @@ function DailyTurnoverSection({ report }: { report: DailyTurnoverReport }) {
         <Card>
           <CardHeader>
             <CardTitle>Dnevna tabela</CardTitle>
-            <CardDescription>Gotovina, kartica i storniranja.</CardDescription>
+            <CardDescription>
+              Gotovina, kartica, prenos na račun i storniranja.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             <Table>
@@ -526,6 +542,7 @@ function DailyTurnoverSection({ report }: { report: DailyTurnoverReport }) {
                   <TableHead className="text-right">Broj računa</TableHead>
                   <TableHead className="text-right">Gotovina</TableHead>
                   <TableHead className="text-right">Kartica</TableHead>
+                  <TableHead className="text-right">Prenos na račun</TableHead>
                   <TableHead className="text-right">Ukupno</TableHead>
                   <TableHead className="text-right">Povrati/storno</TableHead>
                 </TableRow>
@@ -537,6 +554,9 @@ function DailyTurnoverSection({ report }: { report: DailyTurnoverReport }) {
                     <TableCell className="text-right">{row.receiptCount}</TableCell>
                     <TableCell className="text-right">{formatRsd(row.cashMinor)}</TableCell>
                     <TableCell className="text-right">{formatRsd(row.cardMinor)}</TableCell>
+                    <TableCell className="text-right">
+                      {formatRsd(row.bankTransferMinor)}
+                    </TableCell>
                     <TableCell className="text-right">{formatRsd(row.totalMinor)}</TableCell>
                     <TableCell className="text-right">
                       {formatRsd(row.refundsOrVoidsMinor)}
@@ -598,7 +618,9 @@ function TurnoverBreakdownSection({
       <Card>
         <CardHeader>
           <CardTitle>Plaćanja</CardTitle>
-          <CardDescription>Gotovina i kartica kroz račune.</CardDescription>
+          <CardDescription>
+            Gotovina, kartica i prenos na račun kroz račune.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <CompactTable
@@ -870,7 +892,7 @@ function formatQuantity(quantityMilli: number): string {
 }
 
 function paymentMethodLabel(paymentMethod: string): string {
-  return paymentMethod === "cash" ? "Gotovina" : "Kartica";
+  return PAYMENT_METHOD_LABELS[paymentMethod] ?? paymentMethod;
 }
 
 function errorToMessage(error: unknown): string {

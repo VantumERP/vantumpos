@@ -833,6 +833,7 @@ export interface DailyTurnoverSummary {
   totalMinor: number;
   cashMinor: number;
   cardMinor: number;
+  bankTransferMinor: number;
   receiptCount: number;
   averageReceiptMinor: number;
 }
@@ -842,6 +843,7 @@ export interface DailyTurnoverRow {
   receiptCount: number;
   cashMinor: number;
   cardMinor: number;
+  bankTransferMinor: number;
   totalMinor: number;
   refundsOrVoidsMinor: number;
   refundsOrVoidsCount: number;

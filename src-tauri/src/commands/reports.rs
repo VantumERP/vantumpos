@@ -78,6 +78,7 @@ pub struct DailyTurnoverSummary {
     pub total_minor: i64,
     pub cash_minor: i64,
     pub card_minor: i64,
+    pub bank_transfer_minor: i64,
     pub receipt_count: i64,
     pub average_receipt_minor: i64,
 }
@@ -89,6 +90,7 @@ pub struct DailyTurnoverRow {
     pub receipt_count: i64,
     pub cash_minor: i64,
     pub card_minor: i64,
+    pub bank_transfer_minor: i64,
     pub total_minor: i64,
     pub refunds_or_voids_minor: i64,
     pub refunds_or_voids_count: i64,
@@ -342,6 +344,18 @@ SELECT
           AND (?4 IS NULL OR ps.cashier_id = ?4)
           AND sp.payment_method = 'card'
     ) AS card_minor,
+    (
+        SELECT COALESCE(SUM(
+            sp.amount_minor
+        ), 0)
+        FROM sales ps
+        JOIN sale_payments sp ON sp.sale_id = ps.id
+        WHERE substr(ps.created_at, 1, 10) = substr(s.created_at, 1, 10)
+          AND substr(ps.created_at, 1, 10) BETWEEN ?1 AND ?2
+          AND (?3 IS NULL OR ps.shift_id = ?3)
+          AND (?4 IS NULL OR ps.cashier_id = ?4)
+          AND sp.payment_method = 'bank_transfer'
+    ) AS bank_transfer_minor,
     SUM(CASE WHEN s.document_type = 'sale' THEN s.total_minor ELSE -s.total_minor END) AS total_minor,
     -SUM(CASE WHEN s.document_type IN ('void', 'return') THEN s.total_minor ELSE 0 END) AS refunds_or_voids_minor,
     SUM(CASE WHEN s.document_type IN ('void', 'return') THEN 1 ELSE 0 END) AS refunds_or_voids_count
@@ -363,9 +377,10 @@ ORDER BY day
                     receipt_count: row.get(1)?,
                     cash_minor: row.get(2)?,
                     card_minor: row.get(3)?,
-                    total_minor: row.get(4)?,
-                    refunds_or_voids_minor: row.get(5)?,
-                    refunds_or_voids_count: row.get(6)?,
+                    bank_transfer_minor: row.get(4)?,
+                    total_minor: row.get(5)?,
+                    refunds_or_voids_minor: row.get(6)?,
+                    refunds_or_voids_count: row.get(7)?,
                 })
             },
         )?
@@ -374,6 +389,7 @@ ORDER BY day
     let total_minor = rows.iter().map(|row| row.total_minor).sum();
     let cash_minor = rows.iter().map(|row| row.cash_minor).sum();
     let card_minor = rows.iter().map(|row| row.card_minor).sum();
+    let bank_transfer_minor = rows.iter().map(|row| row.bank_transfer_minor).sum();
     let receipt_count = rows.iter().map(|row| row.receipt_count).sum();
     let average_receipt_minor = if receipt_count == 0 {
         0
@@ -386,6 +402,7 @@ ORDER BY day
             total_minor,
             cash_minor,
             card_minor,
+            bank_transfer_minor,
             receipt_count,
             average_receipt_minor,
         },
@@ -733,6 +750,7 @@ fn build_report_csv(
                 "Broj računa",
                 "Gotovina",
                 "Kartica",
+                "Prenos na račun",
                 "Ukupno",
                 "Povrati i storniranja",
             ])];
@@ -743,6 +761,7 @@ fn build_report_csv(
                     &row.receipt_count.to_string(),
                     &row.cash_minor.to_string(),
                     &row.card_minor.to_string(),
+                    &row.bank_transfer_minor.to_string(),
                     &row.total_minor.to_string(),
                     &row.refunds_or_voids_minor.to_string(),
                 ]));
@@ -1447,6 +1466,92 @@ mod tests {
         std::fs::remove_file(&db_path).expect("test database should be removed");
     }
 
+    fn with_reports_state(test_name: &str, test: impl FnOnce(&Connection)) {
+        let db_path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&db_path).expect("database should initialize");
+            let connection = db.open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO users (id, username, display_name, role, created_at, updated_at)
+                     VALUES (2, 'mira', 'Mira Kasir', 'cashier', '2026-07-31T07:00:00Z', '2026-07-31T07:00:00Z')",
+                    [],
+                )
+                .expect("cashier should insert");
+            connection
+                .execute(
+                    "INSERT INTO shifts (id, user_id, opened_at, opening_cash_minor, expected_cash_minor, status, created_at, updated_at)
+                     VALUES (1, 2, '2026-07-31T07:30:00Z', 0, 0, 'open', '2026-07-31T07:30:00Z', '2026-07-31T07:30:00Z')",
+                    [],
+                )
+                .expect("shift should insert");
+            test(&connection);
+        }
+
+        fs::remove_file(&db_path).unwrap_or_else(|error| {
+            panic!(
+                "test database file {} should be removed: {error}",
+                db_path.display()
+            )
+        });
+    }
+
+    fn seed_sale_on(connection: &Connection, day: &str, payment_method: &str, amount_minor: i64) {
+        let created_at = format!("{day}T09:00:00Z");
+        connection
+            .execute(
+                "INSERT INTO sales (local_receipt_number, shift_id, cashier_id, status, fiscal_status, subtotal_minor, discount_minor, tax_minor, total_minor, created_at, updated_at)
+                 VALUES (?1, 1, 2, 'completed', 'not_fiscalized', ?2, 0, 0, ?2, ?3, ?3)",
+                params![
+                    format!("R-{payment_method}-{amount_minor}"),
+                    amount_minor,
+                    created_at
+                ],
+            )
+            .expect("sale should insert");
+        let sale_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![sale_id, payment_method, amount_minor, created_at],
+            )
+            .expect("payment should insert");
+    }
+
+    fn date_query(from: &str, to: &str) -> super::ReportDateQuery {
+        super::ReportDateQuery {
+            from: from.to_string(),
+            to: to.to_string(),
+            shift_id: None,
+            cashier_id: None,
+        }
+    }
+
+    #[test]
+    fn daily_turnover_breaks_out_bank_transfer_instead_of_swallowing_it() {
+        with_reports_state("daily_turnover_bank_transfer", |conn| {
+            seed_sale_on(conn, "2026-07-31", "cash", 10_000);
+            seed_sale_on(conn, "2026-07-31", "card", 20_000);
+            seed_sale_on(conn, "2026-07-31", "bank_transfer", 70_000);
+
+            let report = super::query_daily_turnover(conn, &date_query("2026-07-31", "2026-07-31"))
+                .expect("report should run");
+            let row = &report.rows[0];
+
+            assert_eq!(row.cash_minor, 10_000);
+            assert_eq!(row.card_minor, 20_000);
+            assert_eq!(row.bank_transfer_minor, 70_000);
+            assert_eq!(
+                row.cash_minor + row.card_minor + row.bank_transfer_minor,
+                row.total_minor,
+                "the breakdown must reconcile to the total"
+            );
+            assert_eq!(report.summary.bank_transfer_minor, 70_000);
+        });
+    }
+
     #[test]
     fn query_payment_methods_handles_mixed_payments_and_voids() {
         with_seeded_reports_database(
@@ -1871,9 +1976,10 @@ mod tests {
                 .expect("daily turnover csv should export");
 
                 let csv = fs::read_to_string(&exported.path).expect("csv should be readable");
-                assert!(csv
-                    .starts_with("Dan,Broj računa,Gotovina,Kartica,Ukupno,Povrati i storniranja"));
-                assert!(csv.contains("2026-06-17,3,11000,4000,15000,-3000"));
+                assert!(csv.starts_with(
+                    "Dan,Broj računa,Gotovina,Kartica,Prenos na račun,Ukupno,Povrati i storniranja"
+                ));
+                assert!(csv.contains("2026-06-17,3,11000,4000,0,15000,-3000"));
                 assert_eq!(exported.row_count, 1);
 
                 fs::remove_dir_all(export_dir).expect("export dir should be removed");
