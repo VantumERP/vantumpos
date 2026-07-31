@@ -11,6 +11,7 @@ pub(crate) const RECEIPT_SETTINGS_KEY: &str = "receipt_numbering";
 pub(crate) const BACKUP_SETTINGS_KEY: &str = "backup";
 pub(crate) const BACKUP_ENCRYPTION_KEY: &str = "backup_encryption";
 pub(crate) const SALES_SETTINGS_KEY: &str = "sales";
+pub(crate) const SHOP_PROFILE_KEY: &str = "shop_profile";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,6 +118,62 @@ pub struct SalesSettingsRequest {
     pub allow_overselling: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PravnaForma {
+    Preduzetnik,
+    PravnoLice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum EsirTip {
+    Esir,
+    Lpfr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EsirElement {
+    pub naziv: String,
+    pub verzija: String,
+    pub ib: String,
+    pub tip: EsirTip,
+    #[serde(default)]
+    pub checked_on: Option<String>,
+}
+
+/// The shop's legal identity. `pravna_forma == None` is a real state meaning
+/// "not yet answered" — it is NEVER inferred (e.g. from the PIB), because
+/// guessing the tier is exactly what produced the penalty errors corrected in
+/// commit 3d5aede. Legal copy renders no figure at all while it is None.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShopProfile {
+    #[serde(default)]
+    pub pravna_forma: Option<PravnaForma>,
+    #[serde(default)]
+    pub pdv_obveznik: Option<bool>,
+    #[serde(default)]
+    pub distance_selling: bool,
+    #[serde(default)]
+    pub lpfr_in_premises: Option<bool>,
+    #[serde(default)]
+    pub esir_elements: Vec<EsirElement>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShopProfileRequest {
+    pub pravna_forma: Option<PravnaForma>,
+    pub pdv_obveznik: Option<bool>,
+    #[serde(default)]
+    pub distance_selling: bool,
+    pub lpfr_in_premises: Option<bool>,
+    #[serde(default)]
+    pub esir_elements: Vec<EsirElement>,
+}
+
 #[tauri::command]
 pub fn settings_get_company(state: State<'_, AppState>) -> Result<CompanySettings, CommandError> {
     load_company_settings(state.inner()).map_err(Into::into)
@@ -175,6 +232,19 @@ pub fn settings_update_sales(
     request: SalesSettingsRequest,
 ) -> Result<SalesSettings, CommandError> {
     save_sales_settings(state.inner(), request).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn settings_get_shop_profile(state: State<'_, AppState>) -> Result<ShopProfile, CommandError> {
+    load_shop_profile(state.inner()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn settings_update_shop_profile(
+    state: State<'_, AppState>,
+    request: ShopProfileRequest,
+) -> Result<ShopProfile, CommandError> {
+    save_shop_profile(state.inner(), request).map_err(Into::into)
 }
 
 pub(crate) fn load_json_setting<T>(
@@ -374,6 +444,47 @@ pub fn save_sales_settings(
     };
     save_json_setting(state, SALES_SETTINGS_KEY, &settings)?;
     Ok(settings)
+}
+
+pub fn load_shop_profile(state: &AppState) -> Result<ShopProfile, AppError> {
+    load_json_setting(state, SHOP_PROFILE_KEY, ShopProfile::default())
+}
+
+pub fn save_shop_profile(
+    state: &AppState,
+    request: ShopProfileRequest,
+) -> Result<ShopProfile, AppError> {
+    super::auth::require_admin(state)?;
+
+    let mut elements = Vec::with_capacity(request.esir_elements.len());
+    for element in request.esir_elements {
+        let naziv = element.naziv.trim().to_string();
+        let verzija = element.verzija.trim().to_string();
+        let ib = element.ib.trim().to_string();
+        if naziv.is_empty() || verzija.is_empty() || ib.is_empty() {
+            return Err(AppError::validation(
+                "Naziv, verzija i IB elementa su obavezni.",
+                serde_json::json!({ "field": "esirElements" }),
+            ));
+        }
+        elements.push(EsirElement {
+            naziv,
+            verzija,
+            ib,
+            tip: element.tip,
+            checked_on: element.checked_on,
+        });
+    }
+
+    let profile = ShopProfile {
+        pravna_forma: request.pravna_forma,
+        pdv_obveznik: request.pdv_obveznik,
+        distance_selling: request.distance_selling,
+        lpfr_in_premises: request.lpfr_in_premises,
+        esir_elements: elements,
+    };
+    save_json_setting(state, SHOP_PROFILE_KEY, &profile)?;
+    Ok(profile)
 }
 
 fn validate_company_request(request: &CompanySettingsRequest) -> Result<(), AppError> {
@@ -823,6 +934,60 @@ mod tests {
             sign_in_cashier(state);
             let error = super::seed_tax_rates(state, true).expect_err("cashier is forbidden");
             assert_eq!(error.code(), "forbidden");
+        });
+    }
+
+    #[test]
+    fn shop_profile_defaults_to_unset_and_never_infers_legal_form() {
+        with_state("shop_profile_defaults_unset", |state| {
+            let profile = load_shop_profile(state).expect("profile should load");
+
+            assert_eq!(
+                profile.pravna_forma, None,
+                "legal form must never be inferred"
+            );
+            assert_eq!(profile.pdv_obveznik, None);
+            assert!(!profile.distance_selling, "distance selling defaults off");
+            assert!(profile.esir_elements.is_empty());
+        });
+    }
+
+    #[test]
+    fn shop_profile_round_trips_and_requires_admin() {
+        with_state("shop_profile_round_trip", |state| {
+            let request = ShopProfileRequest {
+                pravna_forma: Some(PravnaForma::Preduzetnik),
+                pdv_obveznik: Some(false),
+                distance_selling: true,
+                lpfr_in_premises: Some(true),
+                esir_elements: vec![EsirElement {
+                    naziv: "Master ESIR".to_string(),
+                    verzija: "2.1.4".to_string(),
+                    ib: "338".to_string(),
+                    tip: EsirTip::Esir,
+                    checked_on: Some("2026-07-31".to_string()),
+                }],
+            };
+
+            let error = save_shop_profile(state, request.clone())
+                .expect_err("a signed-out caller must be rejected");
+            assert!(matches!(
+                error,
+                AppError::Business {
+                    code: "unauthorized",
+                    ..
+                }
+            ));
+
+            sign_in_admin(state);
+            let saved = save_shop_profile(state, request).expect("admin should save");
+
+            assert_eq!(saved.pravna_forma, Some(PravnaForma::Preduzetnik));
+            assert!(saved.distance_selling);
+            assert_eq!(saved.esir_elements[0].verzija, "2.1.4");
+
+            let reloaded = load_shop_profile(state).expect("profile should reload");
+            assert_eq!(reloaded, saved);
         });
     }
 }

@@ -115,6 +115,8 @@ pub fn run() {
             commands::settings::settings_update_receipt,
             commands::settings::settings_get_sales,
             commands::settings::settings_update_sales,
+            commands::settings::settings_get_shop_profile,
+            commands::settings::settings_update_shop_profile,
             commands::catalog::catalog_list_products,
             commands::catalog::catalog_search_products,
             commands::catalog::catalog_get_product,
