@@ -495,7 +495,7 @@ WHERE substr(s.created_at, 1, 10) BETWEEN ?1 AND ?2
   AND (?3 IS NULL OR s.shift_id = ?3)
   AND (?4 IS NULL OR s.cashier_id = ?4)
 GROUP BY sp.payment_method
-ORDER BY CASE sp.payment_method WHEN 'cash' THEN 0 WHEN 'card' THEN 1 ELSE 2 END
+ORDER BY CASE sp.payment_method WHEN 'cash' THEN 0 WHEN 'card' THEN 1 WHEN 'bank_transfer' THEN 2 ELSE 3 END
 "#,
     )?;
 
@@ -897,6 +897,7 @@ fn payment_method_label(payment_method: &str) -> &str {
     match payment_method {
         "cash" => "Gotovina",
         "card" => "Kartica",
+        "bank_transfer" => "Prenos na račun",
         other => other,
     }
 }
@@ -1468,6 +1469,49 @@ mod tests {
                 assert_eq!(report.rows[1].payment_method, "card");
                 assert_eq!(report.rows[1].total_minor, 4_000);
             },
+        );
+    }
+
+    /// The lawful alternative to a capped cash payment (čl. 46 st. 1) is a
+    /// tender like any other in the report, and it reads last — after the two
+    /// the operator counts at the till.
+    #[test]
+    fn payment_methods_report_orders_bank_transfer_after_card() {
+        with_seeded_reports_database("payment_methods_bank_transfer", |connection| {
+            connection
+                .execute(
+                    "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                     VALUES (2, 'bank_transfer', 900, '2026-06-17T10:00:00Z')",
+                    [],
+                )
+                .expect("bank transfer payment should insert");
+
+            let report = super::query_payment_methods(
+                connection,
+                &super::ReportDateQuery {
+                    from: "2026-06-17".to_string(),
+                    to: "2026-06-17".to_string(),
+                    shift_id: None,
+                    cashier_id: None,
+                },
+            )
+            .expect("report should run");
+
+            let methods: Vec<&str> = report
+                .rows
+                .iter()
+                .map(|row| row.payment_method.as_str())
+                .collect();
+            assert_eq!(methods, vec!["cash", "card", "bank_transfer"]);
+            assert_eq!(report.rows[2].total_minor, 900);
+        });
+    }
+
+    #[test]
+    fn bank_transfer_reads_in_serbian_in_the_export() {
+        assert_eq!(
+            super::payment_method_label("bank_transfer"),
+            "Prenos na račun"
         );
     }
 

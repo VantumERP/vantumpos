@@ -452,6 +452,24 @@ mod tests {
         .expect("sale should insert");
     }
 
+    /// Seeds one completed `sale` document on `created_at`, settled entirely by
+    /// `payment_method`.
+    fn seed_sale_with_payment_on(
+        conn: &Connection,
+        id: i64,
+        created_at: &str,
+        payment_method: &str,
+        total_minor: i64,
+    ) {
+        seed_completed_sale(conn, id, created_at, total_minor);
+        conn.execute(
+            "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, payment_method, total_minor, created_at],
+        )
+        .expect("payment should insert");
+    }
+
     /// Seeds a tax rate and a product with the given retail/purchase prices.
     fn seed_product(conn: &Connection, id: i64, sale_price_minor: i64, purchase_price_minor: i64) {
         conn.execute(
@@ -597,6 +615,23 @@ mod tests {
             // The next day still books (distinct document_date).
             post_daily_sales(conn, "2026-07-06", None, 1, "2026-07-07T09:00:00Z")
                 .expect("next day still books");
+        });
+    }
+
+    /// KEP razduženje (kolona 5) is the day's TOTAL promet, not the cash part of
+    /// it. A bank-transfer sale is still promet na malo and must be posted, so
+    /// steering a customer to the account can never quietly shrink the ledger.
+    #[test]
+    fn daily_razduzenje_includes_a_bank_transfer_sale() {
+        with_kep_db("kep_bank_transfer_in_razduzenje", |conn| {
+            seed_shift(conn);
+            seed_sale_with_payment_on(conn, 1, "2026-07-31T10:00:00Z", "cash", 150_000);
+            seed_sale_with_payment_on(conn, 2, "2026-07-31T14:00:00Z", "bank_transfer", 84_000);
+
+            let entry = post_daily_sales(conn, "2026-07-31", None, 1, "2026-08-01T09:00:00Z")
+                .expect("posting should succeed");
+
+            assert_eq!(entry.razduzenje_minor, Some(234_000), "150000 + 84000");
         });
     }
 

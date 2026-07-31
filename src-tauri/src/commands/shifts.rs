@@ -513,6 +513,78 @@ mod tests {
             .expect("card payment should insert");
     }
 
+    /// Seeds one completed sale settled entirely by `payment_method`.
+    fn seed_sale_with_payment(
+        state: &AppState,
+        shift_id: i64,
+        cashier_id: i64,
+        payment_method: &str,
+        amount_minor: i64,
+    ) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO sales (
+                    local_receipt_number, shift_id, cashier_id, status, fiscal_status,
+                    subtotal_minor, discount_minor, tax_minor, total_minor,
+                    created_at, updated_at
+                 )
+                 VALUES (?1, ?2, ?3, 'completed', 'not_fiscalized', ?4, 0, 0, ?4,
+                         '2026-07-31T09:00:00Z', '2026-07-31T09:00:00Z')",
+                params![
+                    format!("VP-{payment_method}"),
+                    shift_id,
+                    cashier_id,
+                    amount_minor
+                ],
+            )
+            .expect("sale should insert");
+        let sale_id = connection.last_insert_rowid();
+
+        connection
+            .execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (?1, ?2, ?3, '2026-07-31T09:00:00Z')",
+                params![sale_id, payment_method, amount_minor],
+            )
+            .expect("payment should insert");
+    }
+
+    /// The lawful alternative to a capped cash payment (čl. 46 st. 1) settles in
+    /// the bank, never in the drawer — so the till still expects only the cash
+    /// line, and the closing count is not asked to find 500.000 para that never
+    /// arrived.
+    #[test]
+    fn bank_transfer_tender_is_not_expected_in_the_till() {
+        with_state("bank_transfer_not_in_till", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 5_000,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            seed_sale_with_payment(state, opened.id, cashier_id, "cash", 30_000);
+            seed_sale_with_payment(state, opened.id, cashier_id, "bank_transfer", 500_000);
+
+            let summary = current_shift_for_user(state, cashier_id)
+                .expect("summary loads")
+                .expect("shift is open");
+
+            assert_eq!(
+                summary.expected_cash_minor,
+                summary.opening_cash_minor + 30_000,
+                "a bank transfer never enters the drawer"
+            );
+            assert_eq!(summary.cash_sales_minor, 30_000);
+            assert_eq!(summary.card_sales_minor, 0);
+        });
+    }
+
     #[test]
     fn close_shift_for_user_derives_expected_cash() {
         with_state("close_shift_derives_expected_cash", |state| {

@@ -44,10 +44,13 @@ pub enum DiscountRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum PaymentMethod {
     Cash,
     Card,
+    /// The lawful alternative čl. 46 st. 1 points the customer to when the cash
+    /// cap is reached: the money settles in the bank, never in the drawer.
+    BankTransfer,
 }
 
 impl PaymentMethod {
@@ -55,6 +58,7 @@ impl PaymentMethod {
         match self {
             Self::Cash => "cash",
             Self::Card => "card",
+            Self::BankTransfer => "bank_transfer",
         }
     }
 }
@@ -168,6 +172,7 @@ struct PaymentAllocation {
     change_due_minor: i64,
     stored_cash_minor: i64,
     stored_card_minor: i64,
+    stored_bank_transfer_minor: i64,
 }
 
 #[tauri::command]
@@ -338,6 +343,13 @@ pub fn complete_sale_transaction(
         sale_id,
         PaymentMethod::Card,
         payment.stored_card_minor,
+        &created_at,
+    )?;
+    insert_payment_if_present(
+        &tx,
+        sale_id,
+        PaymentMethod::BankTransfer,
+        payment.stored_bank_transfer_minor,
         &created_at,
     )?;
     tx.execute(
@@ -645,6 +657,7 @@ fn validate_payments(
 ) -> Result<PaymentAllocation, AppError> {
     let mut cash_received_minor = 0_i64;
     let mut card_minor = 0_i64;
+    let mut bank_transfer_minor = 0_i64;
 
     for payment in payments {
         if payment.amount_minor < 0 {
@@ -661,12 +674,18 @@ fn validate_payments(
             PaymentMethod::Card => {
                 card_minor = checked_add(card_minor, payment.amount_minor)?;
             }
+            PaymentMethod::BankTransfer => {
+                bank_transfer_minor = checked_add(bank_transfer_minor, payment.amount_minor)?;
+            }
         }
     }
 
-    let tendered_minor = checked_add(cash_received_minor, card_minor)?;
+    // Only cash can be over-tendered — it is the only tender that gives change
+    // back. A card slip and a transfer to the account both settle exactly.
+    let non_cash_minor = checked_add(card_minor, bank_transfer_minor)?;
+    let tendered_minor = checked_add(cash_received_minor, non_cash_minor)?;
 
-    if card_minor > total_minor || tendered_minor < total_minor {
+    if non_cash_minor > total_minor || tendered_minor < total_minor {
         return Err(AppError::business(
             "payment_mismatch",
             "Plaćanja se ne poklapaju sa ukupnim iznosom.",
@@ -676,8 +695,9 @@ fn validate_payments(
     Ok(PaymentAllocation {
         cash_received_minor,
         change_due_minor: tendered_minor - total_minor,
-        stored_cash_minor: total_minor - card_minor,
+        stored_cash_minor: total_minor - non_cash_minor,
         stored_card_minor: card_minor,
+        stored_bank_transfer_minor: bank_transfer_minor,
     })
 }
 
@@ -714,6 +734,13 @@ fn stored_payments(payment: &PaymentAllocation) -> Vec<PaymentDraft> {
         payments.push(PaymentDraft {
             method: PaymentMethod::Card,
             amount_minor: payment.stored_card_minor,
+        });
+    }
+
+    if payment.stored_bank_transfer_minor > 0 {
+        payments.push(PaymentDraft {
+            method: PaymentMethod::BankTransfer,
+            amount_minor: payment.stored_bank_transfer_minor,
         });
     }
 
@@ -1656,5 +1683,172 @@ mod tests {
             !assessment.breached,
             "cl. 46 st. 1 keys to the cash received, not the invoice"
         );
+    }
+
+    /// The lawful alternative čl. 46 st. 1 points the customer to is a transfer
+    /// to the account. It is a tender of its own: stored under its own method,
+    /// never added to the drawer, never given change, and — because it is not
+    /// cash — never able to breach the cap. Rate 100 with a preduzetnik profile
+    /// puts the threshold at exactly 1.000.000 para, so a transfer of that
+    /// amount would breach if it were miscounted as cash.
+    #[test]
+    fn a_bank_transfer_is_its_own_tender_and_never_reaches_the_till() {
+        with_state("bank_transfer_tender_end_to_end", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+            save_shop_profile(state, preduzetnik_profile_request()).expect("profile saves");
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 100,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate saves");
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 1_000_000)],
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::BankTransfer,
+                        amount_minor: 1_000_000,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: None,
+                },
+            )
+            .expect("a transfer to the account is a valid tender");
+
+            assert_eq!(sale.cash_received_minor, 0);
+            assert_eq!(sale.change_due_minor, 0, "a transfer never gives change");
+            assert_eq!(sale.payments.len(), 1, "the receipt shows one tender");
+            assert_eq!(sale.payments[0].method, PaymentMethod::BankTransfer);
+            assert_eq!(sale.payments[0].amount_minor, 1_000_000);
+
+            let conn = state.db().open().expect("db opens");
+            let (method, amount): (String, i64) = conn
+                .query_row(
+                    "SELECT payment_method, amount_minor FROM sale_payments WHERE sale_id = ?1",
+                    params![sale.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the tender is stored");
+            assert_eq!(method, "bank_transfer");
+            assert_eq!(amount, 1_000_000);
+
+            let expected_cash_minor: i64 = conn
+                .query_row(
+                    "SELECT expected_cash_minor FROM shifts WHERE status = 'open'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the open shift is readable");
+            assert_eq!(expected_cash_minor, 0, "a transfer never enters the drawer");
+
+            let aml_cash: Option<i64> = conn
+                .query_row(
+                    "SELECT aml_cash_minor FROM sales WHERE id = ?1",
+                    params![sale.id],
+                    |row| row.get(0),
+                )
+                .expect("row exists");
+            assert_eq!(
+                aml_cash, None,
+                "the cap keys to cash — the lawful alternative can never breach it"
+            );
+        });
+    }
+
+    /// A split that settles part in cash and part by transfer still owes no
+    /// change, stores both tenders, and puts only the cash line in the drawer.
+    #[test]
+    fn a_cash_and_bank_transfer_split_stores_both_tenders() {
+        with_state("bank_transfer_split_tender", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 1_000_000)],
+                    receipt_discount: None,
+                    payments: vec![
+                        PaymentDraft {
+                            method: PaymentMethod::BankTransfer,
+                            amount_minor: 700_000,
+                        },
+                        PaymentDraft {
+                            method: PaymentMethod::Cash,
+                            amount_minor: 300_000,
+                        },
+                    ],
+                    allow_stock_override: None,
+                    aml_ack_reason: None,
+                },
+            )
+            .expect("a split with a transfer completes");
+
+            assert_eq!(sale.change_due_minor, 0);
+
+            let conn = state.db().open().expect("db opens");
+            let mut statement = conn
+                .prepare(
+                    "SELECT payment_method, amount_minor FROM sale_payments
+                     WHERE sale_id = ?1 ORDER BY payment_method",
+                )
+                .expect("statement prepares");
+            let stored: Vec<(String, i64)> = statement
+                .query_map(params![sale.id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("payments query")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("payments collect");
+            assert_eq!(
+                stored,
+                vec![
+                    ("bank_transfer".to_string(), 700_000),
+                    ("cash".to_string(), 300_000),
+                ]
+            );
+
+            let expected_cash_minor: i64 = conn
+                .query_row(
+                    "SELECT expected_cash_minor FROM shifts WHERE status = 'open'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the open shift is readable");
+            assert_eq!(
+                expected_cash_minor, 300_000,
+                "only the cash line is in the till"
+            );
+        });
+    }
+
+    /// A transfer is a non-cash tender, so — like a card — it may not exceed the
+    /// receipt total: there is no change to give back on it.
+    #[test]
+    fn a_bank_transfer_above_the_total_is_a_payment_mismatch() {
+        with_state("bank_transfer_overpayment", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+
+            let error = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 100_000)],
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::BankTransfer,
+                        amount_minor: 120_000,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: None,
+                },
+            )
+            .expect_err("a transfer overpayment must be refused");
+
+            assert_eq!(error.code(), "payment_mismatch");
+        });
     }
 }
