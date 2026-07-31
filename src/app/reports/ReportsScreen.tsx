@@ -583,7 +583,7 @@ function TurnoverBreakdownSection({
 }) {
   return (
     <div className="grid gap-4 xl:grid-cols-3">
-      <Card>
+      <Card className="xl:col-span-2">
         <CardHeader>
           <CardTitle>Smene</CardTitle>
           <CardDescription>Promet po otvorenim i zatvorenim smenama.</CardDescription>
