@@ -7,10 +7,17 @@ use tauri::State;
 use crate::app_error::{AppError, CommandError};
 use crate::commands::inventory::{write_stock_movement, StockMovementWrite};
 use crate::commands::settings::{
-    ReceiptSettings, SalesSettings, RECEIPT_SETTINGS_KEY, SALES_SETTINGS_KEY,
+    ReceiptSettings, SalesSettings, ShopProfile, EUR_RATE_KEY, RECEIPT_SETTINGS_KEY,
+    SALES_SETTINGS_KEY, SHOP_PROFILE_KEY,
 };
 use crate::db::Db;
+use crate::nbs_rate::EurRate;
 use crate::state::AppState;
+
+/// The share of the čl. 46 st. 1 cap at which the till starts warning. It is a
+/// [PRUDENTIAL] early warning, not a statutory line — nothing below the cap is
+/// unlawful.
+const AML_SOFT_RATIO_PERCENT: i64 = 80;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +74,10 @@ pub struct CompleteSaleRequest {
     pub payments: Vec<PaymentDraft>,
     #[serde(default)]
     pub allow_stock_override: Option<bool>,
+    /// What the operator typed when acknowledging the AML warning. Recorded,
+    /// never required: the sale is never rejected on an AML result.
+    #[serde(default)]
+    pub aml_ack_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -175,6 +186,25 @@ pub fn sales_complete(
     complete_sale_transaction(state.db(), request).map_err(Into::into)
 }
 
+/// Asked by the till before the money changes hands. `cash_minor` is the cash
+/// line of the tender, never the invoice total. The verdict is advisory — the
+/// caller decides how to warn, and `sales_complete` accepts the sale either
+/// way.
+#[tauri::command]
+pub fn sales_assess_cash_payment(
+    state: State<'_, AppState>,
+    cash_minor: i64,
+) -> Result<crate::aml::AmlAssessment, CommandError> {
+    let profile = crate::commands::settings::load_shop_profile(state.inner())?;
+    let rate = crate::commands::settings::load_eur_rate(state.inner())?;
+    Ok(crate::aml::assess_cash_payment(
+        cash_minor,
+        rate.as_ref(),
+        &profile,
+        AML_SOFT_RATIO_PERCENT,
+    ))
+}
+
 pub fn build_sale_preview(db: &Db, request: SaleDraftRequest) -> Result<SalePreview, AppError> {
     let connection = db.open()?;
     let computation = compute_sale(&connection, &request)?;
@@ -193,6 +223,7 @@ pub fn complete_sale_transaction(
         receipt_discount,
         payments,
         allow_stock_override,
+        aml_ack_reason,
     } = request;
     let draft = SaleDraftRequest {
         items,
@@ -205,6 +236,10 @@ pub fn complete_sale_transaction(
     let payment = validate_payments(&payments, computation.preview.total_minor)?;
     let created_at = current_timestamp(&tx)?;
     let local_receipt_number = take_next_receipt_number(&tx, &created_at)?;
+    // čl. 46 st. 1 keys to the cash actually received, so the assessment reads
+    // the cash line — not the invoice total, and not the tendered amount, which
+    // still carries the change. A verdict never rejects the sale.
+    let aml = assess_sale_cash(&tx, payment.stored_cash_minor, aml_ack_reason)?;
 
     tx.execute(
         "INSERT INTO sales (
@@ -217,10 +252,15 @@ pub fn complete_sale_transaction(
             discount_minor,
             tax_minor,
             total_minor,
+            aml_cash_minor,
+            aml_rate_minor,
+            aml_rate_date,
+            aml_rate_source,
+            aml_ack_reason,
             created_at,
             updated_at
          )
-         VALUES (?1, ?2, ?3, 'completed', 'not_fiscalized', ?4, ?5, ?6, ?7, ?8, ?8)",
+         VALUES (?1, ?2, ?3, 'completed', 'not_fiscalized', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
         params![
             local_receipt_number,
             shift.id,
@@ -229,6 +269,11 @@ pub fn complete_sale_transaction(
             computation.preview.discount_minor,
             computation.preview.tax_minor,
             computation.preview.total_minor,
+            aml.cash_minor,
+            aml.rate_minor,
+            aml.rate_date,
+            aml.rate_source,
+            aml.ack_reason,
             created_at
         ],
     )?;
@@ -490,6 +535,75 @@ fn load_allow_overselling(connection: &Connection) -> Result<bool, AppError> {
             .map(|settings| settings.allow_overselling)
             .unwrap_or(false)),
         None => Ok(false),
+    }
+}
+
+/// What gets written into the five AML columns of the sale row. Every field is
+/// `None` unless the assessment actually fired: an ordinary sale must leave no
+/// trace, so the columns themselves are the record that a warning was shown.
+#[derive(Debug, Default)]
+struct AmlProvenance {
+    cash_minor: Option<i64>,
+    rate_minor: Option<i64>,
+    rate_date: Option<String>,
+    rate_source: Option<String>,
+    ack_reason: Option<String>,
+}
+
+/// The AML inputs are read on the sale's own connection: this runs inside the
+/// sale transaction, and `complete_sale_transaction` holds a `Db` rather than
+/// the `AppState` the settings loaders take.
+fn read_json_setting<T>(connection: &Connection, key: &str, default_value: T) -> Result<T, AppError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    match stored {
+        Some(value) => serde_json::from_str(&value).map_err(|source| {
+            AppError::InvalidState(format!("Podešavanja nisu ispravna: {source}"))
+        }),
+        None => Ok(default_value),
+    }
+}
+
+/// Assesses the cash line and reduces the verdict to what the sale row keeps.
+///
+/// Without a rate nothing fires — `assess_cash_payment` reports
+/// `rate_unavailable` rather than guessing — so the columns stay `NULL` and the
+/// sale still completes.
+fn assess_sale_cash(
+    connection: &Connection,
+    cash_minor: i64,
+    ack_reason: Option<String>,
+) -> Result<AmlProvenance, AppError> {
+    let profile: ShopProfile =
+        read_json_setting(connection, SHOP_PROFILE_KEY, ShopProfile::default())?;
+    let rate: Option<EurRate> = read_json_setting(connection, EUR_RATE_KEY, None)?;
+    let assessment = crate::aml::assess_cash_payment(
+        cash_minor,
+        rate.as_ref(),
+        &profile,
+        AML_SOFT_RATIO_PERCENT,
+    );
+
+    match assessment.rate {
+        Some(rate) if assessment.breached || assessment.near_threshold => Ok(AmlProvenance {
+            cash_minor: Some(assessment.cash_minor),
+            rate_minor: Some(rate.rate_minor),
+            rate_date: Some(rate.rate_date),
+            rate_source: Some(rate.source.as_str().to_string()),
+            ack_reason: ack_reason
+                .map(|reason| reason.trim().to_string())
+                .filter(|reason| !reason.is_empty()),
+        }),
+        _ => Ok(AmlProvenance::default()),
     }
 }
 
@@ -778,7 +892,12 @@ mod tests {
         build_sale_preview, complete_sale_transaction, CompleteSaleRequest, DiscountRequest,
         PaymentDraft, PaymentMethod, SaleDraftItem, SaleDraftRequest,
     };
+    use crate::commands::settings::{
+        save_eur_rate, save_shop_profile, PravnaForma, ShopProfile, ShopProfileRequest,
+    };
     use crate::db::{test_database_path, Db};
+    use crate::nbs_rate::{EurRate, RateSource};
+    use crate::state::AppState;
 
     struct SeededSaleData {
         db_path: std::path::PathBuf,
@@ -864,6 +983,119 @@ mod tests {
         }
     }
 
+    fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
+        let path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let state = AppState::new(db);
+            test(&state);
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    fn sign_in_admin(state: &AppState) {
+        let admin_id: i64 = state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist");
+        state
+            .set_session_user_id(admin_id)
+            .expect("admin session should set");
+    }
+
+    /// The product is priced at 1000 para (10 RSD) per unit, which makes the
+    /// line total in para equal to `quantity_milli` — so a test can ask for an
+    /// exact dinar amount without doing arithmetic in the assertion.
+    fn seed_admin_shift_and_product(state: &AppState) -> i64 {
+        let connection = state.db().open().expect("database should open");
+        let admin_id: i64 = connection
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist");
+
+        connection
+            .execute(
+                "INSERT INTO shifts (
+                    user_id,
+                    opened_at,
+                    opening_cash_minor,
+                    expected_cash_minor,
+                    status,
+                    created_at,
+                    updated_at
+                 )
+                 VALUES (?1, '2026-07-31T09:00:00Z', 0, 0, 'open', '2026-07-31T09:00:00Z', '2026-07-31T09:00:00Z')",
+                params![admin_id],
+            )
+            .expect("shift should insert");
+
+        connection
+            .execute(
+                "INSERT INTO tax_rates (name, rate_basis_points, created_at, updated_at)
+                 VALUES ('PDV 20', 2000, '2026-07-31T09:00:00Z', '2026-07-31T09:00:00Z')",
+                [],
+            )
+            .expect("tax rate should insert");
+        let tax_rate_id = connection.last_insert_rowid();
+
+        connection
+            .execute(
+                "INSERT INTO products (
+                    name,
+                    sku,
+                    barcode,
+                    unit_of_measure,
+                    sale_price_minor,
+                    purchase_price_minor,
+                    tax_rate_id,
+                    minimum_stock_milli,
+                    allow_negative_stock,
+                    active,
+                    created_at,
+                    updated_at
+                 )
+                 VALUES ('Šporet', 'SPORET-1', '8600000000027', 'kom', 1000, 800, ?1, 0, 0, 1, '2026-07-31T09:00:00Z', '2026-07-31T09:00:00Z')",
+                params![tax_rate_id],
+            )
+            .expect("product should insert");
+        let product_id = connection.last_insert_rowid();
+
+        connection
+            .execute(
+                "INSERT INTO inventory_balances (product_id, quantity_milli, updated_at)
+                 VALUES (?1, 100000000, '2026-07-31T09:00:00Z')",
+                params![product_id],
+            )
+            .expect("inventory balance should insert");
+
+        product_id
+    }
+
+    fn draft_item_worth(product_id: i64, total_minor: i64) -> SaleDraftItem {
+        SaleDraftItem {
+            product_id,
+            quantity_milli: total_minor,
+            discount: None,
+        }
+    }
+
+    fn preduzetnik_profile_request() -> ShopProfileRequest {
+        ShopProfileRequest {
+            pravna_forma: Some(PravnaForma::Preduzetnik),
+            pdv_obveznik: Some(false),
+            distance_selling: Some(false),
+            lpfr_in_premises: Some(true),
+            esir_elements: Vec::new(),
+        }
+    }
+
     fn sale_draft(product_id: i64, quantity_milli: i64) -> SaleDraftRequest {
         SaleDraftRequest {
             items: vec![SaleDraftItem {
@@ -901,6 +1133,7 @@ mod tests {
                 amount_minor: 30000,
             }],
             allow_stock_override: None,
+            aml_ack_reason: None,
         };
 
         let completed =
@@ -950,6 +1183,7 @@ mod tests {
                 amount_minor: 12000,
             }],
             allow_stock_override: None,
+            aml_ack_reason: None,
         };
 
         let error = complete_sale_transaction(&seeded.db, request)
@@ -971,6 +1205,7 @@ mod tests {
                 amount_minor: 24000,
             }],
             allow_stock_override: None,
+            aml_ack_reason: None,
         };
 
         let error = complete_sale_transaction(&seeded.db, request)
@@ -1007,6 +1242,7 @@ mod tests {
                 amount_minor: 24000,
             }],
             allow_stock_override: Some(true),
+            aml_ack_reason: None,
         };
 
         complete_sale_transaction(&seeded.db, request).expect("oversell override should succeed");
@@ -1051,6 +1287,7 @@ mod tests {
                 amount_minor: 24000,
             }],
             allow_stock_override: None,
+            aml_ack_reason: None,
         };
 
         complete_sale_transaction(&seeded.db, request)
@@ -1070,6 +1307,7 @@ mod tests {
                 amount_minor: 24000,
             }],
             allow_stock_override: None,
+            aml_ack_reason: None,
         };
 
         let error = complete_sale_transaction(&seeded.db, request)
@@ -1101,6 +1339,7 @@ mod tests {
                 amount_minor: 40000,
             }],
             allow_stock_override: None,
+            aml_ack_reason: None,
         };
 
         complete_sale_transaction(&seeded.db, request).expect("sale should complete");
@@ -1144,6 +1383,7 @@ mod tests {
                 },
             ],
             allow_stock_override: None,
+            aml_ack_reason: None,
         };
 
         let completed =
@@ -1166,6 +1406,7 @@ mod tests {
                 amount_minor: 25000,
             }],
             allow_stock_override: None,
+            aml_ack_reason: None,
         };
 
         let error = complete_sale_transaction(&seeded.db, request)
@@ -1174,5 +1415,129 @@ mod tests {
         assert_eq!(error.code(), "payment_mismatch");
 
         let _ = std::fs::remove_file(seeded.db_path);
+    }
+
+    #[test]
+    fn completing_a_sale_persists_the_aml_decision_when_the_cap_is_reached() {
+        with_state("aml_persisted_on_sale", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+            save_shop_profile(state, preduzetnik_profile_request()).expect("profile saves");
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 100,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate saves");
+            // threshold = 10_000 * 100 = 1_000_000 para
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 1_000_000)],
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::Cash,
+                        amount_minor: 1_000_000,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: Some("Kupac odbio prenos na račun".to_string()),
+                },
+            )
+            .expect("sale should complete — the warning is soft, never a block");
+
+            let conn = state.db().open().expect("db opens");
+            let (cash, rate, date, source, reason): (i64, i64, String, String, String) = conn
+                .query_row(
+                    "SELECT aml_cash_minor, aml_rate_minor, aml_rate_date, aml_rate_source, aml_ack_reason
+                     FROM sales WHERE id = ?1",
+                    params![sale.id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .expect("AML provenance must be reproducible at inspection");
+
+            assert_eq!(cash, 1_000_000);
+            assert_eq!(rate, 100);
+            assert_eq!(date, "2026-07-31");
+            assert_eq!(source, "nbs");
+            assert_eq!(reason, "Kupac odbio prenos na račun");
+        });
+    }
+
+    #[test]
+    fn an_ordinary_sale_leaves_the_aml_columns_null() {
+        with_state("aml_absent_on_ordinary_sale", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 100,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate saves");
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 50_000)],
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::Cash,
+                        amount_minor: 50_000,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: None,
+                },
+            )
+            .expect("sale completes");
+
+            let conn = state.db().open().expect("db opens");
+            let cash: Option<i64> = conn
+                .query_row(
+                    "SELECT aml_cash_minor FROM sales WHERE id = ?1",
+                    params![sale.id],
+                    |row| row.get(0),
+                )
+                .expect("row exists");
+            assert_eq!(
+                cash, None,
+                "no assessment fired, so no provenance is written"
+            );
+        });
+    }
+
+    #[test]
+    fn mixed_tender_below_the_cap_in_cash_does_not_breach() {
+        let rate = EurRate {
+            rate_minor: 100,
+            rate_date: "2026-07-31".to_string(),
+            source: RateSource::Nbs,
+        };
+        let profile = ShopProfile {
+            pravna_forma: Some(PravnaForma::Preduzetnik),
+            ..ShopProfile::default()
+        };
+
+        // 1.500.000 total, but only 500.000 of it in cash.
+        let assessment = crate::aml::assess_cash_payment(500_000, Some(&rate), &profile, 80);
+
+        assert!(
+            !assessment.breached,
+            "cl. 46 st. 1 keys to the cash received, not the invoice"
+        );
     }
 }

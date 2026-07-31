@@ -171,6 +171,7 @@ pub fn run() {
             commands::kep::kep_export_book,
             commands::sales::sales_preview,
             commands::sales::sales_complete,
+            commands::sales::sales_assess_cash_payment,
             commands::backup::backup_get_status,
             commands::backup::backup_update_settings,
             commands::backup::backup_create,

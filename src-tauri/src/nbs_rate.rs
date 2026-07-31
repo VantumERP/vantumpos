@@ -21,6 +21,18 @@ pub enum RateSource {
     Manual,
 }
 
+impl RateSource {
+    /// The persisted form of the source, kept identical to the serde wire
+    /// name so a rate read back off a sale row matches one read out of the
+    /// settings JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nbs => "nbs",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 /// `rate_minor` is **para per 1 EUR** (117,2345 RSD/EUR -> 11723), truncated
 /// (floored) to the para. Every consumer depends on this unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
