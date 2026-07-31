@@ -980,6 +980,19 @@ function AmlNotice({
               prikazana.
             </p>
           )}
+          {/*
+            Verified-rules §3 req 5. The verdict above is per-sale and that is
+            the whole of what the software computes — there is no buyer tag and
+            no rolling 365-day total. čl. 46 st. 1 reaches linked cash
+            transactions and contracts inside one year anyway, so a cashier who
+            reads one cleared sale as clearance for the buyer is reading more
+            into the check than it does.
+          */}
+          <p className="text-xs">
+            Zabrana obuhvata i više međusobno povezanih gotovinskih transakcija,
+            kao i ugovore u periodu od godinu dana. Program proverava samo ovu
+            prodaju i ne sabira ranije uplate istog kupca.
+          </p>
           <p className="text-xs">{assessment.notice.citation}</p>
           {stale && assessment.rate && (
             <p className="text-xs">

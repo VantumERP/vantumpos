@@ -331,7 +331,12 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
         </div>
       ) : null}
 
-      {activeTab === "rate" ? <EurRatePanel settings={services.settings} /> : null}
+      {activeTab === "rate" ? (
+        <div className="flex flex-col gap-4">
+          <EurRatePanel settings={services.settings} />
+          <AmlAggregationDisclosure />
+        </div>
+      ) : null}
 
       {activeTab === "calendar" ? (
         <DepositCalendarPanel settings={services.settings} />
@@ -1092,6 +1097,74 @@ function formatRateDate(value: string): string {
 }
 
 /**
+ * The written disclosure the one-year aggregation limb needs
+ * (`docs/SW11-SW15-VERIFIED-RULES.md` §3 req 5).
+ *
+ * čl. 46 st. 1 bans the cash acceptance „bez obzira na to da li se radi o
+ * jednoj ili više međusobno povezanih gotovinskih transakcija ili jednom ili
+ * više ugovora u periodu od godinu dana“. The till only ever sees the sale in
+ * front of it: there is no customers table, no buyer tag and no rolling
+ * 365-day total, and a customer-identity store without a lawful ZZPL basis
+ * would be its own exposure (§5 Q-3). So the gap is **stated in writing** here
+ * instead of being left for the owner to discover — the duty binds the shop
+ * whether or not the software can compute it.
+ *
+ * Two things this copy must not do. It must not read as a feature: nothing
+ * here may suggest the program watches a buyer over a year, because an owner
+ * who believes that stops watching himself. And it must carry no fine figure —
+ * penalties live in `src-tauri/src/legal.rs` and are rendered from the
+ * backend's `LegalNotice`, so that a preduzetnik is never shown a pravno-lice
+ * tier.
+ */
+function AmlAggregationDisclosure() {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle role="heading" aria-level={2}>
+          Šta provera gotovine ne obuhvata
+        </CardTitle>
+        <CardDescription>
+          Pročitajte pre nego što se oslonite na proveru koja se prikazuje na
+          kasi.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Alert>
+          <ShieldAlertIcon aria-hidden="true" />
+          <AlertTitle>Program ne sabira uplate istog kupca</AlertTitle>
+          <AlertDescription>
+            <div className="flex flex-col gap-2">
+              <p>
+                Zabrana prijema gotovine ne odnosi se samo na jednu uplatu. Ona
+                važi i kada se radi o više međusobno povezanih gotovinskih
+                transakcija, kao i o jednom ili više ugovora u periodu od
+                godinu dana.
+              </p>
+              <p>
+                Program proverava isključivo pojedinačnu prodaju koja je u tom
+                trenutku na kasi. On ne vodi evidenciju kupaca i ne sabira
+                ranije uplate istog kupca, pa povezane uplate ne može ni da
+                prepozna ni da ih prikaže.
+              </p>
+              <p>
+                Zakonska obaveza važi za radnju i onda kada je program ne
+                proverava. Procenu da li su uplate međusobno povezane donosi
+                radnja sama; kod većih iznosa kupcu ponudite uplatu na tekući
+                račun.
+              </p>
+              <p className="text-xs">
+                Član 46. stav 1. Zakona o sprečavanju pranja novca i
+                finansiranja terorizma.
+              </p>
+            </div>
+          </AlertDescription>
+        </Alert>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
  * The calendar the seven-working-day deposit deadline (Zakon 68/2015, čl. 3
  * st. 1) is counted against.
  *
@@ -1203,7 +1276,7 @@ function DepositCalendarPanel({ settings }: { settings: SettingsService }) {
               <div className="flex flex-col gap-1">
                 <span className="text-sm font-medium">Subota je radni dan</span>
                 <span className="text-xs text-muted-foreground">
-                  „Radni dan" nije definisan ni u Zakonu 68/2015 ni u Pravilniku
+                  „Radni dan“ nije definisan ni u Zakonu 68/2015 ni u Pravilniku
                   77/2011. Podrazumevano se subota računa, jer tako rok pada
                   ranije.
                 </span>
@@ -1699,6 +1772,20 @@ function GoLiveResetCard({
               čl. 47). Pre brisanja se obavezno pravi rezervna kopija — čuvajte je
               trajno. Pravna lica ne smeju uništavati dokumentarni materijal bez
               pismenog odobrenja arhiva.
+            </p>
+            {/*
+              `reset_trading_data` also runs DELETE FROM kalkulacije. The
+              kalkulacija is the isprava behind a receipt zaduženje and is
+              numbered per poslovna godina, exactly like the KEP it feeds — so
+              it is a numbered book the owner is losing, not a by-product of
+              „obriši probne račune“, and it gets its own sentence.
+            */}
+            <p className="text-sm text-muted-foreground">
+              Briše se i knjiga kalkulacija. Kalkulacija je isprava koja se
+              numeriše po poslovnoj godini, pa bi uz zadržane probne kalkulacije
+              prva prava kalkulacija dobila redni broj veći od 1. Zajedno sa njom
+              briše se i KEP (evidencija prometa) sa zaključenjima poslovnih
+              godina, da probna knjiženja ne bi ušla u pravu knjigu.
             </p>
             <Input
               aria-label="Potvrda brisanja"

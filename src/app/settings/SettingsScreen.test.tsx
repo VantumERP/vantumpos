@@ -205,6 +205,25 @@ describe("SettingsScreen", () => {
       screen.getByText(/proveru ponovite pri prvom prijemu robe/i),
     ).toBeInTheDocument();
   });
+
+  it("discloses that the reset deletes the kalkulacija book", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Backup" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Obriši probne podatke" }),
+    );
+
+    // `reset_trading_data` runs DELETE FROM kalkulacije next to the KEP wipe.
+    // A kalkulacija is an isprava numbered per book_year, so its deletion is
+    // not an implementation detail of „obriši probne račune“ — the owner is
+    // losing a numbered book and has to be told so before confirming.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(/knjiga kalkulacija/i);
+    expect(dialog).toHaveTextContent(/numeriš[ue] po poslovnoj godini/i);
+    expect(dialog).toHaveTextContent(/KEP/);
+  });
 });
 
 describe("SettingsScreen deposit calendar", () => {
@@ -473,6 +492,42 @@ describe("SettingsScreen EUR rate", () => {
     ).toBeInTheDocument();
     // No fine figure may live outside legal.rs.
     expect(screen.queryByText(/dinara kazn/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * Verified-rules §3 req 5: the one-year aggregation limb is a real duty that
+   * binds the shop, the software cannot compute it (no customers table, no
+   * buyer tag, no rolling 365-day total), and the gap must therefore be
+   * **stated in writing** to the shop owner rather than left to be discovered.
+   */
+  it("states in writing that it cannot aggregate a buyer's cash over one year", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Kurs" }));
+
+    const disclosure = (
+      await screen.findByText("Program ne sabira uplate istog kupca")
+    ).closest('[data-slot="alert"]');
+
+    // The ban reaches „jednu ili više međusobno povezanih gotovinskih
+    // transakcija ili jedan ili više ugovora u periodu od godinu dana“.
+    expect(disclosure).toHaveTextContent(
+      /više međusobno povezanih gotovinskih transakcija/i,
+    );
+    expect(disclosure).toHaveTextContent(/ugovora u periodu od godinu dana/i);
+    // What the software actually does — a limit, never advertised as a feature.
+    expect(disclosure).toHaveTextContent(
+      /proverava isključivo pojedinačnu prodaju/i,
+    );
+    expect(disclosure).toHaveTextContent(/ne sabira ranije uplate istog kupca/i);
+    // And that the duty binds the shop regardless.
+    expect(disclosure).toHaveTextContent(
+      /važi za radnju i onda kada je program ne proverava/i,
+    );
+    expect(disclosure).toHaveTextContent(/46/);
+    // Still no fine figure outside legal.rs.
+    expect(disclosure).not.toHaveTextContent(/kazn/i);
   });
 });
 

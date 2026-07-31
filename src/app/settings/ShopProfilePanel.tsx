@@ -347,7 +347,7 @@ export function ShopProfilePanel({
                 <AlertDescription>
                   Dok odgovor izostaje, program ne može da zna da li su podaci o
                   proizvođaču, uvozniku i zemlji porekla obavezni ili samo
-                  preporučeni. Ćutanje se ne računa kao „ne”.
+                  preporučeni. Ćutanje se ne računa kao „ne“.
                 </AlertDescription>
               </Alert>
             ) : null}
@@ -439,7 +439,7 @@ export function ShopProfilePanel({
           <p className="text-xs text-muted-foreground">
             U registru Poreske uprave uporedite naziv, verziju i IB elementa sa
             onim što uređaj prijavljuje i proverite da je polje „Broj i datum
-            rešenja o ukidanju odobrenja” prazno.
+            rešenja o ukidanju odobrenja“ prazno.
           </p>
           <div>
             <Button

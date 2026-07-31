@@ -778,6 +778,29 @@ describe("RegisterScreen", () => {
     );
   }, AML_TEST_TIMEOUT_MS);
 
+  /**
+   * Verified-rules §3 req 5. The per-sale check is the whole of what the till
+   * computes; čl. 46 st. 1 also reaches linked cash transactions and contracts
+   * inside one year. A cashier who reads one cleared sale as clearance for the
+   * buyer is exactly the misreading this line exists to prevent.
+   */
+  it("says the ban also covers linked payments the program cannot see", async () => {
+    const user = userEvent.setup();
+    const services = createAmlServices({ eurRateMinor: 100 });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    await tenderCash(user, "10000");
+
+    const line = await screen.findByText(
+      /više međusobno povezanih gotovinskih transakcija/i,
+      undefined,
+      { timeout: AML_WAIT_MS },
+    );
+    expect(line).toHaveTextContent(/u periodu od godinu dana/i);
+    expect(line).toHaveTextContent(/ne sabira ranije uplate istog kupca/i);
+  }, AML_TEST_TIMEOUT_MS);
+
   it("shows a staleness warning when the rate is not today's", async () => {
     const user = userEvent.setup();
     const services = createAmlServices({
