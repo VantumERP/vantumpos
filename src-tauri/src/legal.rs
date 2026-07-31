@@ -32,6 +32,17 @@ pub struct LegalNotice {
     pub is_legal_duty: bool,
 }
 
+/// Which ZZP a reklamacija was filed under. Frozen on the record at intake by
+/// `reklamacije::regime_for` and never recomputed, so the figure a complaint
+/// carries cannot drift when the shop's clock passes the cutover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReklamacijaRegime {
+    /// 88/2021 — filed before the cutover.
+    Old,
+    /// 35/2026 — filed on or after it.
+    New,
+}
+
 fn tiered(profile: &ShopProfile, preduzetnik: &str, pravno_lice: &str) -> Option<String> {
     match profile.pravna_forma {
         Some(PravnaForma::Preduzetnik) => Some(preduzetnik.to_string()),
@@ -120,6 +131,51 @@ pub fn declaration_defective(profile: &ShopProfile) -> LegalNotice {
     }
 }
 
+/// ZZP čl. 55 (88/2021) / čl. 63 (35/2026) — failing to act on a reklamacija.
+///
+/// Regime-versioned as well as tier-resolved: the amounts rose ~4× at the
+/// cutover, so a figure is only correct for one of the two laws. Both tiers sit
+/// in the lower, FIXED-amount prekršaj band — never the 300.000–2.000.000 range
+/// of čl. 187/209 — and no zaštitna mera attaches to a reklamacija breach. The
+/// ZZP prescribes no privredni prestup at all, so neither tier reaches for one.
+/// Verified rules §5.
+pub fn reklamacija_breach(profile: &ShopProfile, regime: ReklamacijaRegime) -> LegalNotice {
+    let (penalty, citation) = match regime {
+        ReklamacijaRegime::Old => (
+            tiered(
+                profile,
+                "Prekršaj: novčana kazna u fiksnom iznosu od 30.000 dinara (čl. 188 st. 3). \
+                 Zaštitne mere nisu propisane.",
+                "Prekršaj: novčana kazna u fiksnom iznosu od 50.000 dinara (čl. 188 st. 1), \
+                 uz kaznu za odgovorno lice od 8.000 dinara (čl. 188 st. 2). \
+                 Zaštitne mere nisu propisane.",
+            ),
+            "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 88/2021), čl. 55; \
+             prekršajne odredbe čl. 188.",
+        ),
+        ReklamacijaRegime::New => (
+            tiered(
+                profile,
+                "Prekršaj: novčana kazna u fiksnom iznosu od 100.000 dinara (čl. 210 st. 3). \
+                 Zaštitne mere nisu propisane.",
+                "Prekršaj: novčana kazna u fiksnom iznosu od 200.000 dinara \
+                 (čl. 210 st. 1 tač. 24), uz kaznu za odgovorno lice od 50.000 dinara \
+                 (čl. 210 st. 2). Zaštitne mere nisu propisane.",
+            ),
+            "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 35/2026), čl. 63; \
+             prekršajne odredbe čl. 210 st. 1 tač. 24.",
+        ),
+    };
+
+    LegalNotice {
+        summary: "Nepostupanje po reklamaciji potrošača u propisanim rokovima je prekršaj."
+            .to_string(),
+        penalty,
+        citation: citation.to_string(),
+        is_legal_duty: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,12 +190,16 @@ mod tests {
 
     /// Every public notice, under the preduzetnik regime, in one place. Adding a
     /// new copy function without adding it here is a visible omission in review.
+    /// Regime-versioned copy contributes one entry per regime — a figure that is
+    /// only wrong under one of the two ZZP laws is still wrong.
     fn all_notices(p: &ShopProfile) -> Vec<LegalNotice> {
         vec![
             aml_cash_cap(p),
             cash_deposit_duty(p),
             declaration_missing(p),
             declaration_defective(p),
+            reklamacija_breach(p, ReklamacijaRegime::Old),
+            reklamacija_breach(p, ReklamacijaRegime::New),
         ]
     }
 
@@ -266,6 +326,96 @@ mod tests {
             penalty.contains("10.000"),
             "odgovorno lice, čl. 67 st. 2: {penalty}"
         );
+    }
+
+    #[test]
+    fn reklamacija_breach_is_regime_versioned_and_tier_correct() {
+        // ZZP 88/2021 čl. 188 and 35/2026 čl. 210 each carry three rows, and the
+        // amounts rose ~4× at the cutover. The pilot is a preduzetnik, so the
+        // opening stav (pravno lice) is the wrong row twice over — once by tier,
+        // once by regime. Verified rules §5.
+        let old = reklamacija_breach(
+            &profile(Some(PravnaForma::Preduzetnik)),
+            ReklamacijaRegime::Old,
+        );
+        let penalty = old.penalty.expect("preduzetnik penalty is known");
+        assert!(penalty.contains("30.000"), "čl. 188 st. 3: {penalty}");
+        assert!(
+            penalty.contains("fiksnom"),
+            "a fixed sum, not a range: {penalty}"
+        );
+        assert!(
+            !penalty.contains("50.000"),
+            "50.000 is the pravno-lice row (čl. 188 st. 1): {penalty}"
+        );
+        assert!(
+            !penalty.contains("8.000"),
+            "a preduzetnik has no odgovorno lice (čl. 188 st. 2): {penalty}"
+        );
+        assert!(old.citation.contains("88/2021"), "{}", old.citation);
+        assert!(old.is_legal_duty);
+
+        let new = reklamacija_breach(
+            &profile(Some(PravnaForma::Preduzetnik)),
+            ReklamacijaRegime::New,
+        );
+        let penalty = new.penalty.expect("preduzetnik penalty is known");
+        assert!(
+            penalty.contains("100.000"),
+            "čl. 210 st. 3, ~4× the old figure: {penalty}"
+        );
+        assert!(
+            !penalty.contains("200.000"),
+            "200.000 is the pravno-lice row (čl. 210 st. 1): {penalty}"
+        );
+        assert!(
+            !penalty.contains("50.000"),
+            "50.000 is the odgovorno-lice row (čl. 210 st. 2): {penalty}"
+        );
+        assert!(new.citation.contains("35/2026"), "{}", new.citation);
+
+        // The pravno-lice tier keeps its own two rows, per regime.
+        let old_pravno = reklamacija_breach(
+            &profile(Some(PravnaForma::PravnoLice)),
+            ReklamacijaRegime::Old,
+        );
+        let penalty = old_pravno.penalty.expect("pravno lice penalty is known");
+        assert!(penalty.contains("50.000"), "čl. 188 st. 1: {penalty}");
+        assert!(penalty.contains("8.000"), "čl. 188 st. 2: {penalty}");
+
+        let new_pravno = reklamacija_breach(
+            &profile(Some(PravnaForma::PravnoLice)),
+            ReklamacijaRegime::New,
+        );
+        let penalty = new_pravno.penalty.expect("pravno lice penalty is known");
+        assert!(penalty.contains("200.000"), "čl. 210 st. 1: {penalty}");
+        assert!(penalty.contains("50.000"), "čl. 210 st. 2: {penalty}");
+    }
+
+    #[test]
+    fn reklamacija_breach_is_prekrsaj_only_and_carries_no_zastitna_mera() {
+        // Verified rules §5: reklamacija breaches sit in the LOWER fixed tier —
+        // never the 300k–2M band of čl. 187/209 — and no zaštitna mera attaches
+        // to them, on either tier. The ZZP knows no privredni prestup at all, so
+        // even the pravno-lice copy must not reach for that category.
+        for forma in [PravnaForma::Preduzetnik, PravnaForma::PravnoLice] {
+            for regime in [ReklamacijaRegime::Old, ReklamacijaRegime::New] {
+                let notice = reklamacija_breach(&profile(Some(forma)), regime);
+                let penalty = notice.penalty.expect("a known legal form has a figure");
+                assert!(
+                    !penalty.contains("zabran"),
+                    "no zaštitna mera attaches to a reklamacija breach: {penalty}"
+                );
+                assert!(
+                    !penalty.to_lowercase().contains("privredni prestup"),
+                    "the ZZP prescribes no privredni prestup: {penalty}"
+                );
+                assert!(
+                    !penalty.contains("300.000"),
+                    "čl. 187/209 is the wrong tier for a reklamacija breach: {penalty}"
+                );
+            }
+        }
     }
 
     #[test]

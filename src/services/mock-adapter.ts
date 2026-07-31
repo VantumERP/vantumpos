@@ -31,6 +31,7 @@ import type {
   ReceiptDetail,
   ReceiptSettings,
   ReklamacijaInput,
+  ReklamacijaRegime,
   ReklamacijaView,
   RestoreBackupRequest,
   SaleDraftRequest,
@@ -1710,6 +1711,31 @@ function mockCampaignView(
 // The regime is frozen here at create and never recomputed.
 const REKLAMACIJA_CUTOVER = "2026-08-01T00:00:00Z";
 
+/**
+ * Mirrors `legal.rs::reklamacija_breach` — summary and citation only.
+ *
+ * `penalty` is deliberately `null` whatever the legal form, for the same reason
+ * the AML double withholds it: every statutory fine figure lives in
+ * `src-tauri/src/legal.rs` and nowhere else, and a second copy here could
+ * silently drift out of tier. The citation is regime-versioned because the two
+ * ZZP laws put the reklamacija duty and its prekršajne odredbe in different
+ * articles.
+ */
+function reklamacijaNotice(regime: ReklamacijaRegime): LegalNotice {
+  return {
+    summary:
+      "Nepostupanje po reklamaciji potrošača u propisanim rokovima je prekršaj.",
+    penalty: null,
+    citation:
+      regime === "old"
+        ? "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 88/2021), čl. 55; " +
+          "prekršajne odredbe čl. 188."
+        : "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 35/2026), čl. 63; " +
+          "prekršajne odredbe čl. 210 st. 1 tač. 24.",
+    isLegalDuty: true,
+  };
+}
+
 function findReklamacija(
   reklamacije: ReklamacijaView[],
   id: number,
@@ -1727,11 +1753,12 @@ function mockReklamacijaView(
   registerNumber: number,
   input: ReklamacijaInput,
 ): ReklamacijaView {
+  const regime: ReklamacijaRegime =
+    new Date(input.filedAt) < new Date(REKLAMACIJA_CUTOVER) ? "old" : "new";
   const view: ReklamacijaView = {
     id,
     registerNumber,
-    regime:
-      new Date(input.filedAt) < new Date(REKLAMACIJA_CUTOVER) ? "old" : "new",
+    regime,
     status: "open",
     filedAt: input.filedAt,
     podnosilacImePrezime: input.podnosilacImePrezime,
@@ -1755,6 +1782,7 @@ function mockReklamacijaView(
       oneExtensionUsed: false,
     },
     purgeEligible: false,
+    notice: reklamacijaNotice(regime),
   };
   recomputeMockDeadlines(view);
   return view;

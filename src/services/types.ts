@@ -688,6 +688,12 @@ export interface ReklamacijaView {
   events: ReklamacijaEvent[];
   deadlines: DeadlineState;
   purgeEligible: boolean;
+  /**
+   * Advisory prekršaj exposure for this record's own frozen regime, already
+   * resolved to the shop's tier by `legal.rs::reklamacija_breach`. No fine
+   * figure may live outside that module — render this, never derive one.
+   */
+  notice: LegalNotice;
 }
 
 /**

@@ -7,7 +7,32 @@ import { navigationItems } from "@/app/navigation";
 import { Toaster } from "@/components/ui/sonner";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices } from "@/services/ports";
-import type { ReklamacijaSummary, ReklamacijaView } from "@/services/types";
+import type {
+  LegalNotice,
+  ReklamacijaSummary,
+  ReklamacijaView,
+} from "@/services/types";
+
+// `legal.rs::reklamacija_breach` verbatim, preduzetnik tier. The two regimes
+// carry different figures (~4× apart) and different citations; the module must
+// render whichever one the backend sent and derive neither.
+const preduzetnikNewNotice: LegalNotice = {
+  summary:
+    "Nepostupanje po reklamaciji potrošača u propisanim rokovima je prekršaj.",
+  penalty:
+    "Prekršaj: novčana kazna u fiksnom iznosu od 100.000 dinara " +
+    "(čl. 210 st. 3). Zaštitne mere nisu propisane.",
+  citation:
+    "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 35/2026), čl. 63; " +
+    "prekršajne odredbe čl. 210 st. 1 tač. 24.",
+  isLegalDuty: true,
+};
+
+// What an UNSET `pravnaForma` produces: no figure at all, never a plausible one.
+const unsetFormaNotice: LegalNotice = {
+  ...preduzetnikNewNotice,
+  penalty: null,
+};
 
 // Memo worked example (NEW/tehnička): filed 15.08. → answer 23.08., resolution
 // 14.09. Nothing is overdue yet.
@@ -67,6 +92,7 @@ const createdView: ReklamacijaView = {
     oneExtensionUsed: false,
   },
   purgeEligible: false,
+  notice: preduzetnikNewNotice,
 };
 
 function servicesWith(rows: ReklamacijaSummary[]): PosServices {
@@ -104,6 +130,7 @@ const newRegimeOpen: ReklamacijaView = {
     oneExtensionUsed: false,
   },
   purgeEligible: false,
+  notice: preduzetnikNewNotice,
 };
 
 // The OLD regime is NOT gated on the express warning — rejecting an old-regime
@@ -115,6 +142,19 @@ const oldRegimeOpen: ReklamacijaView = {
   regime: "old",
   filedAt: "2026-06-01T00:00:00Z",
   podnosilacImePrezime: "Marija Marić",
+};
+
+// Both clocks blown — the only state in which the advisory penalty context is
+// shown at all.
+const overdue: ReklamacijaView = {
+  ...newRegimeOpen,
+  id: 13,
+  registerNumber: 13,
+  deadlines: {
+    ...newRegimeOpen.deadlines,
+    answerOverdue: true,
+    resolutionOverdue: true,
+  },
 };
 
 // An extension was already granted: čl. 55/63 st. 11 permits exactly one.
@@ -289,6 +329,49 @@ describe("ReklamacijeModule detail", () => {
     expect(duty).toHaveDisplayValue(/najkasnije u roku od 3 \(tri\) dana/);
     expect(consequences).toHaveDisplayValue(/smatraće se da niste saglasni/);
     expect(zastoj).toHaveDisplayValue(/zastaje danom Vašeg prijema/);
+  });
+
+  it("renders the backend's penalty copy verbatim on an overdue record", async () => {
+    const user = userEvent.setup();
+    render(<ReklamacijeModule services={servicesWithView(overdue)} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Detalji za reklamaciju #13",
+      }),
+    );
+
+    // Every word and every figure comes from `legal.rs` — the module resolves
+    // neither the regime nor the pravna forma into an amount of its own.
+    expect(
+      await screen.findByText(preduzetnikNewNotice.summary, { exact: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(preduzetnikNewNotice.penalty as string),
+    ).toBeInTheDocument();
+    expect(screen.getByText(preduzetnikNewNotice.citation)).toBeInTheDocument();
+  });
+
+  it("shows no figure at all when the shop's legal form is unanswered", async () => {
+    const user = userEvent.setup();
+    render(
+      <ReklamacijeModule
+        services={servicesWithView({ ...overdue, notice: unsetFormaNotice })}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Detalji za reklamaciju #13",
+      }),
+    );
+
+    expect(
+      await screen.findByText(/Unesite pravnu formu u Podešavanja → Profil/),
+    ).toBeInTheDocument();
+    // A plausible-but-untiered amount is the defect this replaces: with no
+    // legal form on file there is no correct figure, so none may be shown.
+    expect(screen.queryByText(/dinara/)).not.toBeInTheDocument();
   });
 
   it("omits the express-warning fields for an old-regime answer", async () => {

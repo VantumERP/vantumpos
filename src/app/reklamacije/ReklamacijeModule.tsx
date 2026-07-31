@@ -122,14 +122,6 @@ const EVENT_LABELS: Record<string, string> = {
   resolved: "Reklamacija rešena",
 };
 
-// Regime-versioned prekršajni raspon for a preduzetnik (verified rules §7):
-// 30.000 din under 88/2021, 100.000 din under 35/2026. Advisory context on an
-// overdue complaint ONLY — never a threat, never a legal conclusion.
-const PENALTY_BY_REGIME: Record<ReklamacijaRegime, string> = {
-  old: "30.000",
-  new: "100.000",
-};
-
 // The memo §4(a) express-warning template (verified rules, čl. 63 st. 10), split
 // into the three mandated parts: (1) obaveza izjašnjenja, (2) posledice
 // propuštanja roka, (3) zastoj rokova. The law prescribes content, not exact
@@ -490,14 +482,27 @@ function DetailPanel({
           ) : null}
         </dl>
         {overdue ? (
-          // Advisory context only (verified rules §7) — never a threat, and
+          // Advisory context only (verified rules §5) — never a threat, and
           // nothing here asserts the shop is or is not in violation.
-          <p className="text-xs text-muted-foreground">
-            Informativno: za preduzetnika je propisana novčana kazna od{" "}
-            {PENALTY_BY_REGIME[view.regime]} dinara za nepostupanje po
-            reklamaciji (prekršajne odredbe ZZP). Ovo je informativni podatak, a
-            ne pravni savet.
-          </p>
+          //
+          // Legal: every figure and every word of the penalty comes from the
+          // backend (`legal.rs::reklamacija_breach`), tier-resolved from the
+          // shop's pravna forma and versioned by this record's frozen regime.
+          // When the legal form is unanswered the penalty is `null` and we
+          // point at Podešavanja → Profil instead of guessing a tier.
+          <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+            <p>Informativno: {view.notice.summary}</p>
+            {view.notice.penalty ? (
+              <p>{view.notice.penalty}</p>
+            ) : (
+              <p>
+                Unesite pravnu formu u Podešavanja → Profil da bi kazna bila
+                prikazana.
+              </p>
+            )}
+            <p>{view.notice.citation}</p>
+            <p>Ovo je informativni podatak, a ne pravni savet.</p>
+          </div>
         ) : null}
       </div>
 

@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 use crate::app_error::AppError;
+use crate::legal::{reklamacija_breach, LegalNotice, ReklamacijaRegime};
 use rusqlite::{params, Connection, OptionalExtension};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
@@ -120,6 +121,20 @@ pub fn regime_for(filed_at: &str) -> Result<&'static str, AppError> {
         Ok(REGIME_OLD)
     } else {
         Ok(REGIME_NEW)
+    }
+}
+
+/// Maps the stored `regime` onto the legal-copy tier. The column is
+/// CHECK-constrained to `old`/`new`, so anything else is a corrupt row — and a
+/// statutory fine figure is the last thing that may be guessed for one, in
+/// either direction: the new figures are ~4× the old ones.
+fn legal_regime(regime: &str) -> Result<ReklamacijaRegime, AppError> {
+    match regime {
+        REGIME_OLD => Ok(ReklamacijaRegime::Old),
+        REGIME_NEW => Ok(ReklamacijaRegime::New),
+        other => Err(AppError::InvalidState(format!(
+            "Nepoznat pravni režim reklamacije: {other}."
+        ))),
     }
 }
 
@@ -278,6 +293,10 @@ pub struct ReklamacijaView {
     pub events: Vec<EventView>,
     pub deadlines: DeadlineState,
     pub purge_eligible: bool,
+    /// Advisory prekršaj exposure for this record's own frozen regime, resolved
+    /// to the shop's tier in `legal.rs`. No fine figure may live outside that
+    /// module, so the UI renders this and never computes one.
+    pub notice: LegalNotice,
 }
 
 /// Register-list row: the stored `status` plus the derived answer/resolution
@@ -485,6 +504,12 @@ pub fn get_reklamacija(
         today,
     )?;
     let purge_eligible = is_purge_eligible(&filed_at, today);
+    // An unreadable profile degrades to UNSET, which withholds the figure rather
+    // than inventing one — the conservative direction, and the only one that
+    // cannot quote the wrong tier. The register must still open either way.
+    let profile =
+        crate::commands::catalog::load_shop_profile_for_connection(conn).unwrap_or_default();
+    let notice = reklamacija_breach(&profile, legal_regime(&regime)?);
 
     Ok(ReklamacijaView {
         id,
@@ -505,6 +530,7 @@ pub fn get_reklamacija(
         events,
         deadlines,
         purge_eligible,
+        notice,
     })
 }
 
@@ -872,6 +898,7 @@ pub fn resolve_reklamacija(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::settings::{PravnaForma, ShopProfile, SHOP_PROFILE_KEY};
     use crate::db::{test_database_path, Db};
 
     fn ev(t: &str, d: &str) -> DeadlineEvent {
@@ -1110,6 +1137,76 @@ mod tests {
                 "filed + 30 with no round-trip yet"
             );
             assert_eq!(view.deadlines.clock, "running");
+        });
+    }
+
+    fn set_pravna_forma(conn: &Connection, forma: PravnaForma) {
+        let profile = ShopProfile {
+            pravna_forma: Some(forma),
+            ..ShopProfile::default()
+        };
+        conn.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            params![
+                SHOP_PROFILE_KEY,
+                serde_json::to_string(&profile).expect("profile serializes"),
+                "2026-06-01T08:00:00Z"
+            ],
+        )
+        .expect("shop profile should save");
+    }
+
+    #[test]
+    fn view_carries_the_regime_and_tier_correct_penalty_notice() {
+        with_reklamacija_db("rek_notice_tier", |conn| {
+            let old = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            assert!(
+                old.notice.penalty.is_none(),
+                "an unanswered legal form must withhold the figure, not guess it: {:?}",
+                old.notice.penalty
+            );
+
+            set_pravna_forma(conn, PravnaForma::Preduzetnik);
+
+            // Both records are read at the same instant: the figure follows the
+            // regime frozen on each record, never the clock at read time.
+            let old = get_reklamacija(conn, old.id, "2026-09-05T00:00:00Z").unwrap();
+            let penalty = old.notice.penalty.expect("preduzetnik penalty is known");
+            assert!(
+                penalty.contains("30.000"),
+                "88/2021 čl. 188 st. 3: {penalty}"
+            );
+            assert!(
+                old.notice.citation.contains("88/2021"),
+                "{}",
+                old.notice.citation
+            );
+
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-09-01T00:00:00Z"),
+                1,
+                "2026-09-01T08:00:00Z",
+            )
+            .unwrap();
+            let new = get_reklamacija(conn, created.id, "2026-09-05T00:00:00Z").unwrap();
+            let penalty = new.notice.penalty.expect("preduzetnik penalty is known");
+            assert!(
+                penalty.contains("100.000"),
+                "35/2026 čl. 210 st. 3: {penalty}"
+            );
+            assert!(
+                new.notice.citation.contains("35/2026"),
+                "{}",
+                new.notice.citation
+            );
         });
     }
 
