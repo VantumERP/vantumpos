@@ -28,9 +28,10 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::params;
+use serde::Serialize;
 use time::{Date, Month, Weekday};
 
 use crate::app_error::AppError;
@@ -150,6 +151,122 @@ fn format_iso_date(date: Date) -> String {
     )
 }
 
+/// One cash receipt as the duty sees it: an amount received on one trading date,
+/// and whether čl. 3 st. 1 reaches it at all.
+///
+/// `subject == false` is the Pravilnik 77/2011 čl. 5 st. 2 float carve-out —
+/// dinars paid out of the shop's own tekući račun per čl. 2 st. 2 i 3. **The
+/// caller decides**, because the exclusion turns on how the withdrawal was
+/// documented, not on the movement type alone (§3 rule 14), and because the
+/// relief is bylaw-level: the statute's own "po bilo kom osnovu" and its kazna
+/// (čl. 7 st. 1 tač. 2) contain no exclusion.
+///
+/// `amount_minor` may be negative — a documented payout out of the till reduces
+/// that trading date's base.
+#[derive(Debug, Clone)]
+pub struct CashInflow {
+    pub date: String,
+    pub amount_minor: i64,
+    pub subject: bool,
+}
+
+/// One polog onto the shop's own račun kod banke.
+#[derive(Debug, Clone)]
+pub struct CashDeposit {
+    pub date: String,
+    pub amount_minor: i64,
+}
+
+/// The calendar the per-bucket deadlines are computed against. Held by the
+/// caller so the arithmetic stays pure and the clock stays a parameter.
+#[derive(Debug, Clone)]
+pub struct BucketConfig {
+    pub non_working_days: BTreeSet<String>,
+    pub saturday_is_working: bool,
+}
+
+/// Cash received on one trading date, and how much of it has reached the bank.
+///
+/// Per-trading-date aggregation is an **implementation convention**, not the
+/// statute: čl. 3 st. 1 runs from receipt of the cash, and neither it nor
+/// Pravilnik 77/2011 knows anything about a dnevni izveštaj or a Z-report. The
+/// UI must say so (§3 rule 11).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DepositBucket {
+    pub trading_date: String,
+    pub subject_minor: i64,
+    pub deposited_minor: i64,
+    pub outstanding_minor: i64,
+    /// `None` only when `trading_date` is not strictly `yyyy-MM-dd`; the report
+    /// then shows no deadline rather than a guessed one.
+    pub due_on: Option<String>,
+}
+
+/// Builds the deposit buckets, oldest first, and draws every polog down against
+/// the oldest bucket that still has a remainder.
+///
+/// Partial deposits are lawful — the duty is not all-or-nothing — so a polog
+/// smaller than the bucket leaves a remainder rather than clearing or failing
+/// (§3 rule 12). A polog larger than everything outstanding simply has nothing
+/// left to discharge: outstanding saturates at zero and never goes negative,
+/// because a negative "outstanding" would read as credit against future takings
+/// that the statute does not grant.
+///
+/// A trading date whose documented payouts consumed the whole take carries no
+/// duty and gets no bucket.
+pub fn build_buckets(
+    inflows: &[CashInflow],
+    deposits: &[CashDeposit],
+    config: &BucketConfig,
+) -> Vec<DepositBucket> {
+    let mut subject_by_date: BTreeMap<&str, i64> = BTreeMap::new();
+    for inflow in inflows.iter().filter(|inflow| inflow.subject) {
+        let total = subject_by_date.entry(inflow.date.as_str()).or_insert(0);
+        *total = total.saturating_add(inflow.amount_minor);
+    }
+
+    // ISO dates sort lexicographically, so the BTreeMap already hands them back
+    // chronologically — that ordering *is* the FIFO queue.
+    let mut buckets: Vec<DepositBucket> = subject_by_date
+        .into_iter()
+        .filter(|(_, subject_minor)| *subject_minor > 0)
+        .map(|(trading_date, subject_minor)| DepositBucket {
+            trading_date: trading_date.to_string(),
+            subject_minor,
+            deposited_minor: 0,
+            outstanding_minor: subject_minor,
+            due_on: add_working_days(
+                trading_date,
+                DEPOSIT_WINDOW_WORKING_DAYS,
+                &config.non_working_days,
+                config.saturday_is_working,
+            ),
+        })
+        .collect();
+
+    let mut ordered: Vec<&CashDeposit> = deposits.iter().collect();
+    ordered.sort_by(|left, right| left.date.cmp(&right.date));
+
+    for deposit in ordered {
+        let mut remaining = deposit.amount_minor.max(0);
+        for bucket in buckets.iter_mut() {
+            if remaining == 0 {
+                break;
+            }
+            let applied = remaining.min(bucket.outstanding_minor);
+            if applied <= 0 {
+                continue;
+            }
+            bucket.deposited_minor = bucket.deposited_minor.saturating_add(applied);
+            bucket.outstanding_minor = bucket.outstanding_minor.saturating_sub(applied);
+            remaining -= applied;
+        }
+    }
+
+    buckets
+}
+
 /// Loads the non-working-day calendar the deadline arithmetic runs against.
 pub fn load_non_working_days(state: &AppState) -> Result<BTreeSet<String>, AppError> {
     let conn = state.db().open()?;
@@ -197,6 +314,29 @@ mod tests {
 
     fn holidays(days: &[&str]) -> BTreeSet<String> {
         days.iter().map(|d| (*d).to_string()).collect()
+    }
+
+    fn inflow(date: &str, amount_minor: i64) -> CashInflow {
+        CashInflow {
+            date: date.to_string(),
+            amount_minor,
+            subject: true,
+        }
+    }
+
+    fn deposit(date: &str, amount_minor: i64) -> CashDeposit {
+        CashDeposit {
+            date: date.to_string(),
+            amount_minor,
+        }
+    }
+
+    /// An empty calendar with Saturdays counting — the shipped default.
+    fn config() -> BucketConfig {
+        BucketConfig {
+            non_working_days: BTreeSet::new(),
+            saturday_is_working: true,
+        }
     }
 
     /// The shipped calendar, as the arithmetic sees it after a seed.
@@ -264,5 +404,71 @@ mod tests {
     #[test]
     fn rejects_a_malformed_start_date_rather_than_guessing() {
         assert!(add_working_days("31.07.2026", 7, &holidays(&[]), true).is_none());
+    }
+
+    #[test]
+    fn deposits_discharge_the_oldest_bucket_first() {
+        let inflows = vec![inflow("2026-08-03", 100_000), inflow("2026-08-04", 50_000)];
+        let deposits = vec![deposit("2026-08-05", 120_000)];
+
+        let buckets = build_buckets(&inflows, &deposits, &config());
+
+        assert_eq!(
+            buckets[0].outstanding_minor, 0,
+            "the older bucket clears first"
+        );
+        assert_eq!(
+            buckets[1].outstanding_minor, 30_000,
+            "the remainder lands on the newer one"
+        );
+    }
+
+    #[test]
+    fn a_partial_deposit_is_lawful_and_leaves_a_remainder() {
+        let buckets = build_buckets(
+            &[inflow("2026-08-03", 100_000)],
+            &[deposit("2026-08-04", 40_000)],
+            &config(),
+        );
+
+        assert_eq!(buckets[0].deposited_minor, 40_000);
+        assert_eq!(buckets[0].outstanding_minor, 60_000);
+    }
+
+    /// Pravilnik 77/2011 čl. 5 st. 2 — cash withdrawn from the shop's own account
+    /// is not "gotov novac" for this duty. Without this the app ages the owner's
+    /// change float as undeposited pazar and invents violations.
+    #[test]
+    fn bank_withdrawal_never_enters_the_subject_base() {
+        let buckets = build_buckets(
+            &[
+                inflow("2026-08-03", 100_000),
+                CashInflow {
+                    date: "2026-08-03".into(),
+                    amount_minor: 500_000,
+                    subject: false,
+                },
+            ],
+            &[],
+            &config(),
+        );
+
+        assert_eq!(buckets[0].subject_minor, 100_000, "the float is excluded");
+    }
+
+    #[test]
+    fn each_bucket_carries_its_own_seven_working_day_deadline() {
+        let buckets = build_buckets(&[inflow("2026-07-31", 10_000)], &[], &config());
+        assert_eq!(buckets[0].due_on, Some("2026-08-08".to_string()));
+    }
+
+    #[test]
+    fn over_depositing_never_produces_a_negative_outstanding() {
+        let buckets = build_buckets(
+            &[inflow("2026-08-03", 10_000)],
+            &[deposit("2026-08-04", 999_000)],
+            &config(),
+        );
+        assert_eq!(buckets[0].outstanding_minor, 0);
     }
 }
