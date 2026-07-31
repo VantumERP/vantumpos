@@ -1252,7 +1252,7 @@ fn require_reason(value: &str, field: &str) -> Result<String, AppError> {
 }
 
 fn validate_payment_method(value: &str) -> Result<(), AppError> {
-    if matches!(value, "cash" | "card") {
+    if matches!(value, "cash" | "card" | "bank_transfer") {
         return Ok(());
     }
 
@@ -1286,7 +1286,9 @@ fn parse_payment_methods(value: String) -> Vec<String> {
 mod tests {
     use rusqlite::{params, Connection};
 
+    use crate::commands::shifts::current_shift_for_user;
     use crate::db::{test_database_path, Db};
+    use crate::state::AppState;
 
     use super::{
         get_receipt_detail, return_items, search_receipts, set_esir_number, void_receipt,
@@ -1455,6 +1457,17 @@ mod tests {
             user_id,
             product_id,
         }
+    }
+
+    /// Re-tenders the seeded sale so the whole total sits on `payment_method`.
+    fn settle_seeded_sale_by(db: &Db, sale_id: i64, payment_method: &str) {
+        db.open()
+            .expect("database should open")
+            .execute(
+                "UPDATE sale_payments SET payment_method = ?2 WHERE sale_id = ?1",
+                params![sale_id, payment_method],
+            )
+            .expect("payment method should update");
     }
 
     fn balance_for(connection: &Connection, product_id: i64) -> i64 {
@@ -1932,6 +1945,102 @@ mod tests {
                 )
                 .expect("card refund should exist");
             assert_eq!(refund, -50_000);
+        });
+    }
+
+    /// A sale settled by the lawful alternative to a capped cash payment
+    /// (čl. 46 st. 1) must be refundable back to the same account.
+    #[test]
+    fn return_refund_tender_bank_transfer_records_negative_transfer_refund() {
+        with_receipt_database("return_bank_transfer_refund", |db, seeded| {
+            settle_seeded_sale_by(db, seeded.sale_id, "bank_transfer");
+
+            return_items(
+                db,
+                ReturnItemsRequest {
+                    receipt_id: seeded.sale_id,
+                    reason: "Zamena velicine".to_string(),
+                    items: vec![ReturnItemRequest {
+                        sale_item_id: seeded.sale_item_id,
+                        quantity_milli: 1000,
+                    }],
+                    refund_tender: Some("bank_transfer".to_string()),
+                },
+                seeded.user_id,
+            )
+            .expect("return should succeed");
+
+            let connection = db.open().expect("database should open");
+            let refund: i64 = connection
+                .query_row(
+                    "SELECT sp.amount_minor FROM sale_payments sp
+                     JOIN sales s ON s.id = sp.sale_id
+                     WHERE s.original_sale_id = ?1 AND s.document_type = 'return'
+                       AND sp.payment_method = 'bank_transfer'",
+                    params![seeded.sale_id],
+                    |row| row.get(0),
+                )
+                .expect("bank transfer refund should exist");
+            assert_eq!(refund, -50_000);
+        });
+    }
+
+    /// Money that never entered the drawer must never be taken out of it: a
+    /// transfer sale refunded to the account leaves the expected cash alone.
+    #[test]
+    fn returning_a_bank_transfer_sale_leaves_the_expected_cash_untouched() {
+        with_receipt_database("return_bank_transfer_no_drawer_shortage", |db, seeded| {
+            settle_seeded_sale_by(db, seeded.sale_id, "bank_transfer");
+            let state = AppState::new(db.clone());
+
+            let before = current_shift_for_user(&state, seeded.user_id)
+                .expect("shift should load")
+                .expect("shift should be open")
+                .expected_cash_minor;
+            assert_eq!(before, 0, "a transfer sale never fills the drawer");
+
+            return_items(
+                db,
+                ReturnItemsRequest {
+                    receipt_id: seeded.sale_id,
+                    reason: "Zamena velicine".to_string(),
+                    items: vec![ReturnItemRequest {
+                        sale_item_id: seeded.sale_item_id,
+                        quantity_milli: 1000,
+                    }],
+                    refund_tender: Some("bank_transfer".to_string()),
+                },
+                seeded.user_id,
+            )
+            .expect("return should succeed");
+
+            let after = current_shift_for_user(&state, seeded.user_id)
+                .expect("shift should load")
+                .expect("shift should be open")
+                .expected_cash_minor;
+            assert_eq!(
+                after, before,
+                "refunding to the account must not invent a drawer shortage"
+            );
+        });
+    }
+
+    #[test]
+    fn search_receipts_can_filter_by_bank_transfer() {
+        with_receipt_database("search_receipts_bank_transfer", |db, seeded| {
+            settle_seeded_sale_by(db, seeded.sale_id, "bank_transfer");
+
+            let result = search_receipts(
+                db,
+                ReceiptSearchQuery {
+                    payment_method: Some("bank_transfer".to_string()),
+                    ..ReceiptSearchQuery::default()
+                },
+            )
+            .expect("receipt search should succeed");
+
+            assert_eq!(result.receipts.len(), 1);
+            assert_eq!(result.receipts[0].receipt_number, "R-2026-0001");
         });
     }
 
