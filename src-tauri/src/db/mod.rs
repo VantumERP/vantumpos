@@ -785,7 +785,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 14);
+                assert_eq!(migration_count, 15);
             },
         );
     }

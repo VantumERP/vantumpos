@@ -512,6 +512,62 @@ CREATE TABLE kep_closures (
 CREATE INDEX idx_kep_closures_year ON kep_closures(book_year);
 "#,
     },
+    Migration {
+        version: 15,
+        name: "shop_profile_cash_and_declaration_compliance",
+        sql: r#"
+ALTER TABLE products ADD COLUMN manufacturer_name TEXT;
+ALTER TABLE products ADD COLUMN importer_name TEXT;
+ALTER TABLE products ADD COLUMN country_of_origin TEXT;
+ALTER TABLE products ADD COLUMN official_goods_code TEXT;
+ALTER TABLE products ADD COLUMN barcode_kind TEXT
+    CHECK (barcode_kind IS NULL OR barcode_kind IN ('gtin', 'internal', 'none'));
+ALTER TABLE products ADD COLUMN declaration_checked_at TEXT;
+ALTER TABLE products ADD COLUMN declaration_checked_by INTEGER REFERENCES users(id);
+
+ALTER TABLE sales ADD COLUMN aml_cash_minor INTEGER;
+ALTER TABLE sales ADD COLUMN aml_rate_minor INTEGER;
+ALTER TABLE sales ADD COLUMN aml_rate_date TEXT;
+ALTER TABLE sales ADD COLUMN aml_rate_source TEXT;
+ALTER TABLE sales ADD COLUMN aml_ack_reason TEXT;
+
+CREATE TABLE cash_movements_next (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shift_id INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+    movement_type TEXT NOT NULL CHECK (movement_type IN ('pay_in', 'pay_out', 'bank_deposit', 'bank_withdrawal')),
+    amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+    reason TEXT,
+    bank_reference TEXT,
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+INSERT INTO cash_movements_next (id, shift_id, movement_type, amount_minor, reason, bank_reference, user_id, created_at)
+SELECT id, shift_id, movement_type, amount_minor, reason, NULL, user_id, created_at FROM cash_movements;
+DROP TABLE cash_movements;
+ALTER TABLE cash_movements_next RENAME TO cash_movements;
+CREATE INDEX idx_cash_movements_shift ON cash_movements(shift_id);
+CREATE INDEX idx_cash_movements_created_at ON cash_movements(created_at);
+
+CREATE TABLE sale_payments_next (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('cash', 'card', 'bank_transfer')),
+    amount_minor INTEGER NOT NULL CHECK (amount_minor <> 0),
+    created_at TEXT NOT NULL
+);
+INSERT INTO sale_payments_next (id, sale_id, payment_method, amount_minor, created_at)
+SELECT id, sale_id, payment_method, amount_minor, created_at FROM sale_payments;
+DROP TABLE sale_payments;
+ALTER TABLE sale_payments_next RENAME TO sale_payments;
+CREATE INDEX idx_sale_payments_sale ON sale_payments(sale_id);
+
+CREATE TABLE non_working_days (
+    day TEXT PRIMARY KEY NOT NULL,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -550,7 +606,7 @@ CREATE TABLE IF NOT EXISTS _migrations (
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::test_database_path;
+    use crate::db::{test_database_path, Db};
 
     fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
         let mut stmt = conn
@@ -794,6 +850,143 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
             );
         }
 
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn migration_v15_adds_declaration_and_cash_compliance_schema() {
+        let path = test_database_path("migration_v15_schema");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            for column in [
+                "manufacturer_name",
+                "importer_name",
+                "country_of_origin",
+                "official_goods_code",
+                "barcode_kind",
+                "declaration_checked_at",
+                "declaration_checked_by",
+            ] {
+                assert!(
+                    column_exists(&conn, "products", column),
+                    "products.{column} should exist after v15"
+                );
+            }
+
+            for column in [
+                "aml_cash_minor",
+                "aml_rate_minor",
+                "aml_rate_date",
+                "aml_rate_source",
+                "aml_ack_reason",
+            ] {
+                assert!(
+                    column_exists(&conn, "sales", column),
+                    "sales.{column} should exist after v15"
+                );
+            }
+
+            assert!(column_exists(&conn, "cash_movements", "bank_reference"));
+
+            // The widened CHECKs must actually admit the new values.
+            conn.execute_batch(
+                "INSERT INTO non_working_days (day, label, created_at)
+                 VALUES ('2027-01-07', 'Božić', '2026-07-31T00:00:00Z');",
+            )
+            .expect("non_working_days should accept a row");
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn migration_v15_preserves_existing_cash_movements_and_payments() {
+        let path = test_database_path("migration_v15_survival");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            // The rebuild already ran during Db::new; prove a round-trip through
+            // the rebuilt tables keeps every column, then prove the new CHECK
+            // values are accepted and a bogus one is rejected.
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (900, 'kasir9', 'Kasir Devet', 'cashier', 1, '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');
+                 INSERT INTO shifts (id, user_id, opened_at, opening_cash_minor, expected_cash_minor, status, created_at, updated_at)
+                     VALUES (900, 900, '2026-07-01T08:00:00Z', 100000, 100000, 'open', '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');
+                 INSERT INTO cash_movements (shift_id, movement_type, amount_minor, reason, user_id, created_at)
+                     VALUES (900, 'pay_in', 5000, 'sitno', 900, '2026-07-01T09:00:00Z');",
+            )
+            .expect("seed should insert");
+
+            for kind in ["bank_deposit", "bank_withdrawal"] {
+                conn.execute(
+                    "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, bank_reference, user_id, created_at)
+                     VALUES (900, ?1, 2500, 'izvod-1', 900, '2026-07-01T10:00:00Z')",
+                    rusqlite::params![kind],
+                )
+                .unwrap_or_else(|error| panic!("v15 should admit {kind}: {error}"));
+            }
+
+            assert!(
+                conn.execute(
+                    "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, user_id, created_at)
+                     VALUES (900, 'teleport', 100, 900, '2026-07-01T11:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the CHECK must still reject an unknown movement type"
+            );
+
+            let kept: i64 = conn
+                .query_row(
+                    "SELECT amount_minor FROM cash_movements WHERE movement_type = 'pay_in' AND shift_id = 900",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the seeded pay_in row must survive the rebuild");
+            assert_eq!(kept, 5000);
+
+            // The rebuilt sale_payments must round-trip every column and admit the
+            // third tender, while still rejecting an unknown one.
+            conn.execute_batch(
+                "INSERT INTO sales (id, local_receipt_number, shift_id, cashier_id, status,
+                                    subtotal_minor, discount_minor, tax_minor, total_minor,
+                                    created_at, updated_at)
+                     VALUES (900, 'R-900', 900, 900, 'completed', 100000, 0, 20000, 120000,
+                             '2026-07-01T09:30:00Z', '2026-07-01T09:30:00Z');
+                 INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                     VALUES (900, 'cash', 120000, '2026-07-01T09:30:00Z');",
+            )
+            .expect("sale seed should insert");
+
+            conn.execute(
+                "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                 VALUES (900, 'bank_transfer', 4500, '2026-07-01T09:40:00Z')",
+                [],
+            )
+            .expect("v15 should admit bank_transfer");
+
+            assert!(
+                conn.execute(
+                    "INSERT INTO sale_payments (sale_id, payment_method, amount_minor, created_at)
+                     VALUES (900, 'barter', 100, '2026-07-01T09:45:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the CHECK must still reject an unknown payment method"
+            );
+
+            let cash_kept: i64 = conn
+                .query_row(
+                    "SELECT amount_minor FROM sale_payments WHERE sale_id = 900 AND payment_method = 'cash'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the seeded cash payment must round-trip");
+            assert_eq!(cash_kept, 120000);
+        }
         std::fs::remove_file(&path).expect("test database should be removed");
     }
 }
