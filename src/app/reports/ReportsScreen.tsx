@@ -590,10 +590,20 @@ function TurnoverBreakdownSection({
         </CardHeader>
         <CardContent>
           <CompactTable
-            headers={["Smena", "Kasir", "Ukupno"]}
+            headers={[
+              "Smena",
+              "Kasir",
+              "Gotovina",
+              "Kartica",
+              "Prenos na račun",
+              "Ukupno",
+            ]}
             rows={shiftTurnover.rows.map((row) => [
               `#${row.shiftId}`,
               row.cashierName,
+              formatRsd(row.cashMinor),
+              formatRsd(row.cardMinor),
+              formatRsd(row.bankTransferMinor),
               formatRsd(row.totalMinor),
             ])}
           />
