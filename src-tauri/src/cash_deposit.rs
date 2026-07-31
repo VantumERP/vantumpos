@@ -48,6 +48,14 @@ pub const SATURDAY_IS_WORKING_DAY_KEY: &str = "saturday_is_working_day";
 /// The statutory deposit window, in radni dani (čl. 3 st. 1).
 pub const DEPOSIT_WINDOW_WORKING_DAYS: i64 = 7;
 
+/// Records that `DEFAULT_NON_WORKING_DAYS` has already been written to this
+/// install, so the seed never runs a second time and an admin deletion sticks.
+pub const NON_WORKING_DAYS_SEED_VERSION_KEY: &str = "non_working_days_seeded_version";
+
+/// Bump only when `DEFAULT_NON_WORKING_DAYS` gains days — see
+/// `ensure_default_non_working_days` for what a bump costs.
+pub const NON_WORKING_DAYS_SEED_VERSION: i64 = 1;
+
 /// Serbian state holidays for 2026 and 2027, per *Zakon o državnim i drugim
 /// praznicima u Republici Srbiji* ("Sl. glasnik RS", br. 43/2001, 101/2007,
 /// 92/2011): the fixed dates plus that year's whole Vaskršnji span, which the
@@ -317,9 +325,11 @@ pub fn load_non_working_days(state: &AppState) -> Result<BTreeSet<String>, AppEr
     Ok(days)
 }
 
-/// Seeds the 2026–2027 Serbian state holidays. Idempotent: an admin edit to a
-/// seeded day survives a re-seed, because every insert is `INSERT OR IGNORE`.
-/// Returns how many rows were actually added.
+/// Seeds the 2026–2027 Serbian state holidays. `INSERT OR IGNORE` keyed on
+/// `day`, so a **relabel** survives a re-seed — but a **deletion does not**: the
+/// row comes straight back. Nothing outside `ensure_default_non_working_days`
+/// may call this on a read path for exactly that reason. Returns how many rows
+/// were actually added.
 pub fn seed_default_non_working_days(state: &AppState, now: &str) -> Result<usize, AppError> {
     let mut conn = state.db().open()?;
     let tx = conn.transaction()?;
@@ -386,6 +396,64 @@ pub fn calendar(state: &AppState) -> Result<CashDepositCalendar, AppError> {
         days,
         horizon_year: SEEDED_CALENDAR_HORIZON_YEAR,
     })
+}
+
+/// Seeds the shipped holiday table **once per install**, never on every read.
+///
+/// The marker is what makes an admin deletion durable. `INSERT OR IGNORE` is
+/// keyed on `day`, so a re-seed silently restores any shipped day the shop
+/// removed — and restoring a non-working day pushes the čl. 3 st. 1 rok *later*,
+/// the unsafe direction this module refuses everywhere else.
+///
+/// Bumping `NON_WORKING_DAYS_SEED_VERSION` re-runs the whole seed, so it is only
+/// for genuinely extending `DEFAULT_NON_WORKING_DAYS` to a year the shop cannot
+/// have curated yet; a bump does restore shipped days the shop deleted, so the
+/// operator must be told to re-check the list when one happens. The same applies
+/// once to an install that predates the marker: it seeds a second time on
+/// upgrade, and from then on the deletion is durable.
+pub fn ensure_default_non_working_days(state: &AppState, now: &str) -> Result<usize, AppError> {
+    let seeded: i64 = load_json_setting(state, NON_WORKING_DAYS_SEED_VERSION_KEY, 0)?;
+    if seeded >= NON_WORKING_DAYS_SEED_VERSION {
+        return Ok(0);
+    }
+
+    let inserted = seed_default_non_working_days(state, now)?;
+    save_json_setting(
+        state,
+        NON_WORKING_DAYS_SEED_VERSION_KEY,
+        &NON_WORKING_DAYS_SEED_VERSION,
+    )?;
+    Ok(inserted)
+}
+
+/// The Settings surface, with the shipped holiday table in place.
+///
+/// Every command that renders the calendar goes through here, so the seed
+/// decision is made in one place and can be tested without a Tauri `State`.
+pub fn calendar_with_seeded_defaults(
+    state: &AppState,
+    now: &str,
+) -> Result<CashDepositCalendar, AppError> {
+    // Gate first: seeding is a write, and an unauthenticated caller must not
+    // provoke one.
+    crate::commands::auth::require_admin(state)?;
+    ensure_default_non_working_days(state, now)?;
+    calendar(state)
+}
+
+/// The aging report, computed against the same holiday table the Settings
+/// calendar shows — never against an empty one just because nobody has opened
+/// Podešavanja yet. Both surfaces seed through
+/// `ensure_default_non_working_days`, so whichever the operator reaches first
+/// establishes the table and neither can later move the other's deadlines.
+pub fn report_with_seeded_defaults(
+    state: &AppState,
+    as_of: &str,
+    now: &str,
+) -> Result<CashDepositReport, AppError> {
+    crate::commands::auth::require_admin(state)?;
+    ensure_default_non_working_days(state, now)?;
+    cash_deposit_report(state, as_of)
 }
 
 /// Sets whether Saturday counts as a radni dan. Never defaulted to `false`:
@@ -1435,6 +1503,74 @@ mod tests {
         });
     }
 
+    /// The Settings panel re-reads the calendar on every mount, and that read is
+    /// what carries the seed. If the seed ran on each read, deleting a shipped
+    /// holiday would be undone the next time the operator opened the tab — and
+    /// silently in the *unsafe* direction, because a restored non-working day
+    /// pushes the čl. 3 st. 1 rok later, so the report would say "U roku" for
+    /// cash the shop's own calendar says is already late.
+    #[test]
+    fn a_deleted_default_holiday_is_not_resurrected_by_reopening_the_calendar() {
+        with_state("cash_deposit_calendar_delete_sticks", |state| {
+            sign_in_admin(state);
+
+            let first = calendar_with_seeded_defaults(state, "2026-07-31T00:00:00Z")
+                .expect("calendar should read");
+            assert!(
+                first.days.iter().any(|entry| entry.day == "2026-04-11"),
+                "the shipped table must arrive on the first read"
+            );
+
+            delete_non_working_day(state, "2026-04-11").expect("day should delete");
+
+            // The mount effect the Settings panel runs on the next visit.
+            let reopened = calendar_with_seeded_defaults(state, "2026-08-01T00:00:00Z")
+                .expect("calendar should read");
+            assert!(
+                !reopened.days.iter().any(|entry| entry.day == "2026-04-11"),
+                "a deleted non-working day must stay deleted across re-reads"
+            );
+
+            // …and the arithmetic must agree, not just the list. Friday 03.04
+            // plus seven radni dana lands on 15.04 with Velika subota listed and
+            // on 14.04 without it — the earlier, conservative deadline.
+            let days = load_non_working_days(state).expect("days should load");
+            assert_eq!(
+                add_working_days("2026-04-03", DEPOSIT_WINDOW_WORKING_DAYS, &days, true),
+                Some("2026-04-14".to_string()),
+                "the deleted day must pull the deadline earlier and keep it there"
+            );
+        });
+    }
+
+    /// A fresh install must not compute the report against an empty holiday
+    /// table until somebody happens to open Podešavanja — that would move every
+    /// deadline later the moment a settings page was viewed.
+    #[test]
+    fn the_report_sees_the_same_holiday_table_as_the_settings_calendar() {
+        with_state("cash_deposit_report_seeds_too", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-04-03", 100_000);
+
+            let report = report_with_seeded_defaults(state, "2026-04-20", "2026-04-20T12:00:00Z")
+                .expect("report should build");
+
+            assert_eq!(
+                report.buckets[0].due_on.as_deref(),
+                Some("2026-04-15"),
+                "the report must count against the shipped Vaskršnji span, not an empty table"
+            );
+            assert!(
+                calendar(state)
+                    .expect("calendar should read")
+                    .days
+                    .iter()
+                    .any(|entry| entry.day == "2026-04-11"),
+                "the report and the Settings calendar must see one table"
+            );
+        });
+    }
+
     #[test]
     fn the_saturday_assumption_is_settable_and_read_back() {
         with_state("cash_deposit_calendar_saturday", |state| {
@@ -1480,6 +1616,19 @@ mod tests {
                 save_non_working_day(state, "2026-08-05", "Slava", "2026-07-31T00:00:00Z").is_err()
             );
             assert!(delete_non_working_day(state, "2026-08-05").is_err());
+
+            // The seeding entry points gate *before* they write, so a caller
+            // without an admin session cannot provoke the seed either.
+            assert!(calendar_with_seeded_defaults(state, "2026-07-31T00:00:00Z").is_err());
+            assert!(
+                report_with_seeded_defaults(state, "2026-07-31", "2026-07-31T00:00:00Z").is_err()
+            );
+            assert!(
+                load_non_working_days(state)
+                    .expect("days should load")
+                    .is_empty(),
+                "a refused call must not have written the holiday table"
+            );
         });
     }
 }

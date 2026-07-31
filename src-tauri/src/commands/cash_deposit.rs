@@ -24,7 +24,8 @@ pub fn cash_deposit_report(
     state: State<'_, AppState>,
     as_of: String,
 ) -> Result<CashDepositReport, CommandError> {
-    crate::cash_deposit::cash_deposit_report(state.inner(), &as_of).map_err(Into::into)
+    crate::cash_deposit::report_with_seeded_defaults(state.inner(), &as_of, &utc_now()?)
+        .map_err(Into::into)
 }
 
 /// Writes the same report as CSV into the `exports/` dir beside the database —
@@ -35,7 +36,8 @@ pub fn cash_deposit_export_csv(
     state: State<'_, AppState>,
     as_of: String,
 ) -> Result<ExportedFile, CommandError> {
-    let report = crate::cash_deposit::cash_deposit_report(state.inner(), &as_of)?;
+    let report =
+        crate::cash_deposit::report_with_seeded_defaults(state.inner(), &as_of, &utc_now()?)?;
     let csv = crate::cash_deposit::report_to_csv(&report);
 
     let export_dir = state.db().path().parent().map_or_else(
@@ -57,19 +59,18 @@ pub fn cash_deposit_export_csv(
 }
 
 /// The Settings surface for the calendar the deadline is counted against. The
-/// holiday table is `[PRUDENTIAL]` and annual, so it is seeded on first read
-/// rather than at install: a shop that upgrades mid-year must not be handed an
-/// empty table, and the seed is idempotent, so an admin edit survives it.
+/// holiday table is `[PRUDENTIAL]` and annual, so it is seeded lazily rather
+/// than at install — a shop that upgrades mid-year must not be handed an empty
+/// table — but exactly **once**: `ensure_default_non_working_days` keeps a
+/// version marker, so an admin who deletes a shipped holiday does not find it
+/// back on the next visit. The report seeds through the same helper, so the two
+/// surfaces can never disagree about the table.
 #[tauri::command]
 pub fn cash_deposit_calendar(
     state: State<'_, AppState>,
 ) -> Result<CashDepositCalendar, CommandError> {
-    let state = state.inner();
-    // Gate first: seeding is a write, and an unauthenticated caller must not
-    // provoke one.
-    crate::commands::auth::require_admin(state)?;
-    crate::cash_deposit::seed_default_non_working_days(state, &utc_now()?)?;
-    crate::cash_deposit::calendar(state).map_err(Into::into)
+    crate::cash_deposit::calendar_with_seeded_defaults(state.inner(), &utc_now()?)
+        .map_err(Into::into)
 }
 
 #[tauri::command]

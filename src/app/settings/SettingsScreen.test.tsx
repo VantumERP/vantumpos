@@ -254,6 +254,44 @@ describe("SettingsScreen deposit calendar", () => {
     );
   });
 
+  it("cites the full title, the gazette and the kazna articles", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Kalendar" }));
+
+    const citation = await screen.findByText(
+      /Zakon o obavljanju plaćanja pravnih lica, preduzetnika i fizičkih lica koja ne obavljaju delatnost/i,
+    );
+    expect(citation).toHaveTextContent(/Sl\. glasnik RS, br\. 68\/2015/);
+    expect(citation).toHaveTextContent(/čl\. 3 st\. 1/);
+    expect(citation).toHaveTextContent(/kazne čl\. 7 st\. 1 tač\. 2\) i st\. 3/);
+    expect(citation).toHaveTextContent(/Poreska uprava/);
+    // Never the short form, and no fine figure outside legal.rs.
+    expect(screen.queryByText(/\bZOP\b/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\d{2}\.000/)).not.toBeInTheDocument();
+  });
+
+  it("never claims a prepared list while the holiday table is empty", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    services.settings.getCashDepositCalendar = async () => ({
+      saturdayIsWorking: true,
+      days: [],
+      horizonYear: 2027,
+    });
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Kalendar" }));
+
+    expect(
+      await screen.findByText(/Lista neradnih dana je prazna/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/pripremljena zaključno sa/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("frames the holiday table as this shop's list, not a statutory one", async () => {
     const user = userEvent.setup();
     renderSettings();

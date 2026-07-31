@@ -921,8 +921,11 @@ function DepositCalendarPanel({ settings }: { settings: SettingsService }) {
         </CardTitle>
         <CardDescription>
           Gotovina primljena po bilo kom osnovu uplaćuje se na tekući račun u
-          roku od sedam radnih dana (Zakon 68/2015, čl. 3 st. 1; nadzor: Poreska
-          uprava). Ova podešavanja određuju kako se ti radni dani broje.
+          roku od sedam radnih dana. Zakon o obavljanju plaćanja pravnih lica,
+          preduzetnika i fizičkih lica koja ne obavljaju delatnost (Sl. glasnik
+          RS, br. 68/2015), čl. 3 st. 1; kazne čl. 7 st. 1 tač. 2) i st. 3.
+          Nadzor: Poreska uprava (čl. 6). Ova podešavanja određuju kako se ti
+          radni dani broje.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -971,12 +974,20 @@ function DepositCalendarPanel({ settings }: { settings: SettingsService }) {
 
             <div className="flex flex-col gap-2">
               <span className="text-sm font-medium">Neradni dani</span>
-              <span className="text-xs text-muted-foreground">
-                Lista je pripremljena zaključno sa {calendar.horizonYear}.
-                godinom — proverite listu za svaku godinu i dopunite je, jer se
-                pokretni praznici pomeraju. Dodatni neradni dan pomera rok
-                kasnije, a uklonjen ga vraća ranije.
-              </span>
+              {calendar.days.length === 0 ? (
+                <span className="text-xs text-muted-foreground">
+                  Lista neradnih dana je prazna — rok se broji samo po nedeljama
+                  i po pretpostavci o suboti. Dodajte praznike koje radnja ne
+                  radi, jer svaki neradni dan pomera rok kasnije.
+                </span>
+              ) : (
+                <span className="text-xs text-muted-foreground">
+                  Lista je pripremljena zaključno sa {calendar.horizonYear}.
+                  godinom — proverite listu za svaku godinu i dopunite je, jer
+                  se pokretni praznici pomeraju. Dodatni neradni dan pomera rok
+                  kasnije, a uklonjen ga vraća ranije.
+                </span>
+              )}
               <div className="overflow-x-auto rounded-md border">
                 <Table>
                   <TableHeader>
