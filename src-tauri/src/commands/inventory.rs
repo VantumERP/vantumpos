@@ -78,8 +78,20 @@ pub struct DeclarationWarning {
     pub product_name: String,
     /// camelCase field names, so the UI can point at the very input that is blank.
     pub missing_fields: Vec<String>,
+    /// What the shop is actually looking at: a gap in its own records, not a
+    /// proven offence. The čl. 34 st. 1 data lives on the packaging, so blank
+    /// catalog fields say nothing about the pallet in the stockroom. `notice`
+    /// below is the exposure this gap leaves *unverified* — the UI must render
+    /// this line with it, never the notice alone (§3 req 26 `[ACCURACY]`).
+    pub advisory: String,
     pub notice: crate::legal::LegalNotice,
 }
+
+/// Kept next to the struct so the qualifier can never drift away from the notice
+/// it qualifies.
+const DECLARATION_ADVISORY: &str = "U sistemu nisu evidentirani podaci sa deklaracije. \
+     Ako roba fizički nosi ispravnu deklaraciju, prekršaja nema — unesite podatke sa \
+     deklaracije ili evidentirajte proveru deklaracije (olakšavajuća okolnost, čl. 69a).";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -582,9 +594,11 @@ pub fn apply_inventory_adjustment(
 
         // SW-11c: the last moment the shop can still refuse the pallet. Collected
         // inside the transaction so the warning describes exactly the row that was
-        // received, but it can never fail the receipt — see the doc comment on
-        // `collect_declaration_warnings`.
-        declaration_warnings = collect_declaration_warnings(&tx, request.product_id)?;
+        // received. It sits after the zaduženje, so anything it returned as `Err`
+        // would roll back the movement, the kalkulacija AND the ledger entry —
+        // i.e. a hard block, which §3 req 12 forbids. Hence the infallible
+        // signature: there is no `?` here to propagate.
+        declaration_warnings = collect_declaration_warnings(&tx, request.product_id);
     }
 
     tx.commit()?;
@@ -607,22 +621,36 @@ pub fn apply_inventory_adjustment(
 /// goods, not receiving them, and a hard block would strand a pallet that is
 /// already in the stockroom.
 ///
+/// **Infallible by construction.** The caller runs this inside the receive
+/// transaction, after the KEP zaduženje, so a `Result` here would be a hard block
+/// wearing an advisory label — the exact thing §3 req 12 forbids. Every failure
+/// mode therefore degrades instead of propagating:
+///
+/// - an unreadable `products` row yields no warning (the receipt is what matters);
+/// - an unreadable `shop_profile` row falls back to `ShopProfile::default()`,
+///   whose pravna forma is `None`, so the notice renders **no figure** rather than
+///   a plausible one. `load_shop_profile_for_connection` keeps failing loudly for
+///   the catalog čl. 34 st. 5 gate, where blocking is the correct answer; only
+///   this advisory path absorbs it.
+///
 /// The notice is tier-resolved from the shop profile, so a shop whose pravna
 /// forma is unset is shown the duty with no figure rather than a plausible one.
 fn collect_declaration_warnings(
     connection: &Connection,
     product_id: i64,
-) -> Result<Vec<DeclarationWarning>, AppError> {
+) -> Vec<DeclarationWarning> {
     let row: Option<(String, Option<String>, Option<String>)> = connection
         .query_row(
             "SELECT name, manufacturer_name, country_of_origin FROM products WHERE id = ?1",
             params![product_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .optional()?;
+        .optional()
+        .ok()
+        .flatten();
 
     let Some((product_name, manufacturer_name, country_of_origin)) = row else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
 
     let missing_fields = [
@@ -635,17 +663,18 @@ fn collect_declaration_warnings(
     .collect::<Vec<_>>();
 
     if missing_fields.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
-    let profile = super::catalog::load_shop_profile_for_connection(connection)?;
+    let profile = super::catalog::load_shop_profile_for_connection(connection).unwrap_or_default();
 
-    Ok(vec![DeclarationWarning {
+    vec![DeclarationWarning {
         product_id,
         product_name,
         missing_fields,
+        advisory: DECLARATION_ADVISORY.to_string(),
         notice: crate::legal::declaration_missing(&profile),
-    }])
+    }]
 }
 
 #[derive(Clone, Debug)]
@@ -825,6 +854,7 @@ mod tests {
         mark_declaration_checked, write_stock_movement, InventoryAdjustmentRequest,
         InventoryMovementType, StockListQuery, StockMovementWrite,
     };
+    use crate::commands::settings::{PravnaForma, ShopProfile};
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
 
@@ -1621,6 +1651,36 @@ mod tests {
         1
     }
 
+    /// Only the proizvođač is on file — the porijeklo column is still blank.
+    fn seed_product_with_manufacturer_only(connection: &Connection) -> i64 {
+        connection
+            .execute(
+                "UPDATE products
+                 SET manufacturer_name = 'Mlekara Šabac d.o.o.'
+                 WHERE id = 1",
+                [],
+            )
+            .expect("declaration data should update");
+        1
+    }
+
+    fn write_shop_profile_row(connection: &Connection, value_json: &str) {
+        connection
+            .execute(
+                "INSERT INTO settings (key, value_json, updated_at)
+                 VALUES ('shop_profile', ?1, '2026-07-31T10:00:00Z')
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                params![value_json],
+            )
+            .expect("shop profile row should write");
+    }
+
+    fn kep_entry_count(connection: &Connection) -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM kep_entries", [], |row| row.get(0))
+            .expect("kep count should query")
+    }
+
     #[test]
     fn receiving_a_product_without_declaration_data_warns_but_never_blocks() {
         with_connection("receive_declaration_check_warning", |connection| {
@@ -1645,17 +1705,136 @@ mod tests {
                 warning.notice.is_legal_duty,
                 "selling such goods IS an offence"
             );
+            assert_eq!(
+                warning.missing_fields,
+                vec![
+                    "manufacturerName".to_string(),
+                    "countryOfOrigin".to_string()
+                ],
+                "the operator must be told which fields are blank"
+            );
+
+            // Pin the exact tier. `is_legal_duty` alone is true of every notice in
+            // legal.rs, so it would not notice a swap to the čl. 67 defective tier
+            // (fixed, lower, no trading ban) or to an unrelated statute. Compared
+            // against the constructor rather than to literal text: no fine figure
+            // may live outside legal.rs.
+            assert_eq!(
+                warning.notice,
+                crate::legal::declaration_missing(&ShopProfile::default()),
+                "the notice must be the čl. 68 st. 1 tač. 9 missing-declaration tier"
+            );
             assert!(
-                warning
-                    .missing_fields
-                    .contains(&"manufacturerName".to_string()),
-                "the operator must be told which field is blank: {:?}",
-                warning.missing_fields
+                warning.notice.citation.contains("čl. 68 st. 1 tač. 9"),
+                "the operator must be able to hand the inspector the right article: {}",
+                warning.notice.citation
+            );
+
+            // Pravna forma is unanswered here, so no plausible figure may render.
+            assert!(
+                warning.notice.penalty.is_none(),
+                "a shop of unknown legal form gets the duty with no figure: {:?}",
+                warning.notice.penalty
+            );
+
+            // A blank catalog field is a record gap, not a proven offence: the
+            // deklaracija lives on the packaging. The payload has to say so, or
+            // the UI renders a shop-closure threat at a compliant shop.
+            assert!(
+                warning.advisory.contains("prekršaja nema"),
+                "the record-vs-reality distinction must reach the operator: {}",
+                warning.advisory
             );
 
             // Warn only: the goods are on the shelf and in the KEP either way.
             assert_eq!(result.new_quantity_milli, 5_000);
             assert_eq!(current_balance(connection), 5_000);
+        });
+    }
+
+    #[test]
+    fn a_declaration_warning_names_only_the_field_that_is_actually_blank() {
+        with_connection("receive_declaration_check_partial", |connection| {
+            seed_product_with_manufacturer_only(connection);
+
+            let result = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                adjustment(5_000, "Prijem robe"),
+                SEEDED_ADMIN_ID,
+                "2026-07-31T10:00:00Z",
+            )
+            .expect("receive should succeed");
+
+            assert_eq!(result.declaration_warnings.len(), 1);
+            assert_eq!(
+                result.declaration_warnings[0].missing_fields,
+                vec!["countryOfOrigin".to_string()],
+                "the recorded proizvođač must not be reported as missing"
+            );
+        });
+    }
+
+    #[test]
+    fn a_declaration_warning_renders_the_tier_of_the_shops_own_legal_form() {
+        with_connection("receive_declaration_check_tier", |connection| {
+            write_shop_profile_row(connection, r#"{"pravnaForma":"preduzetnik"}"#);
+
+            let result = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                adjustment(5_000, "Prijem robe"),
+                SEEDED_ADMIN_ID,
+                "2026-07-31T10:00:00Z",
+            )
+            .expect("receive should succeed");
+
+            let warning = &result.declaration_warnings[0];
+            let expected = crate::legal::declaration_missing(&ShopProfile {
+                pravna_forma: Some(PravnaForma::Preduzetnik),
+                ..ShopProfile::default()
+            });
+            assert_eq!(
+                warning.notice, expected,
+                "the preduzetnik must see the preduzetnik tier, resolved by legal.rs"
+            );
+            assert!(
+                warning.notice.penalty.is_some(),
+                "a known legal form does get a figure"
+            );
+        });
+    }
+
+    /// The advisory declaration check hangs off the receive transaction, after
+    /// the KEP zaduženje. If it can raise, it rolls back the movement, the
+    /// kalkulacija and the ledger entry — a hard block, which §3 req 12 forbids
+    /// and which would strand a pallet already in the stockroom over a settings
+    /// row the operator cannot even see from this screen. The catalog loader
+    /// deliberately fails loud on a corrupt profile (that gate stays), so the
+    /// advisory path has to absorb it.
+    #[test]
+    fn a_corrupt_shop_profile_cannot_block_a_goods_receipt() {
+        with_connection("receive_declaration_check_corrupt_profile", |connection| {
+            write_shop_profile_row(connection, "{ this is not json");
+
+            let result = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                adjustment(5_000, "Prijem robe"),
+                SEEDED_ADMIN_ID,
+                "2026-07-31T10:00:00Z",
+            )
+            .expect("an unreadable settings row must never strand received stock");
+
+            assert_eq!(current_balance(connection), 5_000);
+            assert_eq!(kep_entry_count(connection), 1, "the zaduženje still posts");
+
+            let warning = &result.declaration_warnings[0];
+            assert!(
+                warning.notice.penalty.is_none(),
+                "an unreadable profile resolves no tier, so no figure is invented: {:?}",
+                warning.notice.penalty
+            );
         });
     }
 
