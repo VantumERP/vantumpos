@@ -189,14 +189,28 @@ New **"Radnja / Profil"** section on the existing Settings screen (`SettingsScre
 
 ### 3.1 Evaluation
 
-Evaluated in `sales_preview` (so the cashier sees it **before** tendering) and re-evaluated in `sales_complete`.
+> **Correction as shipped (31.07.2026).** This section originally said the assessment was
+> *"evaluated in `sales_preview`"*. It is not, and could not be: `SaleDraftRequest` carries only
+> `items` + `receiptDiscount` — **no tender split** — so a preview has nothing to assess. Widening it
+> would have made every preview a payment question. The shipped design is instead a **dedicated
+> `sales_assess_cash_payment(cash_minor)` command** (`commands/sales.rs`), called by the till whenever
+> the **cash input changes** — which still puts the verdict in front of the cashier *before* the money
+> changes hands, the property the original wording was reaching for. `sales_complete` re-evaluates
+> server-side and persists the provenance (`assess_sale_cash`), so the warning cannot be dodged by a
+> client that never asked.
+
+Evaluated by `sales_assess_cash_payment` as the cash line is entered (so the cashier sees it **before**
+tendering) and re-evaluated — and persisted — in `sales_complete`.
 
 ```rust
 pub struct AmlAssessment {
     pub cash_minor: i64,
-    pub threshold_minor: i64,      // 10_000 EUR at the applied rate
-    pub breached: bool,            // cash_minor >= threshold_minor
-    pub rate: EurRate,
+    pub threshold_minor: i64,           // 10_000 EUR at the applied rate
+    pub fallback_threshold_minor: i64,  // stand-in cap, may only warn, never assert a breach
+    pub breached: bool,                 // cash_minor >= threshold_minor
+    pub near_threshold: bool,           // soft band: >= soft_minor, < threshold_minor
+    pub rate_unavailable: bool,         // no rate cached: the check could not run
+    pub rate: Option<EurRate>,          // None exactly when rate_unavailable
     pub notice: LegalNotice,
 }
 ```

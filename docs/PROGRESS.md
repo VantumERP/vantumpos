@@ -71,6 +71,40 @@ non-blocking.
 
 ---
 
+## Compliance Backlog Update — SW-11 + SW-15 (2026-07-31)
+
+The cash & product compliance trio (**SW-11a/b/c**) and the **SW-15** onboarding profile shipped as a
+22-task TDD plan (`docs/superpowers/plans/2026-07-31-sw11-sw15.md`, design at
+`docs/superpowers/specs/2026-07-31-sw11-sw15-cash-product-onboarding-design.md`, verified legal rule set
+at `docs/SW11-SW15-VERIFIED-RULES.md`). Register rows 21, 27, 28 and 29 in
+`docs/SERBIAN-LAW-COMPLIANCE.md` were re-stated accordingly.
+
+| Item | Shipped as |
+|---|---|
+| SW-15 onboarding profile | `settings.rs::ShopProfile` — `pravna_forma` / `pdv_obveznik` / `distance_selling`, all tri-state and **never inferred**; `EsirElement` rows kept as an *interna beleška o proveri*, never an *evidencija* |
+| Tier-resolved legal copy | `legal.rs` — the **only** module permitted to hold a fine figure; a test pins that "privredni prestup" is unreachable under the preduzetnik regime |
+| SW-11a AML cash cap | `aml.rs` (inclusive `>=`, subject is the cash line of the tender) + `nbs_rate.rs` (zvanični srednji kurs, manual fallback, no silent pass); asked via `sales_assess_cash_payment`, re-evaluated and persisted by `sales_complete`; `bank_transfer` tender ships the statute's own remedy |
+| SW-11b polog aging | `cash_deposit.rs` — working-day arithmetic over a seeded, operator-editable `non_working_days` table, FIFO buckets clocked from **receipt**, deadline as a date, `bank_withdrawal` excluded from the subject base. Advisory only, no hard block |
+| SW-11c deklaracija | declaration columns on `products` (v15) + `catalog.rs::validate_declaration` (mandatory **iff** `distance_selling`), `catalog_declaration_gaps` report, goods-receipt warnings in `inventory.rs` |
+| Go-live reset | preserves configuration (`shop_profile`, `eur_rate`, `non_working_days`), clears compliance state, and discloses the deklaracija wipe |
+
+**Verification gates (all green at HEAD):**
+
+| Gate | Result |
+|---|---|
+| `bun run test` | **274 passed** / 0 failed, 19 files (was 95) |
+| `bun run build` | pass (tsc + vite, 2732 modules) |
+| `cargo test -- --test-threads=1` | **456 passed** / 0 failed (was 103) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `git diff --check` | clean |
+
+**Known remaining gap:** the general upward-only `retain_until` engine (register row 21) is still open —
+only the onboarding half of the retention item shipped. The KEP book carries its own 5-year floor in
+`kep_close.rs::retention_floor`.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.
