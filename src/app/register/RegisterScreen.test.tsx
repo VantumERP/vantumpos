@@ -650,6 +650,54 @@ describe("RegisterScreen", () => {
     expect(completeSale).not.toHaveBeenCalled();
   }, AML_TEST_TIMEOUT_MS);
 
+  it("does not let a click inside the assessment window skip the reason", async () => {
+    const user = userEvent.setup();
+    const completeSale = vi.fn(createCompletedSale);
+    const services = createAmlServices({ eurRateMinor: 100, completeSale });
+    // The till debounces the assessment, so there is always a window in which
+    // no verdict — or the verdict for the PREVIOUS tender — is what the screen
+    // holds. Holding every assessment open reproduces that window
+    // deterministically; waiting on the 200 ms timer would race a starved box.
+    let releaseAssessment!: () => void;
+    const assessmentGate = new Promise<void>((resolve) => {
+      releaseAssessment = resolve;
+    });
+    services.sales.assessCashPayment = vi.fn(async (cashMinor: number) => {
+      await assessmentGate;
+
+      return buildAmlAssessment(cashMinor, 100, todayIso(), amlPreduzetnikPenalty);
+    });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    // 10.000,00 RSD in cash — a breach of čl. 46 st. 1 — but the verdict that
+    // would say so has not landed yet.
+    await awaitCashPrefill("10000.00");
+    expect(
+      screen.queryByLabelText(/razlog prijema gotovine/i),
+      "the window this test exercises is the one before the verdict lands",
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
+
+    expect(
+      completeSale,
+      "an unassessed cash line may not be booked while the verdict is pending",
+    ).not.toHaveBeenCalled();
+
+    releaseAssessment();
+
+    expect(
+      await screen.findByText(/unesite razlog/i, undefined, {
+        timeout: AML_WAIT_MS,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      completeSale,
+      "a breach may never be recorded with aml_ack_reason left NULL",
+    ).not.toHaveBeenCalled();
+  }, AML_TEST_TIMEOUT_MS);
+
   it("warns near the cap without demanding a reason", async () => {
     const user = userEvent.setup();
     const completeSale = vi.fn(createCompletedSale);

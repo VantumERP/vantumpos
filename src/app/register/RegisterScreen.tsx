@@ -107,6 +107,14 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   const [bankTransferInput, setBankTransferInput] = useState("");
   const [assessment, setAssessment] = useState<AmlAssessment | null>(null);
   const [assessFailed, setAssessFailed] = useState(false);
+  // The cash line `assessment`/`assessFailed` actually describe. The verdict is
+  // debounced, so without this the till cannot tell a verdict for the tender in
+  // the field from one for the tender before last — and a soft block that
+  // consults a stale verdict is a soft block a fast operator walks straight
+  // through.
+  const [assessedCashMinor, setAssessedCashMinor] = useState<number | null>(
+    null,
+  );
   const [amlReason, setAmlReason] = useState("");
   const [amlReasonError, setAmlReasonError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -208,6 +216,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
     if (retainedCashMinor <= 0) {
       setAssessment(null);
       setAssessFailed(false);
+      setAssessedCashMinor(null);
       return;
     }
 
@@ -221,6 +230,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
           if (active) {
             setAssessment(verdict);
             setAssessFailed(false);
+            setAssessedCashMinor(retainedCashMinor);
           }
         } catch {
           if (active) {
@@ -234,6 +244,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
             // any amount rather than only past the stand-in cap.
             setAssessment(null);
             setAssessFailed(true);
+            setAssessedCashMinor(retainedCashMinor);
           }
         }
       })();
@@ -245,6 +256,12 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
     };
   }, [retainedCashMinor, services]);
 
+  // True from the keystroke until the verdict for THAT cash line lands: the
+  // debounce timer, the in-flight call, and the stretch where a settled verdict
+  // still belongs to an older tender. Nothing may read `amlBreached` as final
+  // while this holds.
+  const amlAssessmentPending =
+    retainedCashMinor > 0 && assessedCashMinor !== retainedCashMinor;
   const amlBreached = assessment?.breached ?? false;
   const amlWarns = amlBreached || (assessment?.nearThreshold ?? false);
   // A cached rate is missing on every fresh install, so saying so on a 200 RSD
@@ -387,19 +404,48 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       return;
     }
 
+    setMessage(null);
+
+    // The rendered verdict is debounced, so between the last keystroke and the
+    // assessment landing it describes the tender before this one. Deciding the
+    // soft block on it would let a breach through to anyone who types and
+    // clicks inside that window — settle the verdict for the cash line that is
+    // actually about to be booked before deciding anything.
+    let verdict = assessment;
+
+    if (amlAssessmentPending) {
+      setIsCompleting(true);
+
+      try {
+        verdict = await services.sales.assessCashPayment(retainedCashMinor);
+        setAssessment(verdict);
+        setAssessFailed(false);
+      } catch {
+        // Same degradation as the debounced path: a check that could not run is
+        // not a check that passed, but it must not hold the till hostage
+        // either.
+        verdict = null;
+        setAssessment(null);
+        setAssessFailed(true);
+      }
+
+      setAssessedCashMinor(retainedCashMinor);
+    }
+
+    const breached = verdict?.breached ?? false;
     const reason = amlReason.trim();
 
     // A soft block: the sale is lawful to record either way, but a breach of
     // čl. 46 st. 1 must not go into the books unexplained.
-    if (amlBreached && !reason) {
+    if (breached && !reason) {
       setAmlReasonError(
         "Unesite razlog prijema gotovine pre nego što završite prodaju.",
       );
+      setIsCompleting(false);
       return;
     }
 
     setAmlReasonError(null);
-    setMessage(null);
     setIsCompleting(true);
 
     const payments: SalePaymentDraft[] = [
@@ -421,7 +467,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
         ...(allowStockOverride ? { allowStockOverride: true } : {}),
         // Only a breach is ever acknowledged — the reason field is the only
         // place a reason can be typed, and it only renders on a breach.
-        ...(amlBreached && reason ? { amlAckReason: reason } : {}),
+        ...(breached && reason ? { amlAckReason: reason } : {}),
       });
       setCompletedSale(sale);
       setCart([]);
@@ -432,6 +478,9 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       setBankTransferInput("");
       setAssessment(null);
       setAssessFailed(false);
+      // Without this the NEXT sale for the same cash figure would look already
+      // assessed while `assessment` is null — the bypass again, one sale later.
+      setAssessedCashMinor(null);
       setAmlReason("");
       setReceiptDiscountInput("");
       setOverrideOpen(false);
