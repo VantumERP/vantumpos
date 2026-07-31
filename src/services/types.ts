@@ -62,6 +62,33 @@ export interface SalesSettingsRequest {
   allowOverselling: boolean;
 }
 
+export type PravnaForma = "preduzetnik" | "pravno_lice";
+export type EsirTip = "ESIR" | "LPFR";
+
+export interface EsirElement {
+  naziv: string;
+  verzija: string;
+  ib: string;
+  tip: EsirTip;
+  checkedOn: string | null;
+}
+
+export interface ShopProfile {
+  pravnaForma: PravnaForma | null;
+  pdvObveznik: boolean | null;
+  /** `null` = nije odgovoreno. Never coalesce it to `false` — see §3 req 31 / §5 Q-8. */
+  distanceSelling: boolean | null;
+  lpfrInPremises: boolean | null;
+  esirElements: EsirElement[];
+}
+
+export interface LegalNotice {
+  summary: string;
+  penalty: string | null;
+  citation: string;
+  isLegalDuty: boolean;
+}
+
 export interface BackupSettings {
   backupFolder: string;
   automaticBackupEnabled: boolean;

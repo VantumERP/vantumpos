@@ -63,8 +63,11 @@ import type {
   CompanySettings,
   ReceiptSettings,
   SalesSettings,
+  ShopProfile,
   TaxRate,
 } from "@/services/types";
+
+import { ShopProfilePanel } from "./ShopProfilePanel";
 
 interface SettingsScreenProps {
   services: PosServices;
@@ -79,12 +82,19 @@ type LoadState =
       taxRates: TaxRate[];
       receipt: ReceiptSettings;
       sales: SalesSettings;
+      shopProfile: ShopProfile;
       backupStatus: BackupStatus;
       backupJobs: BackupJob[];
     }
   | { status: "error"; message: string };
 
-type SettingsTab = "company" | "vat" | "receipts" | "users" | "backup";
+type SettingsTab =
+  | "company"
+  | "profile"
+  | "vat"
+  | "receipts"
+  | "users"
+  | "backup";
 
 export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
@@ -97,20 +107,32 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       services.settings.listTaxRates(),
       services.settings.getReceiptSettings(),
       services.settings.getSalesSettings(),
+      services.settings.getShopProfile(),
       services.backup.getBackupStatus(),
       services.backup.listBackupJobs(),
     ])
-      .then(([company, taxRates, receipt, sales, backupStatus, backupJobs]) => {
-        setState({
-          status: "ready",
+      .then(
+        ([
           company,
           taxRates,
           receipt,
           sales,
+          shopProfile,
           backupStatus,
           backupJobs,
-        });
-      })
+        ]) => {
+          setState({
+            status: "ready",
+            company,
+            taxRates,
+            receipt,
+            sales,
+            shopProfile,
+            backupStatus,
+            backupJobs,
+          });
+        },
+      )
       .catch((error) => {
         setState({
           status: "error",
@@ -157,6 +179,12 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           Radnja
         </SettingsTabButton>
         <SettingsTabButton
+          active={activeTab === "profile"}
+          onSelect={() => setActiveTab("profile")}
+        >
+          Profil
+        </SettingsTabButton>
+        <SettingsTabButton
           active={activeTab === "vat"}
           onSelect={() => setActiveTab("vat")}
         >
@@ -191,6 +219,19 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
               current.status === "ready" ? { ...current, company } : current,
             );
             toast.success("Podešavanja radnje su sačuvana.");
+          }}
+        />
+      ) : null}
+
+      {activeTab === "profile" ? (
+        <ShopProfilePanel
+          profile={state.shopProfile}
+          onSave={async (request) => {
+            const shopProfile = await services.settings.updateShopProfile(request);
+            setState((current) =>
+              current.status === "ready" ? { ...current, shopProfile } : current,
+            );
+            toast.success("Profil radnje je sačuvan.");
           }}
         />
       ) : null}

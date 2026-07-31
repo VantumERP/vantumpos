@@ -27,6 +27,7 @@ import type {
   SaleDraftRequest,
   SalePreview,
   ShiftSummary,
+  ShopProfile,
   StockListItem,
   TaxRate,
   UserAccount,
@@ -175,6 +176,15 @@ export function createMockServices(): PosServices {
     resetPolicy: "none",
   };
   let salesSettings = { allowOverselling: false };
+  // Every answer starts UNSET. A fresh install must ask, never assume — see
+  // SW11-SW15-VERIFIED-RULES §3 req 31 / §5 Q-8.
+  let shopProfile: ShopProfile = {
+    pravnaForma: null,
+    pdvObveznik: null,
+    distanceSelling: null,
+    lpfrInPremises: null,
+    esirElements: [],
+  };
   let backupSettings: BackupSettings = {
     backupFolder: "mock://backups",
     automaticBackupEnabled: true,
@@ -318,6 +328,37 @@ export function createMockServices(): PosServices {
 
         salesSettings = { ...request };
         return salesSettings;
+      },
+      async getShopProfile() {
+        return shopProfile;
+      },
+      async updateShopProfile(request) {
+        if (session?.user.role !== "admin") {
+          throw {
+            code: "forbidden",
+            message: "Samo administrator može da izvrši ovu akciju.",
+          };
+        }
+
+        for (const element of request.esirElements) {
+          if (!element.naziv.trim() || !element.verzija.trim() || !element.ib.trim()) {
+            throw {
+              code: "validation_error",
+              message: "Naziv, verzija i IB elementa su obavezni.",
+            };
+          }
+        }
+
+        shopProfile = {
+          ...request,
+          esirElements: request.esirElements.map((element) => ({
+            ...element,
+            naziv: element.naziv.trim(),
+            verzija: element.verzija.trim(),
+            ib: element.ib.trim(),
+          })),
+        };
+        return shopProfile;
       },
     },
     backup: {

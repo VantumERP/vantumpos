@@ -35,6 +35,11 @@ describe("SettingsScreen", () => {
     await user.click(screen.getByRole("tab", { name: "Računi" }));
     expect(screen.getByLabelText("Prefiks računa")).toBeInTheDocument();
 
+    await user.click(screen.getByRole("tab", { name: "Profil" }));
+    expect(
+      await screen.findByRole("heading", { name: "Profil radnje" }),
+    ).toBeInTheDocument();
+
     await user.click(screen.getByRole("tab", { name: "Korisnici" }));
     expect(screen.getByText("Korisnici panel")).toBeInTheDocument();
 

@@ -7,6 +7,7 @@ import type {
   BasisDoc,
   CampaignInput,
   ReklamacijaInput,
+  ShopProfile,
 } from "./types";
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
@@ -251,6 +252,43 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenCalledWith("settings_update_sales", {
       request: { allowOverselling: true },
     });
+  });
+
+  it("maps the shop profile to stable Tauri command names", async () => {
+    const profile: ShopProfile = {
+      pravnaForma: null,
+      pdvObveznik: null,
+      distanceSelling: null,
+      lpfrInPremises: null,
+      esirElements: [],
+    };
+    const invoke = vi.fn().mockResolvedValue(profile);
+    const services = createLocalServices(invoke);
+
+    await services.settings.getShopProfile();
+    await services.settings.updateShopProfile({
+      ...profile,
+      pravnaForma: "preduzetnik",
+      distanceSelling: true,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("settings_get_shop_profile");
+    expect(invoke).toHaveBeenCalledWith("settings_update_shop_profile", {
+      request: expect.objectContaining({
+        pravnaForma: "preduzetnik",
+        distanceSelling: true,
+      }),
+    });
+  });
+
+  it("seeds the mock shop profile as fully unset", async () => {
+    const services = createMockServices();
+
+    const profile = await services.settings.getShopProfile();
+
+    expect(profile.pravnaForma).toBeNull();
+    expect(profile.distanceSelling).toBeNull();
+    expect(profile.esirElements).toEqual([]);
   });
 
   it("maps seedTaxRates to settings_seed_tax_rates", async () => {

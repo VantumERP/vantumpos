@@ -75,6 +75,7 @@ import type {
   ShiftListItem,
   ShiftTurnoverReport,
   ShiftSummary,
+  ShopProfile,
   StockListQuery,
   StockListResult,
   UserAccount,
@@ -95,6 +96,8 @@ export interface SettingsService {
   updateReceiptSettings(request: ReceiptSettingsRequest): Promise<ReceiptSettings>;
   getSalesSettings(): Promise<SalesSettings>;
   updateSalesSettings(request: SalesSettingsRequest): Promise<SalesSettings>;
+  getShopProfile(): Promise<ShopProfile>;
+  updateShopProfile(request: ShopProfile): Promise<ShopProfile>;
 }
 
 export interface BackupService {

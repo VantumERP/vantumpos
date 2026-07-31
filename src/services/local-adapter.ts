@@ -49,6 +49,7 @@ import type {
   ShiftListItem,
   ShiftTurnoverReport,
   ShiftSummary,
+  ShopProfile,
   StockListResult,
   TaxRate,
   UserAccount,
@@ -79,6 +80,9 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       getSalesSettings: () => invoke<SalesSettings>("settings_get_sales"),
       updateSalesSettings: (request) =>
         invoke<SalesSettings>("settings_update_sales", { request }),
+      getShopProfile: () => invoke<ShopProfile>("settings_get_shop_profile"),
+      updateShopProfile: (request) =>
+        invoke<ShopProfile>("settings_update_shop_profile", { request }),
     },
     backup: {
       getBackupStatus: () => invoke<BackupStatus>("backup_get_status"),
