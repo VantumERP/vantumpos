@@ -900,9 +900,185 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
         std::fs::remove_file(&path).expect("test database should be removed");
     }
 
+    /// v15 is the first rebuild in this schema's history to touch tables that hold
+    /// live money: `cash_movements` drives expected cash and the shortfall check, and
+    /// `sale_payments` drives Z-reports, dnevni promet and KEP. An installed till is
+    /// upgraded in place, so the copy step is the whole point of the rebuild — this
+    /// test seeds at v14 and upgrades, which is the only way to prove it.
     #[test]
-    fn migration_v15_preserves_existing_cash_movements_and_payments() {
-        let path = test_database_path("migration_v15_survival");
+    fn migration_v15_preserves_pre_existing_cash_movements_and_sale_payments() {
+        let path = test_database_path("migration_v15_preserves_money_rows");
+
+        {
+            let mut conn = Connection::open(&path).expect("connection should open");
+
+            // Bring the database to v14 — the last schema before the money-table
+            // rebuild — through the path a real installed database took.
+            conn.execute_batch(
+                r#"
+CREATE TABLE _migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"#,
+            )
+            .expect("migrations table should create");
+            for migration in &MIGRATIONS[..14] {
+                assert!(
+                    migration.version <= 14,
+                    "the pre-v15 prefix must stop at v14, saw v{}",
+                    migration.version
+                );
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, datetime('now'))",
+                    params![migration.version, migration.name],
+                )
+                .expect("migration should record");
+            }
+
+            // Installed-base money data, seeded with v14 columns only. Ids are explicit
+            // and non-contiguous: cash_movements.shift_id and sale_payments.sale_id
+            // integrity depends on the rebuild carrying ids across verbatim.
+            conn.execute_batch(
+                r#"
+INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+VALUES (900, 'stari_kasir', 'Stari Kasir', 'cashier', 1,
+        '2026-06-01T07:00:00Z', '2026-06-01T07:00:00Z');
+INSERT INTO shifts (id, user_id, opened_at, opening_cash_minor, expected_cash_minor,
+                    status, created_at, updated_at)
+VALUES (900, 900, '2026-06-01T07:00:00Z', 100000, 100000, 'open',
+        '2026-06-01T07:00:00Z', '2026-06-01T07:00:00Z');
+INSERT INTO sales (id, local_receipt_number, shift_id, cashier_id, status,
+                   subtotal_minor, discount_minor, tax_minor, total_minor,
+                   created_at, updated_at)
+VALUES (900, 'R-900', 900, 900, 'completed', 100000, 0, 20000, 120000,
+        '2026-06-01T09:30:00Z', '2026-06-01T09:30:00Z');
+
+-- Every v14 cash_movements column non-null, so a dropped column is visible too.
+INSERT INTO cash_movements (id, shift_id, movement_type, amount_minor, reason,
+                            user_id, created_at)
+VALUES (57, 900, 'pay_out', 250000, 'Isplata dobavljaču', 900,
+        '2026-06-01T11:15:00Z');
+
+-- One positive cash and one NEGATIVE card row: v6 widened the CHECK to signed
+-- amounts, so a refund leg is real installed-base data the copy must carry.
+INSERT INTO sale_payments (id, sale_id, payment_method, amount_minor, created_at)
+VALUES (11, 900, 'cash', 120000, '2026-06-01T09:30:00Z'),
+       (77, 900, 'card', -45000, '2026-06-02T10:05:00Z');
+"#,
+            )
+            .expect("v14 money rows should seed");
+
+            // The real installed-base upgrade path: v15 rebuilds both tables.
+            run_migrations(&mut conn).expect("forward migration should succeed");
+
+            let movement_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM cash_movements", [], |row| row.get(0))
+                .expect("cash_movements count should query");
+            assert_eq!(
+                movement_count, 1,
+                "the v15 rebuild must not lose a single cash movement"
+            );
+
+            let (
+                id,
+                shift_id,
+                movement_type,
+                amount_minor,
+                reason,
+                user_id,
+                created_at,
+                bank_reference,
+            ): (i64, i64, String, i64, String, i64, String, Option<String>) = conn
+                .query_row(
+                    "SELECT id, shift_id, movement_type, amount_minor, reason, user_id,
+                            created_at, bank_reference
+                     FROM cash_movements",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
+                )
+                .expect("the seeded cash movement must survive the v15 rebuild");
+            assert_eq!(id, 57, "the movement id must be carried across verbatim");
+            assert_eq!(shift_id, 900, "the shift link must survive the rebuild");
+            assert_eq!(movement_type, "pay_out");
+            assert_eq!(amount_minor, 250000);
+            assert_eq!(reason, "Isplata dobavljaču");
+            assert_eq!(user_id, 900);
+            assert_eq!(created_at, "2026-06-01T11:15:00Z");
+            assert_eq!(
+                bank_reference, None,
+                "a carried-forward movement predates bank references"
+            );
+
+            let payment_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sale_payments", [], |row| row.get(0))
+                .expect("sale_payments count should query");
+            assert_eq!(
+                payment_count, 2,
+                "the v15 rebuild must not lose a single payment leg"
+            );
+
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, sale_id, payment_method, amount_minor, created_at
+                     FROM sale_payments ORDER BY id",
+                )
+                .expect("sale_payments should prepare");
+            let payments: Vec<(i64, i64, String, i64, String)> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .expect("sale_payments should query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("sale_payments rows should collect");
+            assert_eq!(
+                payments,
+                vec![
+                    (
+                        11,
+                        900,
+                        "cash".to_string(),
+                        120000,
+                        "2026-06-01T09:30:00Z".to_string()
+                    ),
+                    (
+                        77,
+                        900,
+                        "card".to_string(),
+                        -45000,
+                        "2026-06-02T10:05:00Z".to_string()
+                    ),
+                ],
+                "the v15 rebuild must copy every payment leg verbatim, signed amount and id included"
+            );
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn migration_v15_admits_the_new_movement_types_and_tender() {
+        let path = test_database_path("migration_v15_new_values");
         {
             let db = Db::new(&path).expect("database should initialize");
             let conn = db.open().expect("database should open");
@@ -945,7 +1121,7 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
                     [],
                     |row| row.get(0),
                 )
-                .expect("the seeded pay_in row must survive the rebuild");
+                .expect("a pay_in row must still round-trip through the v15 table");
             assert_eq!(kept, 5000);
 
             // The rebuilt sale_payments must round-trip every column and admit the
@@ -984,7 +1160,7 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
                     [],
                     |row| row.get(0),
                 )
-                .expect("the seeded cash payment must round-trip");
+                .expect("a cash payment must still round-trip through the v15 table");
             assert_eq!(cash_kept, 120000);
         }
         std::fs::remove_file(&path).expect("test database should be removed");

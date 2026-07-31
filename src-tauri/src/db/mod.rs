@@ -132,6 +132,7 @@ mod tests {
         "kep_entries",
         "kalkulacije",
         "kep_closures",
+        "non_working_days",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -159,6 +160,7 @@ mod tests {
         "idx_kep_entries_date",
         "idx_kalkulacije_product",
         "idx_kep_closures_year",
+        "idx_cash_movements_created_at",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
