@@ -1228,21 +1228,24 @@ fn validate_declaration(
         return Ok(());
     }
 
-    for (value, field, label) in [
+    // The finished sentence travels with the field: „zemlja" is feminine and
+    // „ime" is neuter, so a shared `format!("{label} je obavezno …")` would put
+    // ungrammatical Serbian in front of the operator for one of the two.
+    for (value, field, message) in [
         (
             &input.manufacturer_name,
             "manufacturerName",
-            "Poslovno ime proizvođača",
+            "Poslovno ime proizvođača je obavezno za prodaju na daljinu.",
         ),
         (
             &input.country_of_origin,
             "countryOfOrigin",
-            "Zemlja proizvodnje",
+            "Zemlja proizvodnje je obavezna za prodaju na daljinu.",
         ),
     ] {
         if value.as_deref().map(str::trim).unwrap_or("").is_empty() {
             return Err(AppError::validation(
-                format!("{label} je obavezno za prodaju na daljinu."),
+                message,
                 serde_json::json!({ "field": field }),
             ));
         }
@@ -1255,11 +1258,12 @@ fn validate_declaration(
 /// `AppState` the catalog writers do not hold — they take a `&Db`. Read it off
 /// the connection that is already open instead of widening every signature.
 ///
-/// A value that will not deserialize degrades to the default rather than
-/// erroring. `ShopProfile::default()` has `distance_selling: None`, which is the
-/// advisory branch, so a corrupt row can never invent a hard block that §4
-/// item 12 forbids — nor can it lock the operator out of his own catalogue.
-/// Genuine SQL errors still propagate.
+/// A missing row is the honest default — the operator has simply not answered
+/// §5 Q-8 yet. A row that will *not* deserialize is a different thing, and it
+/// fails loudly with the same „Podešavanja nisu ispravna" that
+/// `settings::load_json_setting` raises for the identical row: degrading to
+/// `ShopProfile::default()` would silently pick the lenient §3 req 22 branch and
+/// switch the [LEGAL] čl. 34 st. 5 gate off with no signal anywhere.
 fn load_shop_profile_for_connection(connection: &Connection) -> Result<ShopProfile, AppError> {
     let stored: Option<String> = connection
         .query_row(
@@ -1269,9 +1273,12 @@ fn load_shop_profile_for_connection(connection: &Connection) -> Result<ShopProfi
         )
         .optional()?;
 
-    Ok(stored
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .unwrap_or_default())
+    match stored {
+        Some(value) => serde_json::from_str(&value).map_err(|source| {
+            AppError::InvalidState(format!("Podešavanja nisu ispravna: {source}"))
+        }),
+        None => Ok(ShopProfile::default()),
+    }
 }
 
 fn product_from_row(row: &Row<'_>) -> rusqlite::Result<ProductSummary> {
@@ -1457,7 +1464,9 @@ mod tests {
         ProductExternalSourceRequest, ProductListQuery, ProductSearchQuery, ProductSummary,
         SaveCategoryRequest, SaveProductRequest,
     };
-    use crate::commands::settings::{save_shop_profile, PravnaForma, ShopProfileRequest};
+    use crate::commands::settings::{
+        save_shop_profile, PravnaForma, ShopProfileRequest, SHOP_PROFILE_KEY,
+    };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
 
@@ -1709,6 +1718,84 @@ mod tests {
             assert_eq!(
                 details.expect("field details")["field"],
                 serde_json::json!("manufacturerName")
+            );
+        });
+    }
+
+    /// „Zemlja" is feminine, so „obavezno" is wrong for it. The message is the
+    /// only thing the operator ever sees of this gate; ungrammatical Serbian on
+    /// a [LEGAL] block reads as a machine error rather than a duty.
+    #[test]
+    fn declaration_messages_agree_with_the_gender_of_the_field() {
+        with_catalog_state("declaration_message_gender", |state| {
+            sign_in_admin(state);
+            save_shop_profile(state, distance_selling_profile_request()).expect("profile saves");
+
+            let mut request = product_request_with_declaration("DEK-GENDER");
+            request.country_of_origin = None;
+
+            let error = create_product_as_admin(state, request)
+                .expect_err("a missing country of production must block a distance seller");
+
+            let AppError::Validation { message, details } = error else {
+                panic!("expected a validation error")
+            };
+            assert_eq!(
+                message,
+                "Zemlja proizvodnje je obavezna za prodaju na daljinu."
+            );
+            assert_eq!(
+                details.expect("field details")["field"],
+                serde_json::json!("countryOfOrigin")
+            );
+
+            let mut missing_manufacturer = product_request_with_declaration("DEK-GENDER-2");
+            missing_manufacturer.manufacturer_name = None;
+
+            let error = create_product_as_admin(state, missing_manufacturer)
+                .expect_err("a missing manufacturer must block a distance seller");
+
+            let AppError::Validation { message, .. } = error else {
+                panic!("expected a validation error")
+            };
+            assert_eq!(
+                message,
+                "Poslovno ime proizvođača je obavezno za prodaju na daljinu."
+            );
+        });
+    }
+
+    /// A `shop_profile` row that will not deserialize must not silently pick the
+    /// lenient §3 req 22 branch. `settings::load_json_setting` already raises
+    /// „Podešavanja nisu ispravna" for exactly this row, so the catalogue has to
+    /// agree with it — otherwise the settings screen errors while the [LEGAL]
+    /// čl. 34 st. 5 gate quietly stops firing.
+    #[test]
+    fn a_corrupt_shop_profile_is_loud_rather_than_lenient() {
+        with_catalog_state("declaration_corrupt_profile", |state| {
+            sign_in_admin(state);
+            save_shop_profile(state, distance_selling_profile_request()).expect("profile saves");
+
+            state
+                .db()
+                .open()
+                .expect("db open")
+                .execute(
+                    "UPDATE settings SET value_json = ?2 WHERE key = ?1",
+                    params![SHOP_PROFILE_KEY, "{ this is not json"],
+                )
+                .expect("the row should be overwritten");
+
+            let error =
+                create_product_as_admin(state, product_request_without_declaration("DEK-CORRUPT"))
+                    .expect_err("an unreadable profile must not pass the gate by default");
+
+            let AppError::InvalidState(message) = error else {
+                panic!("expected an invalid-state error, not a silent default profile")
+            };
+            assert!(
+                message.starts_with("Podešavanja nisu ispravna"),
+                "message should match the canonical loader: {message}"
             );
         });
     }

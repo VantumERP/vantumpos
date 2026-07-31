@@ -71,6 +71,7 @@ import type {
   CategorySummary,
   CommandError,
   PrethodnaCenaDto,
+  ProductBarcodeKind,
   ProductExternalSource,
   ProductListQuery,
   ProductLookupSuggestion,
@@ -109,6 +110,13 @@ interface ProductFormState {
   active: boolean;
   perishable: boolean;
   perishableJustification: string;
+  manufacturerName: string;
+  importerName: string;
+  countryOfOrigin: string;
+  officialGoodsCode: string;
+  /** `UNSET_BARCODE_KIND` while unanswered — „none" is the answer „bez
+   *  barkoda", so it cannot double as the empty state. */
+  barcodeKind: string;
   externalSource: ProductExternalSource | null;
 }
 
@@ -142,6 +150,8 @@ interface CategoryFormState {
   active: boolean;
 }
 
+const UNSET_BARCODE_KIND = "unset";
+
 const EMPTY_PRODUCT_FORM: ProductFormState = {
   name: "",
   sku: "",
@@ -158,8 +168,20 @@ const EMPTY_PRODUCT_FORM: ProductFormState = {
   // st. 3 computation (memo §5.5). Never inferred from category.
   perishable: false,
   perishableJustification: "",
+  manufacturerName: "",
+  importerName: "",
+  countryOfOrigin: "",
+  officialGoodsCode: "",
+  barcodeKind: UNSET_BARCODE_KIND,
   externalSource: null,
 };
+
+const BARCODE_KIND_ITEMS = [
+  { label: "Nije određeno", value: UNSET_BARCODE_KIND },
+  { label: "GTIN (EAN/UPC)", value: "gtin" },
+  { label: "Interni barkod", value: "internal" },
+  { label: "Bez barkoda", value: "none" },
+];
 
 let bulkRowSequence = 0;
 
@@ -200,6 +222,10 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
   });
   const [categoryError, setCategoryError] = useState<string | null>(null);
   const [savingCategory, setSavingCategory] = useState(false);
+  // `null` is „nije odgovoreno", never „ne" (§5 Q-8). It decides only how the
+  // deklaracija section is *labelled*; the čl. 34 st. 5 block itself lives in
+  // Rust, so a stale read here can neither invent nor waive a duty.
+  const [distanceSelling, setDistanceSelling] = useState<boolean | null>(null);
 
   const productQuery = useMemo<ProductListQuery>(
     () => ({
@@ -241,6 +267,29 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
   useEffect(() => {
     void loadProducts();
   }, [loadProducts]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void services.settings
+      .getShopProfile()
+      .then((profile) => {
+        if (!cancelled) {
+          setDistanceSelling(profile.distanceSelling);
+        }
+      })
+      .catch(() => {
+        // An unreadable profile stays unanswered: the section then asks for the
+        // answer instead of asserting either branch.
+        if (!cancelled) {
+          setDistanceSelling(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [services]);
 
   // ZoT čl. 37 st. 3-4: lowering the offered price of an existing article is
   // what triggers the prethodna cena duty, so the advisory is fetched exactly
@@ -319,6 +368,11 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
       active: product.active,
       perishable: product.perishable,
       perishableJustification: product.perishableJustification ?? "",
+      manufacturerName: product.manufacturerName ?? "",
+      importerName: product.importerName ?? "",
+      countryOfOrigin: product.countryOfOrigin ?? "",
+      officialGoodsCode: product.officialGoodsCode ?? "",
+      barcodeKind: product.barcodeKind ?? UNSET_BARCODE_KIND,
       externalSource: product.externalSource ?? null,
     });
     setProductSheetOpen(true);
@@ -796,9 +850,16 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
         </TabsContent>
       </Tabs>
       <ProductSheet
-        allowBulk={!editingProduct}
+        // The bulk grid has no deklaracija columns, so for a distance seller
+        // every row it posts is refused by the čl. 34 st. 5 gate. Withdraw it
+        // rather than offer a button that cannot succeed.
+        allowBulk={!editingProduct && distanceSelling !== true}
         bulkRows={bulkRows}
+        bulkWithdrawnForDistanceSelling={
+          !editingProduct && distanceSelling === true
+        }
         categories={categories}
+        distanceSelling={distanceSelling}
         errors={productErrors}
         form={productForm}
         lookupError={lookupError}
@@ -1113,7 +1174,9 @@ function CategoryTable({
 function ProductSheet({
   allowBulk,
   bulkRows,
+  bulkWithdrawnForDistanceSelling,
   categories,
+  distanceSelling,
   errors,
   form,
   lookupError,
@@ -1138,7 +1201,9 @@ function ProductSheet({
 }: {
   allowBulk: boolean;
   bulkRows: BulkProductRowState[];
+  bulkWithdrawnForDistanceSelling: boolean;
   categories: CategorySummary[];
+  distanceSelling: boolean | null;
   errors: ProductFieldErrors;
   form: ProductFormState;
   lookupError: string | null;
@@ -1286,6 +1351,12 @@ function ProductSheet({
             <TabsTrigger value="quick">Brz unos</TabsTrigger>
             {allowBulk ? <TabsTrigger value="bulk">Bulk unos</TabsTrigger> : null}
           </TabsList>
+          {bulkWithdrawnForDistanceSelling ? (
+            <div className="mt-2 text-xs text-muted-foreground">
+              Bulk unos je isključen dok radnja prodaje na daljinu — deklaracija
+              se unosi po artiklu.
+            </div>
+          ) : null}
           <TabsContent value="quick">
             <form
               className="flex flex-1 flex-col gap-4"
@@ -1495,6 +1566,12 @@ function ProductSheet({
                     ) : null}
                   </FieldGroup>
                 </div>
+                <DeclarationFields
+                  distanceSelling={distanceSelling}
+                  errors={errors}
+                  form={form}
+                  onFormChange={onFormChange}
+                />
               </FieldGroup>
               <SheetFooter className="px-0">
                 <Button type="submit" disabled={saving}>
@@ -1926,6 +2003,94 @@ function CategorySheet({
   );
 }
 
+/** ZoT čl. 34: in-store the deklaracija is the proizvođač's/uvoznik's duty
+ *  (st. 2), so these fields are an aid. Distance selling moves the duty onto
+ *  the trgovac (st. 5) and the Rust gate then refuses a save without the
+ *  proizvođač and the zemlja proizvodnje.
+ *
+ *  `null` is „nije odgovoreno" (§5 Q-8): it must not be dressed up as a settled
+ *  walk-in shop, so it gets the recommendation wording plus a prompt to answer. */
+function DeclarationFields({
+  distanceSelling,
+  errors,
+  form,
+  onFormChange,
+}: {
+  distanceSelling: boolean | null;
+  errors: ProductFieldErrors;
+  form: ProductFormState;
+  onFormChange: (form: ProductFormState) => void;
+}) {
+  return (
+    <div className="rounded-md border p-3">
+      <div className="mb-1 text-sm font-medium">Deklaracija</div>
+      <div className="mb-3 text-xs text-muted-foreground">
+        {distanceSelling === true
+          ? "Obavezno za prodaju na daljinu (ZoT čl. 34 st. 5)."
+          : "Preporuka."}
+      </div>
+      {distanceSelling === null ? (
+        <div className="mb-3 text-xs text-muted-foreground">
+          Odgovorite da li radnja prodaje na daljinu u Podešavanjima.
+        </div>
+      ) : null}
+      <FieldGroup>
+        <div className="grid gap-3 md:grid-cols-2">
+          <TextField
+            error={errors.manufacturerName}
+            id="product-manufacturer-name"
+            label="Poslovno ime proizvođača"
+            value={form.manufacturerName}
+            onChange={(value) =>
+              onFormChange({ ...form, manufacturerName: value })
+            }
+          />
+          <TextField
+            error={errors.countryOfOrigin}
+            id="product-country-of-origin"
+            label="Zemlja proizvodnje"
+            value={form.countryOfOrigin}
+            onChange={(value) =>
+              onFormChange({ ...form, countryOfOrigin: value })
+            }
+          />
+          <TextField
+            error={errors.importerName}
+            id="product-importer-name"
+            label="Poslovno ime uvoznika"
+            value={form.importerName}
+            onChange={(value) => onFormChange({ ...form, importerName: value })}
+          />
+          <TextField
+            error={errors.officialGoodsCode}
+            id="product-official-goods-code"
+            label="Šifra iz šifarnika robe"
+            value={form.officialGoodsCode}
+            onChange={(value) =>
+              onFormChange({ ...form, officialGoodsCode: value })
+            }
+          />
+          <Field data-invalid={errors.barcodeKind ? true : undefined}>
+            <FieldLabel htmlFor="product-barcode-kind">Vrsta barkoda</FieldLabel>
+            <CatalogSelect
+              id="product-barcode-kind"
+              items={BARCODE_KIND_ITEMS}
+              value={form.barcodeKind}
+              onValueChange={(value) =>
+                onFormChange({ ...form, barcodeKind: value })
+              }
+            />
+            <FieldError>{errors.barcodeKind}</FieldError>
+          </Field>
+        </div>
+        <FieldDescription>
+          „EU" je dozvoljena oznaka porekla (čl. 34 st. 7).
+        </FieldDescription>
+      </FieldGroup>
+    </div>
+  );
+}
+
 function TextField({
   error,
   id,
@@ -2090,6 +2255,14 @@ function productRequest(form: ProductFormState): SaveProductRequest {
     perishableJustification: form.perishable
       ? form.perishableJustification.trim()
       : null,
+    manufacturerName: form.manufacturerName.trim() || null,
+    importerName: form.importerName.trim() || null,
+    countryOfOrigin: form.countryOfOrigin.trim() || null,
+    officialGoodsCode: form.officialGoodsCode.trim() || null,
+    barcodeKind:
+      form.barcodeKind === UNSET_BARCODE_KIND
+        ? null
+        : (form.barcodeKind as ProductBarcodeKind),
     externalSource: form.externalSource,
   };
 }

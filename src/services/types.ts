@@ -285,6 +285,11 @@ export interface ProductSummary {
   active: boolean;
   perishable: boolean;
   perishableJustification?: string | null;
+  manufacturerName?: string | null;
+  importerName?: string | null;
+  countryOfOrigin?: string | null;
+  officialGoodsCode?: string | null;
+  barcodeKind?: ProductBarcodeKind | null;
   externalSource: ProductExternalSource | null;
 }
 
@@ -327,8 +332,21 @@ export interface SaveProductRequest {
    *  a shopper compares against, so campaigns demand a manual anchor instead. */
   perishable: boolean;
   perishableJustification?: string | null;
+  /** Deklaracija, ZoT čl. 34. In-store the marking duty is the proizvođač's
+   *  (st. 2), so these are an aid. Selling at distance moves the duty onto the
+   *  trgovac (st. 5), and the Rust side then refuses a save without
+   *  `manufacturerName` and `countryOfOrigin`. */
+  manufacturerName?: string | null;
+  importerName?: string | null;
+  countryOfOrigin?: string | null;
+  officialGoodsCode?: string | null;
+  barcodeKind?: ProductBarcodeKind | null;
   externalSource?: ProductExternalSource | null;
 }
+
+/** „none" is an answered state — the article carries no barcode — not an unset
+ *  one. An unset kind is `null`. */
+export type ProductBarcodeKind = "gtin" | "internal" | "none";
 
 export type ProductFormData = SaveProductRequest;
 

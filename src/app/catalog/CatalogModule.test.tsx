@@ -365,4 +365,164 @@ describe("CatalogModule", () => {
       );
     });
   });
+
+  // ZoT čl. 34 st. 5 — the Rust gate refuses every create/update from a
+  // distance-selling shop that carries no proizvođač and no zemlja proizvodnje.
+  // Without these fields on the sheet that shop cannot save a single article.
+  describe("deklaracija (ZoT čl. 34)", () => {
+    function servicesWithDistanceSelling(distanceSelling: boolean | null) {
+      const services = createMockServices();
+      vi.spyOn(services.settings, "getShopProfile").mockResolvedValue({
+        pravnaForma: "preduzetnik",
+        pdvObveznik: false,
+        distanceSelling,
+        lpfrInPremises: true,
+        esirElements: [],
+      });
+      return services;
+    }
+
+    it("lets a distance-selling shop save the declaration data čl. 34 st. 5 demands", async () => {
+      const user = userEvent.setup();
+      const services = servicesWithDistanceSelling(true);
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Poslovno ime proizvođača"),
+        "Mlekara Šabac d.o.o.",
+      );
+      await user.type(
+        screen.getByLabelText("Zemlja proizvodnje"),
+        "Srbija",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({
+            manufacturerName: "Mlekara Šabac d.o.o.",
+            countryOfOrigin: "Srbija",
+          }),
+        );
+      });
+    });
+
+    it("marks the section obavezno once the shop sells at distance", async () => {
+      const user = userEvent.setup();
+      const services = servicesWithDistanceSelling(true);
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+
+      expect(
+        await screen.findByText(
+          "Obavezno za prodaju na daljinu (ZoT čl. 34 st. 5).",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("labels the section a recommendation for a walk-in shop", async () => {
+      const user = userEvent.setup();
+      const services = servicesWithDistanceSelling(false);
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+
+      expect(await screen.findByText("Preporuka.")).toBeInTheDocument();
+      expect(
+        screen.queryByText(/obavezno za prodaju na daljinu/i),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Odgovorite da li radnja prodaje na daljinu/i),
+      ).not.toBeInTheDocument();
+    });
+
+    // §5 Q-8: silence is not a "no". An unanswered profile must neither claim
+    // the duty nor present the shop as a settled walk-in one.
+    it("asks for the answer instead of claiming a walk-in shop while it is unanswered", async () => {
+      const user = userEvent.setup();
+      const services = servicesWithDistanceSelling(null);
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+
+      expect(
+        await screen.findByText(
+          "Odgovorite da li radnja prodaje na daljinu u Podešavanjima.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/obavezno za prodaju na daljinu/i),
+      ).not.toBeInTheDocument();
+    });
+
+    it("round-trips the declaration fields back into the form", async () => {
+      const user = userEvent.setup();
+      const services = servicesWithDistanceSelling(true);
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Poslovno ime proizvođača"),
+        "Mlekara Šabac d.o.o.",
+      );
+      await user.type(screen.getByLabelText("Zemlja proizvodnje"), "Srbija");
+      await user.type(
+        screen.getByLabelText("Poslovno ime uvoznika"),
+        "Uvoznik Beograd d.o.o.",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+
+      expect(
+        await screen.findByLabelText("Poslovno ime proizvođača"),
+      ).toHaveValue("Mlekara Šabac d.o.o.");
+      expect(screen.getByLabelText("Zemlja proizvodnje")).toHaveValue("Srbija");
+      expect(screen.getByLabelText("Poslovno ime uvoznika")).toHaveValue(
+        "Uvoznik Beograd d.o.o.",
+      );
+    });
+
+    // The bulk grid has no declaration columns, so every row it posts would be
+    // refused by the čl. 34 st. 5 gate. Offering it to a distance seller is
+    // offering a button that cannot succeed.
+    it("withdraws bulk entry from a distance seller rather than letting every row fail", async () => {
+      const user = userEvent.setup();
+      const services = servicesWithDistanceSelling(true);
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(await screen.findByRole("button", { name: /Novi artikal/ }));
+
+      expect(
+        await screen.findByText(
+          "Bulk unos je isključen dok radnja prodaje na daljinu — deklaracija se unosi po artiklu.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: "Bulk unos" }),
+      ).not.toBeInTheDocument();
+    });
+  });
 });
