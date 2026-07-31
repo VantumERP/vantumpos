@@ -189,6 +189,22 @@ describe("SettingsScreen", () => {
       await screen.findByText(/do 10 godina/i),
     ).toBeInTheDocument();
   });
+
+  it("discloses that the reset clears the deklaracija checks on the catalog", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Backup" }));
+
+    // The catalog row survives the reset but its declaration_checked_at stamp
+    // does not, so the card must not imply the whole catalog is untouched.
+    expect(
+      await screen.findByText(/deklaracija proverena se poništavaju/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/proveru ponovite pri prvom prijemu robe/i),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("SettingsScreen deposit calendar", () => {

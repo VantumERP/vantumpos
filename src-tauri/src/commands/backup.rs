@@ -437,6 +437,10 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     // Closures gate the ledger (čl. 18). The go-live reset is the one sanctioned
     // escape from an irreversible close: practice years must not stay frozen.
     tx.execute("DELETE FROM kep_closures", [])?;
+    // The kalkulacija (SW-9b) is the isprava behind a receipt zaduženje and is
+    // numbered per book_year like the KEP it feeds — it must restart with it, or
+    // the first real isprava lands at N+1 in a book of practice documents.
+    tx.execute("DELETE FROM kalkulacije", [])?;
     tx.execute(
         "UPDATE inventory_balances SET quantity_milli = 0, updated_at = datetime('now')",
         [],
@@ -1147,6 +1151,47 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
             .expect("declaration stamp should seed");
     }
 
+    /// The kalkulacija written by a practice goods receipt (SW-9b): the formal
+    /// isprava behind a zaduženje, numbered per book_year.
+    fn seed_practice_kalkulacija(state: &AppState) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .execute_batch(
+                r#"
+INSERT INTO kalkulacije (redni_broj, book_year, product_id,
+                         poslovno_ime, prodajno_mesto, pib,
+                         trgovacki_naziv, jedinica_mere, kolicina_milli,
+                         nabavna_cena_po_jm_minor, vrednost_po_fakturi_minor, razlika_u_ceni_minor,
+                         prodajna_vrednost_bez_pdv_minor, pdv_minor, prodajna_vrednost_sa_pdv_minor,
+                         prodajna_cena_po_jm_minor, reference_type, reference_id, created_by, created_at)
+    VALUES (1, 2026, 1,
+            'Probna radnja', 'Prodavnica 1', '100000000',
+            'Mleko 1 l', 'kom', 3000,
+            9000, 27000, 9000,
+            30000, 6000, 36000,
+            12000, 'otpremnica', 1, 1, '2026-06-18T10:00:00Z');
+"#,
+            )
+            .expect("practice kalkulacija should seed");
+    }
+
+    /// A practice polog: bank_deposit movements are what the undeposited-cash
+    /// aging report (SW-11b) draws down against.
+    fn seed_practice_bank_deposit(state: &AppState) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .execute(
+                "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, reason, bank_reference, user_id, created_at)
+                 VALUES (1, 'bank_deposit', 12000, 'Probni polog', 'REF-1', 1, '2026-06-18T12:00:00Z')",
+                [],
+            )
+            .expect("practice bank deposit should seed");
+    }
+
     #[test]
     fn go_live_reset_keeps_the_profile_and_holidays_but_clears_trading_compliance_state() {
         with_state("reset_preserves_configuration", |state| {
@@ -1165,6 +1210,8 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
             seed_trading_data(state);
             seed_sale_with_aml_provenance(state);
             seed_declaration_checked_product(state);
+            seed_practice_kalkulacija(state);
+            seed_practice_bank_deposit(state);
 
             reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
 
@@ -1210,6 +1257,22 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
             assert_eq!(
                 aml, 0,
                 "AML provenance lives on the sale row and goes with the sales wipe"
+            );
+
+            // The kalkulacija is the isprava behind a practice zaduženje, and it
+            // is numbered per book_year like the KEP it feeds. Leaving it would
+            // number the shop's first real isprava N+1 in a book whose entries
+            // 1..N document goods that were never received.
+            assert_eq!(
+                count(state, "kalkulacije"),
+                0,
+                "practice kalkulacije must not carry into the live book"
+            );
+
+            assert_eq!(
+                count(state, "cash_movements"),
+                0,
+                "deposit-aging state is trading data"
             );
 
             // The catalog itself is configuration and survives.

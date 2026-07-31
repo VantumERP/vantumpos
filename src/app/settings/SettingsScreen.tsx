@@ -1417,7 +1417,9 @@ function GoLiveResetCard({
         <CardTitle>Priprema za početak rada</CardTitle>
         <CardDescription>
           Obriši probne račune i vrati brojač računa na 1. Katalog, korisnici i
-          podešavanja ostaju. Pravi se sigurnosna kopija pre brisanja.
+          podešavanja ostaju. Oznake da je deklaracija proverena se poništavaju;
+          proveru ponovite pri prvom prijemu robe. Pravi se sigurnosna kopija
+          pre brisanja.
         </CardDescription>
       </CardHeader>
       <CardContent>
