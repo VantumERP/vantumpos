@@ -22,6 +22,7 @@ import type {
   CompanySettingsRequest,
   CreateBackupRequest,
   DailyTurnoverReport,
+  DeclarationGapRow,
   EndCampaignOverride,
   ExportedFile,
   ExportReportRequest,
@@ -143,6 +144,12 @@ export interface CatalogService {
   listCategories(): Promise<CategorySummary[]>;
   saveCategory(request: SaveCategoryRequest): Promise<CategorySummary>;
   getPrethodnaCena(productId: number, campaignStart: string): Promise<PrethodnaCenaDto>;
+  /**
+   * Active articles whose ZoT čl. 34 deklaracija evidence is incomplete.
+   * Read-only and admin-gated; every penalty figure rides per row, never on
+   * the report as a whole (§3 req 26).
+   */
+  declarationGaps(): Promise<DeclarationGapRow[]>;
 }
 
 export interface SalesService {
@@ -162,6 +169,12 @@ export interface InventoryService {
   correctStock(request: InventoryAdjustmentRequest): Promise<InventoryAdjustmentResult>;
   writeOffStock(request: InventoryAdjustmentRequest): Promise<InventoryAdjustmentResult>;
   getProductLedger(productId: number): Promise<ProductLedger>;
+  /**
+   * Stamps *who looked and when* at the goods' physical deklaracija — the
+   * ZoT čl. 69a tač. 4 mitigation record. It is a mitigating circumstance in
+   * sentencing, not a defence, and it asserts nothing about the catalog fields.
+   */
+  markDeclarationChecked(productId: number): Promise<void>;
 }
 
 export interface ReceiptsService {

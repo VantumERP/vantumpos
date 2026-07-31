@@ -64,9 +64,11 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { declarationFieldList } from "@/lib/deklaracija";
 import type { PosServices } from "@/services/ports";
 import type {
   CommandErrorShape,
+  DeclarationWarning,
   InventoryAdjustmentRequest,
   ProductLedger,
   StockListItem,
@@ -453,12 +455,20 @@ function InventoryAdjustmentDialog({
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Raised only *after* the movement is committed, so this state can never gate
+  // the form — it replaces it (§3 req 25: warn, never hard-block).
+  const [declarationWarnings, setDeclarationWarnings] = useState<
+    DeclarationWarning[]
+  >([]);
+  const [markingChecked, setMarkingChecked] = useState(false);
 
   useEffect(() => {
     if (adjustment) {
       setQuantity("1");
       setReason("");
       setError(null);
+      setDeclarationWarnings([]);
+      setMarkingChecked(false);
     }
   }, [adjustment]);
 
@@ -482,16 +492,24 @@ function InventoryAdjustmentDialog({
         reason,
       };
 
-      if (adjustment.mode === "receive") {
-        await services.inventory.receiveStock(request);
-      } else if (adjustment.mode === "correction") {
-        await services.inventory.correctStock(request);
-      } else {
-        await services.inventory.writeOffStock(request);
-      }
+      const result =
+        adjustment.mode === "receive"
+          ? await services.inventory.receiveStock(request)
+          : adjustment.mode === "correction"
+            ? await services.inventory.correctStock(request)
+            : await services.inventory.writeOffStock(request);
 
       toast.success(copy.success);
-      onOpenChange(false);
+      const warnings = result.declarationWarnings ?? [];
+
+      // The stock movement is already in the ledger either way. A warning keeps
+      // the dialog open only so the operator can read it and stamp the check.
+      if (warnings.length > 0) {
+        setDeclarationWarnings(warnings);
+      } else {
+        onOpenChange(false);
+      }
+
       await onSaved(adjustment.item.productId);
     } catch (unknownError) {
       setError(getCommandMessage(unknownError));
@@ -500,10 +518,37 @@ function InventoryAdjustmentDialog({
     }
   }
 
+  async function handleMarkChecked() {
+    if (!adjustment) {
+      return;
+    }
+
+    setMarkingChecked(true);
+
+    try {
+      await services.inventory.markDeclarationChecked(
+        adjustment.item.productId,
+      );
+      toast.success("Provera deklaracije je evidentirana.");
+      onOpenChange(false);
+    } catch (unknownError) {
+      toast.error(getCommandMessage(unknownError));
+    } finally {
+      setMarkingChecked(false);
+    }
+  }
+
   return (
     <Dialog open={Boolean(adjustment)} onOpenChange={onOpenChange}>
       <DialogContent>
-        {copy && adjustment ? (
+        {declarationWarnings.length > 0 ? (
+          <DeclarationWarningPanel
+            warnings={declarationWarnings}
+            marking={markingChecked}
+            onMarkChecked={handleMarkChecked}
+            onClose={() => onOpenChange(false)}
+          />
+        ) : copy && adjustment ? (
           <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
             <DialogHeader>
               <DialogTitle>{copy.title}</DialogTitle>
@@ -560,6 +605,73 @@ function InventoryAdjustmentDialog({
         ) : null}
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * ZoT čl. 34. The receipt is already written when this renders — the title says
+ * so first, because a warning that reads like a rejection sends the operator
+ * looking for a movement that is in fact in the ledger.
+ *
+ * The advisory sentence is printed **with** the notice and never without it
+ * (§3 req 26): the notice alone reads as a proven offence, when all the shop
+ * actually knows is that its own records are blank. The stamp offered here is
+ * the čl. 69a tač. 4 mitigating circumstance — it records who looked at the
+ * physical label and when, and it is not a defence.
+ */
+function DeclarationWarningPanel({
+  warnings,
+  marking,
+  onMarkChecked,
+  onClose,
+}: {
+  warnings: DeclarationWarning[];
+  marking: boolean;
+  onMarkChecked: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <DialogHeader>
+        <DialogTitle>Prijem je upisan — nedostaju podaci deklaracije</DialogTitle>
+        <DialogDescription>
+          Prijem robe je evidentiran u lageru. Podaci sa deklaracije se unose u
+          kartici artikla.
+        </DialogDescription>
+      </DialogHeader>
+
+      {warnings.map((warning) => (
+        <Alert key={warning.productId}>
+          <AlertTitle>{warning.productName}</AlertTitle>
+          <AlertDescription>
+            <div className="flex flex-col gap-2">
+              <p>Nedostaje: {declarationFieldList(warning.missingFields)}</p>
+              <p>{warning.advisory}</p>
+              <p>{warning.notice.summary}</p>
+              {warning.notice.penalty ? (
+                <p>{warning.notice.penalty}</p>
+              ) : (
+                <p>
+                  Unesite pravnu formu u Podešavanja → Profil da bi kazna bila
+                  prikazana.
+                </p>
+              )}
+              <p className="text-xs">{warning.notice.citation}</p>
+            </div>
+          </AlertDescription>
+        </Alert>
+      ))}
+
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onClose}>
+          Zatvori
+        </Button>
+        <Button type="button" disabled={marking} onClick={onMarkChecked}>
+          {marking ? <Spinner data-icon="inline-start" /> : null}
+          Evidentiraj proveru deklaracije
+        </Button>
+      </DialogFooter>
+    </div>
   );
 }
 

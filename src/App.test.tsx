@@ -645,6 +645,14 @@ describe("AppShell", () => {
     await user.type(screen.getByLabelText("Razlog"), "Prijem robe");
     await user.click(screen.getByRole("button", { name: "Sačuvaj prijem" }));
 
+    // ZoT čl. 34: „Mleko 1 l" carries no proizvođač or zemlja proizvodnje in
+    // the demo catalogue, so the committed receipt raises the advisory warning
+    // before the dialog closes. The movement is already in the ledger.
+    expect(
+      await screen.findByText("Prijem je upisan — nedostaju podaci deklaracije"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Zatvori" }));
+
     expect(await screen.findByRole("cell", { name: "5 kom" })).toBeInTheDocument();
 
     await user.click(

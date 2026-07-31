@@ -525,4 +525,103 @@ describe("CatalogModule", () => {
       ).not.toBeInTheDocument();
     });
   });
+
+  // The read-only čl. 34 gaps register. It blocks nothing: a blank column is a
+  // gap in the shop's own records, not proof that the pallet carries no
+  // deklaracija.
+  describe("izveštaj artikala bez podataka deklaracije", () => {
+    it("lists an article with blank identity fields and its advisory beside the notice", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      vi.spyOn(services.catalog, "declarationGaps").mockResolvedValue([
+        {
+          productId: 1,
+          sku: "MLEKO-1L",
+          name: "Mleko 1 l",
+          barcode: "8600000000010",
+          barcodeKind: null,
+          missingFields: ["manufacturerName", "countryOfOrigin"],
+          barcodeUnclassified: true,
+          gtinCheckDigitInvalid: false,
+          reasons: ["missingIdentityData", "barcodeUnclassified"],
+          advisory: "U sistemu nisu evidentirani podaci sa deklaracije.",
+          notice: {
+            summary: "Zabranjeno je prodavati robu bez deklaracije.",
+            penalty: "Novčana kazna za preduzetnika: 50.000 do 500.000 dinara.",
+            citation: "Zakon o trgovini, čl. 34 st. 1; kazne čl. 68 st. 1 tač. 9.",
+            isLegalDuty: true,
+          },
+        },
+      ]);
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+      await user.click(
+        await screen.findByRole("tab", { name: "Deklaracije" }),
+      );
+
+      expect(await screen.findByText("Mleko 1 l")).toBeInTheDocument();
+      expect(
+        screen.getByText("Poslovno ime proizvođača, Zemlja proizvodnje"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("U sistemu nisu evidentirani podaci sa deklaracije."),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "Novčana kazna za preduzetnika: 50.000 do 500.000 dinara.",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    // §4 item 11 / §3 req 26: no figure may sit next to a bare barcode defect —
+    // the tier between „roba bez deklaracije" and „neuredna deklaracija" is
+    // unresolved, so the backend sends no notice and the row must show none.
+    it("attaches no penalty figure to a row whose only defect is the barcode", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      vi.spyOn(services.catalog, "declarationGaps").mockResolvedValue([
+        {
+          productId: 2,
+          sku: "KAFA-200",
+          name: "Kafa 200 g",
+          barcode: "8600000000027",
+          barcodeKind: "gtin",
+          missingFields: [],
+          barcodeUnclassified: false,
+          gtinCheckDigitInvalid: true,
+          reasons: ["gtinCheckDigitInvalid"],
+          advisory: null,
+          notice: null,
+        },
+      ]);
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+      await user.click(
+        await screen.findByRole("tab", { name: "Deklaracije" }),
+      );
+
+      expect(
+        await screen.findByText("GTIN ima neispravnu kontrolnu cifru"),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/dinara/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/kazn/i)).not.toBeInTheDocument();
+    });
+
+    it("says so plainly when no active article has a gap", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      vi.spyOn(services.catalog, "declarationGaps").mockResolvedValue([]);
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+      await user.click(
+        await screen.findByRole("tab", { name: "Deklaracije" }),
+      );
+
+      expect(
+        await screen.findByText(
+          "Svi aktivni artikli imaju evidentirane podatke deklaracije.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
 });

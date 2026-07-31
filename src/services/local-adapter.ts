@@ -19,6 +19,7 @@ import type {
   CorrectionReport,
   CompletedSale,
   DailyTurnoverReport,
+  DeclarationGapRow,
   ExportedFile,
   ImportHeaders,
   ImportJob,
@@ -141,6 +142,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<CategorySummary>("catalog_save_category", { request }),
       getPrethodnaCena: (productId, campaignStart) =>
         invoke<PrethodnaCenaDto>("catalog_prethodna_cena", { productId, campaignStart }),
+      declarationGaps: () =>
+        invoke<DeclarationGapRow[]>("catalog_declaration_gaps"),
     },
     sales: {
       createSalePreview: (request) =>
@@ -160,6 +163,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<InventoryAdjustmentResult>("inventory_write_off", { request }),
       getProductLedger: (productId) =>
         invoke<ProductLedger>("inventory_get_product_ledger", { productId }),
+      markDeclarationChecked: (productId) =>
+        invoke<void>("inventory_mark_declaration_checked", { productId }),
     },
     receipts: {
       searchReceipts: (query) => invoke<ReceiptSearchResult>("receipts_search", { query }),

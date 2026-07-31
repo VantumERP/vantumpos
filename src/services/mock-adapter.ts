@@ -10,6 +10,9 @@ import type {
   CategorySummary,
   CompanySettings,
   CreateBackupRequest,
+  DeclarationGapReason,
+  DeclarationGapRow,
+  DeclarationWarning,
   EurRate,
   ImportJob,
   LegalNotice,
@@ -50,6 +53,121 @@ const mockEurRate: EurRate = {
   rateDate: "2026-06-18",
   source: "nbs",
 };
+
+/** Verbatim `commands::inventory::DECLARATION_ADVISORY`. One sentence, one
+ *  wording: two copies would let one surface soften what the other hardened. */
+const DECLARATION_ADVISORY =
+  "U sistemu nisu evidentirani podaci sa deklaracije. Ako roba fizički nosi " +
+  "ispravnu deklaraciju, prekršaja nema — unesite podatke sa deklaracije ili " +
+  "evidentirajte proveru deklaracije (olakšavajuća okolnost, čl. 69a).";
+
+/**
+ * Mirrors `legal::declaration_missing` in wording and citation only.
+ *
+ * `penalty` is deliberately `null` whatever the legal form: every statutory
+ * fine figure lives in `src-tauri/src/legal.rs` and nowhere else, so a second
+ * copy in this double could silently drift out of tier. A `null` penalty is the
+ * one answer that can never be the wrong one.
+ */
+const declarationMissingNotice: LegalNotice = {
+  summary:
+    "Prodaja robe bez deklaracije. Deklaraciju obezbeđuje proizvođač, " +
+    "odnosno uvoznik, ali za prodaju takve robe odgovara trgovac.",
+  penalty: null,
+  citation: "Zakon o trgovini, čl. 34 st. 1–2, čl. 68 st. 1 tač. 9.",
+  isLegalDuty: true,
+};
+
+/** `catalog::is_valid_gtin` — modulo-10 over GTIN-8/12/13/14. Runs only for a
+ *  code the shop asserted to be a GTIN. */
+function isValidGtin(code: string): boolean {
+  if (![8, 12, 13, 14].includes(code.length) || !/^\d+$/.test(code)) {
+    return false;
+  }
+
+  const digits = [...code].map(Number);
+  const check = digits[digits.length - 1];
+  const sum = digits
+    .slice(0, -1)
+    .reverse()
+    .reduce((total, digit, index) => total + (index % 2 === 0 ? digit * 3 : digit), 0);
+
+  return (10 - (sum % 10)) % 10 === check;
+}
+
+/** The two ZoT čl. 34 st. 1 identity fields the Rust gate, the goods-receipt
+ *  warning and the gaps report all agree on. */
+function missingDeclarationFields(product: ProductSummary): string[] {
+  return (
+    [
+      [product.manufacturerName, "manufacturerName"],
+      [product.countryOfOrigin, "countryOfOrigin"],
+    ] as const
+  )
+    .filter(([value]) => !(value ?? "").trim())
+    .map(([, field]) => field);
+}
+
+/** `commands::inventory::collect_declaration_warnings`. Warns, never blocks. */
+function declarationWarningsFor(product: ProductSummary): DeclarationWarning[] {
+  const missingFields = missingDeclarationFields(product);
+  if (missingFields.length === 0) {
+    return [];
+  }
+
+  return [
+    {
+      productId: product.id,
+      productName: product.name,
+      missingFields,
+      advisory: DECLARATION_ADVISORY,
+      notice: declarationMissingNotice,
+    },
+  ];
+}
+
+/** `commands::catalog::declaration_gaps`. Active articles only; a row with no
+ *  reason is not a gap and is not returned. */
+function declarationGapsFor(products: ProductSummary[]): DeclarationGapRow[] {
+  return products
+    .filter((product) => product.active)
+    .map((product) => {
+      const missingFields = missingDeclarationFields(product);
+      const barcodeKind = product.barcodeKind ?? null;
+      const scannable = (product.barcode ?? "").trim() || null;
+      const barcodeUnclassified = scannable !== null && barcodeKind === null;
+      const gtinCheckDigitInvalid =
+        barcodeKind === "gtin" && scannable !== null && !isValidGtin(scannable);
+
+      const reasons: DeclarationGapReason[] = [];
+      if (missingFields.length > 0) {
+        reasons.push("missingIdentityData");
+      }
+      if (barcodeUnclassified) {
+        reasons.push("barcodeUnclassified");
+      }
+      if (gtinCheckDigitInvalid) {
+        reasons.push("gtinCheckDigitInvalid");
+      }
+
+      return {
+        productId: product.id,
+        sku: product.sku,
+        name: product.name,
+        barcode: product.barcode,
+        barcodeKind,
+        missingFields,
+        barcodeUnclassified,
+        gtinCheckDigitInvalid,
+        reasons,
+        // Both hang off the identity gap alone: §4 item 11 lets no figure near
+        // a bare barcode defect.
+        advisory: missingFields.length > 0 ? DECLARATION_ADVISORY : null,
+        notice: missingFields.length > 0 ? declarationMissingNotice : null,
+      } satisfies DeclarationGapRow;
+    })
+    .filter((row) => row.reasons.length > 0);
+}
 
 export function createMockServices(): PosServices {
   let categories: CategorySummary[] = [
@@ -254,6 +372,10 @@ export function createMockServices(): PosServices {
       previousQuantityMilli,
       newQuantityMilli,
       createdAt: now,
+      // Nothing new arrives through a correction or a write-off, so only the
+      // receipt can raise the čl. 34 warning.
+      declarationWarnings:
+        movementType === "receive" ? declarationWarningsFor(product) : [],
     };
   }
 
@@ -721,6 +843,9 @@ export function createMockServices(): PosServices {
           ageDays: null,
         } satisfies PrethodnaCenaDto;
       },
+      async declarationGaps() {
+        return declarationGapsFor(products);
+      },
     },
     sales: {
       async createSalePreview(request) {
@@ -793,6 +918,9 @@ export function createMockServices(): PosServices {
           product: toStockItem(product),
           movements: ledgerMovements.get(productId) ?? [],
         };
+      },
+      async markDeclarationChecked(productId) {
+        findProduct(productId);
       },
     },
     receipts: {

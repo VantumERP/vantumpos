@@ -473,6 +473,24 @@ describe("local service adapter", () => {
     });
   });
 
+  // ZoT čl. 34: the gaps report is read-only and the check stamp is the čl. 69a
+  // mitigation record. Both are admin-gated in Rust, so the frontend must reach
+  // the real command names rather than reimplement the rule.
+  it("maps the deklaracija surfaces to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockResolvedValue([]);
+    const services = createLocalServices(invoke);
+
+    await services.catalog.declarationGaps();
+    await services.inventory.markDeclarationChecked(7);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "catalog_declaration_gaps");
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      "inventory_mark_declaration_checked",
+      { productId: 7 },
+    );
+  });
+
   it("routes receipt use cases through stable Tauri command names", async () => {
     const invoke = vi.fn().mockImplementation((command: string) => {
       if (command === "receipts_search") {

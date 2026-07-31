@@ -738,6 +738,24 @@ export interface InventoryAdjustmentRequest {
   referenceId?: number | null;
 }
 
+/**
+ * `commands::inventory::DeclarationWarning`. ZoT čl. 34 st. 2 puts the marking
+ * duty on the proizvođač/uvoznik, but čl. 68 st. 1 tač. 9 punishes the trgovac
+ * who *sells* goods without a deklaracija — so the goods receipt warns, and
+ * only warns. The receipt is already committed by the time this arrives.
+ */
+export interface DeclarationWarning {
+  productId: number;
+  productName: string;
+  /** camelCase names of the blank fields, so the UI can point at the input. */
+  missingFields: string[];
+  /** The record-vs-reality qualifier. Render it **with** `notice`, never the
+   *  notice alone: a blank column is a gap in the shop's own records, not proof
+   *  that the pallet carries no deklaracija. */
+  advisory: string;
+  notice: LegalNotice;
+}
+
 export interface InventoryAdjustmentResult {
   productId: number;
   movementId: number;
@@ -746,6 +764,35 @@ export interface InventoryAdjustmentResult {
   previousQuantityMilli: number;
   newQuantityMilli: number;
   createdAt: string;
+  /** Advisory only, and always empty for corrections and write-offs. */
+  declarationWarnings: DeclarationWarning[];
+}
+
+/** `commands::catalog::DeclarationGapReason`. The UI branches on the reason
+ *  rather than inferring it from the flags: only `missingIdentityData` may ever
+ *  carry a penalty figure (§3 req 26). */
+export type DeclarationGapReason =
+  | "missingIdentityData"
+  | "barcodeUnclassified"
+  | "gtinCheckDigitInvalid";
+
+/** One row of `catalog_declaration_gaps`. Read-only; blocks nothing. */
+export interface DeclarationGapRow {
+  productId: number;
+  sku: string;
+  name: string;
+  barcode: string | null;
+  barcodeKind: ProductBarcodeKind | null;
+  missingFields: string[];
+  /** `null` barcode_kind means „unclassified", never „is a GTIN". */
+  barcodeUnclassified: boolean;
+  gtinCheckDigitInvalid: boolean;
+  /** Never empty — a row with no reason is not a gap and is not returned. */
+  reasons: DeclarationGapReason[];
+  /** `null` unless `notice` is set; the two are rendered together or not at all. */
+  advisory: string | null;
+  /** `null` for a bare barcode defect: §4 item 11 attaches no figure to it. */
+  notice: LegalNotice | null;
 }
 
 export interface InventoryLedgerMovement {

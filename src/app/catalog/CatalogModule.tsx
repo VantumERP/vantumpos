@@ -65,11 +65,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  declarationFieldList,
+  declarationGapReasonLabel,
+} from "@/lib/deklaracija";
 import { formatRsd, parseRsdInput } from "@/lib/money";
 import type { PosServices } from "@/services/ports";
 import type {
   CategorySummary,
   CommandError,
+  DeclarationGapRow,
   PrethodnaCenaDto,
   ProductBarcodeKind,
   ProductExternalSource,
@@ -376,6 +381,18 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
       externalSource: product.externalSource ?? null,
     });
     setProductSheetOpen(true);
+  }
+
+  /** The gaps report lists an article the current filters may exclude, so it
+   *  fetches the row rather than searching the loaded page. */
+  async function openEditProductById(productId: number) {
+    const product =
+      products.find((item) => item.id === productId) ??
+      (await services.catalog.getProduct(productId));
+
+    if (product) {
+      openEditProduct(product);
+    }
   }
 
   async function handleBarcodeLookup() {
@@ -780,6 +797,7 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
           <TabsList>
             <TabsTrigger value="products">Artikli</TabsTrigger>
             <TabsTrigger value="categories">Kategorije</TabsTrigger>
+            <TabsTrigger value="declarations">Deklaracije</TabsTrigger>
           </TabsList>
           <Button type="button" onClick={openCreateProduct}>
             <PlusIcon data-icon="inline-start" />
@@ -847,6 +865,12 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
             </Button>
           </div>
           <CategoryTable categories={categories} onEdit={openEditCategory} />
+        </TabsContent>
+        <TabsContent value="declarations" className="flex flex-col gap-4">
+          <DeclarationGapsReport
+            services={services}
+            onEditProduct={openEditProductById}
+          />
         </TabsContent>
       </Tabs>
       <ProductSheet
@@ -1108,6 +1132,169 @@ function ProductTable({
           ))}
         </TableBody>
       </Table>
+    </div>
+  );
+}
+
+/**
+ * „Artikli bez podataka deklaracije" — the read-only ZoT čl. 34 gaps register.
+ *
+ * It blocks nothing and it proves nothing: the st. 1 data lives on the physical
+ * packaging, so a blank column here is a gap in the shop's own records, not
+ * evidence that the goods on the shelf carry no deklaracija.
+ *
+ * Every figure rides **per row** and only on a row whose identity fields are
+ * blank. §4 item 11 leaves the tier for a bare barcode defect unresolved
+ * between „roba bez deklaracije" and „neuredna deklaracija", so the backend
+ * sends no notice for such a row and none is invented here — the reason badge
+ * stands alone. The advisory sentence is always printed with the notice
+ * (§3 req 26): the notice alone reads as a proven offence.
+ */
+function DeclarationGapsReport({
+  services,
+  onEditProduct,
+}: {
+  services: PosServices;
+  onEditProduct: (productId: number) => void;
+}) {
+  const [rows, setRows] = useState<DeclarationGapRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const gaps = await services.catalog.declarationGaps();
+        if (!cancelled) {
+          setRows(gaps);
+        }
+      } catch (unknownError) {
+        if (!cancelled) {
+          setError(commandMessage(unknownError, "Izveštaj nije učitan."));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [services]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h3 className="text-sm font-semibold">
+          Artikli bez podataka deklaracije
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          ZoT čl. 34 — aktivni artikli kod kojih podaci sa deklaracije nisu
+          evidentirani u sistemu. Izveštaj ništa ne blokira.
+        </p>
+      </div>
+
+      {error ? (
+        <Alert variant="destructive">
+          <AlertTitle>Izveštaj nije učitan</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : loading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Spinner data-icon="inline-start" />
+          Učitavanje izveštaja
+        </div>
+      ) : rows.length === 0 ? (
+        <Empty>
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <FolderOpenIcon />
+            </EmptyMedia>
+            <EmptyTitle>Nema artikala u izveštaju</EmptyTitle>
+            <EmptyDescription>
+              Svi aktivni artikli imaju evidentirane podatke deklaracije.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <div className="overflow-hidden rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Artikal</TableHead>
+                <TableHead>SKU</TableHead>
+                <TableHead>Barkod</TableHead>
+                <TableHead>Nedostaje</TableHead>
+                <TableHead>Razlog</TableHead>
+                <TableHead>Napomena</TableHead>
+                <TableHead>Akcije</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => (
+                <TableRow key={row.productId}>
+                  <TableCell className="font-medium">{row.name}</TableCell>
+                  <TableCell>{row.sku}</TableCell>
+                  <TableCell>{row.barcode ?? "-"}</TableCell>
+                  <TableCell>
+                    {row.missingFields.length > 0
+                      ? declarationFieldList(row.missingFields)
+                      : "-"}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-col items-start gap-1">
+                      {row.reasons.map((reason) => (
+                        <Badge key={reason} variant="outline">
+                          {declarationGapReasonLabel(reason)}
+                        </Badge>
+                      ))}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    {row.notice && row.advisory ? (
+                      <div className="flex max-w-md flex-col gap-1 text-xs">
+                        <p>{row.advisory}</p>
+                        <p>{row.notice.summary}</p>
+                        {row.notice.penalty ? (
+                          <p>{row.notice.penalty}</p>
+                        ) : (
+                          <p>
+                            Unesite pravnu formu u Podešavanja → Profil za pun
+                            prikaz.
+                          </p>
+                        )}
+                        <p>{row.notice.citation}</p>
+                      </div>
+                    ) : (
+                      "-"
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onEditProduct(row.productId)}
+                    >
+                      <EditIcon data-icon="inline-start" />
+                      Izmeni
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </div>
   );
 }
