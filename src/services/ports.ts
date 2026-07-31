@@ -272,6 +272,11 @@ export interface KepService {
 export interface PrintService {
   /** Opens an exported document in the OS default handler for printing. */
   openForPrint(path: string): Promise<void>;
+  /**
+   * Opens an external URL in the system browser. Needed because a
+   * `target="_blank"` anchor does nothing inside the Tauri webview.
+   */
+  openExternalUrl(url: string): Promise<void>;
 }
 
 export interface ReportsService {

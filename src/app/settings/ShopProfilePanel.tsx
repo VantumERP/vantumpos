@@ -51,6 +51,11 @@ const RECHECK_AFTER_MS = 365 * 24 * 60 * 60 * 1000;
 interface ShopProfilePanelProps {
   profile: ShopProfile;
   onSave: (request: ShopProfile) => Promise<void> | void;
+  /**
+   * Opens the registry in the system browser. A `target="_blank"` anchor is a
+   * no-op inside the Tauri webview, so the link must go through the opener.
+   */
+  onOpenRegistry?: (url: string) => Promise<void> | void;
 }
 
 /** `nije` is a real answer state, never a silent `false`. */
@@ -113,7 +118,11 @@ function errorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
-export function ShopProfilePanel({ profile, onSave }: ShopProfilePanelProps) {
+export function ShopProfilePanel({
+  profile,
+  onSave,
+  onOpenRegistry,
+}: ShopProfilePanelProps) {
   const [form, setForm] = useState<ShopProfile>(profile);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -129,6 +138,20 @@ export function ShopProfilePanel({ profile, onSave }: ShopProfilePanelProps) {
         position === index ? { ...element, ...patch } : element,
       ),
     }));
+  }
+
+  async function handleOpenRegistry() {
+    setError(null);
+    try {
+      await onOpenRegistry?.(REGISTAR_URL);
+    } catch (openError) {
+      setError(
+        errorMessage(
+          openError,
+          "Registar nije otvoren. Otvorite adresu ručno u pregledaču.",
+        ),
+      );
+    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -313,17 +336,18 @@ export function ShopProfilePanel({ profile, onSave }: ShopProfilePanelProps) {
             onim što uređaj prijavljuje i proverite da je polje „Broj i datum
             rešenja o ukidanju odobrenja” prazno.
           </p>
-          <p className="text-xs">
-            <a
-              href={REGISTAR_URL}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="inline-flex items-center gap-1 font-medium underline underline-offset-4"
+          <div>
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="px-0"
+              onClick={handleOpenRegistry}
             >
               Registar odobrenih elemenata EFU (Poreska uprava)
-              <ExternalLinkIcon className="size-3" aria-hidden="true" />
-            </a>
-          </p>
+              <ExternalLinkIcon aria-hidden="true" />
+            </Button>
+          </div>
           <p className="text-[0.625rem] break-all text-muted-foreground">
             {REGISTAR_URL}
           </p>

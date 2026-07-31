@@ -1,5 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 
 import type { PosServices } from "./ports";
 import type {
@@ -295,6 +295,7 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
     },
     print: {
       openForPrint: (path) => openPath(path),
+      openExternalUrl: (url) => openUrl(url),
     },
   };
 }

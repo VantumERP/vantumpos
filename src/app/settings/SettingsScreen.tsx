@@ -226,6 +226,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       {activeTab === "profile" ? (
         <ShopProfilePanel
           profile={state.shopProfile}
+          onOpenRegistry={(url) => services.print.openExternalUrl(url)}
           onSave={async (request) => {
             const shopProfile = await services.settings.updateShopProfile(request);
             setState((current) =>

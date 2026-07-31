@@ -1383,6 +1383,7 @@ export function createMockServices(): PosServices {
     },
     print: {
       async openForPrint() {},
+      async openExternalUrl() {},
     },
   };
 

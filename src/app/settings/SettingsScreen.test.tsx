@@ -49,6 +49,26 @@ describe("SettingsScreen", () => {
     ).toBeInTheDocument();
   });
 
+  it("opens the PURS registry through the opener service", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const openExternalUrl = vi
+      .spyOn(services.print, "openExternalUrl")
+      .mockResolvedValue(undefined);
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Profil" }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /registar odobrenih elemenata efu/i,
+      }),
+    );
+
+    expect(openExternalUrl).toHaveBeenCalledWith(
+      "https://www.purs.gov.rs/sr/eFiskalizacija/registar-odobrenih-elemenata-efu.html",
+    );
+  });
+
   it("saves company settings and shows a success toast", async () => {
     const user = userEvent.setup();
     renderSettings();

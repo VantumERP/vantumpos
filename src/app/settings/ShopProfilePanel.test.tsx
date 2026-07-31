@@ -36,7 +36,7 @@ describe("ShopProfilePanel", () => {
     expect(screen.queryByText(/evidencija ESIR/i)).not.toBeInTheDocument();
   });
 
-  it("leaves prodaja na daljinu unanswered and asks for the answer", () => {
+  it("leaves prodaja na daljinu unanswered and asks for the answer", async () => {
     render(<ShopProfilePanel profile={unset} onSave={vi.fn()} />);
 
     const da = screen.getByRole("radio", { name: /prodaja na daljinu: da/i });
@@ -44,6 +44,72 @@ describe("ShopProfilePanel", () => {
     expect(da).not.toBeChecked();
     expect(ne).not.toBeChecked();
     expect(screen.getByText(/nije odgovoreno/i)).toBeInTheDocument();
+
+    expect(
+      screen.getByText(/odgovorite na pitanje o prodaji na daljinu/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/ćutanje se ne računa/i)).toBeInTheDocument();
+
+    await userEvent.click(ne);
+
+    expect(
+      screen.queryByText(/odgovorite na pitanje o prodaji na daljinu/i),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/ćutanje se ne računa/i)).not.toBeInTheDocument();
+  });
+
+  it("saves an untouched profile with every question still null", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<ShopProfilePanel profile={unset} onSave={onSave} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /sačuvaj profil/i }));
+
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pravnaForma: null,
+          pdvObveznik: null,
+          distanceSelling: null,
+          lpfrInPremises: null,
+        }),
+      ),
+    );
+  });
+
+  it("returns prodaja na daljinu to unanswered instead of storing ne", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<ShopProfilePanel profile={unset} onSave={onSave} />);
+
+    await userEvent.click(
+      screen.getByRole("radio", { name: /prodaja na daljinu: ne/i }),
+    );
+    await userEvent.click(
+      screen.getByRole("radio", { name: /prodaja na daljinu: nije odgovoreno/i }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /sačuvaj profil/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].distanceSelling).toBeNull();
+    expect(onSave.mock.calls[0][0].distanceSelling).not.toBe(false);
+  });
+
+  it("opens the PURS registry through the injected opener, not a target=_blank anchor", async () => {
+    const onOpenRegistry = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ShopProfilePanel
+        profile={unset}
+        onSave={vi.fn()}
+        onOpenRegistry={onOpenRegistry}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /registar odobrenih elemenata efu/i }),
+    );
+
+    expect(onOpenRegistry).toHaveBeenCalledWith(
+      "https://www.purs.gov.rs/sr/eFiskalizacija/registar-odobrenih-elemenata-efu.html",
+    );
   });
 
   it("saves the selected profile", async () => {

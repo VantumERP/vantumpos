@@ -12,6 +12,7 @@ import type {
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
+  openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe("local service adapter", () => {
@@ -914,6 +915,13 @@ describe("local service adapter", () => {
     const services = createLocalServices(vi.fn());
     await services.print.openForPrint("C:/exports/etikete-kampanja-1.html");
     expect(openPath).toHaveBeenCalledWith("C:/exports/etikete-kampanja-1.html");
+  });
+
+  it("opens an external URL through the opener plugin", async () => {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    const services = createLocalServices(vi.fn());
+    await services.print.openExternalUrl("https://www.purs.gov.rs/");
+    expect(openUrl).toHaveBeenCalledWith("https://www.purs.gov.rs/");
   });
 });
 
