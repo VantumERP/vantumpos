@@ -1,6 +1,16 @@
 <ExchangeRates>
   <Date>31.07.2026</Date>
   <ExchangeRate>
+    <CurrencyCodeAlfaChar>CHF</CurrencyCodeAlfaChar>
+    <UnitValue>1</UnitValue>
+    <MiddleRate>75.1234</MiddleRate>
+  </ExchangeRate>
+  <ExchangeRate>
+    <CurrencyCodeAlfaChar>JPY</CurrencyCodeAlfaChar>
+    <UnitValue>100</UnitValue>
+    <MiddleRate>68.9012</MiddleRate>
+  </ExchangeRate>
+  <ExchangeRate>
     <CurrencyCodeAlfaChar>EUR</CurrencyCodeAlfaChar>
     <UnitValue>1</UnitValue>
     <MiddleRate>117.2345</MiddleRate>
