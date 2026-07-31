@@ -12,9 +12,6 @@ pub(crate) const BACKUP_SETTINGS_KEY: &str = "backup";
 pub(crate) const BACKUP_ENCRYPTION_KEY: &str = "backup_encryption";
 pub(crate) const SALES_SETTINGS_KEY: &str = "sales";
 pub(crate) const SHOP_PROFILE_KEY: &str = "shop_profile";
-/// Read by the rate commands once the NBS refresh lands; `dead_code` is allowed
-/// until then, mirroring the staged domain modules.
-#[allow(dead_code)]
 pub(crate) const EUR_RATE_KEY: &str = "eur_rate";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +256,41 @@ pub fn settings_update_shop_profile(
     save_shop_profile(state.inner(), request).map_err(Into::into)
 }
 
+#[tauri::command]
+pub fn settings_get_eur_rate(state: State<'_, AppState>) -> Result<EurRateStatus, CommandError> {
+    let today = today_utc()?;
+    eur_rate_status(state.inner(), &today).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn settings_refresh_eur_rate(
+    state: State<'_, AppState>,
+) -> Result<EurRateStatus, CommandError> {
+    let today = today_utc()?;
+    refresh_eur_rate(state.inner(), &today).map_err(Into::into)
+}
+
+/// The saved status is recomputed against today rather than against the entered
+/// `rateDate`: a manually entered rate carrying yesterday's date is stale, and
+/// the surface must say so instead of reporting the day it was entered for.
+#[tauri::command]
+pub fn settings_set_manual_eur_rate(
+    state: State<'_, AppState>,
+    rate_minor: i64,
+    rate_date: String,
+) -> Result<EurRateStatus, CommandError> {
+    set_manual_eur_rate(state.inner(), rate_minor, rate_date.trim())?;
+    let today = today_utc()?;
+    eur_rate_status(state.inner(), &today).map_err(Into::into)
+}
+
+/// Staleness is judged on the calendar day, so the RFC3339 stamp is cut to the
+/// `YYYY-MM-DD` shape `rate_date` is stored in.
+fn today_utc() -> Result<String, AppError> {
+    let now = crate::clock::utc_now()?;
+    Ok(now.split('T').next().unwrap_or(&now).to_string())
+}
+
 pub(crate) fn load_json_setting<T>(
     state: &AppState,
     key: &str,
@@ -460,14 +492,81 @@ pub fn save_sales_settings(
 
 /// The cached EUR middle rate. Absent until the first refresh, so the AML
 /// surface can tell "never fetched" from "fetched and stale".
-#[allow(dead_code)]
 pub fn load_eur_rate(state: &AppState) -> Result<Option<crate::nbs_rate::EurRate>, AppError> {
     load_json_setting(state, EUR_RATE_KEY, None)
 }
 
-#[allow(dead_code)]
 pub fn save_eur_rate(state: &AppState, rate: &crate::nbs_rate::EurRate) -> Result<(), AppError> {
     save_json_setting(state, EUR_RATE_KEY, &Some(rate.clone()))
+}
+
+/// The cached rate plus the staleness verdict for the day it was asked about.
+/// `checked_for` travels with the verdict so the surface can say *which* day the
+/// rate was judged against instead of implying "now".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EurRateStatus {
+    pub rate: Option<crate::nbs_rate::EurRate>,
+    pub is_stale: bool,
+    pub checked_for: String,
+}
+
+/// A rate is fresh only on its own date. An absent rate is stale — never
+/// "fine": the AML čl. 46 st. 1 threshold is derived from it, so silence has to
+/// read as "unknown", not as "no rate needed".
+pub fn eur_rate_status(state: &AppState, today: &str) -> Result<EurRateStatus, AppError> {
+    let rate = load_eur_rate(state)?;
+    let is_stale = rate.as_ref().is_none_or(|r| r.rate_date != today);
+    Ok(EurRateStatus {
+        rate,
+        is_stale,
+        checked_for: today.to_string(),
+    })
+}
+
+/// Refreshes from the NBS, degrading to the cached rate when the fetch fails.
+/// A dead network must never surface as a command error here: the operator gets
+/// the stale rate plus `is_stale`, and the sale is never blocked by the refresh
+/// itself. The admin gate runs BEFORE the fetch, so a cashier cannot trigger
+/// the outbound call at all.
+pub fn refresh_eur_rate(state: &AppState, today: &str) -> Result<EurRateStatus, AppError> {
+    super::auth::require_admin(state)?;
+
+    match crate::nbs_rate::fetch_nbs_middle_rate() {
+        Ok(rate) => {
+            save_eur_rate(state, &rate)?;
+        }
+        Err(error) => {
+            log::warn!("NBS rate refresh failed, keeping the cached rate: {error}");
+        }
+    }
+
+    eur_rate_status(state, today)
+}
+
+/// The manual fallback for the days the NBS is unreachable. Admin-only: this
+/// value sets the dinar threshold the AML block is computed from.
+pub fn set_manual_eur_rate(
+    state: &AppState,
+    rate_minor: i64,
+    rate_date: &str,
+) -> Result<EurRateStatus, AppError> {
+    super::auth::require_admin(state)?;
+    if rate_minor <= 0 {
+        return Err(AppError::validation(
+            "Kurs mora biti veći od nule.",
+            serde_json::json!({ "field": "rateMinor" }),
+        ));
+    }
+    save_eur_rate(
+        state,
+        &crate::nbs_rate::EurRate {
+            rate_minor,
+            rate_date: rate_date.to_string(),
+            source: crate::nbs_rate::RateSource::Manual,
+        },
+    )?;
+    eur_rate_status(state, rate_date)
 }
 
 pub fn load_shop_profile(state: &AppState) -> Result<ShopProfile, AppError> {
@@ -604,6 +703,7 @@ fn default_reset_policy() -> String {
 mod tests {
     use super::*;
     use crate::db::{test_database_path, Db};
+    use crate::nbs_rate::{EurRate, RateSource};
     use crate::state::AppState;
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
@@ -1060,6 +1160,84 @@ mod tests {
                 .expect("rate should reload")
                 .expect("a saved rate is cached");
             assert_eq!(reloaded, rate, "para-per-EUR, date and source all survive");
+        });
+    }
+
+    #[test]
+    fn rate_status_reports_staleness_without_touching_the_network() {
+        with_state("eur_rate_staleness", |state| {
+            sign_in_admin(state);
+
+            let status = eur_rate_status(state, "2026-07-31").expect("status should compute");
+            assert!(status.rate.is_none(), "no rate cached yet");
+            assert!(status.is_stale, "an absent rate is stale");
+
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 11723,
+                    rate_date: "2026-07-30".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate should save");
+
+            let status = eur_rate_status(state, "2026-07-31").expect("status should compute");
+            assert!(status.is_stale, "yesterday's rate is stale for today");
+            assert_eq!(status.rate.expect("cached").rate_minor, 11723);
+
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 11800,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Manual,
+                },
+            )
+            .expect("rate should save");
+
+            let status = eur_rate_status(state, "2026-07-31").expect("status should compute");
+            assert!(
+                !status.is_stale,
+                "today's rate is fresh regardless of source"
+            );
+        });
+    }
+
+    #[test]
+    fn manual_rate_rejects_a_non_positive_amount() {
+        with_state("eur_rate_manual_validation", |state| {
+            sign_in_admin(state);
+            let error = set_manual_eur_rate(state, 0, "2026-07-31")
+                .expect_err("a zero rate must be rejected");
+            assert!(matches!(error, AppError::Validation { .. }));
+        });
+    }
+
+    /// The manual rate sets the AML čl. 46 st. 1 threshold the block is derived
+    /// from, so it is admin-only — and the gate has to fire before the refresh
+    /// reaches the network, otherwise a cashier could still trigger the call.
+    #[test]
+    fn manual_and_refresh_rates_are_admin_only() {
+        with_state("eur_rate_admin_gate", |state| {
+            sign_in_cashier(state);
+
+            let error = set_manual_eur_rate(state, 11_723, "2026-07-31")
+                .expect_err("cashier must not set the AML rate");
+            assert_eq!(error.code(), "forbidden");
+
+            let error =
+                refresh_eur_rate(state, "2026-07-31").expect_err("cashier must not refresh");
+            assert_eq!(
+                error.code(),
+                "forbidden",
+                "the admin gate must precede the network call"
+            );
+
+            assert!(
+                load_eur_rate(state).expect("rate should load").is_none(),
+                "a rejected call must not have written a rate"
+            );
         });
     }
 }

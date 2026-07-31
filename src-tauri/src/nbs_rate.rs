@@ -3,16 +3,16 @@
 //! The parse is deliberately split from the fetch so it is unit-tested from
 //! fixtures with no network — the same shape as the Open Food Facts lookup in
 //! `commands/catalog.rs`.
-//!
-//! Consumed by the NBS refresh command and the AML assessment (Tasks 6 and 7),
-//! so `dead_code` is allowed here until that wiring lands — mirroring the other
-//! domain modules.
 
-#![allow(dead_code)]
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::app_error::AppError;
+
+const NBS_TIMEOUT_SECONDS: u64 = 8;
+const NBS_RATE_URL: &str =
+    "https://www.nbs.rs/ExchangeRateXmlOldWS/ExchangeRateXmlOld.asmx/GetCurrentExchangeRate";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -111,6 +111,32 @@ pub fn parse_nbs_middle_rate(body: &str) -> Result<EurRate, AppError> {
         rate_date,
         source: RateSource::Nbs,
     })
+}
+
+/// The network call. Deliberately not unit-tested — the parse above is where
+/// the logic lives, and it is fixture-tested. Any failure is a `Business` error
+/// the caller degrades from: an unreachable NBS must never block a sale, it may
+/// only leave the cached rate standing and stale.
+pub fn fetch_nbs_middle_rate() -> Result<EurRate, AppError> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(NBS_TIMEOUT_SECONDS))
+        .build();
+
+    match agent.get(NBS_RATE_URL).call() {
+        Ok(response) => {
+            let body = response.into_string().map_err(|source| {
+                AppError::business(
+                    "nbs_rate_unavailable",
+                    format!("Odgovor NBS-a nije čitljiv: {source}"),
+                )
+            })?;
+            parse_nbs_middle_rate(&body)
+        }
+        Err(error) => Err(AppError::business(
+            "nbs_rate_unavailable",
+            format!("Kurs NBS-a trenutno nije dostupan: {error}"),
+        )),
+    }
 }
 
 /// NBS renders `dd.MM.yyyy`; the app stores ISO `yyyy-MM-dd` everywhere.
