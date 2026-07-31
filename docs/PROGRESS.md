@@ -88,20 +88,56 @@ at `docs/SW11-SW15-VERIFIED-RULES.md`). Register rows 21, 27, 28 and 29 in
 | SW-11c deklaracija | declaration columns on `products` (v15) + `catalog.rs::validate_declaration` (mandatory **iff** `distance_selling`), `catalog_declaration_gaps` report, goods-receipt warnings in `inventory.rs` |
 | Go-live reset | preserves configuration (`shop_profile`, `eur_rate`, `non_working_days`), clears compliance state, and discloses the deklaracija wipe |
 
-**Verification gates (all green at HEAD):**
+**Verification gates at the end of the 22-task plan (`f96df45`):** bun 274 passed / 19 files,
+cargo 456 passed, build + clippy + fmt + `git diff --check` clean.
+
+### SW-11 / SW-15 fix batch (2026-08-01)
+
+A post-ship adversarial review of the module against `docs/SW11-SW15-VERIFIED-RULES.md` found six
+defects (D1, D3, D5, D6–D8) plus four documentation errors. All are now closed on `master`.
+
+| Defect | What was wrong | Fixed by |
+|---|---|---|
+| **D1 — blocking** | `settings_get_eur_rate` / `settings_refresh_eur_rate` / `settings_set_manual_eur_rate` existed in Rust but were absent from `PosServices`, so a **real install had no way to obtain a rate at all**. `sales_assess_cash_payment` therefore always returned `rateUnavailable` and the AML čl. 46 st. 1 check could never run outside the mock adapter | `2b586ee` — the three commands added to `ports.ts` / `local-adapter.ts`, registered in `lib.rs`, and surfaced as the admin **„Kurs“** tab (`SettingsScreen.tsx::EurRatePanel`): NBS refresh, band-checked manual fallback, staleness verdict |
+| **D3** | The till's AML verdict is debounced; between the last keystroke and the verdict landing, „Završi prodaju“ decided the soft block on the *previous* tender — a fast operator walked straight through a breach | `5fc0390` — `RegisterScreen` tracks `assessedCashMinor` and re-asks `assessCashPayment` for the exact cash line about to be booked before deciding |
+| **D5** | Answering **„ne“** to the L-PFR question surfaced nothing. §3 req 32 requires the ZF čl. 6 st. 4 duty **and** its čl. 15 st. 1 tač. 4 penalty at the shop's own tier, unless one of the two statutory carve-outs is claimed | `3c724c0` — `legal.rs::lpfr_required` (tier-resolved, enumerated in the `all_notices` guard), `settings_lpfr_notice`, and the two carve-out tri-states (`lpfrCarveOutInternetOnly`, `lpfrCarveOutOwnUsedAssets`) on `ShopProfilePanel` |
+| **D6–D8** | The per-sale verdict read as clearance for the buyer; čl. 46 st. 1 also reaches linked cash transactions and contracts inside one year, which the software cannot compute (§3 req 5 requires that limitation be stated **in writing**) | `848dcb4` — disclosure on the till's AML notice and an `AmlAggregationDisclosure` panel beside the rate settings |
+| Docs | Gate baselines, the `legal.rs` exclusivity claim, register row 27 and the retention citation were overstated; the `reset_trading_data` tombstone still cited **ZPDV čl. 47** as the general retention floor | `9fa88b8` + `backup.rs` — the tombstone now cites **ZoRač čl. 28 st. 4 + ZPPPA čl. 114ž**, with a test that bars `ZPDV` from that string |
+
+**Verification gates (all green at HEAD, `848dcb4`):**
 
 | Gate | Result |
 |---|---|
-| `bun run test` | **274 passed** / 0 failed, 19 files (was 211, 17 files at plan base `10ba510`) |
+| `bun run test` | **296 passed** / 0 failed, 19 files (was 274 pre-batch) |
 | `bun run build` | pass (tsc + vite, 2732 modules) |
-| `cargo test -- --test-threads=1` | **456 passed** / 0 failed (was 349 at plan base `10ba510`) |
+| `cargo test -- --test-threads=1` | **460 passed** / 0 failed (was 456 pre-batch) |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --check` | clean |
 | `git diff --check` | clean |
 
-**Known remaining gap:** the general upward-only `retain_until` engine (register row 21) is still open —
-only the onboarding half of the retention item shipped. The KEP book carries its own 5-year floor in
-`kep_close.rs::retention_floor`.
+**Still open after this batch** (requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3):
+
+- **Req 39 / §4 item 8 — false archive duty still on screen.** `src/app/settings/SettingsScreen.tsx:1773`
+  tells the operator „Pravna lica ne smeju uništavati dokumentarni materijal bez pismenog odobrenja
+  arhiva.“ ZAG čl. 16 st. 2 confines prior written archive approval to the **public sector**; the memo
+  (§1 row 5) requires that claim removed. Pre-existing (SW-3, `062250d`), not introduced by this batch.
+- **Req 35–38, 42, 43 — retention engine.** No `retention_class`, `retain_until`, `legal_hold` or
+  upward-only extension exists anywhere in the schema; the čl. 32 objekti/ulaganja register (req 37) and
+  the documented plain-text archival export (req 43) are not built. The KEP book carries its own 5-year
+  floor in `kep_close.rs::retention_floor`. The same screen line (`SettingsScreen.tsx:1771`) still
+  attributes the 10-year floor to **ZPDV čl. 47** — the miscitation corrected in `backup.rs` was not
+  carried into the UI copy.
+- **Req 5(b)(c) — one-year aggregation.** The limitation is now disclosed, but the optional buyer tag and
+  the rolling 365-day running total are not built. `[PRUDENTIAL]` mechanism; blocked on §5 Q-3 (lawful
+  ZZPL basis for a customer-identity store).
+- **Req 17 — polog evidence trail.** The „Izveštaj o nedeponovanom gotovom novcu“ renders on screen; no
+  printable/CSV export for the knjigovođa.
+- **Req 29 — preduzetnik constant lint** (>500.000 range / >150.000 fixed) is not implemented; the
+  `legal.rs` guard covers the forbidden substrings and the UNSET case only.
+- **Req 40 — SEF / e-otpremnica copy** does not exist yet, so the korporacijska-kartica and
+  public-sector-buyer exceptions have nowhere to be stated.
+- **`legal.rs` exclusivity, known exception:** `src/app/reklamacije/ReklamacijeModule.tsx:128` still
+  hard-codes the regime-versioned reklamacija amounts — an SW-7 follow-up.
 
 ---
 
