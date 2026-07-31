@@ -568,6 +568,32 @@ CREATE TABLE non_working_days (
 );
 "#,
     },
+    Migration {
+        version: 16,
+        name: "aml_compliance_event_and_documented_cash_movements",
+        sql: r#"
+-- SQLite cannot alter a CHECK, so widening compliance_log.event_type to admit the
+-- AML cash-threshold event is a table rebuild in the style of the v15 rebuilds.
+CREATE TABLE compliance_log_next (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL CHECK (event_type IN ('trading_data_reset', 'backup_restored', 'aml_cash_threshold')),
+    detail_json TEXT,
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+INSERT INTO compliance_log_next (id, event_type, detail_json, user_id, created_at)
+SELECT id, event_type, detail_json, user_id, created_at FROM compliance_log;
+DROP TABLE compliance_log;
+ALTER TABLE compliance_log_next RENAME TO compliance_log;
+CREATE INDEX idx_compliance_log_created_at ON compliance_log(created_at);
+
+-- Nullable and deliberately NOT backfilled: NULL means the operator has not
+-- asserted that this movement is documented per the pravilnik, which is the safe
+-- default for anything that keys off the assertion.
+ALTER TABLE cash_movements ADD COLUMN documented_per_pravilnik INTEGER
+    CHECK (documented_per_pravilnik IS NULL OR documented_per_pravilnik IN (0, 1));
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -1162,6 +1188,299 @@ VALUES (11, 900, 'cash', 120000, '2026-06-01T09:30:00Z'),
                 )
                 .expect("a cash payment must still round-trip through the v15 table");
             assert_eq!(cash_kept, 120000);
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// v16 rebuilds `compliance_log` — the never-deleted audit trail whose rows are
+    /// the evidence that a trading-data reset or a backup restore happened at all.
+    /// An installed till is upgraded in place, so the copy step is the whole point
+    /// of the rebuild; seeding at v15 and upgrading is the only way to prove it.
+    /// The same upgrade adds `cash_movements.documented_per_pravilnik`, which must
+    /// arrive NULL on every carried-forward movement: NULL means the operator has
+    /// not asserted anything, and the exclusion it gates must default OFF.
+    #[test]
+    fn migration_v16_preserves_pre_existing_compliance_log_and_cash_movements() {
+        let path = test_database_path("migration_v16_preserves_audit_rows");
+
+        {
+            let mut conn = Connection::open(&path).expect("connection should open");
+
+            // Bring the database to v15 — the last schema before the compliance_log
+            // rebuild — through the path a real installed database took.
+            conn.execute_batch(
+                r#"
+CREATE TABLE _migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"#,
+            )
+            .expect("migrations table should create");
+            for migration in &MIGRATIONS[..15] {
+                assert!(
+                    migration.version <= 15,
+                    "the pre-v16 prefix must stop at v15, saw v{}",
+                    migration.version
+                );
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, datetime('now'))",
+                    params![migration.version, migration.name],
+                )
+                .expect("migration should record");
+            }
+
+            // Installed-base audit and money data, seeded with v15 columns only. Ids
+            // are explicit and non-contiguous: the audit trail is read in id order and
+            // a movement's shift link depends on ids carrying across verbatim.
+            conn.execute_batch(
+                r#"
+INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+VALUES (900, 'stari_kasir', 'Stari Kasir', 'cashier', 1,
+        '2026-06-01T07:00:00Z', '2026-06-01T07:00:00Z');
+INSERT INTO shifts (id, user_id, opened_at, opening_cash_minor, expected_cash_minor,
+                    status, created_at, updated_at)
+VALUES (900, 900, '2026-06-01T07:00:00Z', 100000, 100000, 'open',
+        '2026-06-01T07:00:00Z', '2026-06-01T07:00:00Z');
+
+-- Both v8 event types, every column non-null, so a dropped column is visible too.
+INSERT INTO compliance_log (id, event_type, detail_json, user_id, created_at)
+VALUES (13, 'trading_data_reset',
+        '{"razlog":"probni podaci obrisani pre početka rada"}', 900,
+        '2026-06-01T08:00:00Z'),
+       (41, 'backup_restored',
+        '{"putanja":"D:/rezerva/kopija.sqlite3"}', 900,
+        '2026-06-02T08:30:00Z');
+
+-- Every v15 cash_movements column non-null, bank_reference included.
+INSERT INTO cash_movements (id, shift_id, movement_type, amount_minor, reason,
+                            bank_reference, user_id, created_at)
+VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
+        '2026-06-01T11:15:00Z');
+"#,
+            )
+            .expect("v15 audit and money rows should seed");
+
+            // The real installed-base upgrade path: v16 rebuilds compliance_log.
+            run_migrations(&mut conn).expect("forward migration should succeed");
+
+            let log_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM compliance_log", [], |row| row.get(0))
+                .expect("compliance_log count should query");
+            assert_eq!(
+                log_count, 2,
+                "the v16 rebuild must not lose a single audit row"
+            );
+
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, event_type, detail_json, user_id, created_at
+                     FROM compliance_log ORDER BY id",
+                )
+                .expect("compliance_log should prepare");
+            let entries: Vec<(i64, String, String, i64, String)> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .expect("compliance_log should query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("compliance_log rows should collect");
+            assert_eq!(
+                entries,
+                vec![
+                    (
+                        13,
+                        "trading_data_reset".to_string(),
+                        "{\"razlog\":\"probni podaci obrisani pre početka rada\"}".to_string(),
+                        900,
+                        "2026-06-01T08:00:00Z".to_string()
+                    ),
+                    (
+                        41,
+                        "backup_restored".to_string(),
+                        "{\"putanja\":\"D:/rezerva/kopija.sqlite3\"}".to_string(),
+                        900,
+                        "2026-06-02T08:30:00Z".to_string()
+                    ),
+                ],
+                "the v16 rebuild must copy every audit row verbatim, id and detail included"
+            );
+
+            // The rebuild drops the table, so the index it was read through must be
+            // back — the audit trail is queried by created_at.
+            let index_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_compliance_log_created_at'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("index metadata should query");
+            assert_eq!(
+                index_count, 1,
+                "the v16 rebuild must recreate idx_compliance_log_created_at"
+            );
+
+            // cash_movements is only ALTERed, never rebuilt — the row must be intact
+            // and the new flag must arrive NULL, never backfilled to an assertion.
+            let movement_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM cash_movements", [], |row| row.get(0))
+                .expect("cash_movements count should query");
+            assert_eq!(
+                movement_count, 1,
+                "v16 must not disturb a single cash movement"
+            );
+
+            let (
+                id,
+                shift_id,
+                movement_type,
+                amount_minor,
+                reason,
+                bank_reference,
+                user_id,
+                created_at,
+                documented,
+            ): (
+                i64,
+                i64,
+                String,
+                i64,
+                String,
+                String,
+                i64,
+                String,
+                Option<i64>,
+            ) = conn
+                .query_row(
+                    "SELECT id, shift_id, movement_type, amount_minor, reason,
+                            bank_reference, user_id, created_at, documented_per_pravilnik
+                     FROM cash_movements",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                        ))
+                    },
+                )
+                .expect("the seeded cash movement must survive v16");
+            assert_eq!(id, 57, "the movement id must be carried across verbatim");
+            assert_eq!(shift_id, 900, "the shift link must survive v16");
+            assert_eq!(movement_type, "bank_deposit");
+            assert_eq!(amount_minor, 250000);
+            assert_eq!(reason, "Polog pazara");
+            assert_eq!(bank_reference, "izvod-77");
+            assert_eq!(user_id, 900);
+            assert_eq!(created_at, "2026-06-01T11:15:00Z");
+            assert_eq!(
+                documented, None,
+                "an upgraded movement carries no operator assertion, so the flag must be NULL"
+            );
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn migration_v16_admits_the_aml_event_and_the_documented_flag() {
+        let path = test_database_path("migration_v16_new_values");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (900, 'kasir9', 'Kasir Devet', 'cashier', 1, '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');
+                 INSERT INTO shifts (id, user_id, opened_at, opening_cash_minor, expected_cash_minor, status, created_at, updated_at)
+                     VALUES (900, 900, '2026-07-01T08:00:00Z', 100000, 100000, 'open', '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');",
+            )
+            .expect("seed should insert");
+
+            // The widened CHECK must admit the AML event alongside the v8 pair.
+            for event_type in [
+                "trading_data_reset",
+                "backup_restored",
+                "aml_cash_threshold",
+            ] {
+                conn.execute(
+                    "INSERT INTO compliance_log (event_type, detail_json, user_id, created_at)
+                     VALUES (?1, '{\"napomena\":\"provera praga\"}', 900, '2026-07-01T09:00:00Z')",
+                    rusqlite::params![event_type],
+                )
+                .unwrap_or_else(|error| panic!("v16 should admit {event_type}: {error}"));
+            }
+
+            assert!(
+                conn.execute(
+                    "INSERT INTO compliance_log (event_type, user_id, created_at)
+                     VALUES ('teleport', 900, '2026-07-01T09:05:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the CHECK must still reject an unknown compliance event type"
+            );
+
+            let aml_kept: String = conn
+                .query_row(
+                    "SELECT detail_json FROM compliance_log WHERE event_type = 'aml_cash_threshold'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("an AML event must round-trip through the v16 table");
+            assert_eq!(aml_kept, "{\"napomena\":\"provera praga\"}");
+
+            // The new flag is tri-state: NULL (no assertion), 0 and 1.
+            for documented in [None, Some(0_i64), Some(1_i64)] {
+                conn.execute(
+                    "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, reason,
+                                                 documented_per_pravilnik, user_id, created_at)
+                     VALUES (900, 'pay_out', 5000, 'sitno', ?1, 900, '2026-07-01T10:00:00Z')",
+                    rusqlite::params![documented],
+                )
+                .unwrap_or_else(|error| {
+                    panic!("v16 should admit documented_per_pravilnik = {documented:?}: {error}")
+                });
+            }
+
+            assert!(
+                conn.execute(
+                    "INSERT INTO cash_movements (shift_id, movement_type, amount_minor,
+                                                 documented_per_pravilnik, user_id, created_at)
+                     VALUES (900, 'pay_out', 5000, 2, 900, '2026-07-01T10:30:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the CHECK must reject a documented_per_pravilnik outside NULL/0/1"
+            );
+
+            let unasserted: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM cash_movements WHERE documented_per_pravilnik IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("documented_per_pravilnik count should query");
+            assert_eq!(
+                unasserted, 1,
+                "a movement written without the flag must stay unasserted, not default to 1"
+            );
         }
         std::fs::remove_file(&path).expect("test database should be removed");
     }

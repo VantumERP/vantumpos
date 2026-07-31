@@ -411,8 +411,12 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("compliance_log schema should load");
+            // v16 rebuilt the table to widen this CHECK; the v8 pair must still be
+            // admitted alongside the AML event, and nothing beyond the three.
             assert!(
-                schema.contains("trading_data_reset") && schema.contains("backup_restored"),
+                schema.contains("trading_data_reset")
+                    && schema.contains("backup_restored")
+                    && schema.contains("aml_cash_threshold"),
                 "expected event_type CHECK, schema was: {schema}"
             );
         });
@@ -787,7 +791,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 15);
+                assert_eq!(migration_count, 16);
             },
         );
     }
