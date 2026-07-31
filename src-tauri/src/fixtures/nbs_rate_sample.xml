@@ -1,0 +1,13 @@
+<ExchangeRates>
+  <Date>31.07.2026</Date>
+  <ExchangeRate>
+    <CurrencyCodeAlfaChar>EUR</CurrencyCodeAlfaChar>
+    <UnitValue>1</UnitValue>
+    <MiddleRate>117.2345</MiddleRate>
+  </ExchangeRate>
+  <ExchangeRate>
+    <CurrencyCodeAlfaChar>USD</CurrencyCodeAlfaChar>
+    <UnitValue>1</UnitValue>
+    <MiddleRate>101.5000</MiddleRate>
+  </ExchangeRate>
+</ExchangeRates>

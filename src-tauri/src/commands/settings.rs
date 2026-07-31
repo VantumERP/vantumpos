@@ -12,6 +12,10 @@ pub(crate) const BACKUP_SETTINGS_KEY: &str = "backup";
 pub(crate) const BACKUP_ENCRYPTION_KEY: &str = "backup_encryption";
 pub(crate) const SALES_SETTINGS_KEY: &str = "sales";
 pub(crate) const SHOP_PROFILE_KEY: &str = "shop_profile";
+/// Read by the rate commands once the NBS refresh lands; `dead_code` is allowed
+/// until then, mirroring the staged domain modules.
+#[allow(dead_code)]
+pub(crate) const EUR_RATE_KEY: &str = "eur_rate";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -452,6 +456,18 @@ pub fn save_sales_settings(
     };
     save_json_setting(state, SALES_SETTINGS_KEY, &settings)?;
     Ok(settings)
+}
+
+/// The cached EUR middle rate. Absent until the first refresh, so the AML
+/// surface can tell "never fetched" from "fetched and stale".
+#[allow(dead_code)]
+pub fn load_eur_rate(state: &AppState) -> Result<Option<crate::nbs_rate::EurRate>, AppError> {
+    load_json_setting(state, EUR_RATE_KEY, None)
+}
+
+#[allow(dead_code)]
+pub fn save_eur_rate(state: &AppState, rate: &crate::nbs_rate::EurRate) -> Result<(), AppError> {
+    save_json_setting(state, EUR_RATE_KEY, &Some(rate.clone()))
 }
 
 pub fn load_shop_profile(state: &AppState) -> Result<ShopProfile, AppError> {
@@ -1022,6 +1038,28 @@ mod tests {
             .expect_err("cashier is forbidden");
 
             assert_eq!(error.code(), "forbidden");
+        });
+    }
+
+    #[test]
+    fn eur_rate_cache_is_absent_until_saved_and_round_trips() {
+        with_state("eur_rate_cache_round_trip", |state| {
+            assert!(
+                load_eur_rate(state).expect("rate should load").is_none(),
+                "no rate is cached before the first refresh"
+            );
+
+            let rate = crate::nbs_rate::EurRate {
+                rate_minor: 11723,
+                rate_date: "2026-07-31".to_string(),
+                source: crate::nbs_rate::RateSource::Nbs,
+            };
+            save_eur_rate(state, &rate).expect("rate should save");
+
+            let reloaded = load_eur_rate(state)
+                .expect("rate should reload")
+                .expect("a saved rate is cached");
+            assert_eq!(reloaded, rate, "para-per-EUR, date and source all survive");
         });
     }
 }

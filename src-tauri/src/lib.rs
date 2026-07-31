@@ -10,6 +10,7 @@ mod kep_close;
 mod kep_kalkulacija;
 mod kep_storno;
 mod legal;
+mod nbs_rate;
 mod price_history;
 mod reklamacije;
 mod reklamacije_docs;
