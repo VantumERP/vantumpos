@@ -82,7 +82,7 @@ at `docs/SW11-SW15-VERIFIED-RULES.md`). Register rows 21, 27, 28 and 29 in
 | Item | Shipped as |
 |---|---|
 | SW-15 onboarding profile | `settings.rs::ShopProfile` — `pravna_forma` / `pdv_obveznik` / `distance_selling`, all tri-state and **never inferred**; `EsirElement` rows kept as an *interna beleška o proveri*, never an *evidencija* |
-| Tier-resolved legal copy | `legal.rs` — the **only** module permitted to hold a fine figure; a test pins that "privredni prestup" is unreachable under the preduzetnik regime |
+| Tier-resolved legal copy | `legal.rs` — the only module allowed to hold a fine figure; every SW-11/SW-15 figure resolves through it, and a test pins that "privredni prestup" is unreachable under the preduzetnik regime. **Known exception, pre-existing (SW-7):** `src/app/reklamacije/ReklamacijeModule.tsx:128` still hard-codes the regime-versioned reklamacija amounts (`30.000` / `100.000`) and renders them at line 497 — to be folded into `legal.rs` as an SW-7 follow-up |
 | SW-11a AML cash cap | `aml.rs` (inclusive `>=`, subject is the cash line of the tender) + `nbs_rate.rs` (zvanični srednji kurs, manual fallback, no silent pass); asked via `sales_assess_cash_payment`, re-evaluated and persisted by `sales_complete`; `bank_transfer` tender ships the statute's own remedy |
 | SW-11b polog aging | `cash_deposit.rs` — working-day arithmetic over a seeded, operator-editable `non_working_days` table, FIFO buckets clocked from **receipt**, deadline as a date, `bank_withdrawal` excluded from the subject base. Advisory only, no hard block |
 | SW-11c deklaracija | declaration columns on `products` (v15) + `catalog.rs::validate_declaration` (mandatory **iff** `distance_selling`), `catalog_declaration_gaps` report, goods-receipt warnings in `inventory.rs` |
@@ -92,9 +92,9 @@ at `docs/SW11-SW15-VERIFIED-RULES.md`). Register rows 21, 27, 28 and 29 in
 
 | Gate | Result |
 |---|---|
-| `bun run test` | **274 passed** / 0 failed, 19 files (was 95) |
+| `bun run test` | **274 passed** / 0 failed, 19 files (was 211, 17 files at plan base `10ba510`) |
 | `bun run build` | pass (tsc + vite, 2732 modules) |
-| `cargo test -- --test-threads=1` | **456 passed** / 0 failed (was 103) |
+| `cargo test -- --test-threads=1` | **456 passed** / 0 failed (was 349 at plan base `10ba510`) |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --check` | clean |
 | `git diff --check` | clean |

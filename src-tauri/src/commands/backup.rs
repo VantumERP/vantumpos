@@ -494,7 +494,11 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     // back to `pravna_forma = None` and re-seed praznici the admin had deleted.
     let detail = serde_json::json!({
         "note": "Go-live reset (SW-3).",
-        "retention": "10y (ZoRač čl. 28; ZPDV čl. 47)",
+        // §2 Q4: the general 10-year floor is ZPPPA čl. 114ž (apsolutna
+        // zastarelost) plus ZoRač čl. 28 st. 4 (dnevnik i glavna knjiga).
+        // ZPDV čl. 47 supplies no general period — cite it only for the
+        // čl. 32 objekti i ulaganja limb.
+        "retention": "10y (ZoRač čl. 28 st. 4; ZPPPA čl. 114ž)",
     })
     .to_string();
     insert_compliance_event(&tx, "trading_data_reset", &detail, Some(acting.id))?;
@@ -1093,14 +1097,29 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
             assert_eq!(count(state, "compliance_log"), 1);
 
             let conn = state.db().open().expect("database should open");
-            let event_type: String = conn
+            let (event_type, detail_json): (String, String) = conn
                 .query_row(
-                    "SELECT event_type FROM compliance_log ORDER BY id DESC LIMIT 1",
+                    "SELECT event_type, detail_json FROM compliance_log ORDER BY id DESC LIMIT 1",
                     [],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .expect("compliance event should exist");
             assert_eq!(event_type, "trading_data_reset");
+
+            // SW11-SW15-VERIFIED-RULES.md §2 Q4: the general 10-year floor comes
+            // from ZPPPA čl. 114ž (apsolutna zastarelost) and ZoRač čl. 28 st. 4
+            // (dnevnik i glavna knjiga). ZPDV čl. 47 sets no general period at
+            // all — it defers to zastarelost, and its own "najmanje deset
+            // godina" limb is object-specific to čl. 32 objekti i ulaganja.
+            assert!(
+                detail_json.contains("ZoRač čl. 28 st. 4")
+                    && detail_json.contains("ZPPPA čl. 114ž"),
+                "tombstone must cite the statutes that actually supply the 10-year floor: {detail_json}"
+            );
+            assert!(
+                !detail_json.contains("ZPDV"),
+                "ZPDV čl. 47 may only be cited for the čl. 32 objekti/ulaganja limb, never for the general retention floor: {detail_json}"
+            );
         });
     }
 
