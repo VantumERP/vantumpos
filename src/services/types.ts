@@ -1568,12 +1568,19 @@ export interface SavedWorkTimeEntry {
 }
 
 /**
- * The two ZoR notices the register surfaces, already resolved against the
- * stored legal form — `crate::commands::worktime::WorkTimeNotices`. Every
- * penalty figure is authored in `legal.rs` and rides here; this side never
- * composes one.
+ * The ZoR notices the register surfaces, already resolved against the stored
+ * legal form — `crate::commands::worktime::WorkTimeNotices`. Every penalty
+ * figure is authored in `legal.rs` and rides here; this side never composes one.
+ *
+ * `capsExceeded` and `preraspodelaCapsExceeded` are **not** interchangeable.
+ * čl. 58 says hours worked in preraspodela are not prekovremeni rad, so the
+ * čl. 53 caps do not bind such an employee, and the offence is čl. 274 st. 1
+ * tač. 4 rather than tač. 3. The amount is the same under both tačke, so putting
+ * the wrong one on screen ships no wrong figure — only a wrong article and a
+ * rule that does not apply.
  */
 export interface WorkTimeNotices {
   recordMissing: LegalNotice;
   capsExceeded: LegalNotice;
+  preraspodelaCapsExceeded: LegalNotice;
 }

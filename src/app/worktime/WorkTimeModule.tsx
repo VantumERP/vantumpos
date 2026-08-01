@@ -51,6 +51,7 @@ import type {
   LegalNotice,
   SaveWorkTimeEntryRequest,
   UserAccount,
+  WorkTimeCapAssessment,
   WorkTimeEntryView,
   WorkTimeMonth,
   WorkTimeNotices,
@@ -243,6 +244,15 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
   // Set the moment the backend answers `cap_override_required`: the write is not
   // refused, it is waiting for a čl. 53 st. 1 ground.
   const [capWarning, setCapWarning] = useState<string | null>(null);
+  // The assessment the last write was measured against, from BOTH paths: the
+  // `cap_override_required` detail and the successful save alike.
+  //
+  // It decides two things the module cannot get from anywhere else. Which of the
+  // two ceiling notices applies — čl. 53 or the čl. 57 st. 5 preraspodela one —
+  // and whether a day that saved without needing an override nonetheless carries
+  // a standing daily-cap finding, which is the only way a thirteen-hour
+  // preraspodela day is ever mentioned to anyone.
+  const [caps, setCaps] = useState<WorkTimeCapAssessment | null>(null);
   const [protections, setProtections] = useState<WorkTimeProtectionBlock[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -342,12 +352,14 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
   useEffect(() => {
     setForm(emptyForm(godina, mesec));
     setCapWarning(null);
+    setCaps(null);
     setProtections([]);
     setSaveError(null);
   }, [employeeId, godina, mesec]);
 
   const zatvoren = month?.zatvoren ?? false;
   const liveEntries = (month?.entries ?? []).filter((entry) => !entry.zamenjen);
+  const capNotice = capNoticeFor(notices, caps);
 
   // The day picker never offers a day the register may not describe: outside the
   // displayed period the row would save and then be invisible (`listMonth`
@@ -361,6 +373,7 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
   const resetForm = useCallback(() => {
     setForm(emptyForm(godina, mesec));
     setCapWarning(null);
+    setCaps(null);
     setProtections([]);
     setSaveError(null);
   }, [godina, mesec]);
@@ -400,6 +413,15 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
       // under-18 and čl. 91 consent guards could not run for this day at all.
       // Dropping them here is the only place they can be silently lost.
       setProtections(saved.protections);
+      // Same reasoning, same path, and the same failure mode: `assess_caps_for_employee`
+      // deliberately leaves `dailyCapExceeded` standing for an employee in
+      // preraspodela — the stored profile carries one `radi_u_preraspodeli`
+      // flag and it cannot tell čl. 57 preraspodela, which has no daily leg,
+      // from the čl. 56 st. 3 scheme, where čl. 56 st. 4 expressly restates 12
+      // časova dnevno. The write is not gated on it, so discarding it here is
+      // the only place a thirteen-hour day can pass in total silence — and it is
+      // a finding on the čl. 274 side, the larger fine.
+      setCaps(saved.caps);
       setReloadToken((token) => token + 1);
       toast.success("Dan je evidentiran", {
         description: formatDan(saved.entry.dan),
@@ -408,10 +430,13 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
       const code = errorCode(error);
 
       if (code === "cap_override_required") {
-        // Not a refusal — the day is recordable once a ground is chosen.
+        // Not a refusal — the day is recordable once a ground is chosen. The
+        // assessment rides along so the alert can name the ceiling that was
+        // actually breached: čl. 53, or the čl. 57 st. 5 preraspodela one.
         setCapWarning(
           errorMessage(error, "Prekoračen je zakonski limit iz ZoR čl. 53."),
         );
+        setCaps(capsFrom(error));
         setSaveError(null);
       } else if (code === "protection_block") {
         setProtections(protectionsFrom(error));
@@ -560,11 +585,40 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
           <AlertTitle>Prekoračen limit radnog vremena</AlertTitle>
           <AlertDescription>
             <p>{capWarning}</p>
-            {notices ? <p>{notices.capsExceeded.summary}</p> : null}
-            {notices?.capsExceeded.penalty ? (
-              <p>{notices.capsExceeded.penalty}</p>
-            ) : null}
-            {notices ? <p>{notices.capsExceeded.citation}</p> : null}
+            {capNotice ? <p>{capNotice.summary}</p> : null}
+            {capNotice?.penalty ? <p>{capNotice.penalty}</p> : null}
+            {capNotice ? <p>{capNotice.citation}</p> : null}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {/*
+        A day that exceeded twelve hours and was NOT gated on it. Only one
+        situation produces that combination: the employee's profile says
+        preraspodela, so `assess_caps_for_employee` swapped the čl. 53 st. 3
+        daily leg for the čl. 57 st. 5 weekly one — and the week stayed under
+        sixty hours.
+
+        Which ceiling actually binds him is a question the stored profile cannot
+        answer, so this states both and says so instead of picking one: čl. 57
+        preraspodela has no daily leg at all, while čl. 56 st. 4 expressly
+        restates twelve hours for the čl. 56 st. 3 scheme. Non-blocking and not
+        `destructive` — the day is recorded, and this is a finding to check, not
+        a refusal.
+      */}
+      {caps?.dailyCapExceeded && !caps.requiresOverride ? (
+        <Alert>
+          <AlertCircleIcon aria-hidden="true" />
+          <AlertTitle>Dnevno radno vreme prelazi 12 časova</AlertTitle>
+          <AlertDescription>
+            <p>
+              Dan je evidentiran. Ukupno radno vreme tog dana prelazi 12 časova,
+              a koji dnevni limit važi zavisi od šeme po kojoj zaposleni radi:
+              preraspodela iz ZoR čl. 57 nema dnevni limit, dok za preraspodelu
+              iz ZoR čl. 56 st. 3 važi ZoR čl. 56 st. 4, koji izričito propisuje
+              najviše 12 časova dnevno. Van preraspodele važi ZoR čl. 53 st. 3.
+            </p>
+            <p>Proverite po kojoj šemi zaposleni radi.</p>
           </AlertDescription>
         </Alert>
       ) : null}
@@ -924,6 +978,35 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
   );
 }
 
+/**
+ * The notice that belongs beside a cap refusal — the čl. 53 one, or the čl. 57
+ * st. 5 preraspodela one.
+ *
+ * They are not interchangeable. čl. 58 says hours worked in preraspodela are not
+ * prekovremeni rad, so čl. 53 st. 2 and st. 3 do not bind such an employee at
+ * all, and the backend refuses his day on the 60 h weekly ceiling instead
+ * (`assess_caps_for_employee`). Showing `capsExceeded` there states a rule that
+ * does not apply to him and cites čl. 274 st. 1 **tač. 3**, when čl. 57 and
+ * čl. 60 are **tač. 4**.
+ *
+ * Both tačke resolve through the same čl. 274 st. 2 for a preduzetnik, so the
+ * amount is identical and nothing about the money would ever betray the swap —
+ * which is exactly why the choice has to be made here rather than left to the
+ * one notice that happens to be nearest.
+ */
+export function capNoticeFor(
+  notices: WorkTimeNotices | null,
+  caps: WorkTimeCapAssessment | null,
+): LegalNotice | null {
+  if (!notices) {
+    return null;
+  }
+
+  return caps?.preraspodelaWeeklyCapExceeded
+    ? notices.preraspodelaCapsExceeded
+    : notices.capsExceeded;
+}
+
 const ADVISORY_HINT =
   "Kolona izračunata radi provere usklađenosti — nije obavezno polje.";
 
@@ -1222,6 +1305,31 @@ function errorCode(error: unknown): string | null {
     typeof (error as { code: unknown }).code === "string"
   ) {
     return (error as { code: string }).code;
+  }
+
+  return null;
+}
+
+/**
+ * The `cap_override_required` detail's assessment, or `null` when the error does
+ * not carry one.
+ *
+ * `null` is the safe miss: `capNoticeFor` then falls back to the čl. 53 notice,
+ * which is the ceiling that applies to every employee not in preraspodela.
+ */
+function capsFrom(error: unknown): WorkTimeCapAssessment | null {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "details" in error &&
+    typeof (error as { details: unknown }).details === "object" &&
+    (error as { details: unknown }).details !== null
+  ) {
+    const details = (error as { details: Record<string, unknown> }).details;
+
+    if (typeof details.caps === "object" && details.caps !== null) {
+      return details.caps as WorkTimeCapAssessment;
+    }
   }
 
   return null;

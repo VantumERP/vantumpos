@@ -375,7 +375,7 @@ export interface WorkTimeService {
   /** The employee's own read-only month (ZoR čl. 83 st. 1, ZZPL čl. 26). */
   myHours(godina: number, mesec: number): Promise<WorkTimeMonth>;
   /**
-   * The two ZoR notices with their penalty already resolved against the stored
+   * The ZoR notices with their penalty already resolved against the stored
    * legal form. Read-only: the frontend decides whether to show a duty, never
    * what it costs.
    */

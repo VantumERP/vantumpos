@@ -2,7 +2,12 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { WorkTimeModule, todayIso, validateDan } from "./WorkTimeModule";
+import {
+  WorkTimeModule,
+  capNoticeFor,
+  todayIso,
+  validateDan,
+} from "./WorkTimeModule";
 import { navigationItems } from "@/app/navigation";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices } from "@/services/ports";
@@ -280,6 +285,14 @@ describe("WorkTimeModule cap warnings", () => {
         citation: "Zakon o radu, čl. 53 st. 2 i st. 3. Nadzor: inspektor rada.",
         isLegalDuty: true,
       },
+      preraspodelaCapsExceeded: {
+        summary:
+          "U slučaju preraspodele radnog vremena, radno vreme ne može da traje duže od 60 časova nedeljno.",
+        penalty:
+          "Prekršaj: novčana kazna od 200.000 do 400.000 dinara (čl. 274 st. 1 tač. 4 u vezi sa st. 2).",
+        citation: "Zakon o radu, čl. 57 st. 5. Nadzor: inspektor rada.",
+        isLegalDuty: true,
+      },
     });
 
     render(<WorkTimeModule services={services} currentUser={admin} />);
@@ -290,6 +303,177 @@ describe("WorkTimeModule cap warnings", () => {
     expect(
       screen.getByText(/50\.000 do 150\.000 dinara/),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * A preraspodela breach is refused on čl. 57 st. 5, so the notice beside it
+   * must be the čl. 57 one.
+   *
+   * čl. 58 says preraspodela is not prekovremeni rad: the čl. 53 summary — eight
+   * hours of overtime a week, twelve hours a day — states rules that do not bind
+   * this employee, and its citation is čl. 274 st. 1 **tač. 3** when čl. 57 and
+   * čl. 60 are **tač. 4**. The amount is the same either way, so nothing here is
+   * a wrong figure; it is a wrong article handed to an inspector.
+   */
+  it("quotes čl. 57 st. 5 and tač. 4 when the preraspodela ceiling is the one breached", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    vi.spyOn(services.worktime, "notices").mockResolvedValue({
+      recordMissing: {
+        summary:
+          "Poslodavac je dužan da vodi dnevnu evidenciju o prekovremenom radu zaposlenih.",
+        penalty:
+          "Prekršaj: novčana kazna od 50.000 do 150.000 dinara (čl. 276 st. 1 u vezi sa tač. 1a).",
+        citation: "Zakon o radu, čl. 55 st. 6. Nadzor: inspektor rada.",
+        isLegalDuty: true,
+      },
+      capsExceeded: {
+        summary:
+          "Prekovremeni rad ne može trajati duže od osam časova nedeljno, niti ukupno radno vreme sa prekovremenim duže od 12 časova dnevno.",
+        penalty:
+          "Prekršaj: novčana kazna od 200.000 do 400.000 dinara (čl. 274 st. 1 tač. 3 u vezi sa st. 2).",
+        citation: "Zakon o radu, čl. 53 st. 2 i st. 3. Nadzor: inspektor rada.",
+        isLegalDuty: true,
+      },
+      preraspodelaCapsExceeded: {
+        summary:
+          "U slučaju preraspodele radnog vremena, radno vreme ne može da traje duže od 60 časova nedeljno.",
+        penalty:
+          "Prekršaj: novčana kazna od 200.000 do 400.000 dinara (čl. 274 st. 1 tač. 4 u vezi sa st. 2).",
+        citation: "Zakon o radu, čl. 57 st. 5. Nadzor: inspektor rada.",
+        isLegalDuty: true,
+      },
+    });
+    vi.spyOn(services.worktime, "saveEntry").mockRejectedValue({
+      code: "cap_override_required",
+      message:
+        "Prekoračen je limit radnog vremena u preraspodeli — 60 časova nedeljno (ZoR čl. 57 st. 5). Dan se može evidentirati, ali morate izabrati razlog prekoračenja.",
+      details: {
+        caps: {
+          ...nulaCaps,
+          dailyTotalMinutes: 780,
+          weeklyTotalMinutes: 3660,
+          preraspodelaWeeklyCapExceeded: true,
+          requiresOverride: true,
+        },
+      },
+    });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+
+    await setMinutes(user, /efektivno izvršeni/i, "780");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+
+    const alert = (
+      await screen.findByText(/Prekoračen limit radnog vremena/i)
+    ).closest<HTMLElement>('[data-slot="alert"]');
+    expect(alert).not.toBeNull();
+
+    expect(within(alert!).getByText(/ZoR čl\. 57 st\. 5/)).toBeInTheDocument();
+    expect(within(alert!).getByText(/60 časova nedeljno\./)).toBeInTheDocument();
+    expect(within(alert!).getByText(/tač\. 4/)).toBeInTheDocument();
+    // čl. 58 makes the čl. 53 rule set inapplicable to this employee, and
+    // tač. 3 is the wrong offence.
+    expect(
+      within(alert!).queryByText(/osam časova nedeljno/),
+    ).not.toBeInTheDocument();
+    expect(within(alert!).queryByText(/tač\. 3/)).not.toBeInTheDocument();
+    expect(
+      within(alert!).queryByText(/čl\. 53 st\. 2 i st\. 3/),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * A thirteen-hour preraspodela day inside a forty-hour week saves without
+   * requiring an override — and, today, without saying anything at all.
+   *
+   * `assess_caps_for_employee` deliberately leaves `dailyCapExceeded` standing
+   * on the SUCCESS path, because the single `radi_u_preraspodeli` flag cannot
+   * tell čl. 57 preraspodela (no daily leg) from the čl. 56 st. 3 scheme, where
+   * čl. 56 st. 4 expressly restates twelve hours a day. Dropping `saved.caps`
+   * here is the only place that finding can be lost — and it is a finding on the
+   * čl. 274 side, the larger fine.
+   */
+  it("surfaces the non-blocking daily-cap finding a successful preraspodela save carries", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    vi.spyOn(services.worktime, "saveEntry").mockResolvedValue({
+      entry: entry({ dan: today() }),
+      caps: {
+        ...nulaCaps,
+        dailyTotalMinutes: 780,
+        weeklyTotalMinutes: 2400,
+        dailyCapExceeded: true,
+        requiresOverride: false,
+      },
+      protections: [],
+    });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+
+    await setMinutes(user, /efektivno izvršeni/i, "780");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+
+    const alert = (
+      await screen.findByText(/Dnevno radno vreme prelazi 12 časova/i)
+    ).closest<HTMLElement>('[data-slot="alert"]');
+    expect(alert).not.toBeNull();
+
+    // Both ceilings are named, because the stored profile cannot say which
+    // scheme the employee is in — and the operator is told that is the open
+    // question rather than handed one answer.
+    expect(within(alert!).getByText(/čl\. 53 st\. 3/)).toBeInTheDocument();
+    expect(within(alert!).getByText(/čl\. 56 st\. 4/)).toBeInTheDocument();
+    expect(within(alert!).getByText(/12 časova dnevno/)).toBeInTheDocument();
+    // Non-blocking: the day was recorded, and nothing here may say otherwise.
+    expect(screen.queryByText(/Dan nije evidentiran/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Unos nije dozvoljen/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("cap notice selection", () => {
+  const notices = {
+    recordMissing: {
+      summary: "Poslodavac je dužan da vodi dnevnu evidenciju.",
+      penalty: null,
+      citation: "Zakon o radu, čl. 55 st. 6.",
+      isLegalDuty: true,
+    },
+    capsExceeded: {
+      summary: "Prekovremeni rad ne može trajati duže od osam časova nedeljno.",
+      penalty: null,
+      citation: "Zakon o radu, čl. 53 st. 2 i st. 3.",
+      isLegalDuty: true,
+    },
+    preraspodelaCapsExceeded: {
+      summary:
+        "U slučaju preraspodele radnog vremena, radno vreme ne može da traje duže od 60 časova nedeljno.",
+      penalty: null,
+      citation: "Zakon o radu, čl. 57 st. 5.",
+      isLegalDuty: true,
+    },
+  };
+
+  it("picks the čl. 57 notice only when the preraspodela ceiling is the breached one", () => {
+    expect(
+      capNoticeFor(notices, { ...nulaCaps, preraspodelaWeeklyCapExceeded: true }),
+    ).toBe(notices.preraspodelaCapsExceeded);
+    expect(
+      capNoticeFor(notices, { ...nulaCaps, dailyCapExceeded: true }),
+    ).toBe(notices.capsExceeded);
+  });
+
+  /**
+   * An error without a `details.caps` payload must still name a ceiling, and
+   * čl. 53 is the one that binds every employee not in preraspodela. Falling
+   * back the other way would quote čl. 57 st. 5 — a provision that binds nobody
+   * outside preraspodela — at an ordinary twelve-hour breach.
+   */
+  it("falls back to the čl. 53 notice when no assessment came back", () => {
+    expect(capNoticeFor(notices, null)).toBe(notices.capsExceeded);
+    expect(capNoticeFor(null, null)).toBeNull();
   });
 });
 
@@ -472,6 +656,13 @@ describe("WorkTimeModule legal notices", () => {
         penalty: null,
         citation: "Praksa inspekcije rada, bez propisane obaveze.",
         isLegalDuty: false,
+      },
+      preraspodelaCapsExceeded: {
+        summary:
+          "U slučaju preraspodele radnog vremena, radno vreme ne može da traje duže od 60 časova nedeljno.",
+        penalty: null,
+        citation: "Zakon o radu, čl. 57 st. 5. Nadzor: inspektor rada.",
+        isLegalDuty: true,
       },
     });
 

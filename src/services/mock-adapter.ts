@@ -173,6 +173,19 @@ const overtimeCapsExceededNotice: LegalNotice = {
   isLegalDuty: true,
 };
 
+/** Mirrors `legal::preraspodela_caps_exceeded`. `penalty` null for the same reason. */
+const preraspodelaCapsExceededNotice: LegalNotice = {
+  summary:
+    "U slučaju preraspodele radnog vremena, radno vreme ne može da traje duže " +
+    "od 60 časova nedeljno. Časovi ostvareni u preraspodeli ne smatraju se " +
+    "prekovremenim radom (čl. 58).",
+  penalty: null,
+  citation:
+    "Zakon o radu, čl. 57 st. 5. Nadzor: inspektor rada. " +
+    "Ovi članovi ne propisuju zaštitnu meru.",
+  isLegalDuty: true,
+};
+
 /** `crate::commands::worktime::EVIDENCIJA_ZAGLAVLJE`, verbatim (§4 req. 22). */
 const EVIDENCIJA_ZAGLAVLJE =
   "Evidencija prekovremenog rada — ZoR čl. 55 st. 6. Zakon ne propisuje obrazac.";
@@ -1998,6 +2011,7 @@ export function createMockServices(): PosServices {
         return {
           recordMissing: overtimeRecordMissingNotice,
           capsExceeded: overtimeCapsExceededNotice,
+          preraspodelaCapsExceeded: preraspodelaCapsExceededNotice,
         };
       },
     },

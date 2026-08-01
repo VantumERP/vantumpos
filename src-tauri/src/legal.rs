@@ -192,6 +192,40 @@ pub fn overtime_caps_exceeded(profile: &ShopProfile) -> LegalNotice {
     }
 }
 
+/// ZoR čl. 57 st. 5 — the preraspodela ceiling, sixty hours a week.
+///
+/// A separate notice from [`overtime_caps_exceeded`], because it is a separate
+/// rule set and a separate offence. čl. 58 says hours worked in preraspodela are
+/// **not** prekovremeni rad, so čl. 53 st. 2 (eight hours of overtime a week)
+/// and čl. 53 st. 3 (twelve hours a day in total) do not bind an employee in
+/// preraspodela at all — quoting them at him states a rule that does not apply.
+/// And the offence article differs: čl. 53 is čl. 274 st. 1 tač. 3, while čl. 57
+/// and čl. 60 are **tač. 4**.
+///
+/// Both tačke resolve through the same st. 2 for a preduzetnik, so the amount is
+/// identical either way. That is precisely why the wrong tačka is easy to ship
+/// and invisible to a figure-only guard — the damage is a wrong article and an
+/// inapplicable statement of the law in the operator's hands.
+pub fn preraspodela_caps_exceeded(profile: &ShopProfile) -> LegalNotice {
+    LegalNotice {
+        summary: "U slučaju preraspodele radnog vremena, radno vreme ne može da traje duže \
+                  od 60 časova nedeljno. Časovi ostvareni u preraspodeli ne smatraju se \
+                  prekovremenim radom (čl. 58)."
+            .to_string(),
+        penalty: tiered(
+            profile,
+            "Prekršaj: novčana kazna od 200.000 do 400.000 dinara \
+             (čl. 274 st. 1 tač. 4 u vezi sa st. 2).",
+            "Prekršaj: novčana kazna od 600.000 do 1.500.000 dinara (čl. 274 st. 1 tač. 4), \
+             uz kaznu za odgovorno lice od 30.000 do 150.000 dinara (čl. 274 st. 3).",
+        ),
+        citation: "Zakon o radu, čl. 57 st. 5. Nadzor: inspektor rada. \
+                   Ovi članovi ne propisuju zaštitnu meru."
+            .to_string(),
+        is_legal_duty: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +252,7 @@ mod tests {
             lpfr_required(p),
             overtime_record_missing(p),
             overtime_caps_exceeded(p),
+            preraspodela_caps_exceeded(p),
         ]
     }
 
@@ -237,7 +272,7 @@ mod tests {
 
         assert_eq!(
             enumerated.len(),
-            7,
+            8,
             "adding a notice function means adding it to all_notices, to the \
              list below, AND bumping this count — an omission from both lists \
              is otherwise invisible"
@@ -251,6 +286,7 @@ mod tests {
             lpfr_required(&p),
             overtime_record_missing(&p),
             overtime_caps_exceeded(&p),
+            preraspodela_caps_exceeded(&p),
         ] {
             assert!(
                 enumerated.contains(&notice),
@@ -538,6 +574,75 @@ mod tests {
         assert!(
             notice.is_legal_duty,
             "čl. 53 is an obaveza, never a preporuka"
+        );
+    }
+
+    /// Preraspodela is a different rule set and a different offence tačka, and
+    /// the čl. 53 notice may not stand in for it.
+    ///
+    /// čl. 58 says preraspodela is not prekovremeni rad, so the čl. 53 st. 2/st. 3
+    /// summary — eight hours of overtime a week, twelve hours a day in total —
+    /// states rules that do **not** bind an employee in preraspodela. And čl. 274
+    /// st. 1 tač. 3 is the čl. 53 offence: čl. 57 and čl. 60 sit in **tač. 4**.
+    /// The amount happens to be identical (both resolve through st. 2), so a
+    /// wrong tačka ships no wrong figure — it ships a wrong article and an
+    /// inapplicable statement of the law, which is what an inspector reads.
+    #[test]
+    fn preraspodela_caps_notice_cites_cl_57_st_5_and_the_tacka_4_offence() {
+        let notice = preraspodela_caps_exceeded(&profile(Some(PravnaForma::Preduzetnik)));
+
+        assert!(
+            notice.summary.contains("60 časova nedeljno"),
+            "čl. 57 st. 5 — the preraspodela ceiling is sixty hours a week: {}",
+            notice.summary
+        );
+        assert!(
+            !notice.summary.contains("12 časova dnevno"),
+            "čl. 57 has no daily leg; quoting the čl. 53 st. 3 figure states a \
+             rule čl. 58 makes inapplicable: {}",
+            notice.summary
+        );
+        assert!(
+            !notice.summary.contains("osam časova nedeljno"),
+            "čl. 53 st. 2 caps prekovremeni rad, and preraspodela is not \
+             prekovremeni rad (čl. 58): {}",
+            notice.summary
+        );
+        assert!(
+            notice.citation.contains("čl. 57 st. 5"),
+            "the duty: {}",
+            notice.citation
+        );
+        assert!(
+            !notice.citation.contains("čl. 53"),
+            "čl. 53 is not the provision breached here: {}",
+            notice.citation
+        );
+
+        let penalty = notice.penalty.expect("preduzetnik tier is known");
+        assert!(
+            penalty.contains("čl. 274 st. 1 tač. 4"),
+            "čl. 57 and čl. 60 are tač. 4, not tač. 3: {penalty}"
+        );
+        assert!(
+            !penalty.contains("tač. 3"),
+            "tač. 3 is the čl. 53 offence: {penalty}"
+        );
+        assert!(
+            penalty.contains("200.000 do 400.000") && penalty.contains("st. 2"),
+            "the preduzetnik row is čl. 274 st. 2, the same amount as tač. 3: {penalty}"
+        );
+        assert!(
+            notice.is_legal_duty,
+            "čl. 57 st. 5 is an obaveza, never a preporuka"
+        );
+
+        let pravno = preraspodela_caps_exceeded(&profile(Some(PravnaForma::PravnoLice)));
+        let penalty = pravno.penalty.expect("pravno lice tier is known");
+        assert!(penalty.contains("600.000 do 1.500.000"), "{penalty}");
+        assert!(
+            penalty.contains("30.000 do 150.000") && penalty.contains("čl. 274 st. 3"),
+            "the odgovorno-lice row belongs on the pravno-lice tier: {penalty}"
         );
     }
 
