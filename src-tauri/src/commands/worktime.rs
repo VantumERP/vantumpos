@@ -37,7 +37,10 @@ use crate::cash_deposit::parse_iso_date;
 use crate::clock::utc_now;
 use crate::commands::reports::{csv_line, ExportedFile};
 use crate::state::AppState;
-use crate::worktime::{assess_caps, check_protection, CapAssessment, DayHours, EmployeeProtection};
+use crate::worktime::{
+    assess_caps, check_protection, CapAssessment, DayHours, EmployeeProtection,
+    PRERASPODELA_WEEKLY_CAP_MINUTES,
+};
 
 /// §4 req. 22, verbatim. The one sentence every rendering of this register
 /// carries, so that no surface can imply a propisani obrazac exists — ZoR
@@ -74,6 +77,12 @@ const KATEGORIJE_ODSUSTVA: [&str; 10] = [
 /// The ZoR čl. 53 st. 1 grounds on which overtime may be **ordered**, mirroring
 /// v17's `CHECK`. Recording one does **not** make a čl. 53 st. 2/st. 3 breach
 /// lawful — it records why the employer says the day happened.
+///
+/// The same closed list is what the čl. 57 st. 5 leg in [`assess_caps_for_employee`]
+/// demands, because v17 is frozen and carries no second vocabulary. It is a
+/// stretch on the face of it — čl. 53 st. 1 speaks of ordering overtime, and
+/// čl. 58 says preraspodela is not overtime — but the alternative is a
+/// sixty-hour ceiling that asks for nothing at all.
 const CAP_OVERRIDE_RAZLOZI: [&str; 4] = [
     "visa_sila",
     "iznenadno_povecanje_obima_posla",
@@ -392,6 +401,9 @@ pub fn correct_entry(
 /// the stored `status`, so a second close fails whatever the caller intends.
 /// §4 req. 19 — without a real state transition there is no defensible moment at
 /// which raw data stops being necessary.
+///
+/// Because it is irreversible, the month must have **ended** — see
+/// [`guard_period_has_ended`].
 pub fn close_period(
     state: &AppState,
     user_id: i64,
@@ -401,6 +413,7 @@ pub fn close_period(
 ) -> Result<ClosedPeriod, AppError> {
     let acting = crate::commands::auth::require_admin(state)?;
     validate_month(godina, mesec)?;
+    guard_period_has_ended(godina, mesec, now)?;
 
     let mut connection = state.db().open()?;
     let tx = connection.transaction()?;
@@ -514,13 +527,22 @@ fn write_entry(
     let minuti = build_minutes(&request)?;
     validate_cap_override(&request)?;
 
-    let connection = state.db().open()?;
-    ensure_employee_exists(&connection, request.user_id)?;
-    if period_is_closed(&connection, request.user_id, godina, mesec)? {
+    // One transaction over the closed-period check, the live-row lookup and the
+    // INSERT — the codebase norm for every multi-statement statutory write. A save
+    // that read an open month while a `close_period` was mid-flight would otherwise
+    // land a row in a month that is closed by the time it commits: unwritable-to
+    // ever after (`period_closed` refuses the correction) and absent from the
+    // frozen Class A `klasifikacija_json`, so the permanent classification would
+    // silently disagree with the live rows it is supposed to summarise.
+    let mut connection = state.db().open()?;
+    let tx = connection.transaction()?;
+
+    ensure_employee_exists(&tx, request.user_id)?;
+    if period_is_closed(&tx, request.user_id, godina, mesec)? {
         return Err(period_closed_error(godina, mesec));
     }
 
-    let live = live_entry(&connection, request.user_id, &dan)?;
+    let live = live_entry(&tx, request.user_id, &dan)?;
     let (verzija, supersedes_id) = match (&korekcija, &live) {
         (Some(_), Some(previous)) => (previous.verzija + 1, Some(previous.id)),
         (Some(_), None) => {
@@ -537,7 +559,7 @@ fn write_entry(
         (None, None) => (1, None),
     };
 
-    let protection = load_protection(&connection, request.user_id)?;
+    let protection = load_protection(&tx, request.user_id)?;
     let day_hours = DayHours {
         dan: dan.clone(),
         efektivno_minuta: minuti.efektivno_izvrseni_minuta,
@@ -553,19 +575,26 @@ fn write_entry(
         ));
     }
 
-    let week = load_week(&connection, request.user_id, &dan)?;
+    let week = load_week(&tx, request.user_id, &dan)?;
     let caps = assess_caps_for_employee(&dan, &day_hours, &week, &protection);
     if caps.requires_override && request.cap_override_razlog.is_none() {
+        let poruka = if caps.preraspodela_weekly_cap_exceeded {
+            "Prekoračen je limit radnog vremena u preraspodeli — 60 časova nedeljno \
+             (ZoR čl. 57 st. 5). Dan se može evidentirati, ali morate izabrati razlog \
+             prekoračenja."
+        } else {
+            "Prekoračen je zakonski limit iz ZoR čl. 53. Dan se može evidentirati, \
+             ali morate izabrati razlog prekoračenja."
+        };
         return Err(AppError::business_with_details(
             "cap_override_required",
-            "Prekoračen je zakonski limit iz ZoR čl. 53. Dan se može evidentirati, \
-             ali morate izabrati razlog prekoračenja.",
+            poruka,
             serde_json::json!({ "caps": caps }),
         ));
     }
 
     let id = insert_entry(
-        &connection,
+        &tx,
         &request,
         &minuti,
         verzija,
@@ -574,6 +603,7 @@ fn write_entry(
         acting_id,
         now,
     )?;
+    tx.commit()?;
 
     let entry = load_entries(&connection, "WHERE e.id = ?1", params![id])?
         .pop()
@@ -586,14 +616,31 @@ fn write_entry(
     })
 }
 
-/// Applies the čl. 53 caps with the čl. 58 branch §4 req. 9 demands.
+/// Applies the čl. 53 caps with the čl. 57/čl. 58 branch §4 req. 9 demands.
 ///
 /// `assess_caps` states the čl. 53 st. 3 rule set alone and documents that the
-/// caller must branch it: preraspodela is not prekovremeni rad (čl. 58) and
-/// čl. 57 caps it at 60 časova **nedeljno** (st. 5) with no daily leg at all, so
-/// applying the 12 h daily cap there reports a lawful day as a breach and demands
-/// an override reason for it. The weekly overtime leg is *not* branched — čl. 53
-/// st. 2 still governs any overtime the operator actually records.
+/// caller must branch the override gate: preraspodela is not prekovremeni rad
+/// (čl. 58) and čl. 57 has no daily leg at all, so gating on the 12 h figure there
+/// reports a lawful day as a breach. **The branch swaps one ceiling for another,
+/// it never deletes one.** čl. 58 also means such an employee records
+/// `prekovremeni_minuta = 0`, so the čl. 53 st. 2 weekly leg cannot fire for them
+/// either — remove the daily leg with nothing in its place and they have no
+/// total-hours ceiling of any kind, and seven thirteen-hour days save in silence.
+/// čl. 57 st. 5 — „radno vreme ne može da traje duže od 60 časova nedeljno“ — is
+/// what takes over, measured across the day's Monday-anchored calendar week.
+/// Breaching preraspodela is čl. 274 st. 1 tač. 4, the bigger fine.
+///
+/// The weekly overtime leg is *not* branched: čl. 53 st. 2 still governs any
+/// overtime the operator actually records, whatever the profile says.
+///
+/// **`daily_cap_exceeded` is deliberately left standing.** v17 carries a single
+/// `radi_u_preraspodeli` flag and it cannot tell čl. 57 preraspodela — no daily
+/// leg — from the čl. 56 st. 3 monthly-average scheme, where čl. 56 st. 4
+/// *expressly* restates 12 časova dnevno and 48 časova nedeljno. Because the flag
+/// conflates the two, erasing the twelve-hour figure would hide a cap that may
+/// well apply; it stays visible as a non-blocking finding and only the override
+/// gate is branched. The 48 h leg cannot be applied at all without knowing which
+/// scheme the employee is in, and v17 is frozen — it needs a column that says so.
 fn assess_caps_for_employee(
     dan: &str,
     entry: &DayHours,
@@ -602,8 +649,9 @@ fn assess_caps_for_employee(
 ) -> CapAssessment {
     let mut caps = assess_caps(dan, entry, week);
     if protection.radi_u_preraspodeli {
-        caps.daily_cap_exceeded = false;
-        caps.requires_override = caps.weekly_cap_exceeded;
+        caps.preraspodela_weekly_cap_exceeded =
+            caps.weekly_total_minutes > PRERASPODELA_WEEKLY_CAP_MINUTES;
+        caps.requires_override = caps.weekly_cap_exceeded || caps.preraspodela_weekly_cap_exceeded;
     }
     caps
 }
@@ -1023,6 +1071,59 @@ fn validate_month(godina: i64, mesec: i64) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+/// Refuses to close a month that has not ended yet.
+///
+/// The close is irreversible — there is no reopen command, by design — and a
+/// closed month refuses every write with `period_closed`. Closing August on the
+/// first of August would therefore make the remaining thirty days permanently
+/// unrecordable and manufacture exactly the „ne vodi dnevnu evidenciju“ exposure
+/// (ZoR čl. 276 st. 1, uvodna rečenica, u vezi sa tač. 1a) that this module exists
+/// to remove, with no in-app remedy. §4 req. 19 phrases the transition as
+/// irreversible *without an audited unlock*; this build has the irreversibility
+/// and not the unlock, so the guard sits at the entry instead.
+///
+/// The month's own last civil day decides, not a fixed 31st: February 2026 ends on
+/// the 28th. An unreadable `now` refuses the close — a transition that cannot be
+/// undone is not one to take on a guess.
+fn guard_period_has_ended(godina: i64, mesec: i64, now: &str) -> Result<(), AppError> {
+    let ended = match (month_last_date(godina, mesec), civil_date(now)) {
+        (Some(last), Some(danas)) => last < danas,
+        _ => false,
+    };
+    if ended {
+        return Ok(());
+    }
+    Err(AppError::validation(
+        format!(
+            "Period {mesec:02}/{godina} još nije završen, pa se ne može zaključiti. \
+             Zaključenje je konačno i posle njega se ni jedan dan tog meseca više ne \
+             može evidentirati. Zaključite ga najranije prvog dana narednog meseca."
+        ),
+        serde_json::json!({ "godina": godina, "mesec": mesec }),
+    ))
+}
+
+/// The civil date of an RFC3339 timestamp — its first ten characters.
+fn civil_date(now: &str) -> Option<time::Date> {
+    parse_iso_date(now.get(..10)?)
+}
+
+/// The last civil day of a month, via the first day of the next one.
+fn month_last_date(godina: i64, mesec: i64) -> Option<time::Date> {
+    let (godina, mesec) = if mesec == 12 {
+        (godina.checked_add(1)?, 1)
+    } else {
+        (godina, mesec.checked_add(1)?)
+    };
+    let first_of_next = time::Date::from_calendar_date(
+        i32::try_from(godina).ok()?,
+        time::Month::try_from(u8::try_from(mesec).ok()?).ok()?,
+        1,
+    )
+    .ok()?;
+    time::Date::from_julian_day(first_of_next.to_julian_day() - 1).ok()
 }
 
 /// The first and last civil dates of a month, as ISO strings. The 31st is a safe
@@ -1658,8 +1759,14 @@ mod tests {
         });
     }
 
+    /// The čl. 53 st. 3 daily gate is branched off for preraspodela, but the
+    /// twelve-hour *figure* is not deleted: v17 has a single
+    /// `radi_u_preraspodeli` flag and it cannot tell čl. 57 preraspodela — which
+    /// has no daily leg — from the čl. 56 st. 3 monthly-average scheme, where
+    /// čl. 56 st. 4 expressly restates 12 časova dnevno. Erasing the finding on a
+    /// flag that conflates the two would hide a cap that may well apply.
     #[test]
-    fn a_preraspodela_day_is_not_measured_against_the_daily_cap() {
+    fn a_preraspodela_day_reports_the_daily_figure_without_gating_on_it() {
         with_state("worktime_preraspodela_daily_cap_branch", |state| {
             sign_in_admin(state);
             let redovni = seed_employee(state, "radnik10a", "Radnik Deset A");
@@ -1676,16 +1783,151 @@ mod tests {
             assert_eq!(error.code(), "cap_override_required");
 
             // … but čl. 58 keeps preraspodela out of it, and čl. 57 has no daily
-            // leg at all, so the same day needs no override there.
+            // leg at all, so the same day is not gated on the twelve hours.
             let saved = save_entry(
                 state,
                 radni_dan(u_preraspodeli, "2026-08-03", 780, 0),
                 "2026-08-03T22:00:00Z",
             )
-            .expect("a preraspodela day is not a čl. 53 st. 3 breach");
-            assert!(!saved.caps.daily_cap_exceeded);
+            .expect("a preraspodela day is not gated by čl. 53 st. 3");
             assert!(!saved.caps.requires_override);
             assert_eq!(saved.entry.cap_override_razlog, None);
+
+            // The čl. 56 st. 4 case is not silently lost: the figure stays on the
+            // assessment as a non-blocking finding.
+            assert_eq!(saved.caps.daily_total_minutes, 780);
+            assert!(
+                saved.caps.daily_cap_exceeded,
+                "the twelve-hour figure must stay visible — čl. 56 st. 4 restates \
+                 it expressly and the flag cannot tell the two schemes apart"
+            );
+        });
+    }
+
+    /// čl. 58 keeps preraspodela out of the overtime derivation, so such an
+    /// employee records `prekovremeni_minuta = 0` and the čl. 53 st. 2 weekly leg
+    /// can never fire for them. Suppress the čl. 53 st. 3 daily gate as well and
+    /// they are left with no total-hours ceiling of any kind — seven thirteen-hour
+    /// days, 91 hours in one calendar week, would all save with nothing recorded
+    /// on the row. čl. 57 st. 5 is the ceiling that replaces the daily one:
+    /// „radno vreme ne može da traje duže od 60 časova nedeljno“, and breaching
+    /// preraspodela is the čl. 274 st. 1 tač. 4 exposure, the bigger fine.
+    #[test]
+    fn a_preraspodela_week_over_sixty_hours_still_demands_a_ground() {
+        with_state("worktime_preraspodela_weekly_ceiling", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik12", "Radnik Dvanaest");
+            set_preraspodela(state, radnik);
+
+            // Monday to Thursday, thirteen hours a day: 52 h, inside čl. 57 st. 5.
+            for dan in ["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06"] {
+                let saved = save_entry(
+                    state,
+                    radni_dan(radnik, dan, 780, 0),
+                    &format!("{dan}T22:00:00Z"),
+                )
+                .expect("a preraspodela week under 60 h asks for nothing");
+                assert!(
+                    !saved.caps.requires_override,
+                    "{dan} is inside the čl. 57 st. 5 ceiling"
+                );
+            }
+
+            // Friday makes 65 h in the same calendar week.
+            let error = save_entry(
+                state,
+                radni_dan(radnik, "2026-08-07", 780, 0),
+                "2026-08-07T22:00:00Z",
+            )
+            .expect_err("čl. 57 st. 5 caps preraspodela at 60 časova nedeljno");
+            assert_eq!(error.code(), "cap_override_required");
+
+            // The day still has to be recordable — refusing it would hide the
+            // exposure instead of surfacing it.
+            let mut sa_razlogom = radni_dan(radnik, "2026-08-07", 780, 0);
+            sa_razlogom.cap_override_razlog = Some("visa_sila".to_string());
+            let saved = save_entry(state, sa_razlogom, "2026-08-07T22:00:00Z")
+                .expect("a stated ground records the day rather than hiding it");
+            assert_eq!(
+                saved.caps.weekly_overtime_minutes, 0,
+                "čl. 58 — preraspodela hours are not prekovremeni rad"
+            );
+            assert!(
+                !saved.caps.weekly_cap_exceeded,
+                "the čl. 53 st. 2 leg cannot be what caught this week"
+            );
+            assert_eq!(saved.caps.weekly_total_minutes, 3900, "65 h in minutes");
+            assert!(
+                saved.caps.preraspodela_weekly_cap_exceeded,
+                "čl. 57 st. 5 is the leg that has to catch a 65-hour week"
+            );
+            assert_eq!(
+                saved.entry.cap_override_razlog.as_deref(),
+                Some("visa_sila")
+            );
+
+            // The next calendar week starts from zero — „nedeljno“ is the
+            // calendar week, not a sliding window.
+            let saved = save_entry(
+                state,
+                radni_dan(radnik, "2026-08-10", 780, 0),
+                "2026-08-10T22:00:00Z",
+            )
+            .expect("a fresh calendar week carries nothing in");
+            assert!(!saved.caps.requires_override);
+        });
+    }
+
+    #[test]
+    fn a_period_cannot_be_closed_before_it_has_ended() {
+        with_state("worktime_close_only_after_the_month_ends", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik13", "Radnik Trinaest");
+
+            save_entry(
+                state,
+                radni_dan(radnik, "2026-08-03", 480, 0),
+                "2026-08-03T18:00:00Z",
+            )
+            .expect("the day should record");
+
+            // Closing is irreversible and there is no reopen command, so closing a
+            // month that is still running would make the rest of it permanently
+            // unrecordable — the čl. 276 st. 1 tač. 1a exposure this module exists
+            // to remove, manufactured by one mis-click.
+            let error = close_period(state, radnik, 2026, 8, "2026-08-15T08:00:00Z")
+                .expect_err("a running month cannot be closed");
+            assert_eq!(error.code(), "validation_error");
+
+            // Not on its last day either — 31 August is still a day of August.
+            let error = close_period(state, radnik, 2026, 8, "2026-08-31T23:59:59Z")
+                .expect_err("the last day of the month is still inside it");
+            assert_eq!(error.code(), "validation_error");
+
+            // A month that has not happened at all is the sharper case.
+            let error = close_period(state, radnik, 2026, 12, "2026-08-15T08:00:00Z")
+                .expect_err("a future month cannot be closed");
+            assert_eq!(error.code(), "validation_error");
+
+            // The register keeps taking the rest of the month …
+            save_entry(
+                state,
+                radni_dan(radnik, "2026-08-20", 480, 0),
+                "2026-08-20T18:00:00Z",
+            )
+            .expect("the month is still open");
+
+            // … and the close works from the first day after the month ends.
+            close_period(state, radnik, 2026, 8, "2026-09-01T00:05:00Z")
+                .expect("the month after its end closes normally");
+
+            // The month's real length decides, not a fixed 31st: February ends on
+            // the 28th in 2026 and is closable on 1 March.
+            let error = close_period(state, radnik, 2026, 2, "2026-02-28T23:00:00Z")
+                .expect_err("28 February is still inside February");
+            assert_eq!(error.code(), "validation_error");
+            close_period(state, radnik, 2026, 2, "2026-03-01T09:00:00Z")
+                .expect("February closes once March starts");
         });
     }
 

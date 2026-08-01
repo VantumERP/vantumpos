@@ -26,6 +26,16 @@ pub const WEEKLY_OVERTIME_CAP_MINUTES: i64 = 8 * 60;
 /// uključujući i prekovremeni rad.“ Twelve hours, in minutes.
 pub const DAILY_TOTAL_CAP_MINUTES: i64 = 12 * 60;
 
+/// ZoR čl. 57 st. 5 — „U slučaju preraspodele radnog vremena, radno vreme ne može
+/// da traje duže od 60 časova nedeljno.“ Sixty hours, in minutes.
+///
+/// This is the ceiling that has to replace čl. 53 st. 3 for an employee in
+/// preraspodela, and the caller applies it: čl. 58 keeps preraspodela out of
+/// prekovremeni rad, so such an employee records no overtime and the čl. 53 st. 2
+/// weekly leg never fires for them either. Drop the daily leg without putting this
+/// one in its place and the register accepts a 91-hour week in silence.
+pub const PRERASPODELA_WEEKLY_CAP_MINUTES: i64 = 60 * 60;
+
 /// One calendar day of one employee's hours, reduced to the two figures the
 /// čl. 53 caps are drawn on. Minutes, never floating point.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +50,18 @@ pub struct DayHours {
 pub struct CapAssessment {
     pub weekly_overtime_minutes: i64,
     pub daily_total_minutes: i64,
+    /// Every worked minute of `day`'s calendar week — efektivno **and**
+    /// prekovremeni — which is the figure čl. 57 st. 5 is drawn on. Reported
+    /// always, because it is arithmetic over the same week the other two legs
+    /// already walk; whether the 60 h ceiling binds is the caller's branch.
+    pub weekly_total_minutes: i64,
     pub weekly_cap_exceeded: bool,
+    /// The čl. 53 st. 3 twelve-hour figure. A fact about the day, never erased:
+    /// see precondition 2 on [`assess_caps`].
     pub daily_cap_exceeded: bool,
+    /// čl. 57 st. 5. [`assess_caps`] always leaves this `false` — it cannot see
+    /// whether the employee works in preraspodela — and the caller sets it.
+    pub preraspodela_weekly_cap_exceeded: bool,
     pub requires_override: bool,
 }
 
@@ -69,34 +89,48 @@ pub struct CapAssessment {
 ///    manufacture a čl. 53 st. 2 breach out of lawful hours. The `dan != day`
 ///    filter protects the assessed date only — never the other six.
 /// 2. **`daily_cap_exceeded` is the čl. 53 st. 3 rule set alone, and the caller
-///    must branch it off `users.radi_u_preraspodeli`.** čl. 58 says preraspodela
-///    is not prekovremeni rad, and čl. 57 caps it at 60 časova nedeljno (st. 5)
-///    with no daily leg at all — the 12 h/48 h pair belongs to the separate
-///    čl. 56 st. 3 monthly-average scheme (čl. 56 st. 4). Applying this daily cap
-///    unconditionally reports a lawful preraspodela day as a breach and demands an
-///    override reason for it. §4 req. 9 makes this a hard branch, not a toggle.
+///    must branch the *override gate* off `users.radi_u_preraspodeli`.** čl. 58
+///    says preraspodela is not prekovremeni rad, and čl. 57 caps it at 60 časova
+///    nedeljno (st. 5) with no daily leg at all — the 12 h/48 h pair belongs to
+///    the separate čl. 56 st. 3 monthly-average scheme (čl. 56 st. 4). Gating on
+///    this daily cap unconditionally reports a lawful čl. 57 day as a breach.
+///    **But the branch must swap one ceiling for another, never delete one:**
+///    čl. 58 means such an employee records `prekovremeni_minuta = 0`, so the
+///    weekly overtime leg cannot fire for them either, and an employee with the
+///    daily leg removed and nothing in its place has no total-hours ceiling at
+///    all. [`PRERASPODELA_WEEKLY_CAP_MINUTES`] over [`CapAssessment::weekly_total_minutes`]
+///    is the čl. 57 st. 5 leg the caller owes. §4 req. 9 makes these separate rule
+///    sets, not variants of one cap.
 ///
 /// An exceeded cap never blocks the write. §4 req. 7 makes this the bigger fine,
 /// and a record that refuses to describe a day that actually happened hides the
 /// čl. 274 st. 1 tač. 3 exposure instead of surfacing it — so the assessment asks
 /// for an override reason and lets the day be recorded.
 pub fn assess_caps(day: &str, entry: &DayHours, week: &[DayHours]) -> CapAssessment {
-    let same_week: i64 = week
-        .iter()
-        .filter(|d| d.dan != day && in_same_iso_week(&d.dan, day))
-        .map(|d| d.prekovremeni_minuta)
+    let same_week = || {
+        week.iter()
+            .filter(|d| d.dan != day && in_same_iso_week(&d.dan, day))
+    };
+    let overtime_before: i64 = same_week().map(|d| d.prekovremeni_minuta).sum();
+    let total_before: i64 = same_week()
+        .map(|d| d.efektivno_minuta + d.prekovremeni_minuta)
         .sum();
 
-    let weekly_overtime_minutes = same_week + entry.prekovremeni_minuta;
     let daily_total_minutes = entry.efektivno_minuta + entry.prekovremeni_minuta;
+    let weekly_overtime_minutes = overtime_before + entry.prekovremeni_minuta;
+    let weekly_total_minutes = total_before + daily_total_minutes;
     let weekly_cap_exceeded = weekly_overtime_minutes > WEEKLY_OVERTIME_CAP_MINUTES;
     let daily_cap_exceeded = daily_total_minutes > DAILY_TOTAL_CAP_MINUTES;
 
     CapAssessment {
         weekly_overtime_minutes,
         daily_total_minutes,
+        weekly_total_minutes,
         weekly_cap_exceeded,
         daily_cap_exceeded,
+        // čl. 57 st. 5 binds only in preraspodela, which this function cannot
+        // see. Precondition 2 puts the leg on the caller.
+        preraspodela_weekly_cap_exceeded: false,
         requires_override: weekly_cap_exceeded || daily_cap_exceeded,
     }
 }
@@ -510,6 +544,50 @@ mod tests {
             !a.weekly_cap_exceeded,
             "double-counting the superseded row would fake a breach on lawful hours"
         );
+    }
+
+    /// The čl. 57 st. 5 ceiling is drawn on the week's whole working time, not on
+    /// its overtime: čl. 58 means an employee in preraspodela records
+    /// `prekovremeni_minuta = 0`, so a figure built out of overtime alone stays at
+    /// zero however long the week runs. Sixty hours is the limit, not a breach of
+    /// it — the same strict `>` the čl. 53 legs use.
+    #[test]
+    fn the_weekly_total_is_the_whole_week_and_sixty_hours_is_the_limit() {
+        let week = vec![day(720, 0), day(720, 0), day(720, 0), day(720, 0)]; // 48 h
+        let a = assess_caps("2026-08-07", &day(720, 0), &week);
+        assert_eq!(
+            a.weekly_overtime_minutes, 0,
+            "an overtime-only figure would never notice this week"
+        );
+        assert_eq!(a.weekly_total_minutes, PRERASPODELA_WEEKLY_CAP_MINUTES);
+        assert_eq!(
+            PRERASPODELA_WEEKLY_CAP_MINUTES, 3600,
+            "ZoR čl. 57 st. 5 — 60 časova nedeljno, in minutes"
+        );
+        assert!(
+            a.weekly_total_minutes <= PRERASPODELA_WEEKLY_CAP_MINUTES,
+            "exactly 60 h is the ceiling, not over it"
+        );
+
+        let a = assess_caps("2026-08-07", &day(721, 0), &week);
+        assert!(
+            a.weekly_total_minutes > PRERASPODELA_WEEKLY_CAP_MINUTES,
+            "60 h + 1 minute is over ZoR čl. 57 st. 5"
+        );
+        assert!(
+            !a.preraspodela_weekly_cap_exceeded,
+            "this function cannot see the preraspodela flag — the leg is the caller's"
+        );
+
+        // Last week's hours do not carry in: 2026-08-03 is a Monday, so the
+        // Sunday before it belongs to the previous „nedelja“.
+        let prior_sunday = DayHours {
+            dan: "2026-08-02".to_string(),
+            efektivno_minuta: 720,
+            prekovremeni_minuta: 0,
+        };
+        let a = assess_caps("2026-08-03", &day(600, 0), &[prior_sunday]);
+        assert_eq!(a.weekly_total_minutes, 600);
     }
 
     #[test]
