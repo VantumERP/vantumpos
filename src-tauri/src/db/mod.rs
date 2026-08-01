@@ -136,6 +136,11 @@ mod tests {
         "work_time_entries",
         "work_time_periods",
         "retention_policies",
+        "support_sessions",
+        "audit_events",
+        "personnel_records",
+        "data_breaches",
+        "processing_activities",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -167,6 +172,10 @@ mod tests {
         "idx_work_time_entries_user_day",
         "idx_work_time_entries_dan",
         "idx_work_time_periods_user_month",
+        "idx_support_sessions_granted_at",
+        "idx_audit_events_at",
+        "idx_audit_events_actor",
+        "idx_data_breaches_saznanje_at",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -797,7 +806,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 17);
+                assert_eq!(migration_count, 18);
             },
         );
     }

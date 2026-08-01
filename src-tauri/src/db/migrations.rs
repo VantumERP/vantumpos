@@ -743,6 +743,257 @@ CREATE TABLE retention_policies (
 );
 "#,
     },
+    Migration {
+        version: 18,
+        name: "zzpl_audit_support_personnel_breach_and_register",
+        sql: r#"
+-- SW-10, the „nalog“ half. ZZPL čl. 46 is the penalised rule here (čl. 95 st. 1
+-- t. 23): an obrađivač — and „drugo lice … ovlašćeno za pristup“, which reaches
+-- the individual support engineer — may not process without the rukovalac's
+-- nalog. THIS ROW IS THAT NALOG, and evidentially it is worth more than the
+-- session log beside it. Čl. 50, by contrast, prescribes no prekršaj at all.
+CREATE TABLE support_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    granted_by INTEGER NOT NULL REFERENCES users(id),
+    granted_at TEXT NOT NULL,
+    -- Free text on purpose, and the only free-text column v18 adds outside the
+    -- breach record. A nalog says what the vlasnik authorised, in the vlasnik's
+    -- own words; a closed enum would either be too coarse to be a nalog or would
+    -- have to be reopened by a migration on every new support scenario. The
+    -- audit-log exclusions (req. 4) govern `audit_events`, not this table.
+    scope TEXT NOT NULL CHECK (scope <> ''),
+    -- „Explicit scope AND duration“ (req. 2). An open-ended grant is not a nalog,
+    -- so the expiry is NOT NULL and must sit after the grant.
+    expires_at TEXT NOT NULL CHECK (expires_at > granted_at),
+    started_at TEXT,
+    ended_at TEXT,
+    revoked_at TEXT,
+    revoked_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (ended_at IS NULL OR started_at IS NOT NULL)
+);
+CREATE INDEX idx_support_sessions_granted_at ON support_sessions(granted_at);
+
+-- SW-10, the log half — and it is a PRUDENTIAL control, never a legal duty. No
+-- ZZPL provision obliges a private rukovalac to record who accessed personal
+-- data: čl. 48 and čl. 51 bind only a nadležni organ u posebne svrhe, and čl. 50
+-- appears nowhere in čl. 95, so no prekršaj attaches to not having this table.
+-- It exists to discharge an OUTCOME duty — čl. 5 st. 2 odgovornost za postupanje
+-- and the čl. 41 st. 1 ability to predočiti — and its field list is modelled on
+-- čl. 48 st. 2 + čl. 51 st. 2 t. 7, the only two content specs Serbian law has.
+CREATE TABLE audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    -- Čl. 48 st. 2 „identiteta lica“ — an internal user id, NEVER a name column.
+    -- Nullable because the čl. 5 st. 1 t. 5 purge is time-driven, not
+    -- request-driven (req. 23), so its line has no human actor; a fabricated
+    -- actor id would be worse evidence than an honestly absent one.
+    actor_user_id INTEGER REFERENCES users(id),
+    -- Čl. 48 st. 1 verbatim, transliterated: unos, menjanje, uvid, otkrivanje
+    -- (uključujući i prenos), upoređivanje, brisanje. Closed, because a log whose
+    -- vocabulary drifts cannot be read back as evidence of anything.
+    action TEXT NOT NULL CHECK (action IN (
+        'unos', 'menjanje', 'uvid', 'otkrivanje', 'uporedjivanje', 'brisanje'
+    )),
+    object_type TEXT NOT NULL CHECK (object_type <> ''),
+    -- An opaque internal id, never the object's contents (req. 4). The no-space
+    -- shape is the schema's share of that rule: names, addresses and search
+    -- queries carry spaces, internal ids do not. The full exclusion list — JMBG,
+    -- PAN, phone, address, free-text notes, query strings — is enforced at the
+    -- write boundary in `audit.rs`, because SQLite cannot run Luhn.
+    object_id TEXT NOT NULL CHECK (object_id <> '' AND object_id NOT GLOB '* *'),
+    -- Čl. 48 st. 2 requires the RAZLOG for uvid and otkrivanje. Closed enum: the
+    -- one column that could plausibly have been free text is the one an operator
+    -- would eventually type a customer's name into.
+    reason_code TEXT CHECK (reason_code IS NULL OR reason_code IN (
+        'inspekcija', 'zahtev_lica', 'interni_nadzor', 'obrada_reklamacije',
+        'obracun_zarade', 'tehnicka_podrska', 'sudski_ili_upravni_postupak',
+        'bezbednosni_incident', 'zakonska_obaveza', 'automatsko_ciscenje'
+    )),
+    -- Čl. 48 st. 2 „identiteta primaoca“, recorded as a CLASS of recipient. A
+    -- named recipient would be personal data about that recipient, sitting in the
+    -- table whose whole point (req. 4) is to hold none — the class answers the
+    -- statutory question without reproducing the problem.
+    recipient TEXT CHECK (recipient IS NULL OR recipient IN (
+        'lice_na_koje_se_podaci_odnose', 'poreska_uprava', 'inspekcija', 'poverenik',
+        'sud_ili_javni_tuzilac', 'mup', 'knjigovodja', 'obradjivac_tehnicke_podrske',
+        'banka', 'drugi_organ'
+    )),
+    support_session_id INTEGER REFERENCES support_sessions(id),
+    -- Tamper-evidence outranks completeness (req. 7). prev_hash is '' on the
+    -- genesis row and the previous row's hash thereafter.
+    prev_hash TEXT NOT NULL,
+    hash TEXT NOT NULL CHECK (hash <> ''),
+    -- The čl. 48 st. 2 razlog is a constraint, not a convention.
+    CHECK (action NOT IN ('uvid', 'otkrivanje') OR reason_code IS NOT NULL),
+    -- Otkrivanje without a primalac does not answer the question čl. 48 st. 2 asks.
+    CHECK (action <> 'otkrivanje' OR recipient IS NOT NULL)
+);
+CREATE INDEX idx_audit_events_at ON audit_events(at);
+CREATE INDEX idx_audit_events_actor ON audit_events(actor_user_id, at);
+-- Deliberately BEFORE UPDATE only. DELETE stays open because req. 6 forbids
+-- „trajno“ on this log — čl. 47 st. 7 governs the register of processing
+-- activities, and copying it here would put the product in permanent breach of
+-- storage limitation — so expiry must be able to remove a row. A removed row is
+-- not silent: it breaks the hash chain, which is exactly what the chain is for.
+CREATE TRIGGER trg_audit_events_bez_izmene
+BEFORE UPDATE ON audit_events
+BEGIN
+    SELECT RAISE(ABORT, 'Zapis u evidenciji pristupa ne može da se menja.');
+END;
+
+-- SW-13 class A — the 25 tačke of ZEOR čl. 5, physically separate from the
+-- account store so that the purge job is STRUCTURALLY incapable of reaching them
+-- (req. 19). Class B (ledger attribution) is the surrogate `users.id` already on
+-- the transaction rows, so no transaction row changes here — and no ime,
+-- prezime or matični broj is ever denormalised onto one (req. 20).
+CREATE TABLE personnel_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- No ON DELETE clause, so SQLite's default NO ACTION restricts: deleting the
+    -- account cannot take the personnel record with it (req. 24). UNIQUE keeps
+    -- one record per account; `users.username` has been UNIQUE since v1 and that
+    -- uniqueness survives deactivation, which is the deactivate-never-reuse leg.
+    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
+    -- ZEOR čl. 5 t. 1–25. Only prezime i ime is required, because a record is
+    -- opened on the day work starts (čl. 7 st. 1) and filled in as the data
+    -- arrives; „datum i mesto rođenja“ is one tačka over two columns.
+    prezime_ime TEXT NOT NULL CHECK (prezime_ime <> ''),
+    maticni_broj TEXT,
+    pol TEXT CHECK (pol IS NULL OR pol IN ('muski', 'zenski')),
+    datum_rodjenja TEXT CHECK (datum_rodjenja IS NULL OR datum_rodjenja GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    mesto_rodjenja TEXT,
+    prebivaliste_i_adresa_stana TEXT,
+    mesto_rada TEXT,
+    naziv_i_adresa_poslodavca TEXT,
+    delatnost_poslodavca TEXT,
+    zanimanje TEXT,
+    vrsta_i_stepen_strucne_spreme TEXT,
+    osposobljenost TEXT,
+    naziv_radnog_mesta TEXT,
+    -- ZEOR says „radno vreme u časovima“; the store is minutes, like every other
+    -- duration in this database, and the hours are a render-time division.
+    radno_vreme_minuta_nedeljno INTEGER CHECK (radno_vreme_minuta_nedeljno IS NULL OR radno_vreme_minuta_nedeljno >= 0),
+    trajanje_zaposlenja TEXT CHECK (trajanje_zaposlenja IS NULL OR trajanje_zaposlenja IN ('neodredjeno', 'odredjeno')),
+    vrsta_radnog_odnosa TEXT,
+    osnov_upucivanja_u_inostranstvo TEXT,
+    naziv_poslodavca_u_dopunskom_radu TEXT,
+    zainteresovanost_za_promenu_posla INTEGER CHECK (zainteresovanost_za_promenu_posla IS NULL OR zainteresovanost_za_promenu_posla IN (0, 1)),
+    invalid_rada INTEGER CHECK (invalid_rada IS NULL OR invalid_rada IN (0, 1)),
+    -- A COUNT, never a roster. The insured family members are third parties whose
+    -- data the shop has no purpose to hold on a till-adjacent machine.
+    osigurani_clanovi_porodice INTEGER CHECK (osigurani_clanovi_porodice IS NULL OR osigurani_clanovi_porodice >= 0),
+    -- Days, never a diagnosis, an ICD code or a doznaka number: health data is a
+    -- posebna vrsta podataka under ZZPL čl. 17 and has no home in this table.
+    privremena_nesposobnost_dana INTEGER CHECK (privremena_nesposobnost_dana IS NULL OR privremena_nesposobnost_dana >= 0),
+    placeno_odsustvo_dana INTEGER CHECK (placeno_odsustvo_dana IS NULL OR placeno_odsustvo_dana >= 0),
+    datum_zasnivanja TEXT CHECK (datum_zasnivanja IS NULL OR datum_zasnivanja GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    datum_prestanka TEXT CHECK (datum_prestanka IS NULL OR datum_prestanka GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    razlog_prestanka TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+-- ZEOR čl. 7 st. 2: „Podaci iz evidencije o zaposlenim licima čuvaju se trajno.“
+-- The record is opened on the first day of work and closed on the last (st. 1);
+-- it is never deleted. A trigger rather than a convention, because the point of
+-- req. 19 is that the purge job CANNOT reach class A, not that it currently does
+-- not. Corrections are UPDATEs, which stay open — unlike the audit log, this is
+-- a living record whose accuracy is itself a duty.
+CREATE TRIGGER trg_personnel_records_trajno
+BEFORE DELETE ON personnel_records
+BEGIN
+    SELECT RAISE(ABORT, 'Evidencija o zaposlenim licima čuva se trajno i ne može da se briše.');
+END;
+
+-- SW-17. Čl. 52 st. 6 covers „svaku povredu“, so the row always exists and
+-- notifiability is a derived flag on it — never a wizard gate that discards the
+-- non-notifiable incident (req. 43). St. 7 makes this documentation the vehicle
+-- for proving čl. 52 compliance as a whole, which is why the field set goes
+-- beyond st. 6's three elements (req. 44).
+CREATE TABLE data_breaches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- The 72 h anchor. Čl. 52 st. 1 says „od saznanja za povredu“, not from the
+    -- incident, so this is NOT NULL and immutable (trigger below).
+    saznanje_at TEXT NOT NULL,
+    occurred_at TEXT,
+    discovered_at TEXT,
+    -- §6 R-3: when an obrađivač is in the chain, čl. 52 st. 3 gives two candidate
+    -- anchors. Record BOTH and let the operator see which one saznanje_at follows;
+    -- silently picking one would be a legal decision made by a schema.
+    obradjivac_saznanje_at TEXT,
+    rukovalac_obavesten_at TEXT,
+    -- The three čl. 52 st. 6 elements.
+    opis TEXT NOT NULL,
+    posledice TEXT NOT NULL,
+    mere TEXT NOT NULL,
+    -- Obrazac section 2 point (3): „broj lica na koja se podaci odnose“ — a
+    -- COUNT. The prescribed form asks for a number and never for a roster.
+    broj_lica INTEGER CHECK (broj_lica IS NULL OR broj_lica >= 0),
+    kategorije_podataka TEXT,
+    risk_outcome TEXT CHECK (risk_outcome IS NULL OR risk_outcome IN (
+        'bez_rizika', 'rizik', 'visok_rizik'
+    )),
+    notify_decision TEXT CHECK (notify_decision IS NULL OR notify_decision IN (
+        'obavestiti', 'ne_obavestiti'
+    )),
+    notify_obrazlozenje TEXT,
+    poverenik_notified_at TEXT,
+    -- Čl. 52 st. 2: mandatory once 72 h have passed since saznanje. The deadline
+    -- is a decision over a `now: &str`, so it is enforced in the command, not by
+    -- a CHECK that would have to call datetime('now') to know the answer.
+    delay_reason TEXT,
+    -- The separate čl. 53 block: were the affected individuals told, and if not,
+    -- which st. 3 exception was relied on.
+    lica_obavestena INTEGER CHECK (lica_obavestena IS NULL OR lica_obavestena IN (0, 1)),
+    lica_obavestena_at TEXT,
+    cl53_izuzetak TEXT CHECK (cl53_izuzetak IS NULL OR cl53_izuzetak IN (
+        'primenjene_mere_zastite', 'naknadne_mere', 'nesrazmeran_utrosak_vremena_i_sredstava'
+    )),
+    cl53_izuzetak_obrazlozenje TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_data_breaches_saznanje_at ON data_breaches(saznanje_at);
+-- Everything else on the record may be corrected as the investigation proceeds;
+-- the clock anchor may not. A movable saznanje_at would make the čl. 52 st. 2
+-- delay reason optional in hindsight.
+CREATE TRIGGER trg_data_breaches_saznanje_nepromenljiv
+BEFORE UPDATE OF saznanje_at ON data_breaches
+WHEN NEW.saznanje_at <> OLD.saznanje_at
+BEGIN
+    SELECT RAISE(ABORT, 'Vreme saznanja za povredu je nepromenljivo (ZZPL čl. 52 st. 1).');
+END;
+
+-- The čl. 47 evidencija radnji obrade (req. 28) — generated, not hand-kept. This
+-- is the cheapest and most likely inspection finding for a three-employee shop
+-- and the one issuable on the spot by prekršajni nalog, and Pravilnik 40/2019
+-- čl. 4 st. 1 makes it a mandatory attachment to a breach notification.
+CREATE TABLE processing_activities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Stable key of the generated activity, so regeneration is an upsert and not
+    -- a second copy of the same radnja.
+    kljuc TEXT NOT NULL UNIQUE CHECK (kljuc <> ''),
+    rukovalac_naziv TEXT NOT NULL,          -- st. 1 t. 1
+    rukovalac_kontakt TEXT,                 -- st. 1 t. 1
+    svrha_obrade TEXT NOT NULL,             -- st. 1 t. 2
+    vrsta_lica TEXT NOT NULL,               -- st. 1 t. 3
+    vrsta_podataka TEXT NOT NULL,           -- st. 1 t. 3
+    vrsta_primalaca TEXT,                   -- st. 1 t. 4
+    prenos_u_druge_drzave TEXT,             -- st. 1 t. 5
+    mere_zastite_prenosa TEXT,              -- st. 1 t. 5
+    -- St. 1 t. 6, per category: „rok posle čijeg isteka se brišu određene vrste
+    -- podataka o ličnosti, AKO JE TAKAV ROK ODREĐEN“ — hence nullable.
+    rok_cuvanja TEXT,
+    -- and the same rok as a machine-readable link into the shared retention table
+    -- SW-14 created, so the register cannot claim a period the app does not apply.
+    retention_record_class TEXT REFERENCES retention_policies(record_class),
+    opis_mera_zastite TEXT,                 -- st. 1 t. 7 (mere iz čl. 50 st. 1)
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -782,6 +1033,17 @@ CREATE TABLE IF NOT EXISTS _migrations (
 mod tests {
     use super::*;
     use crate::db::{test_database_path, Db};
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                rusqlite::params![table],
+                |row| row.get(0),
+            )
+            .expect("sqlite_master should query");
+        count == 1
+    }
 
     fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
         let mut stmt = conn
@@ -2038,6 +2300,210 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 profile, None,
                 "new profile columns are nullable, not backfilled"
             );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn migration_v18_adds_the_zzpl_stores() {
+        let path = test_database_path("migration_v18_schema");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            for table in [
+                "audit_events",
+                "support_sessions",
+                "personnel_records",
+                "data_breaches",
+                "processing_activities",
+            ] {
+                assert!(table_exists(&conn, table), "{table} should exist after v18");
+            }
+
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                 VALUES (800, 'revizor', 'Revizor Osam', 'admin', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');",
+            )
+            .expect("seed an actor");
+
+            // The action verb is a closed enum mirroring ZZPL čl. 48 st. 1.
+            assert!(
+                conn.execute(
+                    "INSERT INTO audit_events (at, actor_user_id, action, object_type, object_id, prev_hash, hash)
+                     VALUES ('2026-08-01T09:00:00Z', 800, 'izmisljeno', 'sale', '1', '', 'h1')",
+                    [],
+                )
+                .is_err(),
+                "an action outside čl. 48 st. 1 must be rejected by the CHECK"
+            );
+
+            conn.execute(
+                "INSERT INTO audit_events (at, actor_user_id, action, object_type, object_id, reason_code, prev_hash, hash)
+                 VALUES ('2026-08-01T09:00:00Z', 800, 'uvid', 'employee', '3', 'inspekcija', '', 'h1')",
+                [],
+            )
+            .expect("a well-formed uvid should insert");
+
+            // ZZPL čl. 52 st. 1 anchors the 72 h clock to saznanje, so it cannot be null.
+            assert!(
+                conn.execute(
+                    "INSERT INTO data_breaches (opis, posledice, mere, created_at, updated_at)
+                     VALUES ('x', 'y', 'z', '2026-08-01T09:00:00Z', '2026-08-01T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a breach without saznanje_at must be rejected"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn migration_v18_preserves_pre_existing_users_and_shields_personnel() {
+        let path = test_database_path("migration_v18_survival");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw connection");
+            conn.execute_batch(
+                "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);",
+            )
+            .expect("migrations table");
+
+            for migration in &MIGRATIONS[..17] {
+                assert!(
+                    migration.version <= 17,
+                    "the pre-v18 prefix must stop at v17, saw v{}",
+                    migration.version
+                );
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, '2026-07-01T00:00:00Z')",
+                    rusqlite::params![migration.version, migration.name],
+                )
+                .expect("record the migration");
+            }
+
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, pin_hash, active, created_at, updated_at)
+                 VALUES (801, 'stari', 'Stari Radnik', 'cashier', 'hash-801', 1,
+                         '2025-02-03T08:00:00Z', '2025-09-03T08:00:00Z');",
+            )
+            .expect("seed a v17-era user");
+            drop(conn);
+
+            let db = Db::new(&path).expect("database should migrate forward");
+            let conn = db.open().expect("database should open");
+
+            let (username, pin): (String, String) = conn
+                .query_row(
+                    "SELECT username, pin_hash FROM users WHERE id = 801",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the pre-v18 user must survive verbatim");
+            assert_eq!(username, "stari");
+            assert_eq!(pin, "hash-801");
+
+            // ZZPL req. 24: deleting an account must NOT be able to take the
+            // personnel record with it. Prove there is no cascade.
+            conn.execute(
+                "INSERT INTO personnel_records (user_id, prezime_ime, created_at, updated_at)
+                 VALUES (801, 'Stari Radnik', '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z')",
+                [],
+            )
+            .expect("personnel record inserts");
+
+            assert!(
+                conn.execute("DELETE FROM users WHERE id = 801", [])
+                    .is_err(),
+                "the personnel FK must RESTRICT the account delete, not cascade it away"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// The two structural guarantees v18 exists to make unbypassable.
+    ///
+    /// **Append-only** (req. 7): an owner-editable audit log proves nothing, and
+    /// proving something is the entire reason it exists — so `audit_events` carries
+    /// no `updated_at` and every UPDATE aborts in the engine, not in a command.
+    /// DELETE stays open on purpose: req. 6 forbids `trajno` on this log, so
+    /// expiry must be able to remove a row, and the hash chain is what detects the
+    /// resulting gap (proved in `audit::tests`).
+    ///
+    /// **Trajno** (req. 19, 24): the ZEOR čl. 5 personnel record is class A, which
+    /// no purge, reset or UI action may reach. A trigger, not a convention.
+    #[test]
+    fn migration_v18_makes_the_audit_log_append_only_and_the_personnel_record_trajno() {
+        let path = test_database_path("migration_v18_append_only");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            assert!(
+                !column_exists(&conn, "audit_events", "updated_at"),
+                "an audit row is never updated, so it must not carry an updated_at"
+            );
+
+            let personnel_schema: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'personnel_records'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the personnel_records schema should be readable");
+            assert!(
+                !personnel_schema.contains("ON DELETE CASCADE"),
+                "no ON DELETE CASCADE may point at the personnel record, schema was: {personnel_schema}"
+            );
+
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (810, 'vlasnik', 'Vlasnik Deset', 'admin', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+                 INSERT INTO audit_events (id, at, actor_user_id, action, object_type, object_id, prev_hash, hash)
+                     VALUES (900, '2026-08-01T09:00:00Z', 810, 'unos', 'sale', '7', '', 'h-900');
+                 INSERT INTO personnel_records (user_id, prezime_ime, created_at, updated_at)
+                     VALUES (810, 'Vlasnik Deset', '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+                 INSERT INTO data_breaches (saznanje_at, opis, posledice, mere, created_at, updated_at)
+                     VALUES ('2026-08-01T09:00:00Z', 'opis', 'posledice', 'mere', '2026-08-01T09:00:00Z', '2026-08-01T09:00:00Z');",
+            )
+            .expect("the seed rows should insert");
+
+            assert!(
+                conn.execute(
+                    "UPDATE audit_events SET object_id = '999' WHERE id = 900",
+                    [],
+                )
+                .is_err(),
+                "no path may update an audit row"
+            );
+
+            assert!(
+                conn.execute("DELETE FROM personnel_records WHERE user_id = 810", [])
+                    .is_err(),
+                "the personnel record is trajno — no path may delete it"
+            );
+
+            // ZZPL čl. 52 st. 1: the 72 h clock is anchored to saznanje, so the
+            // anchor cannot be moved after the fact.
+            assert!(
+                conn.execute(
+                    "UPDATE data_breaches SET saznanje_at = '2026-08-05T09:00:00Z' WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "saznanje_at must be immutable once set"
+            );
+            conn.execute(
+                "UPDATE data_breaches SET mere = 'dopunjene mere' WHERE id = 1",
+                [],
+            )
+            .expect("the rest of the breach record stays editable");
+
+            // Storage limitation (req. 6) must stay reachable: this log is never trajno.
+            conn.execute("DELETE FROM audit_events WHERE id = 900", [])
+                .expect("an expired audit row must remain deletable");
         }
         std::fs::remove_file(&path).expect("test database should be removed");
     }
