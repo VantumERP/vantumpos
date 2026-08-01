@@ -1510,6 +1510,13 @@ export interface WorkTimeClosedPeriod {
 export interface SaveWorkTimeEntryRequest {
   userId: number;
   dan: string;
+  /**
+   * The period the write was made for. `dan` must fall inside it — the backend
+   * refuses the mismatch, which it cannot see unless the request states it.
+   * Never the source of the row's own month: that stays derived from `dan`.
+   */
+  godina: number;
+  mesec: number;
   moguciMinuta: number;
   efektivnoIzvrseniMinuta: number;
   casoviCekanjaIZastojaMinuta: number;

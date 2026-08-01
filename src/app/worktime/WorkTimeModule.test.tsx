@@ -440,6 +440,33 @@ describe("WorkTimeModule day selection", () => {
     expect(datum).toHaveAttribute("max", `${godina}-${dvocifreni}-${poslednji}`);
   });
 
+  it("tells the backend which period the day was written for", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    const saveSpy = vi.spyOn(services.worktime, "saveEntry");
+    const now = new Date();
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+    await awaitLoadedMonth();
+
+    await setMinutes(user, /efektivno izvršeni/i, "480");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+
+    // The Datum field's own guard protects the operator, not the write: the
+    // backend refuses a day that falls outside the period it was written for, and
+    // it can only see that mismatch if the request says which period that was.
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          dan: today(),
+          godina: now.getFullYear(),
+          mesec: now.getMonth() + 1,
+        }),
+      );
+    });
+  });
+
   it("refuses a day outside the selected period", () => {
     const { godina, mesec } = previousPeriod();
     const dvocifreni = `${mesec}`.padStart(2, "0");

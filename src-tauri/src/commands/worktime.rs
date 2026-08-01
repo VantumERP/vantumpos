@@ -246,6 +246,12 @@ pub struct ClosedPeriod {
 pub struct SaveEntryRequest {
     pub user_id: i64,
     pub dan: String,
+    /// The period the operator had on screen, and the one `dan` must fall inside
+    /// — see [`guard_day_is_in_period`]. Deliberately **not** `#[serde(default)]`:
+    /// the field exists to carry an assertion the write is checked against, and a
+    /// default would let the caller it guards against drop it silently.
+    pub godina: i64,
+    pub mesec: i64,
     #[serde(default)]
     pub moguci_minuta: i64,
     #[serde(default)]
@@ -403,10 +409,13 @@ pub fn my_hours(state: &AppState, godina: i64, mesec: i64) -> Result<WorkTimeMon
 ///
 /// The order of the checks is deliberate: the day must have happened at all
 /// ([`guard_day_has_happened`] — a day still in the future describes no work, so
-/// no later check has anything real to run against), then the closed-period
-/// freeze (a closed month is not writable on any ground), then the čl. 87–91
-/// guards (the statute bans the work, so nothing can authorise the row), then the
-/// čl. 53 caps (which ask for a reason rather than refusing).
+/// no later check has anything real to run against) and must be the day the write
+/// was made for ([`guard_day_is_in_period`]), then the closed-period freeze (a
+/// closed month is not writable on any ground), then the čl. 87–91 guards (the
+/// statute bans the work, so nothing can authorise the row), then the čl. 53 caps
+/// (which ask for a reason rather than refusing). The two day guards run in the
+/// order the Datum field applies them, so the operator meets the same sentence
+/// whichever side refuses first.
 pub fn save_entry(
     state: &AppState,
     request: SaveEntryRequest,
@@ -562,6 +571,8 @@ fn write_entry(
     guard_day_has_happened(&dan, datum, now)?;
     let godina = i64::from(datum.year());
     let mesec = i64::from(u8::from(datum.month()));
+    validate_month(request.godina, request.mesec)?;
+    guard_day_is_in_period(&dan, godina, mesec, request.godina, request.mesec)?;
 
     let minuti = build_minutes(&request)?;
     validate_cap_override(&request)?;
@@ -1186,6 +1197,46 @@ fn guard_day_has_happened(dan: &str, datum: time::Date, now: &str) -> Result<(),
     Ok(())
 }
 
+/// Refuses a day that does not belong to the period the write was made for.
+///
+/// The day alone cannot catch this: `2026-09-01` is a perfectly good date, and
+/// every other check passes it. What is wrong is the *mismatch* — the operator
+/// had avgust on screen and typed a septembar day — and the request has to state
+/// the period before the mismatch is visible at all. That is what `godina` and
+/// `mesec` on [`SaveEntryRequest`] are for; they are an assertion about the write,
+/// never the source of the row's own month, which stays derived from `dan`.
+///
+/// It matters because the row is not merely misfiled. `list_month` filters by
+/// period, so the operator is told „Dan je evidentiran“ about a row that is not on
+/// the screen they are looking at and will not be found by looking harder. In an
+/// append-only log it cannot be withdrawn, only superseded — from a month they
+/// have to know to open. It also slips the closed-period freeze they *would* have
+/// hit: the check runs on the day's own month, so a stray day walks into a
+/// neighbouring month that may be open when the one on screen is shut.
+///
+/// The frontend refuses the same thing at the Datum field (`validateDan`), which
+/// is where an operator should meet it. This is the guard for everything that is
+/// not that field.
+fn guard_day_is_in_period(
+    dan: &str,
+    godina: i64,
+    mesec: i64,
+    trazena_godina: i64,
+    trazeni_mesec: i64,
+) -> Result<(), AppError> {
+    if godina == trazena_godina && mesec == trazeni_mesec {
+        return Ok(());
+    }
+    Err(AppError::validation(
+        format!("Datum mora pripadati izabranom periodu — {trazeni_mesec:02}/{trazena_godina}."),
+        serde_json::json!({
+            "dan": dan,
+            "godina": trazena_godina,
+            "mesec": trazeni_mesec,
+        }),
+    ))
+}
+
 /// The civil date of an RFC3339 timestamp — its first ten characters.
 fn civil_date(now: &str) -> Option<time::Date> {
     parse_iso_date(now.get(..10)?)
@@ -1294,8 +1345,8 @@ mod tests {
     use tauri::Manager;
 
     use super::{
-        close_period, correct_entry, export_month_csv, list_month, my_hours, notices, save_entry,
-        worktime_save_entry, CorrectEntryRequest, SaveEntryRequest,
+        close_period, correct_entry, export_month_csv, list_month, my_hours, notices,
+        parse_iso_date, save_entry, worktime_save_entry, CorrectEntryRequest, SaveEntryRequest,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -1369,11 +1420,16 @@ mod tests {
             .expect("preraspodela flag should update");
     }
 
-    /// One ordinary worked day. Minutes, never floating point.
+    /// One ordinary worked day, stated for the period that day belongs to — the
+    /// normal case. A test that wants a mismatch overwrites the two fields.
+    /// Minutes, never floating point.
     fn radni_dan(user_id: i64, dan: &str, efektivno: i64, prekovremeni: i64) -> SaveEntryRequest {
+        let datum = parse_iso_date(dan).expect("a test day should be an ISO date");
         SaveEntryRequest {
             user_id,
             dan: dan.to_string(),
+            godina: i64::from(datum.year()),
+            mesec: i64::from(u8::from(datum.month())),
             moguci_minuta: 480,
             efektivno_izvrseni_minuta: efektivno,
             casovi_cekanja_i_zastoja_minuta: 0,
@@ -2072,6 +2128,65 @@ mod tests {
             let error = save_entry(state, radni_dan(radnik, "2026-08-05", 480, 0), "")
                 .expect_err("a write cannot be dated from an unreadable clock");
             assert_eq!(error.code(), "validation_error");
+        });
+    }
+
+    #[test]
+    fn a_day_outside_the_stated_period_is_refused() {
+        with_state("worktime_day_outside_period", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik15", "Radnik Petnaest");
+
+            // The operator had avgust on screen and typed a septembar day. Nothing
+            // in the day itself is wrong, so every other check passes it: the row
+            // lands in a month nobody was looking at and vanishes from the grid,
+            // because `list_month` filters by period. In an append-only log that
+            // row cannot be taken back — only superseded, from a screen the
+            // operator has to know to open.
+            let mut mimo_perioda = radni_dan(radnik, "2026-09-01", 480, 0);
+            mimo_perioda.godina = 2026;
+            mimo_perioda.mesec = 8;
+            let error = save_entry(state, mimo_perioda, "2026-10-01T08:00:00Z")
+                .expect_err("a day outside the stated period cannot be recorded");
+            assert_eq!(error.code(), "validation_error");
+            assert_eq!(
+                error.to_string(),
+                "Datum mora pripadati izabranom periodu — 08/2026."
+            );
+
+            // A correction is the same write path and gets the same refusal, ahead
+            // of the live-row lookup that would otherwise report „nema unosa“.
+            let mut ispravka = radni_dan(radnik, "2026-09-01", 60, 0);
+            ispravka.godina = 2026;
+            ispravka.mesec = 8;
+            let error = correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: ispravka,
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-10-01T08:00:00Z",
+            )
+            .expect_err("a correction cannot reach outside the stated period either");
+            assert_eq!(error.code(), "validation_error");
+
+            // The last day of the month is inside it — an off-by-one here would
+            // refuse a day the register must be able to describe.
+            save_entry(
+                state,
+                radni_dan(radnik, "2026-08-31", 480, 0),
+                "2026-10-01T08:00:00Z",
+            )
+            .expect("the last day of the stated month records normally");
+
+            // A stated period that is not a month says so, rather than reporting a
+            // mismatch against „13/2026“.
+            let mut nepostojeci = radni_dan(radnik, "2026-08-30", 480, 0);
+            nepostojeci.mesec = 13;
+            let error = save_entry(state, nepostojeci, "2026-10-01T08:00:00Z")
+                .expect_err("month 13 is not a period");
+            assert_eq!(error.code(), "validation_error");
+            assert_eq!(error.to_string(), "Mesec mora biti između 1 i 12.");
         });
     }
 

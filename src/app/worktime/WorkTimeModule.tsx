@@ -1134,6 +1134,8 @@ function toRequest(
     request: {
       userId,
       dan: form.dan,
+      godina,
+      mesec,
       ...minutes,
       kategorijaOdsustva: form.kategorijaOdsustva
         ? (form.kategorijaOdsustva as AbsenceCategory)
