@@ -168,12 +168,18 @@ pub struct EmployeeProtection {
 pub enum ProtectionKind {
     /// čl. 88 st. 1 — overtime of an employee under 18 is prohibited outright.
     MaloletanPrekovremeni,
+    /// čl. 88 st. 1 — preraspodela radnog vremena of an employee under 18 is
+    /// prohibited outright, as its own leg of the same sentence.
+    MaloletanPreraspodela,
     /// čl. 87 — an employee under 18 is capped at eight hours a day.
     MaloletanDnevniLimit,
     /// čl. 91 — a protected parent works overtime only on their written consent.
     SaglasnostRoditelja,
     /// čl. 90 — pregnancy or nursing, conditional on a health authority's finding.
     TrudnocaNocniIPrekovremeni,
+    /// Not a statutory duty — a profile date the operator entered is not a civil
+    /// date, so the guard it feeds could not be evaluated for this day.
+    NeispravanDatumUProfilu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -201,16 +207,24 @@ pub struct ProtectionBlock {
 /// `izračunato radi provere usklađenosti`, and belong wherever those are modelled.
 /// A plain day with no overtime raises nothing here.
 ///
+/// The čl. 88 st. 1 preraspodela leg is the exception to that: it bans the
+/// *arrangement*, not a day's minutes, so it fires on a plain day with no
+/// overtime. čl. 58 keeps preraspodela out of the overtime derivation, which
+/// means nothing else in this module would ever notice the prohibition.
+///
 /// Two limits of this function, both deliberate:
 ///
 /// 1. **The čl. 87 weekly leg (35 časova nedeljno) is not checked.** It needs the
 ///    employee's week, which this signature does not carry; `assess_caps` is where
 ///    a week is already in hand.
-/// 2. **An absent or unreadable `datum_rodjenja` raises nothing.** v17 adds the
-///    column nullable and does not backfill it, so treating "unknown" as "minor"
-///    would block every employee nobody has filled in yet — and a register that
-///    refuses to describe days that actually happened hides exposure instead of
-///    surfacing it. Filling the profile is what turns the guard on.
+/// 2. **An absent `datum_rodjenja` raises nothing.** v17 adds the column nullable
+///    and does not backfill it, so treating "unknown" as "minor" would block every
+///    employee nobody has filled in yet — and a register that refuses to describe
+///    days that actually happened hides exposure instead of surfacing it. Filling
+///    the profile is what turns the guard on. A date that is *present but not a
+///    civil date* is the opposite case and is reported: the operator believes that
+///    profile is filled in, and v17's CHECKs are GLOB shape tests that let
+///    `2009-13-45` through.
 pub fn check_protection(
     p: &EmployeeProtection,
     day: &str,
@@ -229,6 +243,16 @@ pub fn check_protection(
                     .to_string(),
             });
         }
+        if p.radi_u_preraspodeli {
+            blocks.push(ProtectionBlock {
+                kind: ProtectionKind::MaloletanPreraspodela,
+                blocking: true,
+                poruka: "Zabranjena je preraspodela radnog vremena zaposlenog mlađeg od 18 \
+                         godina života (ZoR čl. 88 st. 1). Isključite preraspodelu radnog \
+                         vremena u profilu ovog zaposlenog."
+                    .to_string(),
+            });
+        }
         if entry.efektivno_minuta + entry.prekovremeni_minuta > MINOR_DAILY_CAP_MINUTES {
             blocks.push(ProtectionBlock {
                 kind: ProtectionKind::MaloletanDnevniLimit,
@@ -240,16 +264,14 @@ pub fn check_protection(
         }
     }
 
-    if ima_prekovremeni
-        && parental_consent_required(p, day)
-        && p.saglasnost_prekovremeni_od.is_none()
-    {
+    let treba_saglasnost = ima_prekovremeni && parental_consent_required(p, day);
+    if treba_saglasnost && !consent_covers(p.saglasnost_prekovremeni_od.as_deref(), day) {
         blocks.push(ProtectionBlock {
             kind: ProtectionKind::SaglasnostRoditelja,
             blocking: true,
             poruka: "Ovaj zaposleni može da radi prekovremeno samo uz svoju pisanu saglasnost \
-                     (ZoR čl. 91). Saglasnost nije evidentirana — upišite datum pisane \
-                     saglasnosti u profil zaposlenog."
+                     (ZoR čl. 91). Za ovaj dan nije evidentirana važeća saglasnost — upišite \
+                     datum pisane saglasnosti koji nije posle ovog dana."
                 .to_string(),
         });
     }
@@ -266,7 +288,59 @@ pub fn check_protection(
         });
     }
 
+    if nije_datum(p.datum_rodjenja.as_deref()) {
+        blocks.push(ProtectionBlock {
+            kind: ProtectionKind::NeispravanDatumUProfilu,
+            blocking: false,
+            poruka: "Datum rođenja zaposlenog u profilu nije ispravan datum, pa zaštite za \
+                     zaposlene mlađe od 18 godina (ZoR čl. 87 i čl. 88) za ovaj dan nisu \
+                     proverene. Ispravite datum rođenja u profilu zaposlenog."
+                .to_string(),
+        });
+    }
+
+    // Only when the unreadable value actually cost a guard: the težak-invalid leg
+    // of čl. 91 st. 2 reads no date at all, so the gate can fire without it.
+    if ima_prekovremeni
+        && !treba_saglasnost
+        && nije_datum(p.datum_rodjenja_najmladjeg_deteta.as_deref())
+    {
+        blocks.push(ProtectionBlock {
+            kind: ProtectionKind::NeispravanDatumUProfilu,
+            blocking: false,
+            poruka: "Datum rođenja najmlađeg deteta u profilu nije ispravan datum, pa provera \
+                     pisane saglasnosti za prekovremeni rad (ZoR čl. 91) za ovaj dan nije \
+                     izvedena. Ispravite datum u profilu zaposlenog."
+                .to_string(),
+        });
+    }
+
     blocks
+}
+
+/// A value the operator entered that is not a civil date.
+///
+/// `None` is not this: an empty column is a profile nobody has filled in, which
+/// v17 leaves as the default. `Some` that does not parse is a value somebody
+/// believes they entered, and every age computation here silently ignores it —
+/// v17's CHECKs are GLOB shape tests, so `2009-13-45` reaches this module.
+fn nije_datum(value: Option<&str>) -> bool {
+    matches!(value, Some(s) if parse_iso_date(s).is_none())
+}
+
+/// Whether a stored čl. 91 written consent covers work done on `day`.
+///
+/// The column is an „od“ date, so it discharges the guard only from that date
+/// on. Anything else — absent, unreadable, or later than `day` — keeps the
+/// guard: čl. 91 is a consent given before the overtime, and a register whose
+/// contemporaneity is the point (čl. 55 st. 6 „dnevnu“) must not let a document
+/// dated afterwards authorise hours already worked. An unreadable `day` keeps it
+/// too, the same over-report-is-safe direction `in_same_iso_week` takes.
+fn consent_covers(saglasnost_od: Option<&str>, day: &str) -> bool {
+    match (saglasnost_od.and_then(parse_iso_date), parse_iso_date(day)) {
+        (Some(od), Some(day)) => od <= day,
+        _ => false,
+    }
 }
 
 /// čl. 58 — „Preraspodela radnog vremena ne smatra se prekovremenim radom.“
@@ -322,8 +396,10 @@ fn child_within_years(birth: Option<&str>, day: &str, years: i32) -> bool {
 
 /// Orders `day` against the `years`-th anniversary of `birth`.
 ///
-/// `None` when either date is absent or unreadable — the caller then raises no
-/// guard at all rather than guessing an age.
+/// `None` when either date is absent or unreadable — no age is guessed. The two
+/// cases are not equivalent to the caller, though, and `check_protection`
+/// separates them: an absent date is an unfilled profile and stays silent, an
+/// unreadable one is reported through `nije_datum`.
 fn compare_day_to_birthday(birth: Option<&str>, day: &str, years: i32) -> Option<Ordering> {
     let birth = parse_iso_date(birth?)?;
     let day = parse_iso_date(day)?;
@@ -536,6 +612,138 @@ mod tests {
         );
     }
 
+    /// čl. 88 st. 1 bans two things in one sentence — „prekovremeni rad **i
+    /// preraspodela radnog vremena** zaposlenog koji je mlađi od 18 godina
+    /// života“. The preraspodela leg is a ban on the *arrangement*, so it fires
+    /// on a plain eight-hour day with no overtime minute anywhere in sight.
+    #[test]
+    fn a_minor_cannot_be_put_in_preraspodela() {
+        let mut p = protection_born("2009-09-01");
+        p.radi_u_preraspodeli = true;
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 0));
+        let block = blocks
+            .iter()
+            .find(|b| b.kind == ProtectionKind::MaloletanPreraspodela)
+            .expect("čl. 88 st. 1 bans the arrangement, not just the day's overtime");
+        assert!(block.blocking, "the statute states the prohibition itself");
+    }
+
+    /// The ban is on being under 18, not on the flag. An adult in preraspodela is
+    /// the ordinary čl. 57 case and must raise nothing.
+    #[test]
+    fn an_adult_may_work_in_preraspodela() {
+        let mut p = protection_born("1990-04-11");
+        p.radi_u_preraspodeli = true;
+        assert!(check_protection(&p, "2026-08-03", &day(480, 0)).is_empty());
+    }
+
+    /// čl. 91 is a consent given *before* the overtime. `saglasnost_prekovremeni_od`
+    /// is an „od“ date and v17 only GLOB-checks its shape, so a consent dated after
+    /// the day is storable — and reading the column as a mere presence flag would
+    /// let it discharge a guard for hours worked seven months earlier.
+    #[test]
+    fn a_consent_dated_after_the_day_does_not_discharge_cl_91() {
+        let mut p = protection_child_born("2020-06-01");
+        p.samohrani_roditelj = Some(true);
+        p.saglasnost_prekovremeni_od = Some("2027-03-01".to_string());
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja),
+            "a consent signed after the fact authorises nothing"
+        );
+    }
+
+    /// The same GLOB that lets `2026-13-45` into `dan` lets it into this column.
+    /// A value that is not a date cannot evidence a consent, and dropping the
+    /// guard on it is the one direction that costs something.
+    #[test]
+    fn an_unreadable_consent_date_does_not_discharge_cl_91() {
+        let mut p = protection_child_born("2020-06-01");
+        p.samohrani_roditelj = Some(true);
+        p.saglasnost_prekovremeni_od = Some("2026-13-45".to_string());
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja),
+            "a non-date must not discharge čl. 91"
+        );
+    }
+
+    /// A consent dated the day itself covers it: „samo uz svoju pisanu saglasnost“
+    /// is satisfied by a consent that exists on that day. Only a later date is a
+    /// reconstruction.
+    #[test]
+    fn a_consent_dated_the_day_itself_discharges_cl_91() {
+        let mut p = protection_child_born("2020-06-01");
+        p.samohrani_roditelj = Some(true);
+        p.saglasnost_prekovremeni_od = Some("2026-08-03".to_string());
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(!blocks
+            .iter()
+            .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
+    }
+
+    /// v17's CHECK on `datum_rodjenja` is a GLOB shape test, so `2009-13-45` is
+    /// storable and looks like a date to the operator. Silently treating it as an
+    /// unknown date of birth drops the čl. 87 and čl. 88 guards on a profile
+    /// somebody believes they filled in — the exact inverse of
+    /// `an_unreadable_day_is_counted_rather_than_silently_dropped`.
+    #[test]
+    fn an_unreadable_date_of_birth_is_reported_rather_than_silently_dropped() {
+        let p = protection_born("2009-13-45");
+        let blocks = check_protection(&p, "2026-08-03", &day(540, 60));
+        let block = blocks
+            .iter()
+            .find(|b| b.kind == ProtectionKind::NeispravanDatumUProfilu)
+            .expect("an unreadable date of birth must be surfaced, not swallowed");
+        assert!(
+            !block.blocking,
+            "the day happened — refusing to record it would hide exposure, \
+             so this reports the unusable profile instead"
+        );
+    }
+
+    /// The same defect on the čl. 91 leg: an unreadable child's date of birth
+    /// drops the consent gate instead of raising it.
+    #[test]
+    fn an_unreadable_child_date_of_birth_is_reported_rather_than_silently_dropped() {
+        let mut p = protection_child_born("2020-13-45");
+        p.samohrani_roditelj = Some(true);
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::NeispravanDatumUProfilu),
+            "the čl. 91 gate vanished on a value the operator believes is a date"
+        );
+    }
+
+    /// Nothing was lost when the unreadable date was never going to be consulted:
+    /// the težak-invalid leg of čl. 91 st. 2 has no age bound, so the gate fired
+    /// anyway and a warning here would be noise.
+    #[test]
+    fn an_unreadable_child_date_is_not_reported_when_the_gate_fired_anyway() {
+        let mut p = protection_child_born("2020-13-45");
+        p.samohrani_roditelj = Some(true);
+        p.dete_tezak_invalid = Some(true);
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(blocks
+            .iter()
+            .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
+        assert!(!blocks
+            .iter()
+            .any(|b| b.kind == ProtectionKind::NeispravanDatumUProfilu));
+    }
+
     /// v17 leaves `datum_rodjenja` NULL and does not backfill it. Treating an
     /// unknown date of birth as a minor would block every employee nobody has
     /// filled in yet, so the guard stays silent and Task 9's profile screen is
@@ -664,21 +872,77 @@ mod tests {
     }
 
     /// Every statutory amount in this application lives in `legal.rs` and is
-    /// named by article everywhere else. The profile is a fixture chosen to
-    /// raise all four kinds at once, not a plausible employee.
+    /// named by article everywhere else. The profiles below are fixtures chosen
+    /// to raise every kind between them, not plausible employees.
+    ///
+    /// A kind that no fixture raises has its poruka outside this guard entirely.
+    /// Two things hold the list total: the `match` below is exhaustive, so a new
+    /// variant stops this test compiling until it is enumerated, and the asserted
+    /// block count then has to be edited — which is where the missing fixture
+    /// gets noticed.
     #[test]
     fn no_protection_message_carries_a_fine_figure() {
-        let mut p = protection_born("2009-09-01");
-        p.trudnoca_ili_dojenje = Some(true);
-        p.samohrani_roditelj = Some(true);
-        p.datum_rodjenja_najmladjeg_deteta = Some("2024-01-01".to_string());
-        let blocks = check_protection(&p, "2026-08-03", &day(540, 60));
+        // Under 18, in preraspodela, pregnant, samohrani roditelj of a toddler,
+        // twelve hours worked: every blocking kind and the čl. 90 warning.
+        let mut svi = protection_born("2009-09-01");
+        svi.trudnoca_ili_dojenje = Some(true);
+        svi.samohrani_roditelj = Some(true);
+        svi.datum_rodjenja_najmladjeg_deteta = Some("2024-01-01".to_string());
+        svi.radi_u_preraspodeli = true;
+
+        // The two unusable-profile messages, one per date the guards read.
+        let neispravan_rodjenja = protection_born("2009-13-45");
+        let mut neispravan_deteta = protection_child_born("2020-13-45");
+        neispravan_deteta.samohrani_roditelj = Some(true);
+
+        let mut blocks = check_protection(&svi, "2026-08-03", &day(540, 60));
         assert_eq!(
             blocks.len(),
-            4,
-            "this must exercise every kind or it guards nothing: {blocks:?}"
+            5,
+            "the fixture must raise every statutory kind or it guards nothing: {blocks:?}"
         );
+        blocks.extend(check_protection(
+            &neispravan_rodjenja,
+            "2026-08-03",
+            &day(540, 60),
+        ));
+        blocks.extend(check_protection(
+            &neispravan_deteta,
+            "2026-08-03",
+            &day(480, 60),
+        ));
+        assert_eq!(
+            blocks.len(),
+            7,
+            "5 statutory + one unusable-date message per date read: {blocks:?}"
+        );
+
+        let ocekivane = [
+            ProtectionKind::MaloletanPrekovremeni,
+            ProtectionKind::MaloletanPreraspodela,
+            ProtectionKind::MaloletanDnevniLimit,
+            ProtectionKind::SaglasnostRoditelja,
+            ProtectionKind::TrudnocaNocniIPrekovremeni,
+            ProtectionKind::NeispravanDatumUProfilu,
+        ];
+        for vrsta in ocekivane {
+            assert!(
+                blocks.iter().any(|b| b.kind == vrsta),
+                "{vrsta:?} raises a poruka no fixture here ever sees"
+            );
+        }
+
         for block in &blocks {
+            // Exhaustive on purpose: a new ProtectionKind stops this compiling
+            // until it is added to `ocekivane` and raised by a fixture above.
+            match block.kind {
+                ProtectionKind::MaloletanPrekovremeni
+                | ProtectionKind::MaloletanPreraspodela
+                | ProtectionKind::MaloletanDnevniLimit
+                | ProtectionKind::SaglasnostRoditelja
+                | ProtectionKind::TrudnocaNocniIPrekovremeni
+                | ProtectionKind::NeispravanDatumUProfilu => {}
+            }
             let poruka = block.poruka.to_lowercase();
             assert!(
                 !poruka.contains("dinara") && !poruka.contains("kazn") && !poruka.contains(".000"),
