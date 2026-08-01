@@ -584,6 +584,22 @@ describe("WorkTimeModule correction log", () => {
   });
 });
 
+describe("WorkTimeModule totals row", () => {
+  it("names the day count instead of leaving a bare figure under „Odsustvo“", async () => {
+    render(
+      <WorkTimeModule
+        services={servicesWithMonth(month([entry({ id: 20, dan: "2026-06-04" })]))}
+        currentUser={admin}
+      />,
+    );
+
+    // A single recorded day. „1 dana“ is ungrammatical, and under the
+    // „Odsustvo“ header a bare figure reads as one day of absence.
+    expect(await screen.findByText("1 dan sa unosom")).toBeInTheDocument();
+    expect(screen.queryByText(/^\d+ dana$/)).not.toBeInTheDocument();
+  });
+});
+
 describe("WorkTimeModule period close", () => {
   it("closes the period and says the close is final", async () => {
     const user = userEvent.setup();

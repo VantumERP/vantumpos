@@ -382,7 +382,19 @@ function renderModule({
   onOpenProductLedger: (productId: number) => void;
   onInventoryLedgerOpened: () => void;
 }) {
-  if (session.user.role === "cashier" && !session.currentShift) {
+  // A cashier with no open shift is sent to „Otvori smenu“ before anything
+  // else — with one exception. „Moji sati“ discharges the employee's *own*
+  // rights (ZoR čl. 83 st. 1, ZZPL čl. 26), and a right of access cannot be
+  // conditioned on first opening a till: that would both withhold the data
+  // from an off-shift employee and fabricate a cash-control record as the
+  // price of a data-subject request. The surface is session-gated backend-side
+  // (`worktime_my_hours` returns own rows only), so nothing here rests on the
+  // shift gate. Every other module stays behind it.
+  if (
+    activeId !== "moji-sati" &&
+    session.user.role === "cashier" &&
+    !session.currentShift
+  ) {
     return (
       <OpenShiftScreen
         services={services}

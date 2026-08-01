@@ -165,6 +165,31 @@ describe("MyHoursPanel", () => {
     expect(screen.queryByText(/7[.,]5/)).not.toBeInTheDocument();
   });
 
+  it("names the day count instead of leaving a bare figure under „Odsustvo“", () => {
+    const { unmount } = render(<MyHoursPanel hours={fixture} />);
+
+    // One recorded day. „1 dana“ is both ungrammatical and, sitting under the
+    // „Odsustvo“ header, reads as one day of absence — on the one column that
+    // carries čl. 17 data.
+    expect(screen.getByText("1 dan sa unosom")).toBeInTheDocument();
+    expect(screen.queryByText(/^\d+ dana$/)).not.toBeInTheDocument();
+    unmount();
+
+    render(
+      <MyHoursPanel
+        hours={month([
+          entry({ id: 1, dan: "2026-06-01" }),
+          entry({ id: 2, dan: "2026-06-02" }),
+          entry({ id: 3, dan: "2026-06-03" }),
+          entry({ id: 4, dan: "2026-06-04" }),
+          entry({ id: 5, dan: "2026-06-05" }),
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("5 dana sa unosom")).toBeInTheDocument();
+  });
+
   it("keeps a superseded version visible rather than hiding the correction", () => {
     const corrected = month([
       entry({

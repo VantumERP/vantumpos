@@ -167,6 +167,35 @@ describe("AppShell", () => {
       .toBeInTheDocument();
   });
 
+  it("lets a cashier reach Moji sati without first opening a shift", async () => {
+    // `createMockServices` hands the shell a ready session through
+    // `initialSession`, which short-circuits `getSession` — so the cashier
+    // session goes there.
+    const services = Object.assign(createMockServices(), {
+      initialSession: cashierSession,
+    });
+    const user = userEvent.setup();
+
+    render(<AppShell services={services} />);
+
+    // The shift gate stands in front of every other module, so a cashier who
+    // has not opened a till lands on „Otvori smenu“ first.
+    expect(await screen.findByRole("heading", { name: "Otvori smenu" }))
+      .toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Moji sati" }));
+
+    // ZoR čl. 83 st. 1 / ZZPL čl. 26 are the employee's own rights. They cannot
+    // be conditioned on first opening a till and entering a početno stanje,
+    // which would also fabricate a cash-control record as the price of a
+    // data-subject request.
+    expect(await screen.findByText(/uvid u sopstvene podatke/i))
+      .toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Otvori smenu" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows real signed-in user and shift state in the shell", async () => {
     const services = buildAuthServices({
       auth: {

@@ -861,7 +861,7 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
               <TableRow className="font-medium">
                 <TableCell>Ukupno</TableCell>
                 <TableCell />
-                <TableCell>{`${liveEntries.length} dana`}</TableCell>
+                <TableCell>{danaSaUnosom(liveEntries.length)}</TableCell>
                 <MinuteCell value={month.ukupno.moguciMinuta} />
                 <MinuteCell value={month.ukupno.ukupnoOstvareniMinuta} />
                 <MinuteCell value={month.ukupno.efektivnoIzvrseniMinuta} />
@@ -1013,6 +1013,22 @@ export function napomenaZa(entry: WorkTimeEntryView): string {
   }
 
   return parts.length > 0 ? parts.join(" · ") : "—";
+}
+
+/**
+ * The totals row's day count, as it appears in the „Odsustvo“ column.
+ *
+ * Two things it has to get right. It counts days that carry a live entry —
+ * `crate::commands::worktime::Klasifikacija::dana_sa_unosom` — and *not* days
+ * of absence, so it names itself: a bare figure under the „Odsustvo“ header
+ * reads as absent days, on the one column carrying ZZPL čl. 17 special-category
+ * data. And it agrees with the number — 1 dan, 2 dana, 5 dana, 21 dan — because
+ * „1 dana“ is not Serbian.
+ */
+export function danaSaUnosom(count: number): string {
+  const jednina = count % 10 === 1 && count % 100 !== 11;
+
+  return `${count} ${jednina ? "dan" : "dana"} sa unosom`;
 }
 
 /**

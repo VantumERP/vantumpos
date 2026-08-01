@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   AbsenceCell,
   buildYearOptions,
+  danaSaUnosom,
   formatDan,
   formatMinutes,
   MESECI,
@@ -76,8 +77,10 @@ export interface MyHoursPanelProps {
  * The absence category *is* shown here, unlike in the employer-facing grid: the
  * viewer is the data subject, and ZZPL čl. 26 is the right to be told what is
  * recorded about oneself. Withholding it would defeat the point of the screen.
- * No penalty figure is composed or rendered here — this screen states rights,
- * not offences.
+ * That is the carve-out written into docs/SW14-VERIFIED-RULES.md §4 req. 25 —
+ * the čl. 50 / čl. 42 gate governs disclosure to *others*, and it is not
+ * widened anywhere else. No penalty figure is composed or rendered here — this
+ * screen states rights, not offences.
  */
 export function MyHoursPanel({ hours }: MyHoursPanelProps) {
   const liveEntries = hours.entries.filter((entry) => !entry.zamenjen);
@@ -168,7 +171,9 @@ export function MyHoursPanel({ hours }: MyHoursPanelProps) {
                       `true` on purpose: the viewer is the data subject. The gate
                       exists so a colleague's category is never shown, and here
                       there is no colleague — `worktime_my_hours` resolves the
-                      employee from the session and returns own rows only.
+                      employee from the session and returns own rows only. This
+                      is the carve-out recorded in docs/SW14-VERIFIED-RULES.md
+                      §4 req. 25, not a hole in it.
                     */}
                     <AbsenceCell entry={entry} canSeeAbsenceReason />
                   </TableCell>
@@ -187,7 +192,7 @@ export function MyHoursPanel({ hours }: MyHoursPanelProps) {
               <TableRow className="font-medium">
                 <TableCell>Ukupno</TableCell>
                 <TableCell />
-                <TableCell>{`${liveEntries.length} dana`}</TableCell>
+                <TableCell>{danaSaUnosom(liveEntries.length)}</TableCell>
                 <MinuteCell value={hours.ukupno.moguciMinuta} />
                 <MinuteCell value={hours.ukupno.ukupnoOstvareniMinuta} />
                 <MinuteCell value={hours.ukupno.efektivnoIzvrseniMinuta} />
