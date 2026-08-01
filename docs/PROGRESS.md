@@ -197,6 +197,77 @@ Latest migration: **v16**.
 
 ---
 
+### SW-14 — Evidencija radnog vremena (2026-08-01)
+
+The ZoR čl. 55 st. 6 daily overtime register, the čl. 53 caps that carry the larger fine, the čl. 87–91
+protection guards and a two-class retention model, shipped as a ten-task TDD plan
+(`docs/superpowers/plans/2026-08-01-sw14-radno-vreme.md`) against the verified rule set in
+`docs/SW14-VERIFIED-RULES.md` §4. Baseline at plan time was `907017c` — cargo **476**, bun **304**,
+migration **v16**.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — schema | **Migration v17**: `work_time_entries` (one row per employee/day, the 15 ZEOR čl. 24 tač. 1 minute buckets, versioned append-only correction chain, a partial unique index giving one live row per day), `work_time_periods`, `retention_policies`, employee-profile columns on `users`. Absence category is a closed `CHECK` enum with **zero free-text columns**, and the bucket column is **derived** from the category (`{kategorija}_minuta`), enforced by a test that parses the live `CHECK` | `4265190`, `6f9de79`, `6b41c43` |
+| 2 — caps | `worktime.rs::assess_caps` — čl. 53 st. 2 (≤ 8 h prekovremenog per **calendar week, Monday-based**) and st. 3 (≤ 12 h daily total incl. overtime); civil-date arithmetic reused from `cash_deposit.rs` rather than re-derived. The stored version of the day under assessment is not double-counted | `d5ad982`, `b3a2d4c` |
+| 3 — penalty copy | `legal.rs::overtime_record_missing` (čl. 276 st. 1 u vezi sa tač. 1a) and `overtime_caps_exceeded` (čl. 274 st. 1 tač. 3), both tier-resolved from `pravna_forma`; the čl. 276 st. 2 odgovorno-lice line is suppressed for a preduzetnik. A test guards that **no ZEOR figure** is reachable anywhere, and three previously vacuous guards were closed | `6ae257e`, `c0fc959` |
+| 4 — protection | `worktime.rs::check_protection` — čl. 87 (35 h/week, 8 h/day for a minor), **čl. 88 st. 1 bans prekovremeni *and* preraspodela**, čl. 91 st. 1 (dete do 3) and st. 2 (**samohrani roditelj — threshold SEVEN**, plus `dete_tezak_invalid` with no age limit) require a stored written consent **dated before the day worked**, čl. 90 warns rather than blocks. `derives_overtime_automatically` returns `false` under preraspodela — čl. 58 hours are not overtime | `defcecf`, `8c04a05` |
+| 5 — commands | `commands/worktime.rs`: `worktime_list_month`, `save_entry`, `correct_entry`, `close_period`, `export_csv`, `my_hours`, `notices`. Not one `UPDATE` against `work_time_entries`; a correction is a new `verzija` row carrying who/when/why. `require_admin` is the **first statement of the domain function**, not of the `#[tauri::command]` wrapper. A cap breach records the day and asks for a čl. 53 st. 1 ground; a čl. 87–91 block refuses the row. Preraspodela is branched onto the čl. 57 st. 5 60 h/week ceiling, and a month cannot close before it ends | `5a87e4a`, `93c95e7` |
+| 6 — retention | `retention.rs` — the single shared table SW11-SW15 §3 req. 42 mandates. `WorktimeClassification` = `trajno` + `never_purge`, unreachable by go-live reset, restore and backup-prune (`assert_never_purge_intact` runs **inside** the reset transaction in `backup.rs`); `WorktimeOvertimeLog` carries an upward-only **3-year** floor applied to each record's own `dan`, with a fail-safe that refuses to purge when no floor is stored; `WorktimeDraft` is bounded by the period close | `ee7fcca`, `0c96a6a` |
+| 7 — Radno vreme UI | `src/app/worktime/WorkTimeModule.tsx` — monthly grid, cap warnings with the override ground, period close, CSV export, and the absence category behind `canSeeAbsenceReason`. Non-blocking čl. 87–91 findings are surfaced rather than swallowed, and the recorded day is guarded | `6807309`, `2f576d7` |
+| 8 — Moji sati | `src/app/worktime/MyHoursPanel.tsx` — read-only own-month view resolved from the server-side session, **no employee picker and no export control** (ZoR čl. 83 st. 1 + ZZPL čl. 26 in one surface). Reachable off-shift | `c57b9bd`, `ae9c00d` |
+| 9 — employee profile | `commands/users.rs` — the čl. 87–91 flags plus ZEOR čl. 44 st. 2 `zanimanje_sifra` / `kvalifikacija_sifra` as codes. **No consent UI**: `saglasnost_prekovremeni_od` records that a written consent exists and when. `trudnoca_ili_dojenje` is a boolean + date, never free text, and is kept out of `users_list` | `f796de3`, `a69f1b0` |
+
+**Verification gates (all six green at HEAD; every command exited `0`):**
+
+| Gate | Result |
+|---|---|
+| `bun run test` | **355 passed** / 0 failed, 22 files (was 304 / 19) |
+| `bun run build` | pass — tsc + vite |
+| `cargo test -- --test-threads=1` | **544 passed** / 0 failed, 0 ignored (was 476) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `git diff --check` | clean |
+
+New tests: 29 in `worktime.rs`, 14 in `commands/worktime.rs`, 9 in `retention.rs`, plus additions in
+`legal.rs`, `db/migrations.rs`, `commands/users.rs` and `commands/backup.rs`; 50 frontend tests across
+`WorkTimeModule.test.tsx`, `MyHoursPanel.test.tsx` and `UserDialog.test.tsx`.
+
+Latest migration: **v17**.
+
+**Deliberately not built** (`docs/SW14-VERIFIED-RULES.md` §5) — read these as decisions, not as gaps:
+payroll of any kind (čl. 24 tačke 2–3 are the accountant's), an obračun zarade, the čl. 108 uplifts,
+any free-text/diagnosis/doznaka field on an absence row, biometric clock-in, an annual overtime counter,
+a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export, and any consent UI.
+
+**Still open after this batch** (requirement numbers are `docs/SW14-VERIFIED-RULES.md` §4):
+
+- **Req 16 — the holiday calendar is not encoded.** `rad_na_praznik_minuta` is an operator-entered,
+  advisory-tagged bucket; the Zakon o državnim i drugim praznicima čl. 1/1a/2/3a rules and the čl. 3/čl. 5
+  working-holiday exclusion set are not in code, so nothing derives the čl. 108 st. 1 tač. 1 flag.
+- **Req 15 `[PRUDENTIAL]` — rest-period checks** (čl. 64, 66, 67) and their preraspodela variants are not
+  implemented.
+- **Req 10 — the 9-month reference period** behind `kolektivni_ugovor_postoji`, and the čl. 61
+  mid-period-termination choice, are not surfaced.
+- **Req 14 — the čl. 62 st. 2 night threshold** advisory flag is not computed. Consequently the
+  *„odnosno noću“* leg of čl. 90 and čl. 91 is **not** enforced either: `nocni_minuta` is an
+  operator-entered advisory bucket and is not visible in `DayHours`, so `check_protection` draws those
+  guards on the overtime leg alone. A protected employee scheduled at night with no overtime raises
+  nothing.
+- **Req 26, second half — the activation gate.** The čl. 23 notice now carries the posebne-vrste row, the
+  named recipients and the two-class retention statement, but the module does **not** yet refuse to
+  activate for an employee until a re-delivery acknowledgement dated on/after this feature is recorded.
+- **Req 27 — the čl. 47 evidencija as a generated artefact** is still a hand-maintained document
+  (`docs/compliance/evidencija-obrade-cl47.md`); it is not driven off the configured purposes, recipients
+  and `retention_policies` rows.
+- **Req 28 — remote-support masking** of the absence-reason column, with the unmask logged, is not built
+  (depends on SW-10).
+- **Req 21, print half — CSV ships, the per-employee monthly print sheet does not.** Mirrors the polog
+  report's open item.
+- **W-1 remains open** (`docs/SW14-VERIFIED-RULES.md` §6): whether ZEOR čl. 51 reaches a preduzetnik at
+  all. Until a lawyer answers, no ZEOR figure is rendered — the `legal.rs` guard enforces it.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.
