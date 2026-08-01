@@ -216,7 +216,13 @@ pub fn run() {
             commands::audit::support_grant_access,
             commands::audit::support_request_access,
             commands::audit::support_end_session,
-            commands::audit::support_active_session
+            commands::audit::support_active_session,
+            // Req. 7: a read path and nothing else. There is deliberately no
+            // command here that edits or removes a logged row — an
+            // owner-editable audit log proves nothing, and proving something is
+            // the entire reason it exists.
+            commands::audit::audit_search,
+            commands::audit::audit_export_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
