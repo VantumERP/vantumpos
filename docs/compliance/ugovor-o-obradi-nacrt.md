@@ -16,9 +16,9 @@
 
 1. **Predmet obrade:** pružanje daljinske tehničke podrške i održavanja informacionog sistema VantumPOS.
 2. **Trajanje obrade:** za vreme trajanja ugovora o podršci/održavanju, odnosno do prestanka ugovora; posle prestanka postupa se po članu 9 ovog ugovora.
-3. **Priroda i svrha obrade:** „daljinska tehnička podrška i održavanje VantumPOS-a" — pristup se vrši isključivo radi otklanjanja smetnji, dijagnostike i konfiguracije, po dokumentovanom nalogu rukovaoca.
+3. **Priroda i svrha obrade:** „daljinska tehnička podrška i održavanje VantumPOS-a“ — pristup se vrši isključivo radi otklanjanja smetnji, dijagnostike i konfiguracije, po dokumentovanom nalogu rukovaoca.
 4. **Vrsta podataka o ličnosti:** identitet zaposlenih (ime i korisničko ime), metapodaci o pristupnim podacima (npr. heš PIN-a, evidencija prijava — ne i sam PIN u čitljivom obliku) i pripisivost smena/prodaja pojedinom zaposlenom.
-5. **Vrsta lica** (zakonski termin je „vrsta lica", ne „kategorije lica"): **zaposleni prodavnice**.
+5. **Vrsta lica** (zakonski termin je „vrsta lica“, ne „kategorije lica“): **zaposleni prodavnice**.
 6. **Prava i obaveze rukovaoca:** rukovalac utvrđuje svrhu i način obrade, daje dokumentovane naloge i odgovoran je za zakonitost osnova obrade.
 
 ## Član 2 — Obaveze obrađivača (ZZPL čl. 45 st. 4 tač. 1–8)

@@ -16,7 +16,7 @@
 Rukovalac podataka je **prodavnica** — `[naziv / poslovno ime, sedište, PIB/MB]`.
 Kontakt za zaštitu podataka: `[ime i prezime kontakt-osobe, e-pošta, telefon]`.
 
-> Napomena (interno): koristi se naziv **„kontakt za zaštitu podataka"**, a **ne** „lice za zaštitu podataka (DPO)" — dobrovoljno imenovanje DPO stvara obaveze objave i prijave (v. `evidencija-obrade-cl47.md`).
+> Napomena (interno): koristi se naziv **„kontakt za zaštitu podataka“**, a **ne** „lice za zaštitu podataka (DPO)“ — dobrovoljno imenovanje DPO stvara obaveze objave i prijave (v. `evidencija-obrade-cl47.md`).
 
 ## 2. Svrhe obrade i pravni osnov
 
@@ -93,7 +93,7 @@ Kao lice na koje se podaci odnose, imate pravo na:
 
 - **pristup** podacima (čl. 26),
 - **ispravku i dopunu** (čl. 29),
-- **brisanje** („pravo na zaborav", čl. 30) — u granicama zakonskih obaveza čuvanja,
+- **brisanje** („pravo na zaborav“, čl. 30) — u granicama zakonskih obaveza čuvanja,
 - **ograničenje obrade** (čl. 31),
 - **prigovor** na obradu (čl. 37),
 - **prenosivost podataka** (čl. 36),
