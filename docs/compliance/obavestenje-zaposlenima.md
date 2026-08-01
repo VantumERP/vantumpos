@@ -79,7 +79,7 @@ klasifikacija čuva se trajno, a sirovi i radni podaci imaju ograničen rok:
 
 | Šta | Koliko | Zašto |
 |---|---|---|
-| **Izvedena mesečna klasifikacija časova** — zaključeni mesečni zbir časova po vrstama iz ZEOR čl. 24 tač. 1, po zaposlenom | **Trajno** | ZEOR čl. 7 st. 2 i čl. 25 st. 3. Ovaj skup podataka je tehnički izuzet iz svakog brisanja: ne dodiruju ga ni resetovanje podataka, ni vraćanje iz rezervne kopije, ni čišćenje starih rezervnih kopija |
+| **Izvedena mesečna klasifikacija časova** — zaključeni mesečni zbir časova po vrstama iz ZEOR čl. 24 tač. 1, po zaposlenom | **Trajno** | ZEOR čl. 7 st. 2 i čl. 25 st. 3. Ovaj skup podataka aplikacija tehnički izuzima iz brisanja i iz resetovanja podataka. **Vraćanje iz rezervne kopije vraća celu bazu na stanje iz te kopije, pa i ovu evidenciju** — na tom putu zaštita je rezervna kopija zatečenog stanja koju aplikacija obavezno napravi pre vraćanja, uz zapis o tome koliko je zapisa vraćanje pomerilo. **Automatsko čišćenje starih rezervnih kopija ne postoji** — stare kopije ostaju dok ih neko ručno ne obriše |
 | **Samostalna evidencija prekovremenog rada** (ZoR čl. 55 st. 6), kada nije deo obračuna zarade | **Najmanje tri godine** od dana na koji se odnosi, uz mogućnost produženja | Zakon ne propisuje rok; primenjuje se odbrambeni minimum izveden iz rokova zastarelosti (ZoR čl. 196; Zakon o prekršajima čl. 84). Rok se pomera **samo unapred**, nikada unazad |
 | **Radne verzije unosa i pomoćni podaci o vremenu** — nezaključeni unosi i podaci o vremenu koji služe samo proveri usklađenosti | **Brišu se pošto je mesec zaključen** i klasifikacija izvedena | ZZPL čl. 5 st. 1 tač. 5 — podaci se ne čuvaju duže nego što je neophodno za svrhu |
 

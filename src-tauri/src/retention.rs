@@ -56,6 +56,18 @@ pub const STANDALONE_OVERTIME_LOG_FLOOR_YEARS: i32 = 3;
 /// The tables no purge, reset, restore or backup-prune path may ever reduce
 /// (§4d: *"the trajno classes must be structurally unreachable"*).
 ///
+/// **Where that is actually enforced, and where it is not.**
+/// [`never_purge_row_counts`] + [`assert_never_purge_intact`] enforce it wherever
+/// the destructive step is a transaction that can be rolled back: today that is
+/// `commands::backup::reset_trading_data`, and tomorrow SW-13's purge job.
+/// `restore_backup` is outside their reach — it replaces the database file, so
+/// the register comes back as the snapshot holds it, and the pre-restore safety
+/// copy is the protection on that path (the reasoning, including why a
+/// count-based refusal there would trap the shop, is on
+/// `commands::backup::never_purge_counts`). No backup-prune path exists in this
+/// crate at all; when one is built it is a transaction-shaped path and it must
+/// carry the fence.
+///
 /// `work_time_periods` holds the frozen Class A classification and
 /// `work_time_entries` is the čl. 55 st. 6 register it is derived from — an
 /// inspector reads the second, and ZEOR čl. 24 tač. 1 ž) carries its overtime
@@ -153,10 +165,14 @@ impl RecordClass {
 
     /// Operator-facing note stored beside the row. No fine figure appears here
     /// or anywhere outside `legal.rs`, and no ZEOR figure appears at all.
-    fn napomena(self) -> &'static str {
+    ///
+    /// `pub(crate)` so `docs_guard` can read these the way it reads the
+    /// documents: they are the same kind of claim, and one of them promised a
+    /// deletion-immunity the restore path never had.
+    pub(crate) fn napomena(self) -> &'static str {
         match self {
             Self::WorktimeClassification => {
-                "Izvedena mesečna klasifikacija časova. Čuva se trajno (ZEOR čl. 7 st. 2 i čl. 25 st. 3). Nijedno brisanje, resetovanje, vraćanje iz rezervne kopije ni čišćenje rezervnih kopija ne sme da je dodirne."
+                "Izvedena mesečna klasifikacija časova. Čuva se trajno (ZEOR čl. 7 st. 2 i čl. 25 st. 3). Aplikacija je izuzima iz brisanja i iz resetovanja podataka. Vraćanje iz rezervne kopije vraća celu bazu na stanje iz te kopije, pa i ovu evidenciju — zaštita na tom putu je rezervna kopija zatečenog stanja koju aplikacija napravi pre vraćanja, uz zapis o tome koliko je zapisa vraćanje pomerilo. Automatsko čišćenje starih rezervnih kopija ne postoji."
             }
             Self::WorktimeOvertimeLog => {
                 "Samostalna evidencija prekovremenog rada (ZoR čl. 55 st. 6). Zakon ne propisuje rok čuvanja; primenjuje se odbrambeni minimum od tri godine, koji se pomera samo unapred."
@@ -186,9 +202,19 @@ pub struct RetentionPolicy {
 /// after the shop has already extended a class must not pull it back to the
 /// seeded value.
 ///
-/// `never_purge` is the one field the seed repairs, and only upward: a row that
-/// somehow reached the database with `never_purge = 0` on a `trajno` class is a
-/// row that would let a purge through.
+/// `never_purge` is the one **decision** the seed repairs, and only upward: a
+/// row that somehow reached the database with `never_purge = 0` on a `trajno`
+/// class is a row that would let a purge through.
+///
+/// [`RecordClass::napomena`] is rewritten unconditionally, which is a different
+/// kind of repair: the note is derived text this crate authors and nothing else
+/// ever writes, and it is the sentence a person reads when they ask why a record
+/// is still there. SW-14 shipped one that promised a deletion-immunity the
+/// restore path never had, and a correction that only lands in new databases
+/// leaves the false claim standing in every shop already running. The seed runs
+/// at each launch and after each restore, so it is the propagation path.
+/// `updated_at` moves only when one of those two actually changed — the stamp
+/// records when the row moved, not when the app last started.
 pub fn seed_retention_policies(state: &AppState, now: &str) -> Result<(), AppError> {
     let connection = state.db().open()?;
 
@@ -199,8 +225,11 @@ pub fn seed_retention_policies(state: &AppState, now: &str) -> Result<(), AppErr
              VALUES (?1, ?2, 0, ?3, ?4, ?5, ?5)
              ON CONFLICT(record_class) DO UPDATE SET
                  never_purge = MAX(retention_policies.never_purge, excluded.never_purge),
+                 napomena = excluded.napomena,
                  updated_at = CASE
-                     WHEN retention_policies.never_purge < excluded.never_purge THEN excluded.updated_at
+                     WHEN retention_policies.never_purge < excluded.never_purge
+                       OR retention_policies.napomena IS NOT excluded.napomena
+                     THEN excluded.updated_at
                      ELSE retention_policies.updated_at
                  END",
             params![
@@ -390,6 +419,10 @@ pub fn overtime_log_purge_eligible(
 /// This pair is what makes „structurally unreachable“ structural rather than a
 /// comment: a future edit that adds a `DELETE` against one of those tables
 /// aborts the whole transaction instead of committing it.
+///
+/// It is a **transaction** fence and only that. A path that replaces the
+/// database file wholesale leaves it nothing to compare — see `restore_backup`,
+/// which records the counts on both sides instead of asserting over them.
 pub fn never_purge_row_counts(conn: &Connection) -> Result<Vec<(&'static str, i64)>, AppError> {
     NEVER_PURGE_TABLES
         .iter()
@@ -820,6 +853,68 @@ mod tests {
                 })
                 .expect("count should query");
             assert_eq!(survivors, 1, "the rolled-back transaction kept the row");
+        });
+    }
+
+    /// The note is the operator-facing half of the class — the sentence a person
+    /// reads when they ask why a record is still there — and SW-14 shipped one
+    /// that promised a deletion-immunity the restore path never had. Correcting
+    /// the literal in code has to reach a database seeded *before* the
+    /// correction, or the false claim outlives its fix in the one place it
+    /// actually lives. `seed_retention_policies` runs at every launch and again
+    /// after every restore, and nothing else ever writes `napomena`, so it is
+    /// the propagation path. The floor and the `never_purge` flag keep their own
+    /// rules — this repairs derived text, never a retention decision.
+    #[test]
+    fn re_seeding_carries_a_corrected_note_into_a_row_seeded_before_it() {
+        with_state("retention_seed_repairs_the_note", |state| {
+            seed_retention_policies(state, "2026-08-01T08:00:00Z").expect("classes should seed");
+            let connection = state.db().open().expect("database should open");
+
+            // The superseded note, exactly as an SW-14 database carries it.
+            connection
+                .execute(
+                    "UPDATE retention_policies
+                     SET napomena = 'Nijedno brisanje, resetovanje, vraćanje iz rezervne kopije ni čišćenje rezervnih kopija ne sme da je dodirne.',
+                         updated_at = '2026-08-01T08:00:00Z'
+                     WHERE record_class = ?1",
+                    params![RecordClass::WorktimeClassification.key()],
+                )
+                .expect("the superseded note should store");
+
+            seed_retention_policies(state, "2026-09-01T08:00:00Z").expect("re-seed should run");
+
+            let (napomena, updated_at): (String, String) = connection
+                .query_row(
+                    "SELECT napomena, updated_at FROM retention_policies WHERE record_class = ?1",
+                    params![RecordClass::WorktimeClassification.key()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("Class A should load");
+            assert_eq!(
+                napomena,
+                RecordClass::WorktimeClassification.napomena(),
+                "a corrected note must reach a row that was seeded before the correction"
+            );
+            assert_eq!(
+                updated_at, "2026-09-01T08:00:00Z",
+                "rewriting the note is a change to the row and moves its updated_at"
+            );
+
+            // …and a seed that changes nothing still changes nothing: the stamp
+            // records when the row last moved, not when the app last started.
+            seed_retention_policies(state, "2027-01-01T08:00:00Z").expect("re-seed should run");
+            let unchanged: String = connection
+                .query_row(
+                    "SELECT updated_at FROM retention_policies WHERE record_class = ?1",
+                    params![RecordClass::WorktimeClassification.key()],
+                    |row| row.get(0),
+                )
+                .expect("Class A should load");
+            assert_eq!(
+                unchanged, "2026-09-01T08:00:00Z",
+                "an idempotent seed must not churn updated_at"
+            );
         });
     }
 

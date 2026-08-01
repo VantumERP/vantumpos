@@ -30,6 +30,134 @@ fn lines_with<'a>(text: &'a str, needle: &str) -> Vec<(usize, &'a str)> {
         .collect()
 }
 
+/// Every piece of prose this crate is answerable for: the three documents, plus
+/// the `napomena` strings the retention table stores beside each class. The
+/// notes are prose in exactly the sense this module guards — they are written
+/// into `retention_policies` and read back by whoever asks why a record is
+/// still there — so a claim is no safer for being a Rust string literal.
+fn prose_sources() -> Vec<(String, String)> {
+    let mut sources = vec![
+        (
+            "docs/SERBIAN-LAW-COMPLIANCE.md".to_string(),
+            REGISTER.to_string(),
+        ),
+        ("docs/PROGRESS.md".to_string(), PROGRESS.to_string()),
+        (
+            "docs/compliance/obavestenje-zaposlenima.md".to_string(),
+            NOTICE.to_string(),
+        ),
+    ];
+    sources.extend(crate::retention::RecordClass::ALL.into_iter().map(|class| {
+        (
+            format!("retention.rs napomena (`{}`)", class.key()),
+            class.napomena().to_string(),
+        )
+    }));
+
+    sources
+}
+
+/// `retention::assert_never_purge_intact` is the fence behind every „ne briše
+/// se“ claim about the `trajno` classification, and it runs in exactly one
+/// place: inside the `reset_trading_data` transaction. It cannot run on the
+/// restore path — `restore_backup` replaces the whole database file, so the
+/// register comes back at whatever the snapshot holds, and a count-based abort
+/// would refuse every legitimate rewind rather than only the lossy ones. There
+/// is no backup-prune path in the crate at all.
+///
+/// So a line that puts restore or backup-pruning beside the go-live reset as
+/// something the class is immune to promises a deletion-immunity the code does
+/// not implement — and the first place it promised it was the čl. 23 notice
+/// handed to the employee whose hours those are. Naming the paths is fine; the
+/// caveat that says what actually protects them has to travel on the same line.
+#[test]
+fn no_trajno_claim_promises_immunity_from_restore_or_backup_pruning() {
+    // Wording that asserts the class cannot be touched. Stems, not whole words:
+    // „izuzet iz brisanja“ and „aplikacija je izuzima“ are the same claim.
+    const IMMUNITY: [&str; 4] = ["unreachable", "immune", "izuz", "dodir"];
+    // The restore path, in either language („vraćanje/vraćanja iz rezervne
+    // kopije“).
+    const RESTORE: [&str; 2] = ["restore", "vraćanj"];
+    // The pre-restore safety copy is the only thing standing on that path.
+    const RESTORE_CAVEAT: [&str; 3] = ["pre_restore", "pre-restore", "pre vraćanja"];
+    // Discarding old backup files.
+    const PRUNE: [&str; 3] = ["prune", "pruning", "čišćenje"];
+    // …which nothing in this crate does, and which is what such a line must say.
+    const PRUNE_CAVEAT: [&str; 2] = ["ne postoji", "does not exist"];
+
+    for (label, text) in prose_sources() {
+        for (index, line) in text.lines().enumerate() {
+            let line_no = index + 1;
+            let line = line.to_lowercase();
+            if !IMMUNITY.iter().any(|needle| line.contains(needle)) {
+                continue;
+            }
+
+            if RESTORE.iter().any(|needle| line.contains(needle)) {
+                assert!(
+                    RESTORE_CAVEAT.iter().any(|needle| line.contains(needle)),
+                    "{label}:{line_no} says the trajno classification is untouched by a restore. \
+                     `restore_backup` replaces the whole database file — the register comes back \
+                     as the snapshot holds it, and `assert_never_purge_intact` runs only inside \
+                     the go-live reset transaction. Name the pre_restore safety copy as the \
+                     protection on that path, or drop the claim."
+                );
+            }
+
+            if PRUNE.iter().any(|needle| line.contains(needle)) {
+                assert!(
+                    PRUNE_CAVEAT.iter().any(|needle| line.contains(needle)),
+                    "{label}:{line_no} says the trajno classification is untouched by backup \
+                     pruning. No backup-prune path exists in this crate, so the claim is vacuous \
+                     — say that it does not exist („ne postoji“) instead of implying a guarded \
+                     path."
+                );
+            }
+        }
+    }
+}
+
+/// The other half of the same defect: the guard above only fires on a claim, so
+/// deleting the sentence would satisfy it while leaving the reader with nothing.
+/// These two strings are where a person is told how long the classification is
+/// kept — the čl. 23 notice handed to the employee, and the note the retention
+/// table stores beside the class — and both have to carry the two facts that are
+/// actually true of a restore: the pre-restore safety copy is the protection,
+/// and no automatic cleanup of old backups exists.
+#[test]
+fn the_trajno_retention_row_names_what_actually_protects_it_on_a_restore() {
+    let rows = lines_with(NOTICE, "ZEOR čl. 7 st. 2");
+    assert!(
+        !rows.is_empty(),
+        "docs/compliance/obavestenje-zaposlenima.md must keep the ZEOR čl. 7 st. 2 retention row"
+    );
+
+    for (line_no, line) in rows {
+        assert!(
+            line.contains("pre vraćanja"),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} tells an employee how the trajno \
+             classification is kept without saying what happens on a restore. A restore rewinds \
+             the whole database, including this register; the safety copy the app takes „pre \
+             vraćanja“ is the only protection on that path and the employee has to be told so."
+        );
+        assert!(
+            line.contains("ne postoji"),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} must say that automatic cleanup \
+             of old backups „ne postoji“ — the app has no backup-prune path, and an employee \
+             reading about „čišćenje starih rezervnih kopija“ would otherwise assume one exists \
+             and is guarded."
+        );
+    }
+
+    let napomena = crate::retention::RecordClass::WorktimeClassification.napomena();
+    assert!(
+        napomena.contains("pre vraćanja") && napomena.contains("ne postoji"),
+        "the note stored beside the trajno class must state the same two facts as the čl. 23 \
+         notice — the pre-restore safety copy is the protection on a restore, and no backup-prune \
+         path exists: {napomena}"
+    );
+}
+
 /// The register and `PROGRESS.md` both credited `worktime::check_protection`
 /// with „maloletnik 35 h/8 h“. Only the daily leg exists — see
 /// `worktime::MINOR_DAILY_CAP_MINUTES` and the doc comment on
