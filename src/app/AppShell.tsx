@@ -1805,7 +1805,13 @@ export function UserDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      {/*
+        Profil zaposlenog je dugačak: sedamnaest polja sa objašnjenjima preraste
+        visinu ekrana na kasi. Osnovni DialogContent je fiksiran i centriran, bez
+        ograničenja visine i bez skrolovanja, pa bi DialogFooter ostao van dohvata
+        i profil se ne bi mogao sačuvati. Isti obrazac koristi i CampaignWizard.
+      */}
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{user ? "Uredi korisnika" : "Novi korisnik"}</DialogTitle>
           <DialogDescription>
@@ -1960,7 +1966,9 @@ export function UserDialog({
               <FieldDescription>
                 Druga alternativa iz ZoR čl. 91 st. 2, koja nema starosne
                 granice — pisana saglasnost se traži i kada je dete starije od
-                sedam godina.
+                sedam godina. Čl. 91 st. 2 i u ovoj alternativi govori o
+                samohranom roditelju, pa provera radi samo uz „Samohrani
+                roditelj: Da“.
               </FieldDescription>
             </Field>
 
@@ -1970,9 +1978,16 @@ export function UserDialog({
                 id="user-trudnoca"
                 value={trudnocaIliDojenje}
                 className="w-full"
-                onChange={(event) =>
-                  setTrudnocaIliDojenje(event.target.value as ProfileFlag)
-                }
+                onChange={(event) => {
+                  const izbor = event.target.value as ProfileFlag;
+                  setTrudnocaIliDojenje(izbor);
+                  // Datum bez oznake pravilo uparivanja iz ZoR čl. 90 odbija, pa
+                  // bi zaostali datum onemogućio prestanak evidencije: oznaka se
+                  // vraća na „Ne“, a čuvanje puca. Povlačenje oznake povlači datum.
+                  if (izbor !== "da") {
+                    setTrudnocaIliDojenjeOd("");
+                  }
+                }}
               >
                 <NativeSelectOption value="">Nije upisano</NativeSelectOption>
                 <NativeSelectOption value="da">Da</NativeSelectOption>
@@ -1992,11 +2007,13 @@ export function UserDialog({
                 id="user-trudnoca-od"
                 type="date"
                 value={trudnocaIliDojenjeOd}
+                disabled={trudnocaIliDojenje !== "da"}
                 onChange={(event) => setTrudnocaIliDojenjeOd(event.target.value)}
               />
               <FieldDescription>
                 Datum od kog važi nalaz nadležnog zdravstvenog organa (ZoR čl.
-                90).
+                90). Unosi se samo uz „Trudnoća ili dojenje: Da“; kada se oznaka
+                povuče, datum se briše.
               </FieldDescription>
             </Field>
 

@@ -101,6 +101,35 @@ describe("UserDialog — profil zaposlenog", () => {
     ).toBeInTheDocument();
   });
 
+  it("uz drugu alternativu čl. 91 st. 2 imenuje uslov „Samohrani roditelj: Da“", () => {
+    renderDialog();
+
+    // Subjekt čl. 91 st. 2 je samohrani roditelj u obe alternative, pa i provera
+    // u worktime.rs traži samohranog roditelja. Bez te zavisnosti u tekstu
+    // operater koji upiše samo „Dete je težak invalid: Da“ ostaje bez ijedne
+    // provere saglasnosti, a tekst mu je rekao da provera od tog trenutka važi.
+    const polje = screen
+      .getByLabelText(/težak invalid/i)
+      .closest("[data-slot=field]");
+    expect(polje).not.toBeNull();
+    expect(
+      within(polje as HTMLElement).getByText(/samohran/i),
+    ).toBeInTheDocument();
+  });
+
+  it("sadržaj drži u sopstvenom skroleru, da dugme za čuvanje ostane dohvatljivo", () => {
+    renderDialog();
+
+    // jsdom ne računa raspored, pa se pravilo proverava na klasama popupa:
+    // osnovni DialogContent je `fixed` i centriran, bez ograničenja visine i bez
+    // skrolovanja. Sa sedamnaest polja profila DialogFooter („Sačuvaj
+    // korisnika“) bi ispao van ekrana i profil čl. 87–91 se ne bi mogao sačuvati.
+    const popup = dialog();
+    expect(popup).toHaveAttribute("data-slot", "dialog-content");
+    expect(popup.className).toMatch(/\bmax-h-\[\d+vh\]/);
+    expect(popup.className).toContain("overflow-y-auto");
+  });
+
   it("ne prikuplja saglasnost — evidentira da pisana saglasnost postoji i od kada", () => {
     renderDialog();
 
@@ -142,6 +171,41 @@ describe("UserDialog — profil zaposlenog", () => {
     expect(
       within(forma).getByText(/dijagnoza i medicinska dokumentacija se ne unose/i),
     ).toBeInTheDocument();
+  });
+
+  it("povlačenjem oznake čl. 90 briše i datum nalaza, pa se profil može sačuvati", async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderDialog({
+      user: kasirka,
+      profile: {
+        ...prazanProfil,
+        trudnocaIliDojenje: true,
+        trudnocaIliDojenjeOd: "2026-05-04",
+      },
+    });
+
+    const datum = screen.getByLabelText(/Nalaz važi od/);
+    expect(datum).toHaveValue("2026-05-04");
+    expect(datum).not.toBeDisabled();
+
+    // Prestanak evidencije po čl. 90 je obična radnja: oznaka ide na „Ne“.
+    // Ako datum ostane, čuvanje pada na pravilu uparivanja u users.rs i oznaka
+    // se ne može povući — a to je polje koje se najpre mora moći povući.
+    fireEvent.change(screen.getByLabelText(/Trudnoća ili dojenje/), {
+      target: { value: "ne" },
+    });
+
+    expect(datum).toHaveValue("");
+    expect(datum).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: /Sačuvaj korisnika/ }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].profile).toEqual({
+      ...prazanProfil,
+      trudnocaIliDojenje: false,
+      trudnocaIliDojenjeOd: null,
+    });
   });
 
   it("prikazuje sačuvani profil zaposlenog", () => {
