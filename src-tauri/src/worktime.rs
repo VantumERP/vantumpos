@@ -1,9 +1,10 @@
 //! Working-time rules — ZoR čl. 53 caps and the čl. 87–91 protection guards.
 //!
-//! Everything here is pure and takes the day as a parameter: the caps are what
-//! carry the larger fine (čl. 274 st. 1 tač. 3, preduzetnik 200.000–400.000,
-//! against 50.000–150.000 for the missing register), so they must be testable
-//! exactly at the boundary.
+//! Everything here is pure and takes the day as a parameter: breaching a cap is
+//! the čl. 274 st. 1 tač. 3 prekršaj, a heavier exposure than the čl. 276 one for
+//! the missing register itself, so the caps must be testable exactly at the
+//! boundary. No figure appears here — every statutory amount in this application
+//! lives in `legal.rs` and is named by article everywhere else.
 //!
 //! The guards and the command layer that consume this land in Tasks 4 and 5, so
 //! `dead_code` is allowed here until that wiring arrives — mirroring the other
@@ -44,16 +45,39 @@ pub struct CapAssessment {
 
 /// Assesses one day's entry against both čl. 53 caps.
 ///
+/// `day` is the sole authority: it anchors the calendar week and is the key the
+/// rows in `week` are de-duplicated against. `entry.dan` is never read — the
+/// field is carried for the caller's convenience only, so an `entry` whose `dan`
+/// disagrees with `day` is silently assessed as `day`, and the stored row for the
+/// entry's real date would then be counted alongside it. Pass both from the same
+/// source.
+///
 /// `week` is the employee's other days around `day`; rows outside `day`'s
 /// calendar week, and the stored row for `day` itself, are dropped so that
 /// `entry` — the version being assessed — is the only contribution for its own
 /// date. Both caps are strict `>`: eight hours of overtime and twelve hours of
 /// total work are the limits, not breaches of them.
 ///
-/// An exceeded cap never blocks the write. Requirement §4 req. 7 makes this the
-/// bigger fine, and a record that refuses to describe a day that actually
-/// happened hides the čl. 274 st. 1 tač. 3 exposure instead of surfacing it —
-/// so the assessment asks for an override reason and lets the day be recorded.
+/// Two preconditions belong to the caller; neither is checkable from here:
+///
+/// 1. **`week` must carry live rows only — `MAX(verzija)` per `dan`.** v17 is
+///    append-only and keeps every correction of a day as its own row, so a plain
+///    `SELECT … WHERE dan BETWEEN …` also returns superseded versions, whose
+///    `prekovremeni_minuta` then sum straight into `weekly_overtime_minutes` and
+///    manufacture a čl. 53 st. 2 breach out of lawful hours. The `dan != day`
+///    filter protects the assessed date only — never the other six.
+/// 2. **`daily_cap_exceeded` is the čl. 53 st. 3 rule set alone, and the caller
+///    must branch it off `users.radi_u_preraspodeli`.** čl. 58 says preraspodela
+///    is not prekovremeni rad, and čl. 57 caps it at 60 časova nedeljno (st. 5)
+///    with no daily leg at all — the 12 h/48 h pair belongs to the separate
+///    čl. 56 st. 3 monthly-average scheme (čl. 56 st. 4). Applying this daily cap
+///    unconditionally reports a lawful preraspodela day as a breach and demands an
+///    override reason for it. §4 req. 9 makes this a hard branch, not a toggle.
+///
+/// An exceeded cap never blocks the write. §4 req. 7 makes this the bigger fine,
+/// and a record that refuses to describe a day that actually happened hides the
+/// čl. 274 st. 1 tač. 3 exposure instead of surfacing it — so the assessment asks
+/// for an override reason and lets the day be recorded.
 pub fn assess_caps(day: &str, entry: &DayHours, week: &[DayHours]) -> CapAssessment {
     let same_week: i64 = week
         .iter()
@@ -125,6 +149,48 @@ mod tests {
         assert!(
             a.weekly_cap_exceeded,
             "8 h + 1 minute is over ZoR čl. 53 st. 2"
+        );
+    }
+
+    /// The weekly leg carries the same čl. 274 st. 1 tač. 3 exposure as the daily
+    /// one, so a week-only breach must ask for a reason on its own. Without this
+    /// the `weekly_cap_exceeded ||` half of `requires_override` is unguarded and a
+    /// čl. 53 st. 2 breach can silently stop demanding an override.
+    #[test]
+    fn a_weekly_only_breach_still_requires_an_override() {
+        let week = vec![day(480, 120), day(480, 120), day(480, 120)]; // 6 h so far
+        let a = assess_caps("2026-08-06", &day(300, 121), &week); // +2 h 1 min = 8 h 1 min
+        assert_eq!(a.weekly_overtime_minutes, 481);
+        assert!(a.weekly_cap_exceeded, "8 h + 1 minute is over čl. 53 st. 2");
+        assert_eq!(
+            a.daily_total_minutes, 421,
+            "the day itself is nowhere near the 12 h cap"
+        );
+        assert!(
+            !a.daily_cap_exceeded,
+            "this must be a weekly-only breach or it does not test the weekly leg"
+        );
+        assert!(
+            a.requires_override,
+            "a čl. 53 st. 2 weekly breach demands a reason even on a short day"
+        );
+    }
+
+    /// v17 keeps every `verzija` of a day as its own row and never UPDATEs, so a
+    /// week window can carry the superseded version of the day being corrected.
+    /// `entry` is the version under assessment; counting the stored one as well
+    /// would double the day's overtime and manufacture a false čl. 53 st. 2 breach.
+    #[test]
+    fn the_stored_version_of_the_assessed_day_is_not_counted_twice() {
+        let stored = day(480, 480); // same `dan` as the assessed day
+        let a = assess_caps("2026-08-03", &day(480, 60), &[stored]);
+        assert_eq!(
+            a.weekly_overtime_minutes, 60,
+            "only the version being assessed contributes for its own date"
+        );
+        assert!(
+            !a.weekly_cap_exceeded,
+            "double-counting the superseded row would fake a breach on lawful hours"
         );
     }
 
