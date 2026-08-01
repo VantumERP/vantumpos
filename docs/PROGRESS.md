@@ -295,6 +295,63 @@ a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export
 
 ---
 
+### SW-14 fix batch — D2, D3, D4 and the prose guards (2026-08-01)
+
+Four defects found by review of the shipped SW-14 work. None of them changed a fine *amount*, which is
+why the amount guards could not see any of them: two were wrong prose about what the code does, one was
+a wrong statutory citation on a correct figure, and one was a save that succeeded when it should have
+been refused.
+
+| Commit | Defect | What shipped |
+|---|---|---|
+| `b495425` | Three compliance rows credited the code with legs it does not have — the čl. 87 weekly cap, the čl. 57 st. 5 ceiling attributed to `assess_caps` rather than to its caller, and an unqualified „no fine figure outside `legal.rs`“ | The rows were re-stated, and the defect class got a guard: **`src-tauri/src/docs_guard.rs`** (test-only, `#[cfg(test)]` in `lib.rs`) embeds `SERBIAN-LAW-COMPLIANCE.md`, `PROGRESS.md`, both `docs/compliance/` templates **and** the `retention.rs` `napomena` strings, and fails when a line claims more than the code delivers |
+| `66636a3` | The čl. 23 notice told the employee the trajno classification could not be reached by a restore or by backup pruning. `assert_never_purge_intact` runs only inside the `reset_trading_data` transaction; `restore_backup` swaps the database file, and no backup-prune path exists in the crate at all | The notice, the register row and the stored `napomena` now claim only what is true — the `pre_restore` safety copy is the protection on that path, `backup_restored` records the never-purge row counts on both sides, and automatic cleanup of old backups „ne postoji“. Two `docs_guard` tests pin both halves |
+| `1c33bf1` (D2) | `docs/compliance/evidencija-obrade-cl47.md` — the document SW-14 req. 27 names — printed a „fiksna kazna 100.000 RSD“ (the čl. 95 st. 2 *pravno-lice* tier, double the pilot's real exposure) in a record shown to the Poverenik, headed the obrađivač record „čl. 47 **st. 2**“ (the disapplication for nadležni organi; the obrađivač record is **st. 4**), and invoked only one limb of čl. 47 st. 9 | Preduzetnik tier **fiksna 50.000 (čl. 95 st. 6)**, st. 4 heading, **both** st. 9 limbs (tač. 2 — obrada nije povremena; tač. 3 — posebne vrste podataka). Three new `docs_guard` tests |
+| `1216194` (D3, D4) | **D3** — a preraspodela day refused on the čl. 57 st. 5 60 h weekly ceiling appended `capsExceeded`, whose summary states the čl. 53 8 h/12 h caps that čl. 58 makes **inapplicable** to that employee and whose citation is čl. 274 st. 1 tač. 3. Preraspodela is **tač. 4**. Both tačke resolve through the same st. 2 for a preduzetnik, so no wrong figure ever shipped. **D4** — a 13 h preraspodela day saved without the čl. 53 st. 1 ground being asked for | `legal::preraspodela_caps_exceeded` — duty čl. 57 st. 5, preduzetnik čl. 274 st. 1 tač. 4 u vezi sa st. 2 — is the **eighth** notice, enumerated in `all_notices`, in the duplicated inline list in `every_notice_function_is_enumerated_in_the_guard`, and the asserted count is bumped to **8** |
+
+**Verification gates — all six run from the repo root at `1216194`, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **359 passed** / 0 failed, 22 files (was 355) | `0` |
+| `bun run build` | 2734 modules transformed, built in 3.64s | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **558 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 549) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+9 cargo / +4 bun** over the SW-14 baseline. Latest migration: **v17** (unchanged — this batch adds
+no schema).
+
+**Found by the closing audit of this batch, and NOT yet fixed** — both are the same defect class the
+batch was created to eliminate, in the one file it did not reach:
+
+- **`docs/compliance/obavestenje-zaposlenima.md:10` still prints the pravno-lice fine band.** The line
+  reads *„50.000–2.000.000 RSD za pravno lice … odnosno 20.000–500.000 RSD za preduzetnika“*. SW-14 §1
+  row 15 was closed only in its *tačka* half (tač. 20 → tač. 8); the tier half was answered by adding the
+  preduzetnik band beside the pravno-lice one rather than by removing it. `evidencija-obrade-cl47.md`
+  received the opposite and correct treatment in `1c33bf1` — the preduzetnik figure printed, the
+  pravno-lice stav cited without an amount — and `docs_guard.rs` has a test pinning that file
+  (`the_cl_47_record_prints_only_the_preduzetnik_fine_tier`) with **no counterpart for the čl. 23
+  notice**. This is the only pravno-lice figure left anywhere under `docs/compliance/`.
+- **`docs/compliance/obavestenje-zaposlenima.md:84` promises a deletion the code never performs.** The
+  Class B retention row tells the employee that drafts and helper time data *„Brišu se pošto je mesec
+  zaključen“*. **No purge path exists in the crate**: `retention::draft_purge_eligible`,
+  `overtime_log_purge_eligible` and `is_purgeable` are predicates with no production caller — every call
+  site is inside `retention.rs`'s own test module. The `WorktimeDraft` `napomena` was written correctly
+  (*„Brišu se **tek** pošto je period zatvoren“* — a not-before bound, not a promise), and the notice was
+  not brought into line with it.
+
+**Also open, and missing from the list above** (`docs/SW14-VERIFIED-RULES.md` §4):
+
+- **Req 24, privacy-screen half.** The three basis strings (čl. 12 st. 1 tač. 3, tač. 2, čl. 17 st. 2
+  tač. 2) are constants that must surface in the app's privacy screen *and* in the čl. 47 generator so
+  they cannot drift. Neither exists — a grep for `čl. 12 st. 1` / `17 st. 2` across `src/` and
+  `src-tauri/src/` returns no basis string, and there is no privacy screen under `src/app/`. The
+  generator half is already tracked as Req 27. The *„build no consent UI“* half of Req 24 **is** honoured.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.
