@@ -19,6 +19,7 @@
 const REGISTER: &str = include_str!("../../docs/SERBIAN-LAW-COMPLIANCE.md");
 const PROGRESS: &str = include_str!("../../docs/PROGRESS.md");
 const NOTICE: &str = include_str!("../../docs/compliance/obavestenje-zaposlenima.md");
+const EVIDENCIJA_CL47: &str = include_str!("../../docs/compliance/evidencija-obrade-cl47.md");
 
 /// Every line of `text` containing `needle`, numbered from 1 the way an editor
 /// numbers them so a failure message points straight at the line to fix.
@@ -45,6 +46,10 @@ fn prose_sources() -> Vec<(String, String)> {
         (
             "docs/compliance/obavestenje-zaposlenima.md".to_string(),
             NOTICE.to_string(),
+        ),
+        (
+            "docs/compliance/evidencija-obrade-cl47.md".to_string(),
+            EVIDENCIJA_CL47.to_string(),
         ),
     ];
     sources.extend(crate::retention::RecordClass::ALL.into_iter().map(|class| {
@@ -248,4 +253,93 @@ fn the_cl_23_notice_cites_the_right_offence_tacka() {
         "docs/compliance/obavestenje-zaposlenima.md cites ZZPL čl. 95 st. 1 tač. 20, which is the \
          čl. 42 privacy-by-design offence, not the čl. 23 notice: {wrong:?}"
     );
+}
+
+/// The čl. 47 record is the third template the 31.07.2026 penalty-tier sweep
+/// never reached. ZZPL **čl. 95 st. 2** is expressly *„rukovalac … koji ima
+/// svojstvo pravnog lica“*, so its fixed 100.000 has the wrong subject in a
+/// document written for a preduzetnik boutique: the sanction that reaches this
+/// shop is **čl. 95 st. 6** — a fixed **50.000** for any st. 2 prekršaj. See
+/// `docs/SW14-VERIFIED-RULES.md` §1 row 17 and §3 W5(a).
+///
+/// The figure matters because of where this file goes. It is handed to the shop
+/// and shown to the Poverenik on request, so a number in it reads as the shop's
+/// own exposure — printing the pravno-lice sum doubles it and, worse, hides the
+/// stav that actually applies, which is the whole defect class the sweep exists
+/// to eliminate.
+#[test]
+fn the_cl_47_record_prints_only_the_preduzetnik_fine_tier() {
+    let wrong = lines_with(EVIDENCIJA_CL47, "100.000");
+    assert!(
+        wrong.is_empty(),
+        "docs/compliance/evidencija-obrade-cl47.md prints the pravno-lice fixed sum, which ZZPL \
+         čl. 95 st. 2 reserves for a „rukovalac … koji ima svojstvo pravnog lica“. The pilot is a \
+         preduzetnik: the figure is a fixed 50.000 under čl. 95 st. 6. Offending lines: {wrong:?}"
+    );
+
+    assert!(
+        EVIDENCIJA_CL47.contains("50.000"),
+        "docs/compliance/evidencija-obrade-cl47.md must state the preduzetnik figure — a fixed \
+         50.000 RSD — wherever it names the consequence of not keeping the record"
+    );
+    assert!(
+        EVIDENCIJA_CL47.contains("čl. 95 st. 6"),
+        "docs/compliance/evidencija-obrade-cl47.md must cite ZZPL čl. 95 st. 6 as the stav that \
+         supplies the preduzetnik sanction. Naming only the st. 2 tačka leaves the reader on the \
+         pravno-lice tier, which is how the 100.000 got there in the first place."
+    );
+}
+
+/// ZZPL čl. 47 **st. 2** is the disapplication for *nadležni organi* processing
+/// in the posebne svrhe of čl. 13; the obrađivač's own record is **st. 4**. st. 9
+/// settles it in its own words — *„Odredbe st. 1. i 4. ovog člana ne primenjuju
+/// se…“* — because the exemption it grants would be incoherent if the processor
+/// record lived anywhere else. See `docs/SW14-VERIFIED-RULES.md` §1 row 16.
+///
+/// A heading is the one line an inspector reads to decide which record they are
+/// looking at, so a wrong stav there misfiles the whole section B.
+#[test]
+fn the_processor_record_is_headed_cl_47_st_4() {
+    let wrong = lines_with(EVIDENCIJA_CL47, "čl. 47 st. 2");
+    assert!(
+        wrong.is_empty(),
+        "docs/compliance/evidencija-obrade-cl47.md cites ZZPL čl. 47 st. 2, which disapplies the \
+         article for nadležni organi u posebne svrhe. The obrađivač record is čl. 47 st. 4 — \
+         st. 9 names „st. 1. i 4.“ as the two records the article creates: {wrong:?}"
+    );
+
+    assert!(
+        EVIDENCIJA_CL47.contains("čl. 47 st. 4"),
+        "docs/compliance/evidencija-obrade-cl47.md must head the obrađivač record with ZZPL \
+         čl. 47 st. 4"
+    );
+}
+
+/// The <250 exemption in čl. 47 st. 9 falls on **both** of the limbs this app
+/// triggers, and the record has to say so, because each limb is an independent
+/// and separately contestable ground. Limb 2 („obrada nije povremena“) rests on
+/// the shop's daily cadence — a factual claim someone could argue with. Limb 3
+/// („posebne vrste podataka … iz člana 17. stav 1.“) rests on the absence-hour
+/// category, and it is not arguable: `work_time_entries.kategorija_odsustva`
+/// carries `sprecenost_poslodavac` and `sprecenost_rfzo`, and the fact of
+/// medical incapacity on identified dates is a podatak o zdravstvenom stanju
+/// with or without a diagnosis. See `docs/SW14-VERIFIED-RULES.md` §3 W5(a),
+/// which is explicit that the file must absorb the second limb.
+#[test]
+fn the_cl_47_record_invokes_both_limbs_that_destroy_the_250_exemption() {
+    assert!(
+        EVIDENCIJA_CL47.contains("povremena"),
+        "docs/compliance/evidencija-obrade-cl47.md must keep the čl. 47 st. 9 tač. 2 limb — daily \
+         POS processing is not „povremena“"
+    );
+
+    for needle in ["st. 9 tač. 3", "posebne vrste podataka", "čl. 17 st. 1"] {
+        assert!(
+            EVIDENCIJA_CL47.contains(needle),
+            "docs/compliance/evidencija-obrade-cl47.md invokes only one limb of ZZPL čl. 47 st. 9 \
+             — it is missing \"{needle}\". SW-14 destroys the <250 exemption on tač. 3 as well: \
+             the absence-hour category (sprecenost_poslodavac / sprecenost_rfzo) is a posebna \
+             vrsta podataka iz čl. 17 st. 1, and that limb is the one nobody can argue with."
+        );
+    }
 }
