@@ -74,7 +74,7 @@ interface WorkTimeModuleProps {
 /** How many prior years the period selector offers alongside the current one. */
 const YEAR_RANGE = 3;
 
-const MESECI = [
+export const MESECI = [
   "januar",
   "februar",
   "mart",
@@ -950,7 +950,7 @@ function MinuteCell({ value }: { value: number }) {
  * unknown one, sees „odsutan“ plus the hour total and nothing that identifies
  * why.
  */
-function AbsenceCell({
+export function AbsenceCell({
   entry,
   canSeeAbsenceReason,
 }: {
@@ -995,7 +995,7 @@ function NoticeBlock({ notice }: { notice: LegalNotice }) {
 }
 
 /** The correction / override grounds recorded on a row, as readable labels. */
-function napomenaZa(entry: WorkTimeEntryView): string {
+export function napomenaZa(entry: WorkTimeEntryView): string {
   const parts: string[] = [];
 
   if (entry.korekcijaRazlog) {
@@ -1129,7 +1129,7 @@ function toRequest(
   };
 }
 
-function buildYearOptions(currentYear: number): number[] {
+export function buildYearOptions(currentYear: number): number[] {
   const years: number[] = [];
 
   for (let offset = 0; offset <= YEAR_RANGE; offset += 1) {
@@ -1188,7 +1188,7 @@ function defaultDan(godina: number, mesec: number): string {
  * `Date` first would re-project the instant into the viewer's timezone and can
  * shift a legally-meaningful day by one.
  */
-function formatDan(value: string): string {
+export function formatDan(value: string): string {
   const [year, month, day] = value.slice(0, 10).split("-");
 
   if (!year || !month || !day) {

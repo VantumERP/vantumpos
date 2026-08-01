@@ -27,6 +27,7 @@ import {
   type NavigationItemId,
 } from "@/app/navigation";
 import { ReklamacijeModule } from "@/app/reklamacije/ReklamacijeModule";
+import { MyHoursScreen } from "@/app/worktime/MyHoursPanel";
 import { WorkTimeModule } from "@/app/worktime/WorkTimeModule";
 import { ReportsScreen } from "@/app/reports/ReportsScreen";
 import { ReceiptsScreen } from "@/app/ReceiptsScreen";
@@ -483,6 +484,10 @@ function renderModule({
 
   if (activeId === "worktime") {
     return <WorkTimeModule services={services} currentUser={session.user} />;
+  }
+
+  if (activeId === "moji-sati") {
+    return <MyHoursScreen services={services} />;
   }
 
   if (activeId === "campaigns") {

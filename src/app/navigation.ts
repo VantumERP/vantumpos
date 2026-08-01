@@ -3,6 +3,7 @@ import {
   ArchiveIcon,
   BarChart3Icon,
   BookIcon,
+  CalendarClockIcon,
   ClockIcon,
   FileSpreadsheetIcon,
   MessageSquareWarningIcon,
@@ -59,6 +60,16 @@ export const navigationItems = [
     label: "Radno vreme",
     icon: ClockIcon,
     adminOnly: true,
+  },
+  // Deliberately NOT adminOnly: ZoR čl. 83 st. 1 and ZZPL čl. 26 are the
+  // employee's own rights, so the surface that discharges them must be
+  // reachable by the employee. `worktime_my_hours` is session-gated and
+  // returns own rows only, so there is nothing here an admin gate would
+  // protect.
+  {
+    id: "moji-sati",
+    label: "Moji sati",
+    icon: CalendarClockIcon,
   },
   {
     id: "campaigns",
