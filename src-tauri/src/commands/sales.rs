@@ -188,7 +188,13 @@ pub fn sales_complete(
     state: State<'_, AppState>,
     request: CompleteSaleRequest,
 ) -> Result<CompletedSale, CommandError> {
-    complete_sale_transaction(state.db(), request).map_err(Into::into)
+    // The acting user is read from the server-side session, never from the
+    // request payload: it is what the AML audit entry attributes the accepted
+    // cash to. A till with no session still sells — the entry then falls back
+    // to the cashier the open shift belongs to.
+    let acting_user_id = state.session_user_id().map_err(CommandError::from)?;
+
+    complete_sale_transaction(state.db(), request, acting_user_id).map_err(Into::into)
 }
 
 /// Asked by the till before the money changes hands. `cash_minor` is the cash
@@ -220,6 +226,7 @@ pub fn build_sale_preview(db: &Db, request: SaleDraftRequest) -> Result<SalePrev
 pub fn complete_sale_transaction(
     db: &Db,
     request: CompleteSaleRequest,
+    acting_user_id: Option<i64>,
 ) -> Result<CompletedSale, AppError> {
     let mut connection = db.open()?;
     let tx = connection.transaction()?;
@@ -283,6 +290,27 @@ pub fn complete_sale_transaction(
         ],
     )?;
     let sale_id = tx.last_insert_rowid();
+
+    // §3 req 8 [PRUDENTIAL]: a breach — not the soft warning — also leaves an
+    // immutable audit entry. It is written here, on the sale's own transaction
+    // and before the rest of the sale, so the two can only ever exist together.
+    if let Some(threshold_minor) = aml.breached_threshold_minor {
+        insert_aml_breach_event(
+            &tx,
+            AmlBreachEvent {
+                sale_id,
+                local_receipt_number: &local_receipt_number,
+                threshold_minor,
+                provenance: &aml,
+                // The signed-in operator when there is one; otherwise the
+                // cashier the open shift belongs to, who is by construction the
+                // person at the till. An audit entry naming nobody is a weaker
+                // record than one naming the shift's owner.
+                user_id: acting_user_id.unwrap_or(shift.cashier_id),
+                created_at: &created_at,
+            },
+        )?;
+    }
 
     for line in &computation.lines {
         tx.execute(
@@ -560,6 +588,11 @@ struct AmlProvenance {
     rate_date: Option<String>,
     rate_source: Option<String>,
     ack_reason: Option<String>,
+    /// The cap the cash line was measured against, set **only** when it was
+    /// reached or passed. A `near_threshold` result fills the columns above but
+    /// leaves this `None`: the soft line is a [PRUDENTIAL] early warning, and
+    /// nothing below the cap is unlawful, so it earns no compliance event.
+    breached_threshold_minor: Option<i64>,
 }
 
 /// The AML inputs are read on the sale's own connection: this runs inside the
@@ -617,9 +650,55 @@ fn assess_sale_cash(
             ack_reason: ack_reason
                 .map(|reason| reason.trim().to_string())
                 .filter(|reason| !reason.is_empty()),
+            breached_threshold_minor: assessment.breached.then_some(assessment.threshold_minor),
         }),
         _ => Ok(AmlProvenance::default()),
     }
+}
+
+/// What a breach of the čl. 46 st. 1 cash cap writes into the never-deleted
+/// `compliance_log`, in the shape `backup.rs` uses for the other two event
+/// types. §3 req 8 [PRUDENTIAL]: the soft block owes an immutable audit entry,
+/// so an inspection can reproduce the decision from the log alone.
+struct AmlBreachEvent<'a> {
+    sale_id: i64,
+    local_receipt_number: &'a str,
+    threshold_minor: i64,
+    provenance: &'a AmlProvenance,
+    user_id: i64,
+    created_at: &'a str,
+}
+
+/// Appends the breach entry. Takes the sale's own transaction: the entry and
+/// the sale commit together or not at all, so a breaching sale can never exist
+/// without its audit entry, nor the entry without its sale.
+///
+/// The row is stamped with the sale's `created_at` rather than
+/// `datetime('now')` — the two records must not be able to disagree about when
+/// the cash was accepted.
+fn insert_aml_breach_event(tx: &Connection, event: AmlBreachEvent<'_>) -> Result<(), AppError> {
+    let detail = serde_json::json!({
+        "sale_id": event.sale_id,
+        "local_receipt_number": event.local_receipt_number,
+        // The cash the drawer kept, in para — never the invoice total.
+        "cash_minor": event.provenance.cash_minor,
+        "threshold_minor": event.threshold_minor,
+        "rate_minor": event.provenance.rate_minor,
+        "rate_date": event.provenance.rate_date,
+        "rate_source": event.provenance.rate_source,
+        "ack_reason": event.provenance.ack_reason,
+        "note": "Gotovina zadržana u iznosu na ili iznad praga iz čl. 46 st. 1 \
+                 Zakona o sprečavanju pranja novca i finansiranja terorizma.",
+    })
+    .to_string();
+
+    tx.execute(
+        "INSERT INTO compliance_log (event_type, detail_json, user_id, created_at)
+         VALUES ('aml_cash_threshold', ?1, ?2, ?3)",
+        params![detail, event.user_id, event.created_at],
+    )?;
+
+    Ok(())
 }
 
 fn validate_stock(lines: &[ComputedLine], allow_overselling: bool) -> Result<(), AppError> {
@@ -1170,7 +1249,7 @@ mod tests {
         };
 
         let completed =
-            complete_sale_transaction(&seeded.db, request).expect("sale should complete");
+            complete_sale_transaction(&seeded.db, request, None).expect("sale should complete");
 
         assert_eq!(completed.local_receipt_number, "VP-000001");
         assert_eq!(completed.total_minor, 24000);
@@ -1219,7 +1298,7 @@ mod tests {
             aml_ack_reason: None,
         };
 
-        let error = complete_sale_transaction(&seeded.db, request)
+        let error = complete_sale_transaction(&seeded.db, request, None)
             .expect_err("sale without open shift should fail");
 
         assert_eq!(error.code(), "shift_required");
@@ -1241,7 +1320,7 @@ mod tests {
             aml_ack_reason: None,
         };
 
-        let error = complete_sale_transaction(&seeded.db, request)
+        let error = complete_sale_transaction(&seeded.db, request, None)
             .expect_err("insufficient stock should fail");
 
         assert_eq!(error.code(), "insufficient_stock");
@@ -1278,7 +1357,8 @@ mod tests {
             aml_ack_reason: None,
         };
 
-        complete_sale_transaction(&seeded.db, request).expect("oversell override should succeed");
+        complete_sale_transaction(&seeded.db, request, None)
+            .expect("oversell override should succeed");
 
         let connection = seeded.db.open().expect("database should open");
         let balance: i64 = connection
@@ -1323,7 +1403,7 @@ mod tests {
             aml_ack_reason: None,
         };
 
-        complete_sale_transaction(&seeded.db, request)
+        complete_sale_transaction(&seeded.db, request, None)
             .expect("shop-enabled oversell should succeed");
 
         let _ = std::fs::remove_file(seeded.db_path);
@@ -1343,7 +1423,7 @@ mod tests {
             aml_ack_reason: None,
         };
 
-        let error = complete_sale_transaction(&seeded.db, request)
+        let error = complete_sale_transaction(&seeded.db, request, None)
             .expect_err("default should still block oversell");
         assert_eq!(error.code(), "insufficient_stock");
 
@@ -1375,7 +1455,7 @@ mod tests {
             aml_ack_reason: None,
         };
 
-        complete_sale_transaction(&seeded.db, request).expect("sale should complete");
+        complete_sale_transaction(&seeded.db, request, None).expect("sale should complete");
 
         let connection = seeded.db.open().expect("database should open");
         let balance: i64 = connection
@@ -1420,7 +1500,7 @@ mod tests {
         };
 
         let completed =
-            complete_sale_transaction(&seeded.db, request).expect("sale should complete");
+            complete_sale_transaction(&seeded.db, request, None).expect("sale should complete");
 
         assert_eq!(completed.total_minor, 24000);
         assert_eq!(completed.change_due_minor, 0);
@@ -1442,7 +1522,7 @@ mod tests {
             aml_ack_reason: None,
         };
 
-        let error = complete_sale_transaction(&seeded.db, request)
+        let error = complete_sale_transaction(&seeded.db, request, None)
             .expect_err("card overpayment should fail");
 
         assert_eq!(error.code(), "payment_mismatch");
@@ -1479,6 +1559,7 @@ mod tests {
                     allow_stock_override: None,
                     aml_ack_reason: Some("Kupac odbio prenos na račun".to_string()),
                 },
+                None,
             )
             .expect("sale should complete — the warning is soft, never a block");
 
@@ -1535,6 +1616,7 @@ mod tests {
                     allow_stock_override: None,
                     aml_ack_reason: None,
                 },
+                None,
             )
             .expect("sale completes");
 
@@ -1549,6 +1631,293 @@ mod tests {
             assert_eq!(
                 cash, None,
                 "no assessment fired, so no provenance is written"
+            );
+        });
+    }
+
+    fn compliance_log_count(state: &AppState) -> i64 {
+        state
+            .db()
+            .open()
+            .expect("db opens")
+            .query_row("SELECT COUNT(*) FROM compliance_log", [], |row| row.get(0))
+            .expect("compliance_log should count")
+    }
+
+    fn admin_id(state: &AppState) -> i64 {
+        state
+            .db()
+            .open()
+            .expect("db opens")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist")
+    }
+
+    /// §3 req 8 [PRUDENTIAL]: the soft block on the čl. 46 st. 1 cash cap owes
+    /// an *immutable audit entry*, not merely the columns on the sale row. The
+    /// entry has to carry enough to reproduce the decision at inspection —
+    /// which sale, which receipt, how much cash stayed in the drawer, the
+    /// threshold it was measured against, the rate that produced the threshold
+    /// with its date and source, and what the operator gave as the reason.
+    #[test]
+    fn a_breaching_sale_writes_one_immutable_aml_audit_entry() {
+        with_state("aml_audit_entry_on_breach", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+            save_shop_profile(state, preduzetnik_profile_request()).expect("profile saves");
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 100,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate saves");
+            // threshold = 10_000 * 100 = 1_000_000 para
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 1_000_000)],
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::Cash,
+                        amount_minor: 1_000_000,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: Some("Kupac odbio prenos na račun".to_string()),
+                },
+                Some(admin_id(state)),
+            )
+            .expect("the block is soft — the sale still completes");
+
+            assert_eq!(
+                compliance_log_count(state),
+                1,
+                "exactly one audit entry per breach"
+            );
+
+            let conn = state.db().open().expect("db opens");
+            let (event_type, detail, user_id, created_at): (String, String, i64, String) = conn
+                .query_row(
+                    "SELECT event_type, detail_json, user_id, created_at FROM compliance_log",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("the audit entry should be readable");
+
+            assert_eq!(event_type, "aml_cash_threshold");
+            assert_eq!(user_id, admin_id(state), "the acting session user");
+            assert_eq!(
+                created_at, sale.created_at,
+                "the entry carries the sale's own timestamp — the two records \
+                 must not be able to disagree about when the cash was accepted"
+            );
+
+            let detail: serde_json::Value =
+                serde_json::from_str(&detail).expect("detail_json should parse");
+            assert_eq!(detail["sale_id"], serde_json::json!(sale.id));
+            assert_eq!(
+                detail["local_receipt_number"],
+                serde_json::json!(sale.local_receipt_number)
+            );
+            assert_eq!(detail["cash_minor"], serde_json::json!(1_000_000));
+            assert_eq!(detail["threshold_minor"], serde_json::json!(1_000_000));
+            assert_eq!(detail["rate_minor"], serde_json::json!(100));
+            assert_eq!(detail["rate_date"], serde_json::json!("2026-07-31"));
+            assert_eq!(detail["rate_source"], serde_json::json!("nbs"));
+            assert_eq!(
+                detail["ack_reason"],
+                serde_json::json!("Kupac odbio prenos na račun")
+            );
+            assert_eq!(
+                detail["note"],
+                serde_json::json!(
+                    "Gotovina zadržana u iznosu na ili iznad praga iz čl. 46 st. 1 \
+                     Zakona o sprečavanju pranja novca i finansiranja terorizma."
+                ),
+                "the note keeps its diacritics and reads as one sentence"
+            );
+        });
+    }
+
+    /// The soft line is a [PRUDENTIAL] early warning, not a breach of čl. 46
+    /// st. 1 — nothing below the cap is unlawful. It fills the sale's
+    /// provenance columns so the till can show what it warned about, but it
+    /// must not manufacture a compliance event for a lawful sale.
+    #[test]
+    fn a_near_threshold_sale_writes_no_aml_audit_entry() {
+        with_state("aml_audit_silent_near_threshold", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+            save_shop_profile(state, preduzetnik_profile_request()).expect("profile saves");
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 100,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate saves");
+            // threshold = 1_000_000 para; the soft line sits at 800_000.
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 999_999)],
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::Cash,
+                        amount_minor: 999_999,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: Some("Blizu praga".to_string()),
+                },
+                Some(admin_id(state)),
+            )
+            .expect("sale completes");
+
+            let conn = state.db().open().expect("db opens");
+            let cash: Option<i64> = conn
+                .query_row(
+                    "SELECT aml_cash_minor FROM sales WHERE id = ?1",
+                    params![sale.id],
+                    |row| row.get(0),
+                )
+                .expect("row exists");
+            assert_eq!(
+                cash,
+                Some(999_999),
+                "the warning did fire, so the sale keeps its provenance"
+            );
+
+            assert_eq!(
+                compliance_log_count(state),
+                0,
+                "one para below the cap is lawful — a warning is not a breach"
+            );
+        });
+    }
+
+    #[test]
+    fn an_ordinary_sale_writes_no_aml_audit_entry() {
+        with_state("aml_audit_silent_ordinary_sale", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+            save_shop_profile(state, preduzetnik_profile_request()).expect("profile saves");
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 100,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate saves");
+
+            complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: vec![draft_item_worth(product_id, 50_000)],
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::Cash,
+                        amount_minor: 50_000,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: None,
+                },
+                Some(admin_id(state)),
+            )
+            .expect("sale completes");
+
+            assert_eq!(
+                compliance_log_count(state),
+                0,
+                "an ordinary sale leaves no compliance event"
+            );
+        });
+    }
+
+    /// The audit entry lives in the **sale's own transaction**: a breaching
+    /// sale can never exist without its entry, nor the entry without its sale.
+    ///
+    /// Two legs, because they fail at different points of the write:
+    ///
+    /// * insufficient stock is refused *before* the assessment runs, so it
+    ///   guards against the audit write ever being hoisted above the stock
+    ///   gate;
+    /// * the injected fault aborts *after* the audit row is already in the
+    ///   transaction, which is the case that actually proves the boundary. A
+    ///   plain `INSERT` outside the transaction would survive it and leave an
+    ///   orphan event describing a sale that never happened.
+    #[test]
+    fn the_aml_audit_entry_shares_the_sales_transaction() {
+        with_state("aml_audit_entry_is_atomic", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            sign_in_admin(state);
+            save_shop_profile(state, preduzetnik_profile_request()).expect("profile saves");
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 100,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate saves");
+            // threshold = 1_000_000 para; the seeded balance is 100_000_000.
+
+            let breaching_sale = |quantity_milli: i64| CompleteSaleRequest {
+                items: vec![draft_item_worth(product_id, quantity_milli)],
+                receipt_discount: None,
+                payments: vec![PaymentDraft {
+                    method: PaymentMethod::Cash,
+                    amount_minor: quantity_milli,
+                }],
+                allow_stock_override: None,
+                aml_ack_reason: Some("Kupac odbio prenos na račun".to_string()),
+            };
+
+            let error = complete_sale_transaction(
+                state.db(),
+                breaching_sale(200_000_000),
+                Some(admin_id(state)),
+            )
+            .expect_err("overselling is disabled, so the sale must be refused");
+            assert_eq!(error.code(), "insufficient_stock");
+            assert_eq!(
+                compliance_log_count(state),
+                0,
+                "a refused sale leaves no compliance event"
+            );
+
+            {
+                let conn = state.db().open().expect("db opens");
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_after_the_audit_write
+                     BEFORE INSERT ON sale_items
+                     BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+                )
+                .expect("the fault trigger should install");
+            }
+
+            complete_sale_transaction(state.db(), breaching_sale(1_000_000), Some(admin_id(state)))
+                .expect_err("the injected fault must fail the sale");
+
+            let conn = state.db().open().expect("db opens");
+            let sales: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0))
+                .expect("sales should count");
+            assert_eq!(sales, 0, "the sale rolled back");
+            assert_eq!(
+                compliance_log_count(state),
+                0,
+                "the audit entry rolled back with it — no orphan event"
             );
         });
     }
@@ -1594,6 +1963,7 @@ mod tests {
                     allow_stock_override: None,
                     aml_ack_reason: None,
                 },
+                None,
             )
             .expect("sale completes");
 
@@ -1648,6 +2018,7 @@ mod tests {
                     allow_stock_override: None,
                     aml_ack_reason: None,
                 },
+                None,
             )
             .expect("a corrupt settings row must not turn the till into a dead register");
 
@@ -1721,6 +2092,7 @@ mod tests {
                     allow_stock_override: None,
                     aml_ack_reason: None,
                 },
+                None,
             )
             .expect("a transfer to the account is a valid tender");
 
@@ -1789,6 +2161,7 @@ mod tests {
                     allow_stock_override: None,
                     aml_ack_reason: None,
                 },
+                None,
             )
             .expect("a split with a transfer completes");
 
@@ -1847,6 +2220,7 @@ mod tests {
                     allow_stock_override: None,
                     aml_ack_reason: None,
                 },
+                None,
             )
             .expect_err("a transfer overpayment must be refused");
 
