@@ -345,6 +345,7 @@ describe("AppShell", () => {
         amountMinor: 150000,
         reason: null,
         bankReference: "uplatnica-7",
+        documentedPerPravilnik: null,
       }),
     );
   });
@@ -364,7 +365,96 @@ describe("AppShell", () => {
     ).toBeInTheDocument();
     // The bylaw carve-out is conditional, so the form must not promise the
     // money is out of the deposit base — it says what to check instead.
-    expect(screen.getByText(/Pravilnik\w* 77\/2011/)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/Pravilnik\w* 77\/2011/).length,
+    ).toBeGreaterThan(0);
+  });
+
+  // Pravilnik 77/2011 čl. 5 st. 2 relieves a podizanje from the čl. 3 st. 1
+  // deposit base only where it was paid out per čl. 2 st. 2 or st. 3. The form
+  // must therefore ask, and an unanswered question must leave the money in the
+  // base — a default-on exclusion would shrink the base on the operator's
+  // behalf and could show „izmireno" while the cash sat in the drawer.
+  it("leaves a podizanje in the deposit base unless the operator asserts the Pravilnik documentation", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const shiftCashMovement = vi.spyOn(services.shifts, "shiftCashMovement");
+    render(<AppShell services={services} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+    await user.selectOptions(
+      screen.getByLabelText("Vrsta transakcije"),
+      "bank_withdrawal",
+    );
+    await user.type(screen.getByLabelText("Iznos"), "5000");
+
+    const assertion = screen.getByRole("checkbox", {
+      name: /čl\. 2 st\. 2 ili st\. 3/,
+    });
+    expect(assertion).not.toBeChecked();
+
+    await user.click(
+      screen.getByRole("button", { name: "Podizanje sa računa" }),
+    );
+
+    await waitFor(() =>
+      expect(shiftCashMovement).toHaveBeenCalledWith({
+        direction: "bank_withdrawal",
+        amountMinor: 500000,
+        reason: null,
+        bankReference: null,
+        documentedPerPravilnik: null,
+      }),
+    );
+  });
+
+  it("records the Pravilnik čl. 2 assertion when the operator makes it", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const shiftCashMovement = vi.spyOn(services.shifts, "shiftCashMovement");
+    render(<AppShell services={services} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+    await user.selectOptions(
+      screen.getByLabelText("Vrsta transakcije"),
+      "bank_withdrawal",
+    );
+    await user.type(screen.getByLabelText("Iznos"), "5000");
+    await user.click(
+      screen.getByRole("checkbox", { name: /čl\. 2 st\. 2 ili st\. 3/ }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Podizanje sa računa" }),
+    );
+
+    await waitFor(() =>
+      expect(shiftCashMovement).toHaveBeenCalledWith(
+        expect.objectContaining({
+          direction: "bank_withdrawal",
+          documentedPerPravilnik: true,
+        }),
+      ),
+    );
+  });
+
+  // The assertion is about a payout from the shop's own account. A polog is the
+  // opposite direction, so the question must not even be asked there.
+  it("asks the Pravilnik question only for a podizanje sa računa", async () => {
+    const user = userEvent.setup();
+    render(<AppShell services={createMockServices()} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+    expect(
+      screen.queryByRole("checkbox", { name: /čl\. 2 st\. 2 ili st\. 3/ }),
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(
+      screen.getByLabelText("Vrsta transakcije"),
+      "bank_deposit",
+    );
+    expect(
+      screen.queryByRole("checkbox", { name: /čl\. 2 st\. 2 ili st\. 3/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the broj uplatnice field out of a plain cash movement", async () => {

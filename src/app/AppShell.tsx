@@ -51,6 +51,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -61,6 +62,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   Field,
+  FieldContent,
   FieldDescription,
   FieldError,
   FieldGroup,
@@ -976,6 +978,23 @@ const BANK_DIRECTION_NOTES: Record<"bank_deposit" | "bank_withdrawal", string> =
       "samo ako je isplata izvršena u skladu sa čl. 2 st. 2 ili st. 3 tog pravilnika — sačuvajte dokumentaciju.",
   };
 
+/**
+ * The one question that decides whether Pravilnik 77/2011 čl. 5 st. 2 reaches
+ * this podizanje at all. It is phrased as a declaration about the payout, not as
+ * a preference: the exclusion shrinks the čl. 3 st. 1 deposit base, so a wrong
+ * „da“ can show the shop „izmireno“ while the cash is still in the drawer.
+ * Unticked therefore leaves the money in the base — the safe direction — and the
+ * description says so, so nobody reads the empty box as a missing convenience.
+ */
+const WITHDRAWAL_PRAVILNIK_LABEL =
+  "Isplata je izvršena u skladu sa Pravilnikom 77/2011 čl. 2 st. 2 ili st. 3";
+
+const WITHDRAWAL_PRAVILNIK_DESCRIPTION =
+  "Označite samo ako je gotovina isplaćena uz originalnu dokumentaciju podnetu banci na uvid i " +
+  "overu (čl. 2 st. 2) ili u okviru dnevnog limita od 150.000 dinara bez dokumentacije " +
+  "(čl. 2 st. 3). Ovo je izjava o dokumentaciji, a ne podešavanje: bez nje iznos ostaje u " +
+  "osnovici za polog i ima rok od sedam radnih dana.";
+
 function isBankDirection(
   direction: CashMovementDirection,
 ): direction is "bank_deposit" | "bank_withdrawal" {
@@ -993,9 +1012,11 @@ function CashMovementForm({
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
   const [bankReference, setBankReference] = useState("");
+  const [pravilnikDocumented, setPravilnikDocumented] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const bankDirection = isBankDirection(direction);
+  const withdrawal = direction === "bank_withdrawal";
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1021,11 +1042,16 @@ function CashMovementForm({
         // A shop that records the polog before the bank confirms it must not be
         // blocked, so the reference stays optional — blank means „not yet".
         bankReference: bankDirection ? bankReference.trim() || null : null,
+        // An unticked box is „ništa nije izjavljeno", which is `null` — not an
+        // explicit „ne". Both keep the money in the čl. 3 st. 1 base, but only
+        // `null` refrains from putting a declaration in the operator's mouth.
+        documentedPerPravilnik: withdrawal && pravilnikDocumented ? true : null,
       });
       onShiftUpdate(updated);
       setAmount("");
       setReason("");
       setBankReference("");
+      setPravilnikDocumented(false);
       toast.success(CASH_MOVEMENT_DONE[direction]);
     } catch (movementError) {
       setError(errorMessage(movementError, "Transakcija nije izvršena."));
@@ -1051,9 +1077,12 @@ function CashMovementForm({
             id="cash-movement-direction"
             value={direction}
             className="w-full"
-            onChange={(event) =>
-              setDirection(event.target.value as CashMovementDirection)
-            }
+            onChange={(event) => {
+              setDirection(event.target.value as CashMovementDirection);
+              // The declaration belongs to one payout. Switching the movement
+              // type must not carry a tick made for a different one.
+              setPravilnikDocumented(false);
+            }}
           >
             <NativeSelectOption value="pay_in">
               {CASH_MOVEMENT_LABELS.pay_in}
@@ -1092,6 +1121,28 @@ function CashMovementForm({
             <FieldDescription>
               {BANK_DIRECTION_NOTES[direction]}
             </FieldDescription>
+          </Field>
+        ) : null}
+        {withdrawal ? (
+          <Field orientation="horizontal">
+            <Checkbox
+              id="cash-movement-pravilnik-documented"
+              checked={pravilnikDocumented}
+              onCheckedChange={(checked) =>
+                setPravilnikDocumented(Boolean(checked))
+              }
+            />
+            <FieldContent>
+              <FieldLabel
+                htmlFor="cash-movement-pravilnik-documented"
+                className="font-normal"
+              >
+                {WITHDRAWAL_PRAVILNIK_LABEL}
+              </FieldLabel>
+              <FieldDescription>
+                {WITHDRAWAL_PRAVILNIK_DESCRIPTION}
+              </FieldDescription>
+            </FieldContent>
           </Field>
         ) : null}
         <Field>

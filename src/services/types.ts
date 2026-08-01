@@ -177,7 +177,11 @@ export interface CashDepositReport {
   outstandingMinor: number;
   /** Of the outstanding total, the part whose deadline has already passed. */
   overdueMinor: number;
-  /** Cash the Pravilnik 77/2011 čl. 5 st. 2 carve-out kept out of the base. */
+  /**
+   * Cash the Pravilnik 77/2011 čl. 5 st. 2 carve-out kept out of the base —
+   * only those podizanja marked as paid out per čl. 2 st. 2 or st. 3. Any other
+   * withdrawal stays in the base and carries its own rok.
+   */
   excludedFloatMinor: number;
   saturdayIsWorking: boolean;
   calendarHorizonYear: number;
@@ -329,6 +333,18 @@ export interface CashMovementRequest {
    * confirms it must not be blocked.
    */
   bankReference?: string | null;
+  /**
+   * `bank_withdrawal` only: the operator's declaration that this payout was made
+   * per Pravilnik 77/2011 čl. 2 st. 2 (uz originalnu dokumentaciju podnetu banci
+   * na uvid i overu) or čl. 2 st. 3 (dnevni limit od 150.000 dinara) — the sole
+   * condition on which čl. 5 st. 2 keeps the money out of the čl. 3 st. 1
+   * deposit base.
+   *
+   * `null` means nothing was declared and is the default. Only `true` excludes;
+   * `null` and `false` alike leave the podizanje in the base, because a wrongly
+   * excluded amount can show a false „izmireno" state.
+   */
+  documentedPerPravilnik?: boolean | null;
 }
 
 export interface SaveUserRequest {
