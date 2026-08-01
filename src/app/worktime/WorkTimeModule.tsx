@@ -66,7 +66,7 @@ interface WorkTimeModuleProps {
    *
    * Optional, and **absent means closed**. A privacy gate that opens when a
    * caller forgets to wire it is not a gate; every other role — and every
-   * unknown one — sees „odsutan" plus an hour total and nothing more.
+   * unknown one — sees „odsutan“ plus an hour total and nothing more.
    */
   currentUser?: UserAccount;
 }
@@ -188,9 +188,9 @@ interface EntryFormState {
   korekcijaRazlog: string;
 }
 
-function emptyForm(): EntryFormState {
+function emptyForm(godina: number, mesec: number): EntryFormState {
   return {
-    dan: todayIso(),
+    dan: defaultDan(godina, mesec),
     moguciMinuta: "480",
     efektivnoIzvrseniMinuta: "",
     casoviCekanjaIZastojaMinuta: "",
@@ -220,7 +220,7 @@ function emptyForm(): EntryFormState {
  *    exposure instead of surfacing it. A čl. 87–91 protection block is the
  *    opposite — the statute bans the work, so the row is refused.
  * 4. **The absence category is gated.** It is special-category data; every role
- *    but payroll sees „odsutan" plus an hour total.
+ *    but payroll sees „odsutan“ plus an hour total.
  *
  * No penalty figure is composed here. Both notices arrive already resolved
  * against the shop's stored legal form.
@@ -237,7 +237,9 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
   );
   const [monthError, setMonthError] = useState<string | undefined>();
   const [notices, setNotices] = useState<WorkTimeNotices | null>(null);
-  const [form, setForm] = useState<EntryFormState>(emptyForm);
+  const [form, setForm] = useState<EntryFormState>(() =>
+    emptyForm(godina, mesec),
+  );
   // Set the moment the backend answers `cap_override_required`: the write is not
   // refused, it is waiting for a čl. 53 st. 1 ground.
   const [capWarning, setCapWarning] = useState<string | null>(null);
@@ -338,7 +340,7 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
   // selector change would attach a warning to a period that never earned it —
   // and, worse, leave a chosen override reason armed for someone else's day.
   useEffect(() => {
-    setForm(emptyForm());
+    setForm(emptyForm(godina, mesec));
     setCapWarning(null);
     setProtections([]);
     setSaveError(null);
@@ -347,12 +349,21 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
   const zatvoren = month?.zatvoren ?? false;
   const liveEntries = (month?.entries ?? []).filter((entry) => !entry.zamenjen);
 
+  // The day picker never offers a day the register may not describe: outside the
+  // displayed period the row would save and then be invisible (`listMonth`
+  // filters by period), and after today it would describe hours that have not
+  // been worked. `toRequest` re-checks both — the picker is a convenience.
+  const danMin = periodStart(godina, mesec);
+  const danKrajPerioda = periodEnd(godina, mesec);
+  const danas = todayIso();
+  const danMax = danKrajPerioda < danas ? danKrajPerioda : danas;
+
   const resetForm = useCallback(() => {
-    setForm(emptyForm());
+    setForm(emptyForm(godina, mesec));
     setCapWarning(null);
     setProtections([]);
     setSaveError(null);
-  }, []);
+  }, [godina, mesec]);
 
   async function submitEntry(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -361,11 +372,13 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
       return;
     }
 
-    const request = toRequest(form, employeeId);
-    if (!request) {
-      setSaveError("Datum i broj minuta moraju biti ispravni.");
+    const validated = toRequest(form, employeeId, godina, mesec);
+    if (!validated.ok) {
+      setSaveError(validated.poruka);
       return;
     }
+
+    const request = validated.request;
 
     setSaving(true);
     setSaveError(null);
@@ -378,9 +391,15 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
           })
         : await worktime.saveEntry(request);
 
-      setProtections(saved.protections);
-      setCapWarning(null);
       resetForm();
+      // AFTER the reset, never before it: `resetForm` clears the previous
+      // assessment, so applying the findings first would leave the array empty
+      // by the time React renders. The backend hands čl. 87–91 findings back on
+      // the SUCCESS path precisely because they are non-blocking — čl. 90 is a
+      // warning the operator must see, and `NeispravanDatumUProfilu` says the
+      // under-18 and čl. 91 consent guards could not run for this day at all.
+      // Dropping them here is the only place they can be silently lost.
+      setProtections(saved.protections);
       setReloadToken((token) => token + 1);
       toast.success("Dan je evidentiran", {
         description: formatDan(saved.entry.dan),
@@ -526,7 +545,12 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
         <ClockIcon aria-hidden="true" />
         <AlertTitle>Noćni časovi i časovi rada na praznik</AlertTitle>
         <AlertDescription>
-          Ove dve kolone su {month?.advisoryNapomena ?? "izračunato radi provere usklađenosti"}.
+          {/*
+            The backend tag is an invariable phrase — „izračunato radi provere
+            usklađenosti“ cannot agree with a plural feminine subject — so the
+            sentence quotes it instead of inflecting it.
+          */}
+          {`Ove dve kolone nose oznaku „${month?.advisoryNapomena ?? ADVISORY_TAG}“.`}
         </AlertDescription>
       </Alert>
 
@@ -579,6 +603,8 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
                   id="worktime-dan"
                   type="date"
                   value={form.dan}
+                  min={danMin}
+                  max={danMax}
                   disabled={zatvoren}
                   onChange={(event) =>
                     setForm({ ...form, dan: event.target.value })
@@ -857,7 +883,12 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
 
       {notices ? (
         <div className="rounded-lg border p-4">
-          <h3 className="text-sm font-semibold">Zakonska osnova</h3>
+          {/*
+            Neutral container heading. Each notice states its own standing —
+            a duty is not the same thing as a recommendation, and only the
+            notice itself knows which it is.
+          */}
+          <h3 className="text-sm font-semibold">Pravne napomene</h3>
           <div className="mt-2 flex flex-col gap-3 text-sm text-muted-foreground">
             <NoticeBlock notice={notices.recordMissing} />
             <NoticeBlock notice={notices.capsExceeded} />
@@ -896,6 +927,12 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
 const ADVISORY_HINT =
   "Kolona izračunata radi provere usklađenosti — nije obavezno polje.";
 
+/**
+ * `crate::commands::worktime::ADVISORY_TAG`, used only when the month has not
+ * loaded yet. An invariable phrase: quote it, never inflect it.
+ */
+const ADVISORY_TAG = "izračunato radi provere usklađenosti";
+
 function MinuteCell({ value }: { value: number }) {
   return (
     <TableCell className="text-right tabular-nums">
@@ -910,7 +947,7 @@ function MinuteCell({ value }: { value: number }) {
  * The absence **category** is special-category data under ZZPL čl. 17 — the two
  * sprečenost buckets alone say which of a poslodavac-funded and an RFZO-funded
  * sick leave a day was. Payroll sees the category; every other role, and every
- * unknown one, sees „odsutan" plus the hour total and nothing that identifies
+ * unknown one, sees „odsutan“ plus the hour total and nothing that identifies
  * why.
  */
 function AbsenceCell({
@@ -935,9 +972,21 @@ function AbsenceCell({
   return <span>{kategorija?.label ?? entry.kategorijaOdsustva}</span>;
 }
 
+/**
+ * One notice, under a heading that states what it actually is.
+ *
+ * `isLegalDuty` is the whole reason the flag exists. A [PRUDENTIAL] item — good
+ * practice with no provision behind it — must never appear under „Zakonska
+ * osnova“, because that heading asserts an obligation the shop does not carry.
+ * Both notices routed here today are duties; the branch is what keeps the first
+ * non-duty one from being misstated the day it is added.
+ */
 function NoticeBlock({ notice }: { notice: LegalNotice }) {
   return (
     <div>
+      <h4 className="font-medium text-foreground">
+        {notice.isLegalDuty ? "Zakonska osnova" : "Preporuka"}
+      </h4>
       <p>{notice.summary}</p>
       {notice.penalty ? <p>{notice.penalty}</p> : null}
       <p>{notice.citation}</p>
@@ -998,12 +1047,55 @@ function parseMinutes(value: string): number | null {
   return Number(trimmed);
 }
 
+/** A validated request, or the Serbian sentence that says why there isn't one. */
+type RequestResult =
+  | { ok: true; request: SaveWorkTimeEntryRequest }
+  | { ok: false; poruka: string };
+
+/**
+ * Whether a day may be written into the register — the Serbian sentence refusing
+ * it, or `null` when it may.
+ *
+ * The picker's `min`/`max` narrow what can be chosen; **this** is the check. A
+ * `type="date"` input is a convenience, not a guarantee: its value can be
+ * pasted, autofilled or set by a browser that honours neither attribute, and a
+ * statutory register must not depend on a widget for its accuracy.
+ */
+export function validateDan(
+  dan: string,
+  godina: number,
+  mesec: number,
+): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dan)) {
+    return "Datum mora biti u obliku gggg-MM-dd.";
+  }
+
+  // A day that has not happened is not a „dnevna evidencija“ within ZoR čl. 55
+  // st. 6, and a register describing hours nobody has worked yet is not an
+  // accurate one.
+  if (dan > todayIso()) {
+    return "Ne može se evidentirati dan koji još nije protekao. Evidentira se dan koji se dogodio.";
+  }
+
+  // Outside the displayed period the row saves and then vanishes: `listMonth`
+  // filters by period, so the operator would be told „Dan je evidentiran“ about
+  // a row they can never see again from this screen.
+  if (dan < periodStart(godina, mesec) || dan > periodEnd(godina, mesec)) {
+    return `Datum mora pripadati izabranom periodu — ${MESECI[mesec - 1]} ${godina}.`;
+  }
+
+  return null;
+}
+
 function toRequest(
   form: EntryFormState,
   userId: number,
-): SaveWorkTimeEntryRequest | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(form.dan)) {
-    return null;
+  godina: number,
+  mesec: number,
+): RequestResult {
+  const danPoruka = validateDan(form.dan, godina, mesec);
+  if (danPoruka) {
+    return { ok: false, poruka: danPoruka };
   }
 
   const minutes = {} as Record<MinuteKey, number>;
@@ -1012,22 +1104,28 @@ function toRequest(
     const parsed = parseMinutes(form[key]);
 
     if (parsed == null) {
-      return null;
+      return {
+        ok: false,
+        poruka: "Broj minuta mora biti ceo broj, bez decimala i bez minusa.",
+      };
     }
 
     minutes[key] = parsed;
   }
 
   return {
-    userId,
-    dan: form.dan,
-    ...minutes,
-    kategorijaOdsustva: form.kategorijaOdsustva
-      ? (form.kategorijaOdsustva as AbsenceCategory)
-      : null,
-    capOverrideRazlog: form.capOverrideRazlog
-      ? (form.capOverrideRazlog as CapOverrideReason)
-      : null,
+    ok: true,
+    request: {
+      userId,
+      dan: form.dan,
+      ...minutes,
+      kategorijaOdsustva: form.kategorijaOdsustva
+        ? (form.kategorijaOdsustva as AbsenceCategory)
+        : null,
+      capOverrideRazlog: form.capOverrideRazlog
+        ? (form.capOverrideRazlog as CapOverrideReason)
+        : null,
+    },
   };
 }
 
@@ -1041,8 +1139,48 @@ function buildYearOptions(currentYear: number): number[] {
   return years;
 }
 
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+/**
+ * Today as `YYYY-MM-DD`, off the LOCAL calendar.
+ *
+ * Never `toISOString()`: that is a UTC date, and between 00:00 and 02:00 CEST it
+ * is still yesterday — on the 1st of a month, still the previous month, which
+ * may already be closed. This register's whole legal point is per-calendar-day
+ * granularity, so an off-by-one default day is a data-integrity defect. The same
+ * reasoning is why `formatDan` never round-trips through `Date` either.
+ */
+export function todayIso(): string {
+  const now = new Date();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  const day = `${now.getDate()}`.padStart(2, "0");
+
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/** The first day of a period, as `YYYY-MM-DD`. */
+function periodStart(godina: number, mesec: number): string {
+  return `${godina}-${String(mesec).padStart(2, "0")}-01`;
+}
+
+/**
+ * The last day of a period. Day 0 of the following month is the last day of this
+ * one; computed in UTC so no local offset can shift the boundary.
+ */
+function periodEnd(godina: number, mesec: number): string {
+  const last = new Date(Date.UTC(godina, mesec, 0)).getUTCDate();
+
+  return `${godina}-${String(mesec).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+}
+
+/**
+ * The day the form opens on: today when today falls inside the displayed
+ * period, otherwise that period's first day. A default outside the period would
+ * write a row the grid cannot show.
+ */
+function defaultDan(godina: number, mesec: number): string {
+  const pocetak = periodStart(godina, mesec);
+  const danas = todayIso();
+
+  return danas.slice(0, 7) === pocetak.slice(0, 7) ? danas : pocetak;
 }
 
 /**

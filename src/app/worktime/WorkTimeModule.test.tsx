@@ -1,13 +1,14 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { WorkTimeModule } from "./WorkTimeModule";
+import { WorkTimeModule, todayIso, validateDan } from "./WorkTimeModule";
 import { navigationItems } from "@/app/navigation";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices } from "@/services/ports";
 import type {
   UserAccount,
+  WorkTimeCapAssessment,
   WorkTimeEntryView,
   WorkTimeMinutes,
   WorkTimeMonth,
@@ -111,9 +112,55 @@ function servicesWithMonth(value: WorkTimeMonth): PosServices {
   return services;
 }
 
-/** The day an entry form defaults to — the module never back-dates for you. */
+/**
+ * The day an entry form defaults to — the module never back-dates for you.
+ *
+ * Local calendar components, never `toISOString()`: between midnight and 02:00
+ * CEST the UTC date is still yesterday, and a register whose whole legal point
+ * is per-calendar-day granularity must not default to the wrong day.
+ */
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  const day = `${now.getDate()}`.padStart(2, "0");
+
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/** The calendar month before the current one, as `{ godina, mesec }`. */
+function previousPeriod(): { godina: number; mesec: number } {
+  const now = new Date();
+  const mesec = now.getMonth() + 1;
+
+  return mesec === 1
+    ? { godina: now.getFullYear() - 1, mesec: 12 }
+    : { godina: now.getFullYear(), mesec: mesec - 1 };
+}
+
+const nulaCaps: WorkTimeCapAssessment = {
+  weeklyOvertimeMinutes: 0,
+  dailyTotalMinutes: 0,
+  weeklyTotalMinutes: 0,
+  weeklyCapExceeded: false,
+  dailyCapExceeded: false,
+  preraspodelaWeeklyCapExceeded: false,
+  requiresOverride: false,
+};
+
+/**
+ * Waits until an employee is selected and their month has loaded.
+ *
+ * The module clears the form whenever the selected employee or period changes,
+ * so touching the form before the first employee lands would have that reset
+ * wipe whatever the test just typed. The loading badge is the signal: it clears
+ * only once `listMonth` has answered, which cannot happen before an employee is
+ * selected. The employee `<select>` itself is no signal at all — a native select
+ * whose value is not among its options renders the first one.
+ */
+async function awaitLoadedMonth(): Promise<void> {
+  await waitFor(() => {
+    expect(screen.queryByText(/učitavanje evidencije/i)).not.toBeInTheDocument();
+  });
 }
 
 async function setMinutes(
@@ -242,6 +289,216 @@ describe("WorkTimeModule cap warnings", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(/50\.000 do 150\.000 dinara/),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("WorkTimeModule protection findings", () => {
+  /**
+   * čl. 90 is a WARNING, not a block: the statute conditions the prohibition on
+   * a nalaz nadležnog zdravstvenog organa, so the backend lets the write through
+   * and hands the finding back on the SUCCESS path. If the module discards it,
+   * the advisory §4 req. 13 mandates is never seen by anyone.
+   */
+  it("surfaces a non-blocking čl. 90 finding carried by a successful save", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    vi.spyOn(services.worktime, "saveEntry").mockResolvedValue({
+      entry: entry({ dan: today() }),
+      caps: { ...nulaCaps },
+      protections: [
+        {
+          kind: "trudnocaNocniIPrekovremeni",
+          blocking: false,
+          poruka:
+            "Zaposlena za vreme trudnoće i zaposlena koja doji dete ne može da radi prekovremeno i noću ako bi takav rad bio štetan za njeno zdravlje i zdravlje deteta (ZoR čl. 90).",
+        },
+      ],
+    });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+
+    await setMinutes(user, /efektivno izvršeni/i, "480");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+
+    expect(await screen.findByText(/ZoR čl\. 90/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/napomena o zaštiti zaposlenog/i),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * `NeispravanDatumUProfilu` means the under-18 (čl. 87/88) and čl. 91 consent
+   * guards COULD NOT RUN for this day. Swallowing it degrades the register to
+   * unguarded without telling anyone.
+   */
+  it("surfaces the unreadable-profile-date finding a successful save carries", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    vi.spyOn(services.worktime, "saveEntry").mockResolvedValue({
+      entry: entry({ dan: today() }),
+      caps: { ...nulaCaps },
+      protections: [
+        {
+          kind: "neispravanDatumUProfilu",
+          blocking: false,
+          poruka:
+            "Datum rođenja zaposlenog u profilu nije ispravan datum, pa zaštite za zaposlene mlađe od 18 godina (ZoR čl. 87 i čl. 88) za ovaj dan nisu proverene.",
+        },
+      ],
+    });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+
+    await setMinutes(user, /efektivno izvršeni/i, "480");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+
+    expect(
+      await screen.findByText(/nije ispravan datum/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("WorkTimeModule day selection", () => {
+  it("defaults to the local calendar day, never the UTC one", () => {
+    vi.stubEnv("TZ", "Europe/Belgrade");
+    vi.useFakeTimers();
+    // 00:30 on 1 June in Belgrade is still 31 May in UTC. A `toISOString()`
+    // default would open the form on the wrong calendar day, and on the 1st of
+    // a month on a day in the previous — possibly already closed — period.
+    vi.setSystemTime(new Date("2026-06-01T00:30:00+02:00"));
+
+    try {
+      expect(todayIso()).toBe("2026-06-01");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("never lets a future day reach the register", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    const saveSpy = vi.spyOn(services.worktime, "saveEntry");
+    const now = new Date();
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+    await awaitLoadedMonth();
+
+    const datum = screen.getByLabelText(/^datum$/i);
+    // The picker must not offer a day that has not happened.
+    expect(datum).toHaveAttribute("max", today());
+
+    const sutra = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    fireEvent.change(datum, {
+      target: {
+        value: `${sutra.getFullYear()}-${`${sutra.getMonth() + 1}`.padStart(2, "0")}-${`${sutra.getDate()}`.padStart(2, "0")}`,
+      },
+    });
+    await setMinutes(user, /efektivno izvršeni/i, "480");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses a future day in code, not only in the picker", () => {
+    const now = new Date();
+    const sutra = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    const sutraIso = `${sutra.getFullYear()}-${`${sutra.getMonth() + 1}`.padStart(2, "0")}-${`${sutra.getDate()}`.padStart(2, "0")}`;
+
+    // Validated against `sutra`'s own period, so only the future rule can fire.
+    expect(
+      validateDan(sutraIso, sutra.getFullYear(), sutra.getMonth() + 1),
+    ).toMatch(/nije protekao/i);
+    expect(
+      validateDan(today(), now.getFullYear(), now.getMonth() + 1),
+    ).toBeNull();
+  });
+
+  it("opens on a day inside the period the grid is showing", async () => {
+    const user = userEvent.setup();
+    const { godina, mesec } = previousPeriod();
+    const dvocifreni = `${mesec}`.padStart(2, "0");
+    const poslednji = new Date(Date.UTC(godina, mesec, 0)).getUTCDate();
+
+    render(<WorkTimeModule services={mockServices()} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+    await awaitLoadedMonth();
+
+    await user.selectOptions(screen.getByLabelText(/godina/i), String(godina));
+    await user.selectOptions(screen.getByLabelText(/mesec/i), String(mesec));
+
+    const datum = screen.getByLabelText(/^datum$/i);
+    // The default day belongs to the displayed month, not to today: a row saved
+    // outside the period is invisible in the grid, because `listMonth` filters
+    // by period.
+    expect(datum).toHaveValue(`${godina}-${dvocifreni}-01`);
+    expect(datum).toHaveAttribute("min", `${godina}-${dvocifreni}-01`);
+    expect(datum).toHaveAttribute("max", `${godina}-${dvocifreni}-${poslednji}`);
+  });
+
+  it("refuses a day outside the selected period", () => {
+    const { godina, mesec } = previousPeriod();
+    const dvocifreni = `${mesec}`.padStart(2, "0");
+    const poslednji = new Date(Date.UTC(godina, mesec, 0)).getUTCDate();
+
+    expect(validateDan(`${godina - 1}-${dvocifreni}-01`, godina, mesec)).toMatch(
+      /mora pripadati izabranom periodu/i,
+    );
+    expect(validateDan(`${godina}-${dvocifreni}-01`, godina, mesec)).toBeNull();
+    // The last day of the month is inside it — an off-by-one here would refuse a
+    // day the register must be able to describe.
+    expect(
+      validateDan(`${godina}-${dvocifreni}-${poslednji}`, godina, mesec),
+    ).toBeNull();
+  });
+});
+
+describe("WorkTimeModule legal notices", () => {
+  it("never files a non-duty notice under „Zakonska osnova“", async () => {
+    const services = mockServices();
+    vi.spyOn(services.worktime, "notices").mockResolvedValue({
+      recordMissing: {
+        summary: "Poslodavac je dužan da vodi dnevnu evidenciju.",
+        penalty: null,
+        citation: "Zakon o radu, čl. 55 st. 6. Nadzor: inspektor rada.",
+        isLegalDuty: true,
+      },
+      capsExceeded: {
+        summary: "Preporučuje se čuvanje evidencije uz platne liste.",
+        penalty: null,
+        citation: "Praksa inspekcije rada, bez propisane obaveze.",
+        isLegalDuty: false,
+      },
+    });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+
+    const preporuka = (
+      await screen.findByText(/Preporučuje se čuvanje evidencije/)
+    ).closest("div");
+    expect(preporuka).not.toBeNull();
+    expect(within(preporuka!).getByText(/preporuka/i)).toBeInTheDocument();
+    expect(
+      within(preporuka!).queryByText(/zakonska osnova/i),
+    ).not.toBeInTheDocument();
+
+    const obaveza = (
+      await screen.findByText(/Poslodavac je dužan da vodi dnevnu evidenciju/)
+    ).closest("div");
+    expect(within(obaveza!).getByText(/zakonska osnova/i)).toBeInTheDocument();
+  });
+
+  it("states the advisory columns in grammatical Serbian", async () => {
+    render(<WorkTimeModule services={mockServices()} currentUser={admin} />);
+
+    expect(
+      await screen.findByText(
+        /Ove dve kolone nose oznaku „izračunato radi provere usklađenosti“\./,
+      ),
     ).toBeInTheDocument();
   });
 });
