@@ -212,7 +212,11 @@ pub fn run() {
             commands::worktime::worktime_close_period,
             commands::worktime::worktime_export_csv,
             commands::worktime::worktime_my_hours,
-            commands::worktime::worktime_notices
+            commands::worktime::worktime_notices,
+            commands::audit::support_grant_access,
+            commands::audit::support_request_access,
+            commands::audit::support_end_session,
+            commands::audit::support_active_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
