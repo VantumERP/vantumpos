@@ -401,10 +401,12 @@ pub fn my_hours(state: &AppState, godina: i64, mesec: i64) -> Result<WorkTimeMon
 
 /// Records one day as `verzija 1`.
 ///
-/// The order of the checks is deliberate: the closed-period freeze first (a
-/// closed month is not writable on any ground), then the čl. 87–91 guards (the
-/// statute bans the work, so nothing can authorise the row), then the čl. 53
-/// caps (which ask for a reason rather than refusing).
+/// The order of the checks is deliberate: the day must have happened at all
+/// ([`guard_day_has_happened`] — a day still in the future describes no work, so
+/// no later check has anything real to run against), then the closed-period
+/// freeze (a closed month is not writable on any ground), then the čl. 87–91
+/// guards (the statute bans the work, so nothing can authorise the row), then the
+/// čl. 53 caps (which ask for a reason rather than refusing).
 pub fn save_entry(
     state: &AppState,
     request: SaveEntryRequest,
@@ -557,6 +559,7 @@ fn write_entry(
             serde_json::json!({ "dan": dan }),
         ));
     };
+    guard_day_has_happened(&dan, datum, now)?;
     let godina = i64::from(datum.year());
     let mesec = i64::from(u8::from(datum.month()));
 
@@ -1139,6 +1142,48 @@ fn guard_period_has_ended(godina: i64, mesec: i64, now: &str) -> Result<(), AppE
         ),
         serde_json::json!({ "godina": godina, "mesec": mesec }),
     ))
+}
+
+/// Refuses to record a day that has not happened yet.
+///
+/// `close_period` has [`guard_period_has_ended`]; the write path needs the same
+/// guard one day at a time. A row carrying hours nobody has worked is a forecast,
+/// and a forecast is not the „dnevna evidencija“ ZoR čl. 55 st. 6 asks for — it is
+/// the thing that makes the register look invented, which is the exposure the
+/// module exists to remove. §4 req. 6 („Never back-date“) and §4 req. 17
+/// (contemporaneous write, late entries marked rather than moved) both describe a
+/// record whose rows are days that actually happened; forward-dating is the same
+/// defect facing the other way, and ZEOR čl. 46 st. 1 puts the accuracy of the
+/// entry on the record-keeper either way.
+///
+/// It is the append-only design that makes this a refusal rather than a warning:
+/// there is no delete, so a mistyped 2028 lands a permanent row that can only be
+/// superseded — a correction log entry about a day that never existed.
+///
+/// The day **in progress** stays writable. čl. 55 st. 6 wants the record kept
+/// daily and §4 req. 17 wants it contemporaneous, so the boundary is the calendar
+/// day of `now`, not the day before it.
+///
+/// The decision reads the `now` already threaded through the write path rather
+/// than a wall clock of its own, so a caller can state the day. An unreadable
+/// `now` refuses: the row is permanent and would carry that same unreadable stamp
+/// as its `created_at`, so there is nothing to fall back on.
+fn guard_day_has_happened(dan: &str, datum: time::Date, now: &str) -> Result<(), AppError> {
+    let Some(danas) = civil_date(now) else {
+        return Err(AppError::validation(
+            "Sistemski sat nije čitljiv, pa se ne može utvrditi da li je dan protekao. \
+             Unos nije sačuvan.",
+            serde_json::json!({ "dan": dan, "sada": now }),
+        ));
+    };
+    if datum > danas {
+        return Err(AppError::validation(
+            "Ne može se evidentirati dan koji još nije protekao. \
+             Evidentira se dan koji se dogodio.",
+            serde_json::json!({ "dan": dan, "danas": danas.to_string() }),
+        ));
+    }
+    Ok(())
 }
 
 /// The civil date of an RFC3339 timestamp — its first ten characters.
@@ -1964,6 +2009,69 @@ mod tests {
             assert_eq!(error.code(), "validation_error");
             close_period(state, radnik, 2026, 2, "2026-03-01T09:00:00Z")
                 .expect("February closes once March starts");
+        });
+    }
+
+    #[test]
+    fn a_day_that_has_not_happened_cannot_be_recorded() {
+        with_state("worktime_no_future_day", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik14", "Radnik Četrnaest");
+
+            // Hours nobody has worked yet are a forecast, not a „dnevna evidencija“
+            // within ZoR čl. 55 st. 6 — and the log is append-only, so the row can
+            // only ever be superseded, never withdrawn.
+            let error = save_entry(
+                state,
+                radni_dan(radnik, "2028-03-04", 480, 0),
+                "2026-08-03T18:00:00Z",
+            )
+            .expect_err("a day two years out cannot be recorded");
+            assert_eq!(error.code(), "validation_error");
+            // Same sentence the Datum field gives, so the two guards cannot drift.
+            assert_eq!(
+                error.to_string(),
+                "Ne može se evidentirati dan koji još nije protekao. \
+                 Evidentira se dan koji se dogodio."
+            );
+
+            // Tomorrow is the case that actually happens — a mistyped day.
+            let error = save_entry(
+                state,
+                radni_dan(radnik, "2026-08-04", 480, 0),
+                "2026-08-03T23:59:59Z",
+            )
+            .expect_err("tomorrow has not happened either");
+            assert_eq!(error.code(), "validation_error");
+
+            // The day in progress stays recordable: §4 req. 17 asks for a
+            // contemporaneous write, so the guard stops at the calendar day of
+            // `now` and not one day short of it.
+            save_entry(
+                state,
+                radni_dan(radnik, "2026-08-03", 480, 0),
+                "2026-08-03T08:00:00Z",
+            )
+            .expect("the current day records normally");
+
+            // The guard sits ahead of the live-row lookup, so a correction pointed
+            // at a future day is told why rather than „nema unosa za taj dan“.
+            let error = correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: radni_dan(radnik, "2028-03-04", 60, 0),
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-08-03T18:00:00Z",
+            )
+            .expect_err("a correction cannot reach a future day either");
+            assert_eq!(error.code(), "validation_error");
+
+            // An unreadable clock refuses the write instead of guessing — the row
+            // is permanent and its own `created_at` would carry the same bad stamp.
+            let error = save_entry(state, radni_dan(radnik, "2026-08-05", 480, 0), "")
+                .expect_err("a write cannot be dated from an unreadable clock");
+            assert_eq!(error.code(), "validation_error");
         });
     }
 
