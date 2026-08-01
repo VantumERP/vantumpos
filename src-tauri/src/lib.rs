@@ -19,6 +19,7 @@ mod reklamacije_docs;
 mod security;
 mod state;
 mod text;
+mod worktime;
 
 use db::Db;
 use state::{resolve_database_path, AppState};

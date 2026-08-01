@@ -134,7 +134,12 @@ pub fn add_working_days(
 
 /// Strict `yyyy-MM-dd`. Anything else — `31.07.2026`, `2026-7-1`, `+026-01-01` —
 /// is a parse failure, not an invitation to infer an order for the fields.
-fn parse_iso_date(value: &str) -> Option<Date> {
+///
+/// `pub(crate)` so that `worktime.rs` can anchor the ZoR čl. 53 st. 2 calendar
+/// week on the same civil-date reader this module's deadline walk is proven on,
+/// rather than the codebase carrying a second date parser that could disagree
+/// with this one about what a day is.
+pub(crate) fn parse_iso_date(value: &str) -> Option<Date> {
     let bytes = value.as_bytes();
     if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
         return None;
