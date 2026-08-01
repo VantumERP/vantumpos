@@ -620,7 +620,8 @@ pub fn search(state: &AppState, query: &AuditQuery) -> Result<AuditSearchResult,
 /// and by actor, written to disk beside the database.
 ///
 /// **It renders offline, from the till.** Everything the reader needs is in the
-/// file — the basis, the čl. 48 st. 3 purpose lock, the period, the filter, the
+/// file — the čl. 49 osnov for handing it over, the čl. 48 st. 4 uzor it is
+/// modelled on, the čl. 48 st. 3 purpose lock, the period, the filter, the
 /// row count, the chain verdict and both hashes per row, so the chain can be
 /// recomputed by whoever receives it. Nothing is fetched.
 ///
@@ -908,8 +909,18 @@ fn validated_day(value: Option<&str>, field: &str) -> Result<Option<String>, App
 
 const IZVOD_NASLOV: &str = "IZVOD IZ EVIDENCIJE PRISTUPA PODACIMA O LIČNOSTI";
 
-const IZVOD_OSNOV: &str =
-    "ZZPL čl. 48 st. 4 — evidencija se stavlja na uvid Povereniku, na njegov zahtev.";
+/// The basis on which this shop actually hands the document over: čl. 49's
+/// general duty to cooperate with the Poverenik, which reaches a private
+/// rukovalac. Req. 8 names it beside čl. 48 st. 4 precisely because the two are
+/// not the same thing, and this is the line the reader meets first.
+const IZVOD_OSNOV: &str = "ZZPL čl. 49 — opšta dužnost rukovaoca da sarađuje sa Poverenikom \
+     u vršenju njegovih ovlašćenja; po tom osnovu se ovaj izvod predaje na zahtev Poverenika.";
+
+/// The MODEL for the document's shape, never its basis. Čl. 48 st. 4 addresses
+/// a nadležni organ koji obrađuje podatke u posebne svrhe (§3 V1), so printing
+/// it as „pravni osnov“ would assert a duty this rukovalac does not have.
+const IZVOD_UZOR: &str = "ZZPL čl. 48 st. 4 — evidencija se stavlja na uvid Povereniku, na \
+     njegov zahtev. Ta odredba obavezuje nadležni organ, pa je ovde uzor, a ne osnov.";
 
 /// ZZPL čl. 48 st. 3, verbatim (req. 5). The article names the only purposes for
 /// which this evidencija may be used at all, so the izvod carries them.
@@ -940,7 +951,8 @@ const IZVOD_KOLONE: [&str; 11] = [
 fn izvod_to_csv(result: &AuditSearchResult, period: &str, actor: &str, now: &str) -> String {
     let mut lines = vec![
         csv_line(&[IZVOD_NASLOV]),
-        csv_line(&["Pravni osnov izvoda", IZVOD_OSNOV]),
+        csv_line(&["Pravni osnov predaje izvoda", IZVOD_OSNOV]),
+        csv_line(&["Uzor za izvod", IZVOD_UZOR]),
         csv_line(&[
             "Svrha korišćenja evidencije (ZZPL čl. 48 st. 3)",
             SVRHE_CL_48_ST_3,
@@ -2012,7 +2024,35 @@ mod tests {
                 let csv = read_file_and_remove(&exported);
 
                 assert!(csv.contains("IZVOD IZ EVIDENCIJE PRISTUPA PODACIMA O LIČNOSTI"));
-                assert!(csv.contains("ZZPL čl. 48 st. 4"), "the model for the izvod");
+                // Req. 8 names two provisions and they are NOT interchangeable.
+                // Čl. 48 st. 4 binds a nadležni organ (§3 V1), so it is the
+                // uzor for the document's shape and may never be printed as
+                // this shop's pravni osnov; the osnov on which a preduzetnik
+                // hands the izvod over is čl. 49's duty to cooperate.
+                let osnov_line = csv
+                    .lines()
+                    .find(|line| line.starts_with("Pravni osnov predaje izvoda,"))
+                    .expect("the izvod states the basis on which it is handed over");
+                assert!(
+                    osnov_line.contains("ZZPL čl. 49")
+                        && osnov_line.contains(
+                            "sarađuje sa Poverenikom u vršenju njegovih \
+                             ovlašćenja"
+                        ),
+                    "the osnov for handing the izvod over is čl. 49, got {osnov_line}"
+                );
+                let uzor_line = csv
+                    .lines()
+                    .find(|line| line.contains("ZZPL čl. 48 st. 4"))
+                    .expect("the izvod names the model it was built on");
+                assert!(
+                    uzor_line.starts_with("Uzor za izvod,")
+                        && uzor_line.contains(
+                            "obavezuje nadležni organ, pa je ovde uzor, a ne \
+                             osnov"
+                        ),
+                    "čl. 48 st. 4 is the uzor, never the osnov, got {uzor_line}"
+                );
                 // The čl. 48 st. 3 purpose lock, verbatim (req. 5).
                 for svrha in [
                     "ocena zakonitosti obrade",
