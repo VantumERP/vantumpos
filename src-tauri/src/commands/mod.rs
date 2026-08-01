@@ -9,6 +9,7 @@ pub mod health;
 pub mod imports;
 pub mod inventory;
 pub mod kep;
+pub mod personnel;
 pub mod receipts;
 pub mod reklamacije;
 pub mod reports;

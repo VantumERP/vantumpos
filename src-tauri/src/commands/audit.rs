@@ -759,7 +759,11 @@ const CHAIN_COLUMNS: &str = "id, at, actor_user_id, action, object_type, object_
 /// legitimate purge reports a break indistinguishable from tampering.
 ///
 /// Absent, the anchor is genesis: nothing has been purged yet.
-const PURGE_ANCHOR_KEY: &str = "audit_chain_anchor";
+///
+/// `pub(crate)` because the purge that writes it lives in
+/// [`crate::commands::personnel`]: the key is a contract between two modules,
+/// and a contract spelled out twice is one that drifts silently.
+pub(crate) const PURGE_ANCHOR_KEY: &str = "audit_chain_anchor";
 
 fn purge_anchor(conn: &Connection) -> Result<(String, i64), AppError> {
     let stored = conn

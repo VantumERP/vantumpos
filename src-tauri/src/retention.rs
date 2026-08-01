@@ -24,15 +24,29 @@
 //! takes two clocks — the shared row, and the recorded day's own three years,
 //! because that floor binds each row rather than the class.
 //!
+//! **`personnel`** (SW-13 class A). The ZEOR čl. 5 evidencija o zaposlenim
+//! licima. `trajno` on čl. 7 st. 2, `never_purge = 1`, and req. 26 gives the
+//! category **no configurable period at all** — `extend_retain_until` refuses
+//! it, and `commands::personnel::PurgeableClass` has no variant that names it.
+//!
+//! **`credentials`** (SW-13 class C). The PIN and password hashes. Discarded at
+//! the termination itself and not after a window (req. 21), so the class row is
+//! here to let a legal hold stop the sweep — not to time it.
+//!
+//! **`access_log`** (SW-13 class C). The čl. 48 evidencija pristupa, on
+//! [`ACCESS_LOG_RETENTION_YEARS`] and never `trajno` (req. 6, 22). Two clocks
+//! again: the class row and the row's own day, the second applied through
+//! [`expiry_cutoff`] where the cut is made.
+//!
 //! **The direction of the trade-off, once.** Under-retention outranks
 //! over-retention for this shop: the ZEOR čl. 50 st. 1 tač. 3 offence is *"ako
 //! ne čuva trajno"*. Every decision here therefore fails safe toward KEEPING —
 //! an unreadable date, a missing floor and an absent policy row all refuse the
 //! purge rather than allow it.
 //!
-//! The purge job itself is SW-13's, a later cycle; this module ships the table,
-//! the classes and the guard the go-live reset already needs, so several items
-//! here have no non-test caller yet.
+//! The purge job that reads these rows is `commands::personnel`; this module
+//! ships the table, the classes, the date arithmetic and the transaction fence,
+//! and some of it (the worktime gates) still has no non-test caller.
 
 #![allow(dead_code)]
 
@@ -52,6 +66,24 @@ use crate::state::AppState;
 /// „6 godina“ is Croatian law; neither may ever be surfaced, and neither is a
 /// figure this constant may be lowered to.
 pub const STANDALONE_OVERTIME_LOG_FLOOR_YEARS: i32 = 3;
+
+/// SW-13 req. 22 + SW-10 req. 6. How long a line in the access evidencija is
+/// kept before the time-driven purge may discard it.
+///
+/// **Two requirements meet on this number and the higher one wins.** Req. 22
+/// calls a one-year default defensible on ZoP čl. 84 st. 1 (relativna
+/// zastarelost) and names three years (ZoR čl. 196) as the defensible outer
+/// bound. Req. 6 is stricter: the floor must sit above the whole ZoP čl. 84
+/// window, whose *apsolutna* leg is two years — a log discarded at one year
+/// cannot serve the čl. 48 st. 3 purpose *ocena zakonitosti obrade* during the
+/// second year of a prekršaj proceeding that is still running.
+///
+/// Two years, therefore, and not three: ZZPL čl. 5 st. 1 t. 5 makes the shortest
+/// defensible period the right *default*, and the shop can push the class floor
+/// forward (never back) if it needs longer. **Never `trajno`** — čl. 47 st. 7
+/// governs the register of processing activities, and copying it onto this log
+/// would put the product in permanent breach of storage limitation (req. 6).
+pub const ACCESS_LOG_RETENTION_YEARS: i32 = 2;
 
 /// The tables no purge, reset, restore or backup-prune path may ever reduce
 /// (§4d: *"the trajno classes must be structurally unreachable"*).
@@ -84,10 +116,18 @@ pub const STANDALONE_OVERTIME_LOG_FLOOR_YEARS: i32 = 3;
 /// SW-13 comes to discard superseded versions it must **narrow what is counted**
 /// — to the live `MAX(verzija)` rows, or to the trajno subset — and never
 /// weaken or remove the fence to get there.
+///
+/// `personnel_records` joins the list with SW-13 (req. 19, 24): the ZEOR čl. 5
+/// evidencija is class A, it is kept `trajno` under čl. 7 st. 2, and no purge,
+/// reset or deactivation may reduce it. v18's `BEFORE DELETE` trigger already
+/// refuses a row-level delete; this entry is the transaction-level half, so a
+/// future edit that finds a way around the trigger still aborts the whole
+/// transaction instead of committing a shortened register.
 pub const NEVER_PURGE_TABLES: &[&str] = &[
     "work_time_entries",
     "work_time_periods",
     "retention_policies",
+    "personnel_records",
 ];
 
 /// A record class as the shared table stores it.
@@ -98,12 +138,10 @@ pub const NEVER_PURGE_TABLES: &[&str] = &[
 ///
 /// [`key`]: RecordClass::key
 /// [`from_key`]: RecordClass::from_key
-// Every class this cycle ships belongs to the working-time feature, which is the
-// only reason the variants share a prefix. It is not noise: this is the shared
-// table SW11-SW15 §3 req. 42 mandates, SW-3 and SW-13 add their own classes to
-// the same enum, and a bare `RecordClass::Classification` would then say nothing
-// about which record it classifies.
-#[allow(clippy::enum_variant_names)]
+// The three working-time variants share a prefix because a bare
+// `RecordClass::Classification` would say nothing about which record it
+// classifies; this is the shared table SW11-SW15 §3 req. 42 mandates and every
+// feature adds its classes to it. SW-13's three follow below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordClass {
@@ -113,13 +151,28 @@ pub enum RecordClass {
     WorktimeOvertimeLog,
     /// Class B — entry drafts and advisory clock data, bounded by the close.
     WorktimeDraft,
+    /// SW-13 class A — the ZEOR čl. 5 evidencija o zaposlenim licima. `trajno`
+    /// under čl. 7 st. 2, and req. 26 gives it **no configurable period at all**:
+    /// `retain_until` stays `NULL` and [`extend_retain_until`] refuses it.
+    Personnel,
+    /// SW-13 class C, the credential half — the PIN and password hashes.
+    /// Discarded **at termination**, not after a window (req. 21).
+    Credentials,
+    /// SW-13 class C, the access half — the čl. 48 evidencija pristupa.
+    /// [`ACCESS_LOG_RETENTION_YEARS`], never `trajno` (req. 6, 22). This app
+    /// keeps no separate login history: `users.last_login_at` is one current
+    /// value overwritten on each sign-in, not a stream a purge could shorten.
+    AccessLog,
 }
 
 impl RecordClass {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 6] = [
         Self::WorktimeClassification,
         Self::WorktimeOvertimeLog,
         Self::WorktimeDraft,
+        Self::Personnel,
+        Self::Credentials,
+        Self::AccessLog,
     ];
 
     /// The `record_class` value stored in `retention_policies`.
@@ -128,6 +181,9 @@ impl RecordClass {
             Self::WorktimeClassification => "worktime_classification",
             Self::WorktimeOvertimeLog => "worktime_overtime_log",
             Self::WorktimeDraft => "worktime_draft",
+            Self::Personnel => "personnel",
+            Self::Credentials => "credentials",
+            Self::AccessLog => "access_log",
         }
     }
 
@@ -137,8 +193,12 @@ impl RecordClass {
 
     /// ZEOR čl. 7 st. 2 / čl. 25 st. 3 — `trajno`. A class that answers `true`
     /// here is unreachable by every purge, whatever date anything else stores.
+    ///
+    /// [`Self::Personnel`] answers `true` on the same article: čl. 7 st. 2 is
+    /// the retention rule for the evidencija o zaposlenim licima itself, and
+    /// req. 26 forbids a configurable period for the category outright.
     pub fn never_purge(self) -> bool {
-        matches!(self, Self::WorktimeClassification)
+        matches!(self, Self::WorktimeClassification | Self::Personnel)
     }
 
     /// The floor the class is seeded with.
@@ -155,11 +215,22 @@ impl RecordClass {
     /// floor is a per-record obligation, and [`overtime_log_purge_eligible`] is
     /// the gate that applies `retention_floor(record_day, …)` to the row's own
     /// `dan`. SW-13 must call that, not this stored value alone.
+    /// SW-13's three follow the same two shapes. `Personnel` gets `NULL` for the
+    /// same reason Class A does, and req. 26 additionally bars any date from ever
+    /// being written there. `Credentials` gets the seeding day, because the thing
+    /// that discards a credential is the *termination event* and not a calendar
+    /// window (req. 21) — the class row exists so a legal hold can still stop the
+    /// sweep, not to time it. `AccessLog` gets the seeding day plus
+    /// [`ACCESS_LOG_RETENTION_YEARS`], and — exactly like the overtime log — that
+    /// class-wide floor is necessary but never sufficient: the per-row gate is
+    /// [`expiry_cutoff`] applied to each row's own day by
+    /// `commands::personnel::expire_access_log`, which is where the cut is made.
     fn seed_retain_until(self, now: &str) -> Option<String> {
         match self {
-            Self::WorktimeClassification => None,
+            Self::WorktimeClassification | Self::Personnel => None,
             Self::WorktimeOvertimeLog => retention_floor(now, STANDALONE_OVERTIME_LOG_FLOOR_YEARS),
-            Self::WorktimeDraft => parse_iso_date(date_only(now)).map(iso_date),
+            Self::WorktimeDraft | Self::Credentials => parse_iso_date(date_only(now)).map(iso_date),
+            Self::AccessLog => retention_floor(now, ACCESS_LOG_RETENTION_YEARS),
         }
     }
 
@@ -179,6 +250,15 @@ impl RecordClass {
             }
             Self::WorktimeDraft => {
                 "Radne verzije unosa i pomoćni podaci o vremenu. Brišu se tek pošto je period zatvoren i klasifikacija izvedena (ZZPL čl. 5 st. 1 tač. 5)."
+            }
+            Self::Personnel => {
+                "Evidencija o zaposlenim licima (ZEOR čl. 5). Čuva se trajno (ZEOR čl. 7 st. 2) i rok se ne podešava. Aplikacija je izuzima iz automatskog čišćenja, iz deaktivacije naloga i iz resetovanja podataka. Vraćanje iz rezervne kopije vraća celu bazu na stanje iz te kopije, pa i ovu evidenciju — zaštita na tom putu je rezervna kopija zatečenog stanja koju aplikacija napravi pre vraćanja. Automatsko čišćenje starih rezervnih kopija ne postoji."
+            }
+            Self::Credentials => {
+                "PIN i lozinka (samo heš vrednosti). Uklanjaju se danom prestanka radnog odnosa, a ne po isteku roka (ZZPL čl. 5 st. 1 tač. 5 i čl. 42 st. 2). Automatsko čišćenje uklanja heš sa svakog deaktiviranog naloga; sam nalog i evidencija o zaposlenom ostaju."
+            }
+            Self::AccessLog => {
+                "Evidencija pristupa podacima o ličnosti (ZZPL čl. 48). Aplikacija ne vodi zasebnu istoriju prijavljivanja — beleži se samo poslednja prijava na nalogu, koja se prepisuje pri svakoj sledećoj. Zakon ne propisuje rok; primenjuje se podrazumevani rok od dve godine, koji nadživljava ceo rok zastarelosti iz ZoP čl. 84. Odbranjiva gornja granica je tri godine (ZoR čl. 196). Rok se pomera samo unapred. Ova evidencija se ne čuva trajno."
             }
         }
     }
@@ -484,14 +564,36 @@ pub fn retention_floor(day: &str, years: i32) -> Option<String> {
         .map(iso_date)
 }
 
+/// `day` shifted **backwards** by `years`, as `gggg-MM-dd` — the oldest day a
+/// bounded class may still keep. A record whose own day is strictly earlier than
+/// the cutoff has outlived its period.
+///
+/// This is [`retention_floor`] read from the other end, and the leap-day
+/// fallback therefore goes the other way: a 29 February cutoff falls back to
+/// **28 February**, the EARLIER day, so the boundary moves toward keeping one
+/// more day rather than discarding one day early. That is the same direction the
+/// module note fixes for every decision here.
+///
+/// `None` when `day` is not a readable calendar day — the caller then has no
+/// cutoff, and no cutoff means keep.
+pub fn expiry_cutoff(day: &str, years: i32) -> Option<String> {
+    let date = parse_iso_date(date_only(day))?;
+    let godina = date.year().checked_sub(years)?;
+
+    Date::from_calendar_date(godina, date.month(), date.day())
+        .or_else(|_| Date::from_calendar_date(godina, Month::February, 28))
+        .ok()
+        .map(iso_date)
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::params;
 
     use super::{
-        draft_purge_eligible, extend_retain_until, is_purgeable, load_policy,
+        draft_purge_eligible, expiry_cutoff, extend_retain_until, is_purgeable, load_policy,
         overtime_log_purge_eligible, retention_floor, seed_retention_policies, RecordClass,
-        RetentionPolicy, STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
+        RetentionPolicy, ACCESS_LOG_RETENTION_YEARS, STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -795,6 +897,33 @@ mod tests {
         assert_eq!(retention_floor("", 3), None);
     }
 
+    /// SW-13 req. 22 / SW-10 req. 6. The access log's period, and the direction
+    /// its boundary moves — which is the opposite of a floor's, because it is the
+    /// same axis read from the other end.
+    #[test]
+    fn the_access_log_cutoff_is_two_years_and_leans_toward_keeping() {
+        assert_eq!(ACCESS_LOG_RETENTION_YEARS, 2);
+        assert_eq!(
+            expiry_cutoff("2029-08-01", ACCESS_LOG_RETENTION_YEARS).as_deref(),
+            Some("2027-08-01"),
+            "a line stamped before this day has outlived the period"
+        );
+        assert_eq!(
+            expiry_cutoff("2029-08-01T03:00:00Z", ACCESS_LOG_RETENTION_YEARS).as_deref(),
+            Some("2027-08-01"),
+            "an RFC3339 stamp reduces to its calendar day"
+        );
+        // 29 February has no counterpart two common years back. It falls to 28
+        // February — the EARLIER day, which keeps one more day of the log rather
+        // than discarding one day early.
+        assert_eq!(
+            expiry_cutoff("2028-02-29", ACCESS_LOG_RETENTION_YEARS).as_deref(),
+            Some("2026-02-28")
+        );
+        assert_eq!(expiry_cutoff("2029-8-1", 2), None);
+        assert_eq!(expiry_cutoff("", 2), None);
+    }
+
     #[test]
     fn every_record_class_round_trips_through_its_stored_key() {
         for class in RecordClass::ALL {
@@ -948,7 +1077,11 @@ mod tests {
                     row.get(0)
                 })
                 .expect("count should query");
-            assert_eq!(count, 3, "seeding is idempotent, never duplicating a class");
+            assert_eq!(
+                count,
+                RecordClass::ALL.len() as i64,
+                "seeding is idempotent, never duplicating a class"
+            );
 
             let log = load_policy(&connection, RecordClass::WorktimeOvertimeLog)
                 .expect("the class must load");

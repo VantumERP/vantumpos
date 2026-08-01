@@ -68,6 +68,17 @@ pub fn run() {
             // never reads one.
             retention::seed_retention_policies(&state_for_launch, &clock::utc_now()?)?;
 
+            // SW-13 req. 23: the čl. 5 st. 1 tač. 5 purge is a proactive
+            // rukovalac duty, so it is time-driven and runs here rather than
+            // behind a command a person has to remember to press. Best-effort
+            // for the same reason the backup below is: a shop that cannot tidy
+            // its expired credentials must still be able to open its till, and
+            // the failure direction is toward KEEPING records, never toward
+            // losing them. Class A is unreachable from it by construction —
+            // `PurgeableClass` has no variant for the ZEOR register.
+            let _ =
+                commands::personnel::purge_expired_classes(&state_for_launch, &clock::utc_now()?);
+
             // Best-effort automatic backup: a failure here is already
             // recorded as a failed backup_job and must never prevent the
             // app from opening.
@@ -84,6 +95,12 @@ pub fn run() {
             std::thread::spawn(move || loop {
                 std::thread::sleep(commands::backup::AUTO_BACKUP_INTERVAL);
                 let _ = commands::backup::auto_backup_if_due(&state_for_timer);
+                // A till that stays open for weeks would otherwise only purge on
+                // the next restart, which is not „time-driven“ in any sense a
+                // čl. 5 st. 1 tač. 5 review would accept.
+                if let Ok(now) = clock::utc_now() {
+                    let _ = commands::personnel::purge_expired_classes(&state_for_timer, &now);
+                }
             });
 
             Ok(())
@@ -222,7 +239,13 @@ pub fn run() {
             // owner-editable audit log proves nothing, and proving something is
             // the entire reason it exists.
             commands::audit::audit_search,
-            commands::audit::audit_export_csv
+            commands::audit::audit_export_csv,
+            // SW-13 class A. Req. 24: there is deliberately no delete command
+            // here, and the time-driven purge is not a command at all — it is
+            // called from the launch and timer path above, because čl. 5 st. 1
+            // tač. 5 is a proactive duty and not a request the webview makes.
+            commands::personnel::personnel_get,
+            commands::personnel::personnel_save
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
