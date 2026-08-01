@@ -153,7 +153,8 @@ const cashDepositReport: CashDepositReport = {
   },
   footer:
     "Zbir po danu prometa je konvencija ove aplikacije, a ne zakonska kategorija. " +
-    "Gotovina podignuta sa tekućeg računa radnje izuzeta je iz osnovice po Pravilniku 77/2011 čl. 5 st. 2. " +
+    "Iz osnovice je izuzeta samo ona gotovina podignuta sa tekućeg računa radnje za koju je " +
+    "zabeleženo da je isplaćena u skladu sa Pravilnikom 77/2011 čl. 2 st. 2 ili čl. 2 st. 3. " +
     "Izveštaj je informativan: nadzor vrši Poreska uprava, a rok ne blokira prodaju, zatvaranje smene ni fiskalizaciju.",
 };
 
