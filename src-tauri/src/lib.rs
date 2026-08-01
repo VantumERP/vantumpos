@@ -1,5 +1,6 @@
 mod aml;
 mod app_error;
+mod audit;
 mod campaign_evidence;
 mod campaigns;
 mod cash_deposit;
