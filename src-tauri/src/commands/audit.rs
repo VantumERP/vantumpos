@@ -492,6 +492,21 @@ mod tests {
         }
     }
 
+    /// A draft that is well-formed in every respect except the field under test,
+    /// so a refusal can only have come from the field under test.
+    fn forbidden_draft(object_id: &str) -> AuditDraft {
+        AuditDraft {
+            at: "2026-08-01T09:00:00Z".to_string(),
+            actor_user_id: None,
+            action: AuditAction::Unos,
+            object_type: AuditObjectType::SupportSession,
+            object_id: object_id.to_string(),
+            reason_code: None,
+            recipient: None,
+            support_session_id: None,
+        }
+    }
+
     /// Every `audit_events` row, oldest first, as (action, object_type,
     /// object_id, reason, recipient, actor, session, prev_hash, hash).
     #[allow(clippy::type_complexity)]
@@ -890,37 +905,109 @@ mod tests {
         });
     }
 
+    /// Req. 4 is enforced at the write boundary or it is enforced nowhere.
+    /// [`reject_forbidden_content`] is unit-tested as a pure function in
+    /// `audit.rs`; this test pins the fact that the function that actually
+    /// touches the table still calls it — and honours the answer.
+    ///
+    /// The transaction is committed rather than dropped, so a refusal that
+    /// leaked a row would be caught as a persisted row and not merely as a
+    /// rolled-back one.
+    #[test]
+    fn the_write_boundary_refuses_forbidden_content_before_the_row_lands() {
+        with_state(
+            "the_write_boundary_refuses_forbidden_content_before_the_row_lands",
+            |state| {
+                let mut connection = state.db().open().expect("database should open");
+                let tx = connection.transaction().expect("transaction should begin");
+
+                // A JMBG-shaped run and a Luhn-passing PAN — the two shapes req. 4
+                // names first. Neither may reach `audit_events` through this door.
+                for object_id in ["0101990710015", "4111111111111111"] {
+                    let error = append_audit_event(&tx, &forbidden_draft(object_id))
+                        .expect_err("the write boundary must refuse this id");
+                    assert_eq!(error.code(), "audit_forbidden_content", "for {object_id}");
+                }
+
+                // The čl. 48 st. 2 leg of the same gate: an otkrivanje with no
+                // class of primalac is not the record the article describes.
+                let error = append_audit_event(
+                    &tx,
+                    &AuditDraft {
+                        action: AuditAction::Otkrivanje,
+                        reason_code: Some(AuditReason::TehnickaPodrska),
+                        recipient: None,
+                        ..forbidden_draft("1")
+                    },
+                )
+                .expect_err("an otkrivanje without a primalac must be refused");
+                assert_eq!(error.code(), "audit_missing_recipient");
+
+                tx.commit().expect("the transaction should commit");
+                drop(connection);
+
+                assert!(
+                    audit_rows(state).is_empty(),
+                    "a refused draft must not reach audit_events at all"
+                );
+            },
+        );
+    }
+
     /// A refused write must leave nothing behind — neither the domain row nor a
     /// half-written log line. The two share one transaction.
+    ///
+    /// The failure has to land BETWEEN the two writes, so it is injected at the
+    /// only seam `grant_access` itself can trip: the audit line's `object_id` is
+    /// the new nalog's id, and the write boundary refuses a run of nine or more
+    /// digits. Seeding the table so the next AUTOINCREMENT id is ten digits
+    /// makes the nalog's own log line unwritable — the domain INSERT has already
+    /// happened when the refusal arrives, which is exactly the window the shared
+    /// transaction exists to close.
     #[test]
     fn the_audit_line_and_the_nalog_share_one_transaction() {
         with_state(
             "the_audit_line_and_the_nalog_share_one_transaction",
             |state| {
-                sign_in_admin(state);
+                let admin_id = sign_in_admin(state);
 
-                let before: i64 = state
+                // Closed, so it is not a live nalog standing in the way; its only
+                // job is to push `sqlite_sequence` up to the last nine-digit id.
+                state
                     .db()
                     .open()
                     .expect("database should open")
-                    .query_row("SELECT COUNT(*) FROM support_sessions", [], |row| {
-                        row.get(0)
-                    })
-                    .expect("count should read");
-                assert_eq!(before, 0);
+                    .execute(
+                        "INSERT INTO support_sessions
+                             (id, granted_by, granted_at, scope, expires_at,
+                              revoked_at, revoked_by, created_at, updated_at)
+                         VALUES (999999999, ?1, '2026-07-01T09:00:00Z', 'Ranija sesija',
+                                 '2026-07-01T10:00:00Z', '2026-07-01T09:30:00Z', ?1,
+                                 '2026-07-01T09:00:00Z', '2026-07-01T09:30:00Z')",
+                        params![admin_id],
+                    )
+                    .expect("the seed session should insert");
 
-                grant_access(state, grant_request(), "2026-08-01T09:00:00Z").expect("nalog issues");
+                let error = grant_access(state, grant_request(), "2026-08-01T09:00:00Z")
+                    .expect_err("a nalog whose log line cannot be written must not be issued");
+                assert_eq!(error.code(), "audit_forbidden_content");
 
-                let sessions: i64 = state
-                    .db()
-                    .open()
-                    .expect("database should open")
-                    .query_row("SELECT COUNT(*) FROM support_sessions", [], |row| {
-                        row.get(0)
-                    })
+                let connection = state.db().open().expect("database should open");
+                let sessions: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM support_sessions WHERE id <> 999999999",
+                        [],
+                        |row| row.get(0),
+                    )
                     .expect("count should read");
-                assert_eq!(sessions, 1);
-                assert_eq!(audit_rows(state).len(), 1);
+                assert_eq!(
+                    sessions, 0,
+                    "the nalog must roll back with the log line it could not write"
+                );
+                assert!(
+                    audit_rows(state).is_empty(),
+                    "and no half-written log line may survive either"
+                );
             },
         );
     }
