@@ -15,6 +15,7 @@ pub mod sales;
 pub mod settings;
 pub mod shifts;
 pub mod users;
+pub mod worktime;
 
 #[cfg(test)]
 mod auth_shift_tests {

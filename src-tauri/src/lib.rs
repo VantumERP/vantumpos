@@ -189,7 +189,13 @@ pub fn run() {
             commands::backup::backup_restore,
             commands::backup::backup_reset_trading_data,
             commands::backup::backup_list_jobs,
-            commands::backup::backup_set_passphrase
+            commands::backup::backup_set_passphrase,
+            commands::worktime::worktime_list_month,
+            commands::worktime::worktime_save_entry,
+            commands::worktime::worktime_correct_entry,
+            commands::worktime::worktime_close_period,
+            commands::worktime::worktime_export_csv,
+            commands::worktime::worktime_my_hours
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
