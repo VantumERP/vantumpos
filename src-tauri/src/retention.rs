@@ -20,7 +20,9 @@
 //!
 //! **`worktime_overtime_log`.** The standalone čl. 55 st. 6 overtime register
 //! considered apart from the wage record it feeds. No statute sets a period;
-//! the defensive floor is three years and moves only forward.
+//! the defensive floor is three years and moves only forward. Like Class B it
+//! takes two clocks — the shared row, and the recorded day's own three years,
+//! because that floor binds each row rather than the class.
 //!
 //! **The direction of the trade-off, once.** Under-retention outranks
 //! over-retention for this shop: the ZEOR čl. 50 st. 1 tač. 3 offence is *"ako
@@ -61,6 +63,15 @@ pub const STANDALONE_OVERTIME_LOG_FLOOR_YEARS: i32 = 3;
 /// list for a different reason: a wipe that took the classes with it would leave
 /// the next purge path with no policy at all, which is exactly the state req. 42
 /// exists to prevent.
+///
+/// **The granularity is deliberate.** [`never_purge_row_counts`] compares whole
+/// tables, so the superseded `verzija > 1` links of the v17 correction chain are
+/// fenced too — even though §4d files edit trails beyond defence needs under
+/// ZZPL čl. 5 st. 1 tač. 5 as bounded-and-purged. That is the §4d trade-off taken
+/// on purpose (under-retention outranks over-retention), not an oversight. When
+/// SW-13 comes to discard superseded versions it must **narrow what is counted**
+/// — to the live `MAX(verzija)` rows, or to the trajno subset — and never
+/// weaken or remove the fence to get there.
 pub const NEVER_PURGE_TABLES: &[&str] = &[
     "work_time_entries",
     "work_time_periods",
@@ -125,6 +136,13 @@ impl RecordClass {
     /// than `NULL` — it has no calendar floor of its own (the period close is
     /// its gate), and giving it an explicit past date keeps `NULL` meaning one
     /// single thing everywhere in this table: *nema roka, ne briši*.
+    ///
+    /// The overtime log's floor is three years from the **seeding day** — the day
+    /// the shop first launched, which is no record's date. It is the class-wide
+    /// earliest-possible day and is necessary but never sufficient: req. 20's
+    /// floor is a per-record obligation, and [`overtime_log_purge_eligible`] is
+    /// the gate that applies `retention_floor(record_day, …)` to the row's own
+    /// `dan`. SW-13 must call that, not this stored value alone.
     fn seed_retain_until(self, now: &str) -> Option<String> {
         match self {
             Self::WorktimeClassification => None,
@@ -231,6 +249,13 @@ pub fn load_policy(conn: &Connection, class: RecordClass) -> Result<RetentionPol
 /// reached. A missing floor refuses too — see the module note on the direction
 /// of the trade-off. Dates compare lexicographically, which is exact on
 /// `gggg-MM-dd`, and `today` may be a full RFC3339 stamp.
+///
+/// This answers for the **class**, never for a row, and it is necessary but not
+/// sufficient wherever the obligation is anchored to the record itself:
+/// [`draft_purge_eligible`] adds the period close for Class B, and
+/// [`overtime_log_purge_eligible`] adds the record's own three-year floor for the
+/// overtime register. A purge job must call one of those — this alone would
+/// release every row in a class the moment the class row's date passed.
 pub fn is_purgeable(policy: &RetentionPolicy, today: &str) -> bool {
     if policy.never_purge || policy.legal_hold {
         return false;
@@ -328,6 +353,37 @@ pub fn draft_purge_eligible(
     Ok(status.as_deref() == Some("closed"))
 }
 
+/// The standalone čl. 55 st. 6 overtime register for **one recorded day**:
+/// two clocks again, and both must agree (§4d, req. 20).
+///
+/// The shared policy row is one — a legal hold or an unreached class floor stops
+/// this purge like it stops any other. The record's own `dan` is the second, and
+/// it is the one that binds in the long run: req. 20's three years are a
+/// *per-record* obligation, so a day entered yesterday is not discardable merely
+/// because the class row was seeded three years ago. Without this gate the class
+/// floor would answer `true` for the whole class forever from its anniversary
+/// onward, which inverts the one axis §4d says must never be inverted. The
+/// repo's own precedent is `kep_close::purge_eligible`, which anchors to the
+/// book's `closed_at` rather than to any global clock.
+///
+/// An unreadable `record_day` yields no floor, and no floor means keep.
+pub fn overtime_log_purge_eligible(
+    conn: &Connection,
+    record_day: &str,
+    today: &str,
+) -> Result<bool, AppError> {
+    let policy = load_policy(conn, RecordClass::WorktimeOvertimeLog)?;
+    if !is_purgeable(&policy, today) {
+        return Ok(false);
+    }
+
+    let Some(floor) = retention_floor(record_day, STANDALONE_OVERTIME_LOG_FLOOR_YEARS) else {
+        return Ok(false);
+    };
+
+    Ok(date_only(today) >= floor.as_str())
+}
+
 /// Row counts of [`NEVER_PURGE_TABLES`], taken **before** a destructive
 /// operation and handed back to [`assert_never_purge_intact`] before it commits.
 ///
@@ -400,8 +456,9 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        draft_purge_eligible, extend_retain_until, is_purgeable, load_policy, retention_floor,
-        seed_retention_policies, RecordClass, STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
+        draft_purge_eligible, extend_retain_until, is_purgeable, load_policy,
+        overtime_log_purge_eligible, retention_floor, seed_retention_policies, RecordClass,
+        RetentionPolicy, STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -456,6 +513,34 @@ mod tests {
                 "never_purge wins over any date"
             );
         });
+    }
+
+    /// §4d states the direction of the trade-off once, so the purge design
+    /// „cannot get it backwards“: *an unreadable date, a missing floor and an
+    /// absent policy row all refuse the purge rather than allow it.*
+    ///
+    /// No seeded class reaches the missing-floor branch on its own — Class A
+    /// short-circuits on `never_purge`, and Class B and the overtime log both
+    /// carry a concrete date — so the fail-safe is asserted directly on a
+    /// constructed row. Flipping `None => false` to `None => true` in
+    /// [`is_purgeable`] must fail here.
+    #[test]
+    fn a_class_with_no_recorded_floor_refuses_the_purge() {
+        let no_floor = RetentionPolicy {
+            record_class: RecordClass::WorktimeDraft,
+            retain_until: None,
+            legal_hold: false,
+            never_purge: false,
+        };
+
+        assert!(
+            !is_purgeable(&no_floor, "9999-12-31"),
+            "§4d — a missing floor means keep, whatever day it is"
+        );
+        assert!(
+            !is_purgeable(&no_floor, "2026-08-01"),
+            "§4d — a missing floor means keep, whatever day it is"
+        );
     }
 
     #[test]
@@ -586,6 +671,71 @@ mod tests {
                 !draft_purge_eligible(&connection, 800, 2026, 8, "2026-09-01")
                     .expect("eligibility should query"),
                 "a legal hold outranks the close"
+            );
+        });
+    }
+
+    /// Req. 20's three years are a **per-record** obligation, so the class row
+    /// alone must never release a day that is younger than its own floor. The
+    /// stored class floor is three years from the day the shop first launched —
+    /// an earliest-possible date for the class, not a date for any record — and
+    /// the record's own `dan` is the second clock, exactly as
+    /// `kep_close::purge_eligible` anchors to the book's `closed_at`.
+    #[test]
+    fn the_overtime_log_needs_both_the_class_floor_and_the_records_own_day() {
+        with_state("retention_overtime_log_two_clocks", |state| {
+            seed_retention_policies(state, "2026-08-01T08:00:00Z").expect("classes should seed");
+            let connection = state.db().open().expect("database should open");
+
+            // The class floor is 2029-08-01. A day recorded on 2029-07-31 is one
+            // day old when that anniversary lands, and must survive it.
+            assert!(
+                !overtime_log_purge_eligible(&connection, "2029-07-31", "2029-08-01")
+                    .expect("eligibility should query"),
+                "req. 20 anchors the three years to the record, not to the launch day"
+            );
+            assert!(
+                !overtime_log_purge_eligible(&connection, "2029-07-31", "2032-07-30")
+                    .expect("eligibility should query"),
+                "the day before the record's own floor is still too early"
+            );
+            assert!(
+                overtime_log_purge_eligible(&connection, "2029-07-31", "2032-07-31")
+                    .expect("eligibility should query"),
+                "both clocks have run out"
+            );
+
+            // The class clock still binds on its own: an old record may not leave
+            // before the class floor either.
+            assert!(
+                !overtime_log_purge_eligible(&connection, "2026-08-01", "2029-07-31")
+                    .expect("eligibility should query"),
+                "the class floor has not been reached"
+            );
+            assert!(
+                overtime_log_purge_eligible(&connection, "2026-08-01", "2029-08-01")
+                    .expect("eligibility should query"),
+                "here the two clocks land on the same day"
+            );
+
+            // An unreadable day yields no floor, and no floor means keep (§4d).
+            assert!(
+                !overtime_log_purge_eligible(&connection, "31.07.2029.", "9999-12-31")
+                    .expect("eligibility should query"),
+                "§4d — a date that cannot be read refuses the purge"
+            );
+
+            // The shared row is the other clock, and it outranks the record's age.
+            connection
+                .execute(
+                    "UPDATE retention_policies SET legal_hold = 1 WHERE record_class = ?1",
+                    params![RecordClass::WorktimeOvertimeLog.key()],
+                )
+                .expect("legal hold should store");
+            assert!(
+                !overtime_log_purge_eligible(&connection, "2029-07-31", "9999-12-31")
+                    .expect("eligibility should query"),
+                "a legal hold outranks both clocks"
             );
         });
     }
