@@ -598,21 +598,44 @@ ALTER TABLE cash_movements ADD COLUMN documented_per_pravilnik INTEGER
         version: 17,
         name: "worktime_records_and_retention",
         sql: r#"
-ALTER TABLE users ADD COLUMN datum_rodjenja TEXT;
-ALTER TABLE users ADD COLUMN datum_rodjenja_najmladjeg_deteta TEXT;
+-- Every ISO date column carries a GLOB shape check. '2026-8-3' and '2026-08-03'
+-- are the same calendar day to a human and two different keys to SQLite, which
+-- would open a second slot per (zaposleni, dan) and drop those minutes out of the
+-- čl. 53 weekly bucket.
+ALTER TABLE users ADD COLUMN datum_rodjenja TEXT CHECK (datum_rodjenja IS NULL OR datum_rodjenja GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
+ALTER TABLE users ADD COLUMN datum_rodjenja_najmladjeg_deteta TEXT CHECK (datum_rodjenja_najmladjeg_deteta IS NULL OR datum_rodjenja_najmladjeg_deteta GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
 ALTER TABLE users ADD COLUMN samohrani_roditelj INTEGER CHECK (samohrani_roditelj IS NULL OR samohrani_roditelj IN (0, 1));
+-- ZoR čl. 91 st. 2 has TWO legs: „dete do sedam godina života“ ILI „dete koje je
+-- težak invalid“. The second leg carries no age limit, so it needs its own flag —
+-- without it a samohrani roditelj of a disabled child aged 8+ gets no consent gate.
+ALTER TABLE users ADD COLUMN dete_tezak_invalid INTEGER CHECK (dete_tezak_invalid IS NULL OR dete_tezak_invalid IN (0, 1));
 ALTER TABLE users ADD COLUMN trudnoca_ili_dojenje INTEGER CHECK (trudnoca_ili_dojenje IS NULL OR trudnoca_ili_dojenje IN (0, 1));
-ALTER TABLE users ADD COLUMN trudnoca_ili_dojenje_od TEXT;
+ALTER TABLE users ADD COLUMN trudnoca_ili_dojenje_od TEXT CHECK (trudnoca_ili_dojenje_od IS NULL OR trudnoca_ili_dojenje_od GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
 ALTER TABLE users ADD COLUMN radi_u_preraspodeli INTEGER NOT NULL DEFAULT 0 CHECK (radi_u_preraspodeli IN (0, 1));
 ALTER TABLE users ADD COLUMN ugovoreno_radno_vreme_minuta_nedeljno INTEGER;
 ALTER TABLE users ADD COLUMN zanimanje_sifra TEXT;
 ALTER TABLE users ADD COLUMN kvalifikacija_sifra TEXT;
-ALTER TABLE users ADD COLUMN saglasnost_prekovremeni_od TEXT;
+-- Two legally distinct written consents. They are NOT interchangeable and must
+-- never be read for each other's purpose:
+--   saglasnost_prekovremeni_od — ZoR čl. 91: a protected parent consenting to
+--     prekovremeni/noćni rad.
+--   saglasnost_preraspodela_od — ZoR čl. 57 st. 4: a zaposleni „koji se saglasio“
+--     to average longer in preraspodela, so hours above the average are computed
+--     and paid as prekovremeni rad.
+-- Neither is a ZZPL pristanak. The column records that a written consent exists
+-- and from when; it does not collect one, and no consent UI belongs anywhere in
+-- the employee surface.
+ALTER TABLE users ADD COLUMN saglasnost_prekovremeni_od TEXT CHECK (saglasnost_prekovremeni_od IS NULL OR saglasnost_prekovremeni_od GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
+ALTER TABLE users ADD COLUMN saglasnost_preraspodela_od TEXT CHECK (saglasnost_preraspodela_od IS NULL OR saglasnost_preraspodela_od GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
 
 CREATE TABLE work_time_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
-    dan TEXT NOT NULL,
+    dan TEXT NOT NULL CHECK (dan GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    -- The correction chain is strictly linear: verzija 1 is the original and every
+    -- ispravka appends verzija + 1. The live row for a day is MAX(verzija), which
+    -- makes „the live row“ a well-defined query without a single UPDATE anywhere.
+    verzija INTEGER NOT NULL DEFAULT 1 CHECK (verzija >= 1),
     moguci_minuta INTEGER NOT NULL DEFAULT 0 CHECK (moguci_minuta >= 0),
     ukupno_ostvareni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (ukupno_ostvareni_minuta >= 0),
     efektivno_izvrseni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (efektivno_izvrseni_minuta >= 0),
@@ -636,16 +659,56 @@ CREATE TABLE work_time_entries (
         'sprecenost_poslodavac', 'sprecenost_rfzo', 'porodiljsko', 'neplaceno_odsustvo',
         'naknada_drugi_poslodavac', 'strajk'
     )),
-    cap_override_razlog TEXT,
+    -- NOT A LEGAL JUSTIFICATION. These are the ZoR čl. 53 st. 1 grounds on which
+    -- overtime may be ORDERED; recording one does not make a čl. 53 st. 2/3 cap
+    -- breach lawful. Closed enum, because no unconstrained TEXT may exist on this
+    -- table — see korekcija_razlog below.
+    cap_override_razlog TEXT CHECK (cap_override_razlog IS NULL OR cap_override_razlog IN (
+        'visa_sila', 'iznenadno_povecanje_obima_posla', 'neplanirani_posao_u_roku', 'drugo'
+    )),
     supersedes_id INTEGER REFERENCES work_time_entries(id),
-    korekcija_razlog TEXT,
+    -- ZERO free text on an absence row (§4 req. 3, §5 item 4). A free-text column
+    -- on the row that also carries kategorija_odsustva and the two sprečenost
+    -- buckets would eventually hold a diagnosis, an ICD code or a doznaka number,
+    -- on a shop-counter PC reachable over remote support. Closed enum, no escape.
+    korekcija_razlog TEXT CHECK (korekcija_razlog IS NULL OR korekcija_razlog IN (
+        'greska_u_unosu', 'ispravka_sati', 'ispravka_kategorije',
+        'naknadno_dostavljen_dokument', 'drugo'
+    )),
     unio_user_id INTEGER REFERENCES users(id),
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- A čl. 53 cap override is only meaningful on a worked day.
+    CHECK (kategorija_odsustva IS NULL OR cap_override_razlog IS NULL),
+    -- Chain root vs correction can never be confused.
+    CHECK ((supersedes_id IS NULL AND verzija = 1) OR (supersedes_id IS NOT NULL AND verzija > 1)),
+    -- ZEOR čl. 46 st. 1 puts accuracy responsibility on the record-keeper: a
+    -- correction to an append-only statutory record must carry who and why, and the
+    -- schema enforces it so no other write path can route around the command layer.
+    CHECK (supersedes_id IS NULL OR (unio_user_id IS NOT NULL AND korekcija_razlog IS NOT NULL))
 );
+-- Total, not partial. A partial index `WHERE supersedes_id IS NULL` would index
+-- only chain ROOTS and let two forked corrections both stay live for one day —
+-- one reporting a čl. 53 st. 2 breach and one not.
 CREATE UNIQUE INDEX idx_work_time_entries_user_day
-    ON work_time_entries(user_id, dan) WHERE supersedes_id IS NULL;
+    ON work_time_entries(user_id, dan, verzija);
 CREATE INDEX idx_work_time_entries_dan ON work_time_entries(dan);
+-- SQLite CHECK cannot subquery, so the „same employee, same day, next verzija“
+-- leg of the chain invariant is a trigger. Append-only: BEFORE INSERT only, no
+-- UPDATE and no DELETE anywhere in this schema.
+CREATE TRIGGER trg_work_time_entries_ispravka_isti_dan
+BEFORE INSERT ON work_time_entries
+WHEN NEW.supersedes_id IS NOT NULL
+     AND NOT EXISTS (
+         SELECT 1 FROM work_time_entries
+          WHERE id = NEW.supersedes_id
+            AND user_id = NEW.user_id
+            AND dan = NEW.dan
+            AND verzija = NEW.verzija - 1
+     )
+BEGIN
+    SELECT RAISE(ABORT, 'Ispravka mora da pripada istom zaposlenom i istom danu i da nastavlja prethodnu verziju.');
+END;
 
 CREATE TABLE work_time_periods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1575,12 +1638,17 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "datum_rodjenja",
                 "datum_rodjenja_najmladjeg_deteta",
                 "samohrani_roditelj",
+                // ZoR čl. 91 st. 2 has two legs; the težak-invalid leg has no age limit.
+                "dete_tezak_invalid",
                 "trudnoca_ili_dojenje",
                 "trudnoca_ili_dojenje_od",
                 "radi_u_preraspodeli",
                 "ugovoreno_radno_vreme_minuta_nedeljno",
                 "zanimanje_sifra",
                 "kvalifikacija_sifra",
+                // Two legally distinct written consents — čl. 91 and čl. 57 st. 4.
+                "saglasnost_prekovremeni_od",
+                "saglasnost_preraspodela_od",
             ] {
                 assert!(
                     column_exists(&conn, "users", column),
@@ -1624,7 +1692,8 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             // One row per (employee, date).
             conn.execute_batch(
                 "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
-                     VALUES (700, 'radnik7', 'Radnik Sedam', 'cashier', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+                     VALUES (700, 'radnik7', 'Radnik Sedam', 'cashier', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z'),
+                            (701, 'radnik8', 'Radnik Osam', 'cashier', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
                  INSERT INTO work_time_entries (user_id, dan, efektivno_izvrseni_minuta, created_at, updated_at)
                      VALUES (700, '2026-08-03', 480, '2026-08-03T18:00:00Z', '2026-08-03T18:00:00Z');",
             )
@@ -1650,6 +1719,155 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 .is_err(),
                 "an unknown absence category must be rejected by the CHECK"
             );
+
+            // §4 req. 3 / §5 item 4 — ZERO free text on an absence row. The correction
+            // reason is a closed enum, so a doznaka number and a diagnosis are
+            // structurally unrepresentable, not merely discouraged by review.
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, kategorija_odsustva, korekcija_razlog, supersedes_id, created_at, updated_at)
+                     VALUES (700, '2026-08-05', 'sprecenost_rfzo', 'ispravka — doznaka 1234/26, upala pluća', NULL, '2026-08-05T18:00:00Z', '2026-08-05T18:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a doznaka number and a diagnosis must be rejected by the korekcija_razlog enum"
+            );
+
+            // A čl. 53 cap override is only meaningful on a worked day — it must never
+            // ride on an absence row, and it is itself a closed enum.
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, kategorija_odsustva, cap_override_razlog, created_at, updated_at)
+                     VALUES (700, '2026-08-05', 'sprecenost_rfzo', 'visa_sila', '2026-08-05T18:00:00Z', '2026-08-05T18:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a cap-override reason must not be recordable on an absence row"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, cap_override_razlog, created_at, updated_at)
+                     VALUES (700, '2026-08-06', 'gazda je tako rekao', '2026-08-06T18:00:00Z', '2026-08-06T18:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "free text on cap_override_razlog must be rejected by the CHECK"
+            );
+
+            // `dan` keys both the uniqueness rule (§4 req. 1) and the čl. 53 weekly
+            // bucket. '2026-8-3' would open a second slot for the same calendar date
+            // and silently drop those minutes out of the weekly overtime total.
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, efektivno_izvrseni_minuta, created_at, updated_at)
+                     VALUES (700, '2026-8-3', 60, '2026-08-03T19:00:00Z', '2026-08-03T19:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a non-ISO date must be rejected so it cannot bypass the unique index"
+            );
+
+            let original_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM work_time_entries WHERE user_id = 700 AND dan = '2026-08-03'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the original row should exist");
+
+            // §4 req. 6 + ZEOR čl. 46 st. 1 — a correction on an append-only statutory
+            // record must carry who and why; the DB, not one command, enforces it.
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, verzija, supersedes_id, created_at, updated_at)
+                     VALUES (700, '2026-08-03', 2, ?1, '2026-08-04T09:00:00Z', '2026-08-04T09:00:00Z')",
+                    [original_id],
+                )
+                .is_err(),
+                "an anonymous, reasonless correction must be rejected"
+            );
+
+            // A correction must stay on its predecessor's (employee, day).
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, verzija, supersedes_id, korekcija_razlog, unio_user_id, created_at, updated_at)
+                     VALUES (701, '2026-08-03', 2, ?1, 'greska_u_unosu', 700, '2026-08-04T09:00:00Z', '2026-08-04T09:00:00Z')",
+                    [original_id],
+                )
+                .is_err(),
+                "a correction must not chain to another employee's row"
+            );
+
+            // A chain root cannot masquerade as a correction, and vice versa.
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, verzija, created_at, updated_at)
+                     VALUES (700, '2026-08-07', 2, '2026-08-07T18:00:00Z', '2026-08-07T18:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a row with no predecessor must be verzija 1"
+            );
+
+            conn.execute(
+                "INSERT INTO work_time_entries (user_id, dan, verzija, efektivno_izvrseni_minuta, supersedes_id, korekcija_razlog, unio_user_id, created_at, updated_at)
+                 VALUES (700, '2026-08-03', 2, 420, ?1, 'ispravka_sati', 700, '2026-08-04T09:00:00Z', '2026-08-04T09:00:00Z')",
+                [original_id],
+            )
+            .expect("a well-formed correction should insert");
+
+            // Forks are impossible: a second correction at the same verzija collides on
+            // the unique index, and one that skips a verzija is rejected by the trigger.
+            // Without this, two live rows could report 600 and 0 overtime minutes for the
+            // same day and the register would be ambiguous about the čl. 53 st. 2 fact.
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, verzija, prekovremeni_minuta, supersedes_id, korekcija_razlog, unio_user_id, created_at, updated_at)
+                     VALUES (700, '2026-08-03', 2, 600, ?1, 'ispravka_sati', 700, '2026-08-04T10:00:00Z', '2026-08-04T10:00:00Z')",
+                    [original_id],
+                )
+                .is_err(),
+                "two corrections superseding the same predecessor must be rejected"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, verzija, prekovremeni_minuta, supersedes_id, korekcija_razlog, unio_user_id, created_at, updated_at)
+                     VALUES (700, '2026-08-03', 3, 600, ?1, 'ispravka_sati', 700, '2026-08-04T10:00:00Z', '2026-08-04T10:00:00Z')",
+                    [original_id],
+                )
+                .is_err(),
+                "a correction must continue the previous verzija, not fork off the root"
+            );
+
+            // The live row is MAX(verzija) — and there is exactly one of it.
+            let (live_rows, live_verzija, live_minuta): (i64, i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*), MAX(verzija), MAX(efektivno_izvrseni_minuta)
+                       FROM work_time_entries
+                      WHERE user_id = 700 AND dan = '2026-08-03'
+                        AND verzija = (SELECT MAX(verzija) FROM work_time_entries
+                                        WHERE user_id = 700 AND dan = '2026-08-03')",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("the live row should resolve");
+            assert_eq!(
+                live_rows, 1,
+                "exactly one live row per (employee, day) after a correction"
+            );
+            assert_eq!(live_verzija, 2);
+            assert_eq!(live_minuta, 420);
+
+            // Append-only: the superseded original is still there, untouched.
+            let originals: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM work_time_entries
+                      WHERE user_id = 700 AND dan = '2026-08-03' AND efektivno_izvrseni_minuta = 480",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the original should survive");
+            assert_eq!(originals, 1, "a correction appends, it never mutates");
 
             conn.execute_batch(
                 "INSERT INTO work_time_periods (user_id, godina, mesec, status, created_at, updated_at)

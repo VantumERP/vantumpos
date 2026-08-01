@@ -70,12 +70,17 @@ Add to the `migrations.rs` tests module. **The survival test must apply `MIGRATI
                 "datum_rodjenja",
                 "datum_rodjenja_najmladjeg_deteta",
                 "samohrani_roditelj",
+                // ZoR čl. 91 st. 2 has two legs; the težak-invalid leg has no age limit.
+                "dete_tezak_invalid",
                 "trudnoca_ili_dojenje",
                 "trudnoca_ili_dojenje_od",
                 "radi_u_preraspodeli",
                 "ugovoreno_radno_vreme_minuta_nedeljno",
                 "zanimanje_sifra",
                 "kvalifikacija_sifra",
+                // Two legally distinct written consents — čl. 91 and čl. 57 st. 4.
+                "saglasnost_prekovremeni_od",
+                "saglasnost_preraspodela_od",
             ] {
                 assert!(
                     column_exists(&conn, "users", column),
@@ -218,21 +223,44 @@ Expected: FAIL — `users.datum_rodjenja should exist after v17`.
         version: 17,
         name: "worktime_records_and_retention",
         sql: r#"
-ALTER TABLE users ADD COLUMN datum_rodjenja TEXT;
-ALTER TABLE users ADD COLUMN datum_rodjenja_najmladjeg_deteta TEXT;
+-- Every ISO date column carries a GLOB shape check. '2026-8-3' and '2026-08-03'
+-- are the same calendar day to a human and two different keys to SQLite, which
+-- would open a second slot per (zaposleni, dan) and drop those minutes out of the
+-- čl. 53 weekly bucket.
+ALTER TABLE users ADD COLUMN datum_rodjenja TEXT CHECK (datum_rodjenja IS NULL OR datum_rodjenja GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
+ALTER TABLE users ADD COLUMN datum_rodjenja_najmladjeg_deteta TEXT CHECK (datum_rodjenja_najmladjeg_deteta IS NULL OR datum_rodjenja_najmladjeg_deteta GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
 ALTER TABLE users ADD COLUMN samohrani_roditelj INTEGER CHECK (samohrani_roditelj IS NULL OR samohrani_roditelj IN (0, 1));
+-- ZoR čl. 91 st. 2 has TWO legs: „dete do sedam godina života“ ILI „dete koje je
+-- težak invalid“. The second leg carries no age limit, so it needs its own flag —
+-- without it a samohrani roditelj of a disabled child aged 8+ gets no consent gate.
+ALTER TABLE users ADD COLUMN dete_tezak_invalid INTEGER CHECK (dete_tezak_invalid IS NULL OR dete_tezak_invalid IN (0, 1));
 ALTER TABLE users ADD COLUMN trudnoca_ili_dojenje INTEGER CHECK (trudnoca_ili_dojenje IS NULL OR trudnoca_ili_dojenje IN (0, 1));
-ALTER TABLE users ADD COLUMN trudnoca_ili_dojenje_od TEXT;
+ALTER TABLE users ADD COLUMN trudnoca_ili_dojenje_od TEXT CHECK (trudnoca_ili_dojenje_od IS NULL OR trudnoca_ili_dojenje_od GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
 ALTER TABLE users ADD COLUMN radi_u_preraspodeli INTEGER NOT NULL DEFAULT 0 CHECK (radi_u_preraspodeli IN (0, 1));
 ALTER TABLE users ADD COLUMN ugovoreno_radno_vreme_minuta_nedeljno INTEGER;
 ALTER TABLE users ADD COLUMN zanimanje_sifra TEXT;
 ALTER TABLE users ADD COLUMN kvalifikacija_sifra TEXT;
-ALTER TABLE users ADD COLUMN saglasnost_prekovremeni_od TEXT;
+-- Two legally distinct written consents. They are NOT interchangeable and must
+-- never be read for each other's purpose:
+--   saglasnost_prekovremeni_od — ZoR čl. 91: a protected parent consenting to
+--     prekovremeni/noćni rad.
+--   saglasnost_preraspodela_od — ZoR čl. 57 st. 4: a zaposleni „koji se saglasio“
+--     to average longer in preraspodela, so hours above the average are computed
+--     and paid as prekovremeni rad.
+-- Neither is a ZZPL pristanak. The column records that a written consent exists
+-- and from when; it does not collect one, and no consent UI belongs anywhere in
+-- the employee surface.
+ALTER TABLE users ADD COLUMN saglasnost_prekovremeni_od TEXT CHECK (saglasnost_prekovremeni_od IS NULL OR saglasnost_prekovremeni_od GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
+ALTER TABLE users ADD COLUMN saglasnost_preraspodela_od TEXT CHECK (saglasnost_preraspodela_od IS NULL OR saglasnost_preraspodela_od GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]');
 
 CREATE TABLE work_time_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
-    dan TEXT NOT NULL,
+    dan TEXT NOT NULL CHECK (dan GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    -- The correction chain is strictly linear: verzija 1 is the original and every
+    -- ispravka appends verzija + 1. The live row for a day is MAX(verzija), which
+    -- makes „the live row“ a well-defined query without a single UPDATE anywhere.
+    verzija INTEGER NOT NULL DEFAULT 1 CHECK (verzija >= 1),
     moguci_minuta INTEGER NOT NULL DEFAULT 0 CHECK (moguci_minuta >= 0),
     ukupno_ostvareni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (ukupno_ostvareni_minuta >= 0),
     efektivno_izvrseni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (efektivno_izvrseni_minuta >= 0),
@@ -256,16 +284,56 @@ CREATE TABLE work_time_entries (
         'sprecenost_poslodavac', 'sprecenost_rfzo', 'porodiljsko', 'neplaceno_odsustvo',
         'naknada_drugi_poslodavac', 'strajk'
     )),
-    cap_override_razlog TEXT,
+    -- NOT A LEGAL JUSTIFICATION. These are the ZoR čl. 53 st. 1 grounds on which
+    -- overtime may be ORDERED; recording one does not make a čl. 53 st. 2/3 cap
+    -- breach lawful. Closed enum, because no unconstrained TEXT may exist on this
+    -- table — see korekcija_razlog below.
+    cap_override_razlog TEXT CHECK (cap_override_razlog IS NULL OR cap_override_razlog IN (
+        'visa_sila', 'iznenadno_povecanje_obima_posla', 'neplanirani_posao_u_roku', 'drugo'
+    )),
     supersedes_id INTEGER REFERENCES work_time_entries(id),
-    korekcija_razlog TEXT,
+    -- ZERO free text on an absence row (§4 req. 3, §5 item 4). A free-text column
+    -- on the row that also carries kategorija_odsustva and the two sprečenost
+    -- buckets would eventually hold a diagnosis, an ICD code or a doznaka number,
+    -- on a shop-counter PC reachable over remote support. Closed enum, no escape.
+    korekcija_razlog TEXT CHECK (korekcija_razlog IS NULL OR korekcija_razlog IN (
+        'greska_u_unosu', 'ispravka_sati', 'ispravka_kategorije',
+        'naknadno_dostavljen_dokument', 'drugo'
+    )),
     unio_user_id INTEGER REFERENCES users(id),
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- A čl. 53 cap override is only meaningful on a worked day.
+    CHECK (kategorija_odsustva IS NULL OR cap_override_razlog IS NULL),
+    -- Chain root vs correction can never be confused.
+    CHECK ((supersedes_id IS NULL AND verzija = 1) OR (supersedes_id IS NOT NULL AND verzija > 1)),
+    -- ZEOR čl. 46 st. 1 puts accuracy responsibility on the record-keeper: a
+    -- correction to an append-only statutory record must carry who and why, and the
+    -- schema enforces it so no other write path can route around the command layer.
+    CHECK (supersedes_id IS NULL OR (unio_user_id IS NOT NULL AND korekcija_razlog IS NOT NULL))
 );
+-- Total, not partial. A partial index `WHERE supersedes_id IS NULL` would index
+-- only chain ROOTS and let two forked corrections both stay live for one day —
+-- one reporting a čl. 53 st. 2 breach and one not.
 CREATE UNIQUE INDEX idx_work_time_entries_user_day
-    ON work_time_entries(user_id, dan) WHERE supersedes_id IS NULL;
+    ON work_time_entries(user_id, dan, verzija);
 CREATE INDEX idx_work_time_entries_dan ON work_time_entries(dan);
+-- SQLite CHECK cannot subquery, so the „same employee, same day, next verzija“
+-- leg of the chain invariant is a trigger. Append-only: BEFORE INSERT only, no
+-- UPDATE and no DELETE anywhere in this schema.
+CREATE TRIGGER trg_work_time_entries_ispravka_isti_dan
+BEFORE INSERT ON work_time_entries
+WHEN NEW.supersedes_id IS NOT NULL
+     AND NOT EXISTS (
+         SELECT 1 FROM work_time_entries
+          WHERE id = NEW.supersedes_id
+            AND user_id = NEW.user_id
+            AND dan = NEW.dan
+            AND verzija = NEW.verzija - 1
+     )
+BEGIN
+    SELECT RAISE(ABORT, 'Ispravka mora da pripada istom zaposlenom i istom danu i da nastavlja prethodnu verziju.');
+END;
 
 CREATE TABLE work_time_periods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,7 +365,14 @@ CREATE TABLE retention_policies (
 
 Bump `db/mod.rs:794` to `17`; add `work_time_entries`, `work_time_periods`, `retention_policies` to `CORE_TABLES` and the three new indexes to `EXPLICIT_INDEXES`.
 
-The partial unique index (`WHERE supersedes_id IS NULL`) is what makes the record append-only *and* one-row-per-day: a correction inserts a new row pointing at the one it supersedes, and only live rows compete for the uniqueness slot.
+**How the one-live-row-per-day invariant actually works — read this before Task 5.** An earlier draft of this plan claimed a *partial* unique index `WHERE supersedes_id IS NULL` made "only live rows compete for the uniqueness slot". **That is inverted and false.** `supersedes_id IS NULL` selects the rows that supersede *nothing* — the chain ROOTS — so under the superseding-row correction model every correction is excluded from the index. Two forked corrections pointing at the same predecessor were both accepted, leaving two simultaneously live rows for one day: one reporting a čl. 53 st. 2 breach and one not. Nothing tied `supersedes_id` to the same employee or the same day either.
+
+The committed schema uses a **total** unique index on `(user_id, dan, verzija)` plus the two chain `CHECK`s and the `trg_work_time_entries_ispravka_isti_dan` trigger. Consequences for later tasks:
+
+- **The live row for a day is `MAX(verzija)` per `(user_id, dan)`.** Every read path in Tasks 2, 4, 5 and 7 must select on that, never on `supersedes_id IS NULL`.
+- **The chain is strictly linear with exactly one tip.** A correction must carry `verzija = predecessor.verzija + 1`, the same `user_id` and the same `dan`; a fork at the same verzija collides on the index and one that skips a verzija is aborted by the trigger.
+- **Still pure append-only** — no `UPDATE` and no `DELETE` anywhere in this schema.
+- **Corrections are attributable at the schema level**: `supersedes_id NOT NULL` requires both `unio_user_id` and `korekcija_razlog`, so Task 5's command layer is a second gate, not the only one.
 
 - [ ] **Step 4: Run to verify they pass**
 
@@ -589,7 +664,7 @@ EOF
 
 **Files:** Modify `src-tauri/src/worktime.rs`.
 
-**Interfaces:** Produces `EmployeeProtection { datum_rodjenja, datum_rodjenja_najmladjeg_deteta, samohrani_roditelj, trudnoca_ili_dojenje, saglasnost_prekovremeni_od, radi_u_preraspodeli }` and `check_protection(p: &EmployeeProtection, day: &str, entry: &DayHours) -> Vec<ProtectionBlock>`.
+**Interfaces:** Produces `EmployeeProtection { datum_rodjenja, datum_rodjenja_najmladjeg_deteta, samohrani_roditelj, dete_tezak_invalid, trudnoca_ili_dojenje, saglasnost_prekovremeni_od, radi_u_preraspodeli }` and `check_protection(p: &EmployeeProtection, day: &str, entry: &DayHours) -> Vec<ProtectionBlock>`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -637,6 +712,22 @@ EOF
         assert!(!blocks.iter().any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
     }
 
+    /// čl. 91 st. 2 is „dete do sedam godina života ILI dete koje je težak invalid“.
+    /// The disability leg has NO age limit — an age-only guard drops it silently.
+    #[test]
+    fn a_single_parent_of_a_disabled_child_needs_consent_at_any_age() {
+        let mut p = protection_child_born("2010-06-01"); // 16 years old
+        p.samohrani_roditelj = Some(true);
+        p.dete_tezak_invalid = Some(true);
+        p.saglasnost_prekovremeni_od = None;
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(
+            blocks.iter().any(|b| b.kind == ProtectionKind::SaglasnostRoditelja),
+            "the težak-invalid leg of čl. 91 st. 2 is not bounded by the seven-year threshold"
+        );
+    }
+
     #[test]
     fn a_non_single_parent_threshold_is_three_not_seven() {
         let mut p = protection_child_born("2022-06-01"); // 4 years old
@@ -677,6 +768,10 @@ Expected: FAIL — `cannot find function check_protection`.
 
 `ProtectionKind` enum, `ProtectionBlock { kind, blocking, poruka }`, and `check_protection` applying: under-18 → blocking on any overtime and on >8 h/day (čl. 87, čl. 88 st. 1); child age threshold **3** normally and **7** for `samohrani_roditelj` (čl. 91 st. 1 / st. 2) → consent required, non-blocking once `saglasnost_prekovremeni_od` is present; `trudnoca_ili_dojenje` → non-blocking warning (čl. 90). Age computed from the entry's `dan`, never from a wall clock. Plus `derives_overtime_automatically(p) -> bool` returning `!p.radi_u_preraspodeli`.
 
+**Both legs of čl. 91 st. 2, not just the age one.** The consent requirement also fires when `samohrani_roditelj = 1 AND dete_tezak_invalid = 1`, **at any child age, independent of the seven-year threshold** — the statute reads *„Samohrani roditelj koji ima dete do sedam godina života **ili dete koje je težak invalid**“*. The ordinary parental threshold stays **3** (st. 1) and the samohrani age threshold stays **7** (st. 2); the disability leg is an additional disjunct, never a replacement.
+
+**Consent columns are not interchangeable.** `check_protection` reads **only** `saglasnost_prekovremeni_od` — that column is the čl. 91 written consent and nothing else. The čl. 57 st. 4 conversion (§4 req. 11: a zaposleni *„koji se saglasio“* to average longer in preraspodela, whose hours above the average are paid as overtime) is a **separate** consent stored in `saglasnost_preraspodela_od`. That conversion is **out of scope for SW-14 as planned** — no task implements it — and `saglasnost_prekovremeni_od` must never be consulted for it. The column exists in v17 so a later task can implement req. 11 without a schema change.
+
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml worktime:: -- --test-threads=1`
@@ -711,7 +806,9 @@ EOF
     #[test]
     fn a_correction_supersedes_rather_than_mutates() {
         // Append-only: the original row survives, struck through, and the
-        // superseding row carries who/when/why.
+        // superseding row carries who/when/why. The correction must be written
+        // with verzija = predecessor.verzija + 1 on the SAME (user_id, dan);
+        // the live row is MAX(verzija), never `supersedes_id IS NULL`.
     }
 
     #[test]
@@ -867,7 +964,7 @@ Read-only per-employee view (discharges ZoR čl. 83 st. 1 and ZZPL čl. 26). Exp
 
 **Files:** Modify `src-tauri/src/commands/users.rs`, `src/app/settings/SettingsScreen.tsx`.
 
-The čl. 87–91 fields, each with copy naming the article it serves. **No consent UI** — `saglasnost_prekovremeni_od` records that a written consent exists and when, it does not collect one. **No free text on `trudnoca_ili_dojenje`**, boolean + date only.
+The čl. 87–91 fields, each with copy naming the article it serves — including `dete_tezak_invalid`, the second leg of čl. 91 st. 2, which has no age limit. **No consent UI** — `saglasnost_prekovremeni_od` records that a written consent exists and when, it does not collect one; the same is true of `saglasnost_preraspodela_od` (čl. 57 st. 4), which this task does not surface. **No free text on `trudnoca_ili_dojenje`**, boolean + date only.
 
 - [ ] **Steps 1–5:** failing tests (validation, no-consent-UI assertion, date-only pregnancy flag), implement, run, commit.
 
