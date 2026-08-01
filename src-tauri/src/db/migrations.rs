@@ -654,10 +654,17 @@ CREATE TABLE work_time_entries (
     prekovremeni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (prekovremeni_minuta >= 0),
     nocni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (nocni_minuta >= 0),
     rad_na_praznik_minuta INTEGER NOT NULL DEFAULT 0 CHECK (rad_na_praznik_minuta >= 0),
+    -- Closed enum, and every value is exactly its bucket column minus the `_minuta`
+    -- suffix: godisnji_odmor books into godisnji_odmor_minuta, obustava_rada_strajk
+    -- into obustava_rada_strajk_minuta. Category → bucket is therefore DERIVED in
+    -- code, never a hand-maintained lookup table where one wrong line would post
+    -- ZEOR čl. 24 tač. 1 d) hours into the g) bucket with nothing downstream able to
+    -- notice. Both vocabularies keep the statutory wording of čl. 24 tač. 1, so the
+    -- rule costs no legal fidelity — it only forbids the two from drifting apart.
     kategorija_odsustva TEXT CHECK (kategorija_odsustva IS NULL OR kategorija_odsustva IN (
-        'godisnji_odmor', 'praznik', 'placeno_odsustvo', 'strucno_osposobljavanje',
+        'godisnji_odmor', 'praznik_odmor', 'odsustvo_uz_naknadu', 'strucno_osposobljavanje',
         'sprecenost_poslodavac', 'sprecenost_rfzo', 'porodiljsko', 'neplaceno_odsustvo',
-        'naknada_drugi_poslodavac', 'strajk'
+        'naknada_drugi_poslodavci', 'obustava_rada_strajk'
     )),
     -- NOT A LEGAL JUSTIFICATION. These are the ZoR čl. 53 st. 1 grounds on which
     -- overtime may be ORDERED; recording one does not make a čl. 53 st. 2/3 cap
@@ -786,6 +793,26 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("table_info rows should collect");
         names.iter().any(|name| name == column)
+    }
+
+    /// Pull the literals out of a `<column> IN ('a', 'b', …)` CHECK in a CREATE TABLE
+    /// body. Returns an empty vector when no such CHECK is present, so a caller that
+    /// asserts on the values fails loudly if the constraint is ever dropped rather
+    /// than quietly asserting over nothing.
+    fn closed_enum_values(schema: &str, column: &str) -> Vec<String> {
+        let needle = format!("{column} IN (");
+        let Some(start) = schema.find(&needle) else {
+            return Vec::new();
+        };
+        let rest = &schema[start + needle.len()..];
+        let Some(end) = rest.find(')') else {
+            return Vec::new();
+        };
+        rest[..end]
+            .split(',')
+            .map(|value| value.trim().trim_matches('\'').to_string())
+            .filter(|value| !value.is_empty())
+            .collect()
     }
 
     #[test]
@@ -1876,6 +1903,77 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                      VALUES ('worktime_classification', NULL, 0, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');",
             )
             .expect("period and retention rows should insert");
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// Every `kategorija_odsustva` value must name its own minute bucket: the column
+    /// is the enum value plus a `_minuta` suffix, with nothing else in between. The
+    /// commands (Task 5) and the grid (Task 7) book an absence into a bucket; if the
+    /// two vocabularies are allowed to drift, that mapping becomes a hand-maintained
+    /// lookup table and one wrong line silently books ZEOR čl. 24 tač. 1 d) hours
+    /// into the g) bucket, where nothing downstream can notice.
+    #[test]
+    fn migration_v17_derives_every_absence_bucket_from_its_category() {
+        let path = test_database_path("migration_v17_category_bucket");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            let schema: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'work_time_entries'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the work_time_entries schema should be readable");
+
+            let categories = closed_enum_values(&schema, "kategorija_odsustva");
+            assert_eq!(
+                categories.len(),
+                10,
+                "kategorija_odsustva must stay a closed enum of ten values; parsed {categories:?}"
+            );
+
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (710, 'radnik10', 'Radnik Deset', 'cashier', 1, '2026-09-01T08:00:00Z', '2026-09-01T08:00:00Z');",
+            )
+            .expect("the seed employee should insert");
+
+            for (offset, category) in categories.iter().enumerate() {
+                let bucket = format!("{category}_minuta");
+                assert!(
+                    column_exists(&conn, "work_time_entries", &bucket),
+                    "kategorija_odsustva = {category} must book into {bucket}"
+                );
+
+                // The CHECK really admits the value we parsed — the derivation is over
+                // the live constraint, not over a comment that drifted away from it.
+                let dan = format!("2026-09-{:02}", offset + 1);
+                conn.execute(
+                    &format!(
+                        "INSERT INTO work_time_entries (user_id, dan, kategorija_odsustva, {bucket}, created_at, updated_at)
+                         VALUES (710, ?1, ?2, 480, '2026-09-01T18:00:00Z', '2026-09-01T18:00:00Z')"
+                    ),
+                    rusqlite::params![dan, category],
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{category} should be insertable into {bucket}: {error}")
+                });
+            }
+
+            // The suffix rule is the whole contract, so a category that does not carry
+            // it must not be smuggled into the enum by a later edit.
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, kategorija_odsustva, created_at, updated_at)
+                     VALUES (710, '2026-09-20', 'placeno_odsustvo', '2026-09-20T18:00:00Z', '2026-09-20T18:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a category with no bucket column of the same name must be rejected"
+            );
         }
         std::fs::remove_file(&path).expect("test database should be removed");
     }

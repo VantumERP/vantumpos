@@ -18,6 +18,7 @@
 - **NEVER render any ZEOR fine figure** anywhere — čl. 51's tier exceeds the ZoP čl. 39 ceiling for a *"fizičko lice koje ima zaposlene"* and is unresolved.
 - **Never present a `[PRUDENTIAL]` item as a legal duty.**
 - **Zero free text on an absence row.** No diagnosis, doznaka, ICD code or attachment, ever.
+- **Absence category → bucket column is derived, not looked up.** Every `kategorija_odsustva` value is exactly its minute column minus the `_minuta` suffix (`obustava_rada_strajk` → `obustava_rada_strajk_minuta`). Tasks 5 and 7 must compute the column from the category; a hand-maintained mapping table is a rejected design. `migration_v17_derives_every_absence_bucket_from_its_category` parses the live `CHECK` and enforces this.
 - **Never boot the app.** Verify only via the gates.
 - Commit trailer: `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`
 
@@ -34,7 +35,7 @@ git diff --check
 
 **Baseline at plan time:** cargo 476 passed, bun 304 passed, all six green at `907017c`.
 
-**Governing law:** [SW14-VERIFIED-RULES.md](../../SW14-VERIFIED-RULES.md) — §4 requirement numbers are cited per task. Design: [2026-08-01-sw14-radno-vreme-design.md](../specs/2026-08-01-sw14-radno-vreme-design.md).
+**Governing law:** [`docs/SW14-VERIFIED-RULES.md`](../../SW14-VERIFIED-RULES.md) — §4 requirement numbers are cited per task. Design: [`docs/superpowers/specs/2026-08-01-sw14-radno-vreme-design.md`](../specs/2026-08-01-sw14-radno-vreme-design.md). Both paths are repo-relative; the link targets are relative to this file's directory (`docs/superpowers/plans/`).
 
 ---
 
@@ -279,10 +280,17 @@ CREATE TABLE work_time_entries (
     prekovremeni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (prekovremeni_minuta >= 0),
     nocni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (nocni_minuta >= 0),
     rad_na_praznik_minuta INTEGER NOT NULL DEFAULT 0 CHECK (rad_na_praznik_minuta >= 0),
+    -- Closed enum, and every value is exactly its bucket column minus the `_minuta`
+    -- suffix: godisnji_odmor books into godisnji_odmor_minuta, obustava_rada_strajk
+    -- into obustava_rada_strajk_minuta. Category → bucket is therefore DERIVED in
+    -- code, never a hand-maintained lookup table where one wrong line would post
+    -- ZEOR čl. 24 tač. 1 d) hours into the g) bucket with nothing downstream able to
+    -- notice. Both vocabularies keep the statutory wording of čl. 24 tač. 1, so the
+    -- rule costs no legal fidelity — it only forbids the two from drifting apart.
     kategorija_odsustva TEXT CHECK (kategorija_odsustva IS NULL OR kategorija_odsustva IN (
-        'godisnji_odmor', 'praznik', 'placeno_odsustvo', 'strucno_osposobljavanje',
+        'godisnji_odmor', 'praznik_odmor', 'odsustvo_uz_naknadu', 'strucno_osposobljavanje',
         'sprecenost_poslodavac', 'sprecenost_rfzo', 'porodiljsko', 'neplaceno_odsustvo',
-        'naknada_drugi_poslodavac', 'strajk'
+        'naknada_drugi_poslodavci', 'obustava_rada_strajk'
     )),
     -- NOT A LEGAL JUSTIFICATION. These are the ZoR čl. 53 st. 1 grounds on which
     -- overtime may be ORDERED; recording one does not make a čl. 53 st. 2/3 cap
