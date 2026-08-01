@@ -380,6 +380,12 @@ pub fn restore_backup(
     }
 
     state.db().migrate()?;
+    // A snapshot taken before v17 restores without the shared retention table;
+    // the migration above recreates it empty, and the classes must be back before
+    // any path can consult them — an absent policy row is the state SW11-SW15
+    // req. 42 exists to prevent. Idempotent, and it never overwrites a floor the
+    // restored database already carried.
+    crate::retention::seed_retention_policies(state, &crate::clock::utc_now()?)?;
     let file_size_bytes = checked_file_size(&source_path)?;
 
     {
@@ -424,6 +430,13 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
 
     let mut conn = state.db().open()?;
     let tx = conn.transaction()?;
+    // SW-14 §4d / req. 18: the trajno classes must be structurally unreachable by
+    // every purge, reset, restore and backup-prune path. This snapshot and the
+    // assertion before the commit are that structure — a future edit that adds a
+    // DELETE against a never-purge table aborts the whole reset rather than
+    // committing it, and the operator keeps the records instead of a report that
+    // they were tidied away.
+    let never_purge_before = crate::retention::never_purge_row_counts(&tx)?;
     // sale_items + sale_payments cascade via ON DELETE CASCADE.
     tx.execute("DELETE FROM sales", [])?;
     // inventory_movements has no FK cascade — delete explicitly.
@@ -492,6 +505,11 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     // the `non_working_days` table. Those are configuration the operator answered
     // once, not practice trading data — wiping them would silently drop the shop
     // back to `pravna_forma = None` and re-seed praznici the admin had deleted.
+    //
+    // Also deliberately untouched, and for a stronger reason: `work_time_entries`,
+    // `work_time_periods` and `retention_policies`. Hours a real person worked
+    // during the pilot are not practice trading data, and ZEOR's offence is
+    // „ako ne čuva trajno“ — see `retention::NEVER_PURGE_TABLES`.
     let detail = serde_json::json!({
         "note": "Go-live reset (SW-3).",
         // §2 Q4: the general 10-year floor is ZPPPA čl. 114ž (apsolutna
@@ -502,6 +520,7 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     })
     .to_string();
     insert_compliance_event(&tx, "trading_data_reset", &detail, Some(acting.id))?;
+    crate::retention::assert_never_purge_intact(&tx, &never_purge_before)?;
     tx.commit()?;
     Ok(())
 }
@@ -1042,6 +1061,117 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
                 count(state, "kep_closures"),
                 0,
                 "go-live reset clears closures"
+            );
+        });
+    }
+
+    /// SW-14 §4d / req. 18. Payroll-adjacent records are a `never_purge` class:
+    /// the go-live reset is a pre-production tool for practice **trading** data,
+    /// and hours a real person actually worked during the pilot are not that.
+    /// Under-retention outranks over-retention here — the ZEOR čl. 50 st. 1
+    /// tač. 3 offence is *"ako ne čuva trajno"* — so the register, the frozen
+    /// classification and the table that records what may be purged at all must
+    /// all come through the wipe untouched.
+    #[test]
+    fn go_live_reset_preserves_closed_worktime_periods_and_the_retention_table() {
+        with_state("reset_preserves_worktime_and_retention", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-worktime");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            seed_trading_data(state);
+            crate::retention::seed_retention_policies(state, "2026-08-01T08:00:00Z")
+                .expect("retention classes should seed");
+
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute_batch(
+                    r#"
+INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+    VALUES (700, 'radnik7', 'Radnik Sedam', 'cashier', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+INSERT INTO work_time_entries (user_id, dan, efektivno_izvrseni_minuta, unio_user_id, created_at, updated_at)
+    VALUES (700, '2026-08-03', 480, 1, '2026-08-03T18:00:00Z', '2026-08-03T18:00:00Z');
+INSERT INTO work_time_periods (user_id, godina, mesec, status, closed_at, closed_by,
+                               klasifikacija_json, created_at, updated_at)
+    VALUES (700, 2026, 8, 'closed', '2026-09-01T08:00:00Z', 1,
+            '{"efektivnoIzvrseniMinuta":480}', '2026-08-01T00:00:00Z', '2026-09-01T08:00:00Z');
+"#,
+                )
+                .expect("worktime rows should seed");
+
+            let classes_before = count(state, "retention_policies");
+            assert_eq!(
+                classes_before, 3,
+                "the shared retention table carries the SW-14 classes"
+            );
+
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            // The reset really ran — otherwise the assertions below prove nothing.
+            assert_eq!(count(state, "sales"), 0);
+            assert_eq!(count(state, "kep_entries"), 0);
+
+            assert_eq!(
+                count(state, "work_time_entries"),
+                1,
+                "the ZoR čl. 55 st. 6 register must survive the go-live reset"
+            );
+            assert_eq!(
+                count(state, "work_time_periods"),
+                1,
+                "a closed period carries the frozen Class A classification"
+            );
+            assert_eq!(
+                count(state, "retention_policies"),
+                classes_before,
+                "the table that records what may be purged must not be purgeable"
+            );
+
+            let conn = state.db().open().expect("database should open");
+            let (status, klasifikacija): (String, String) = conn
+                .query_row(
+                    "SELECT status, klasifikacija_json FROM work_time_periods WHERE user_id = 700",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the closed period should still load");
+            assert_eq!(
+                status, "closed",
+                "a reset must not reopen a frozen classification"
+            );
+            assert!(
+                klasifikacija.contains("480"),
+                "the frozen classification must survive verbatim: {klasifikacija}"
+            );
+
+            let minuta: i64 = conn
+                .query_row(
+                    "SELECT efektivno_izvrseni_minuta FROM work_time_entries WHERE user_id = 700",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the register row should still load");
+            assert_eq!(minuta, 480);
+
+            let never_purge: i64 = conn
+                .query_row(
+                    "SELECT never_purge FROM retention_policies
+                     WHERE record_class = 'worktime_classification'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("Class A should still load");
+            assert_eq!(
+                never_purge, 1,
+                "the class that says „ne briši“ must itself survive the wipe"
             );
         });
     }

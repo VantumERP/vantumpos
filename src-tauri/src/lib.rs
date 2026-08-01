@@ -16,6 +16,7 @@ mod nbs_rate;
 mod price_history;
 mod reklamacije;
 mod reklamacije_docs;
+mod retention;
 mod security;
 mod state;
 mod text;
@@ -52,10 +53,19 @@ pub fn run() {
             let db = Db::new(db_path)?;
             app.manage(AppState::new(db));
 
+            let state_for_launch = app.state::<AppState>().inner().clone();
+
+            // The retention classes must exist before anything can consult them,
+            // and unlike the backup below this is not best-effort: a database
+            // that cannot record what may never be purged is a database whose
+            // next purge path has no policy to read. The wall clock is read here,
+            // at the outermost boundary, and passed in — `retention.rs` itself
+            // never reads one.
+            retention::seed_retention_policies(&state_for_launch, &clock::utc_now()?)?;
+
             // Best-effort automatic backup: a failure here is already
             // recorded as a failed backup_job and must never prevent the
             // app from opening.
-            let state_for_launch = app.state::<AppState>().inner().clone();
             let _ = commands::backup::auto_backup_if_due(&state_for_launch);
 
             // Periodic re-check on a plain OS thread. `tokio` is only a
