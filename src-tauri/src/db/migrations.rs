@@ -796,7 +796,10 @@ CREATE TABLE audit_events (
     action TEXT NOT NULL CHECK (action IN (
         'unos', 'menjanje', 'uvid', 'otkrivanje', 'uporedjivanje', 'brisanje'
     )),
-    object_type TEXT NOT NULL CHECK (object_type <> ''),
+    -- A code constant ('sale', 'employee'), so it carries the same no-space shape
+    -- as object_id below. Without it, this column is the one free-text hole on the
+    -- table and 'pretraga:Marko Marković' fits straight into it.
+    object_type TEXT NOT NULL CHECK (object_type <> '' AND object_type NOT GLOB '* *'),
     -- An opaque internal id, never the object's contents (req. 4). The no-space
     -- shape is the schema's share of that rule: names, addresses and search
     -- queries carry spaces, internal ids do not. The full exclusion list — JMBG,
@@ -2344,6 +2347,44 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 [],
             )
             .expect("a well-formed uvid should insert");
+
+            // Req. 4: the audit log holds no personal data, and a search query for a
+            // customer's name IS personal data about that customer. object_type is a
+            // code constant ('sale', 'employee'), so it carries the same no-space
+            // shape as object_id — otherwise 'pretraga:Marko Marković' fits in it.
+            assert!(
+                conn.execute(
+                    "INSERT INTO audit_events (at, actor_user_id, action, object_type, object_id, reason_code, prev_hash, hash)
+                     VALUES ('2026-08-01T09:05:00Z', 800, 'uvid', 'pretraga:Marko Markovic', '3', 'inspekcija', '', 'h2')",
+                    [],
+                )
+                .is_err(),
+                "an object_type carrying spaces must be rejected by the CHECK"
+            );
+
+            // ZZPL čl. 48 st. 2 requires the razlog for uvid and otkrivanje, and it is
+            // a constraint rather than a convention.
+            assert!(
+                conn.execute(
+                    "INSERT INTO audit_events (at, actor_user_id, action, object_type, object_id, prev_hash, hash)
+                     VALUES ('2026-08-01T09:10:00Z', 800, 'uvid', 'employee', '3', '', 'h3')",
+                    [],
+                )
+                .is_err(),
+                "an uvid without a reason_code must be rejected by the CHECK"
+            );
+
+            // Čl. 48 st. 2 also requires the identitet primaoca for a disclosure; a
+            // razlog alone does not answer the question the article asks.
+            assert!(
+                conn.execute(
+                    "INSERT INTO audit_events (at, actor_user_id, action, object_type, object_id, reason_code, prev_hash, hash)
+                     VALUES ('2026-08-01T09:15:00Z', 800, 'otkrivanje', 'employee', '3', 'zakonska_obaveza', '', 'h4')",
+                    [],
+                )
+                .is_err(),
+                "an otkrivanje without a recipient must be rejected by the CHECK"
+            );
 
             // ZZPL čl. 52 st. 1 anchors the 72 h clock to saznanje, so it cannot be null.
             assert!(
