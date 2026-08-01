@@ -669,6 +669,40 @@ mod tests {
             .any(|b| b.kind == ProtectionKind::MaloletanDnevniLimit));
     }
 
+    /// **The čl. 87 weekly leg — 35 časova nedeljno — is not implemented.** Only
+    /// the daily leg is, and the register claimed both until the SW-14 review.
+    /// This pins the gap so no reader has to take the prose on trust: six lawful
+    /// eight-hour days are 48 h in one calendar week, far over 35, and
+    /// `check_protection` raises nothing, because its signature carries a day and
+    /// not a week.
+    ///
+    /// The under-18 čl. 88 st. 1 bans do limit the damage — a minor cannot reach
+    /// 35 h through overtime or preraspodela, only through plain scheduled hours.
+    ///
+    /// **When the weekly leg is built this test fails, and that is its purpose:**
+    /// it forces `docs/PROGRESS.md` and the SW-14 register row to be re-stated in
+    /// the same commit. Delete it then, together with `docs_guard`'s matching
+    /// guard — do not weaken either.
+    #[test]
+    fn the_cl_87_weekly_leg_is_not_checked() {
+        let p = protection_born("2009-09-01");
+        // Monday to Saturday of one calendar week, exactly eight hours a day.
+        for dan in [
+            "2026-08-03",
+            "2026-08-04",
+            "2026-08-05",
+            "2026-08-06",
+            "2026-08-07",
+            "2026-08-08",
+        ] {
+            assert!(
+                check_protection(&p, dan, &day(480, 0)).is_empty(),
+                "{dan}: exactly 8 h satisfies the čl. 87 daily leg, and nothing in this module \
+                 counts the week — 48 h passes unremarked"
+            );
+        }
+    }
+
     /// „Mlađi od 18 godina života“ is strictly younger, so the eighteenth
     /// birthday itself is already outside čl. 87 and čl. 88. Off by one here
     /// either blocks a lawful adult day or lets a minor's overtime through.

@@ -210,7 +210,7 @@ migration **v16**.
 | 1 — schema | **Migration v17**: `work_time_entries` (one row per employee/day, the 15 ZEOR čl. 24 tač. 1 minute buckets, versioned append-only correction chain, a partial unique index giving one live row per day), `work_time_periods`, `retention_policies`, employee-profile columns on `users`. Absence category is a closed `CHECK` enum with **zero free-text columns**, and the bucket column is **derived** from the category (`{kategorija}_minuta`), enforced by a test that parses the live `CHECK` | `4265190`, `6f9de79`, `6b41c43` |
 | 2 — caps | `worktime.rs::assess_caps` — čl. 53 st. 2 (≤ 8 h prekovremenog per **calendar week, Monday-based**) and st. 3 (≤ 12 h daily total incl. overtime); civil-date arithmetic reused from `cash_deposit.rs` rather than re-derived. The stored version of the day under assessment is not double-counted | `d5ad982`, `b3a2d4c` |
 | 3 — penalty copy | `legal.rs::overtime_record_missing` (čl. 276 st. 1 u vezi sa tač. 1a) and `overtime_caps_exceeded` (čl. 274 st. 1 tač. 3), both tier-resolved from `pravna_forma`; the čl. 276 st. 2 odgovorno-lice line is suppressed for a preduzetnik. A test guards that **no ZEOR figure** is reachable anywhere, and three previously vacuous guards were closed | `6ae257e`, `c0fc959` |
-| 4 — protection | `worktime.rs::check_protection` — čl. 87 (35 h/week, 8 h/day for a minor), **čl. 88 st. 1 bans prekovremeni *and* preraspodela**, čl. 91 st. 1 (dete do 3) and st. 2 (**samohrani roditelj — threshold SEVEN**, plus `dete_tezak_invalid` with no age limit) require a stored written consent **dated before the day worked**, čl. 90 warns rather than blocks. `derives_overtime_automatically` returns `false` under preraspodela — čl. 58 hours are not overtime | `defcecf`, `8c04a05` |
+| 4 — protection | `worktime.rs::check_protection` — čl. 87 (8 h/day for a minor; the 35 h/week leg is not checked), **čl. 88 st. 1 bans prekovremeni *and* preraspodela**, čl. 91 st. 1 (dete do 3) and st. 2 (**samohrani roditelj — threshold SEVEN**, plus `dete_tezak_invalid` with no age limit) require a stored written consent **dated before the day worked**, čl. 90 warns rather than blocks. `derives_overtime_automatically` returns `false` under preraspodela — čl. 58 hours are not overtime | `defcecf`, `8c04a05` |
 | 5 — commands | `commands/worktime.rs`: `worktime_list_month`, `save_entry`, `correct_entry`, `close_period`, `export_csv`, `my_hours`, `notices`. Not one `UPDATE` against `work_time_entries`; a correction is a new `verzija` row carrying who/when/why. `require_admin` is the **first statement of the domain function**, not of the `#[tauri::command]` wrapper. A cap breach records the day and asks for a čl. 53 st. 1 ground; a čl. 87–91 block refuses the row. Preraspodela is branched onto the čl. 57 st. 5 60 h/week ceiling, and a month cannot close before it ends | `5a87e4a`, `93c95e7` |
 | 6 — retention | `retention.rs` — the single shared table SW11-SW15 §3 req. 42 mandates. `WorktimeClassification` = `trajno` + `never_purge`, unreachable by go-live reset, restore and backup-prune (`assert_never_purge_intact` runs **inside** the reset transaction in `backup.rs`); `WorktimeOvertimeLog` carries an upward-only **3-year** floor applied to each record's own `dan`, with a fail-safe that refuses to purge when no floor is stored; `WorktimeDraft` is bounded by the period close | `ee7fcca`, `0c96a6a` |
 | 7 — Radno vreme UI | `src/app/worktime/WorkTimeModule.tsx` — monthly grid, cap warnings with the override ground, period close, CSV export, and the absence category behind `canSeeAbsenceReason`. Non-blocking čl. 87–91 findings are surfaced rather than swallowed, and the recorded day is guarded | `6807309`, `2f576d7` |
@@ -223,7 +223,7 @@ migration **v16**.
 |---|---|
 | `bun run test` | **355 passed** / 0 failed, 22 files (was 304 / 19) |
 | `bun run build` | pass — tsc + vite |
-| `cargo test -- --test-threads=1` | **544 passed** / 0 failed, 0 ignored (was 476) |
+| `cargo test -- --test-threads=1` | **549 passed** / 0 failed, 0 ignored (was 476) |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --check` | clean |
 | `git diff --check` | clean |
@@ -231,6 +231,16 @@ migration **v16**.
 New tests: 29 in `worktime.rs`, 14 in `commands/worktime.rs`, 9 in `retention.rs`, plus additions in
 `legal.rs`, `db/migrations.rs`, `commands/users.rs` and `commands/backup.rs`; 50 frontend tests across
 `WorkTimeModule.test.tsx`, `MyHoursPanel.test.tsx` and `UserDialog.test.tsx`.
+
+**Review fix (01.08.2026).** Four claims in this file and in `SERBIAN-LAW-COMPLIANCE.md` described legs
+the code does not have: the čl. 87 weekly cap credited to `check_protection`, the čl. 57 st. 5 ceiling
+credited to `assess_caps` rather than to its caller, an unqualified "no fine figure outside `legal.rs`",
+and — in the notice handed to employees — ZZPL čl. 95 st. 1 **tač. 20** where the čl. 23 offence is
+**tač. 8**. All four are corrected above, and the defect class now has a guard:
+`src-tauri/src/docs_guard.rs` (test-only) reads the three documents and fails when a compliance row
+claims more than the code delivers. `worktime.rs::the_cl_87_weekly_leg_is_not_checked` pins the gap in
+behaviour — six eight-hour days raise nothing — so building the leg breaks the test and forces the prose
+to be re-stated in the same commit.
 
 Latest migration: **v17**.
 
@@ -241,6 +251,11 @@ a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export
 
 **Still open after this batch** (requirement numbers are `docs/SW14-VERIFIED-RULES.md` §4):
 
+- **Req 12, weekly leg — the čl. 87 cap of 35 časova nedeljno for an employee under 18 is not checked.**
+  `check_protection` enforces only the 8 h/day leg (`MINOR_DAILY_CAP_MINUTES`); the weekly leg needs the
+  employee's week, which that signature does not carry, and no caller supplies it. The under-18 čl. 88 st. 1
+  bans on prekovremeni and preraspodela *are* enforced, so a minor cannot accumulate the week through
+  overtime — but a minor scheduled 7 h a day across six days raises nothing.
 - **Req 16 — the holiday calendar is not encoded.** `rad_na_praznik_minuta` is an operator-entered,
   advisory-tagged bucket; the Zakon o državnim i drugim praznicima čl. 1/1a/2/3a rules and the čl. 3/čl. 5
   working-holiday exclusion set are not in code, so nothing derives the čl. 108 st. 1 tač. 1 flag.

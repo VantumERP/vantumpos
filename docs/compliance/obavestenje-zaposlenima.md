@@ -7,7 +7,7 @@
 
 # Obaveštenje o obradi podataka o ličnosti zaposlenih
 
-**Pravni osnov:** [ZZPL čl. 23](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html) (obaveštavanje lica na koje se podaci odnose prilikom prikupljanja). Uručuje se zaposlenom pri zasnivanju radnog odnosa (onboarding). Propust: prekršaj — novčana kazna **50.000–2.000.000 RSD za pravno lice** ([čl. 95 st. 1 tač. 20](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)), odnosno **20.000–500.000 RSD za preduzetnika** ([čl. 95 st. 4](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)). Iznos zavisi od pravne forme poslodavca.
+**Pravni osnov:** [ZZPL čl. 23](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html) (obaveštavanje lica na koje se podaci odnose prilikom prikupljanja). Uručuje se zaposlenom pri zasnivanju radnog odnosa (onboarding). Propust: prekršaj — novčana kazna **50.000–2.000.000 RSD za pravno lice** ([čl. 95 st. 1 tač. 8](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)), odnosno **20.000–500.000 RSD za preduzetnika** ([čl. 95 st. 4](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)). Iznos zavisi od pravne forme poslodavca.
 
 ---
 

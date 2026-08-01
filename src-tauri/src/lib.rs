@@ -6,6 +6,10 @@ mod cash_deposit;
 mod clock;
 mod commands;
 mod db;
+/// Guards over the compliance prose in `docs/`. Test-only — the documents are
+/// embedded in the test binary and never in the shipped app.
+#[cfg(test)]
+mod docs_guard;
 mod importer;
 mod kep;
 mod kep_close;
