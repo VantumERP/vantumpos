@@ -115,7 +115,8 @@ defects (D1, D3, D5, D6–D8) plus four documentation errors. All are now closed
 | `cargo fmt --check` | clean |
 | `git diff --check` | clean |
 
-**Still open after this batch** (requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3):
+**Still open after that batch** — superseded by the residuals batch below, which closed D2, D4 and the
+D1 residual. (Requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3.)
 
 - **Req 39 / §4 item 8 — false archive duty still on screen.** `src/app/settings/SettingsScreen.tsx:1773`
   tells the operator „Pravna lica ne smeju uništavati dokumentarni materijal bez pismenog odobrenja
@@ -138,6 +139,61 @@ defects (D1, D3, D5, D6–D8) plus four documentation errors. All are now closed
   public-sector-buyer exceptions have nowhere to be stated.
 - **`legal.rs` exclusivity, known exception:** `src/app/reklamacije/ReklamacijeModule.tsx:128` still
   hard-codes the regime-versioned reklamacija amounts — an SW-7 follow-up.
+
+### SW-11 residuals batch — migration v16, D4, D2, D1-residual (2026-08-01)
+
+The three defects the previous batch left open. `src-tauri/src/legal.rs` is **untouched** by this batch
+(`git diff 891d40a..HEAD --name-only` returns no `legal.rs`), and the only Serbian-formatted figure it
+introduces is **150.000** — the Pravilnik 77/2011 čl. 2 st. 3 daily undocumented-withdrawal lane, a
+statutory threshold, not a fine.
+
+| Defect | What was wrong | Fixed by |
+|---|---|---|
+| **Schema** | `compliance_log.event_type` admitted only `('trading_data_reset','backup_restored')`, so the AML audit row had nowhere to land; `cash_movements` had no way to record the Pravilnik čl. 2 st. 2/st. 3 assertion | `4068727` — **migration v16**. Table rebuild widens the CHECK to admit `aml_cash_threshold` (`migrations.rs:579`); `ALTER TABLE cash_movements ADD COLUMN documented_per_pravilnik INTEGER CHECK (… IS NULL OR … IN (0,1))` (`migrations.rs:593`), nullable and **deliberately not backfilled** |
+| **D4 — req 8** `[PRUDENTIAL]` | The čl. 46 st. 1 soft block captured a reason but wrote no immutable audit entry, so an inspection could not reproduce the decision from the log alone | `d92cca6` — `sales.rs::insert_aml_breach_event` (`sales.rs:679`) writes one `aml_cash_threshold` row **on the sale's own transaction** (`sales.rs:297–313`), carrying sale id, local receipt number, cash in para, threshold, rate + date + source, and the operator's reason. Stamped with the sale's `created_at`, never `datetime('now')`. A `near_threshold` warning writes nothing — nothing below the cap is unlawful |
+| **D2 — req 14** `[LEGAL]` | `load_cash_inflows` carried **every** `bank_withdrawal` with `subject = false`. Pravilnik 77/2011 čl. 5 st. 2 relieves only dinars paid out per čl. 2 st. 2 or st. 3; req 14 says in terms *do not exclude all bank withdrawals*. Shrinking the subject base hands the owner the false „izmireno“ state req 10 forbids, and a withdraw-then-redeposit float cycle under-reported twice | `b0adfe6` — the `bank_withdrawal` arm is split in two (`cash_deposit.rs:664–676`): only `documented_per_pravilnik = 1` returns `subject = 0`; `NULL` and `0` are **both** subject, written as an explicit arm because `= 1` and `<> 1` do not partition rows in SQL. Recorded per movement (`shifts.rs:153–157`), dropped on any direction other than a podizanje. Report footer, CSV, summary tile and module docs now state the narrowed rule and still name it bylaw-level relief |
+| **D1 residual** | Podešavanja → Kurs gave the rate an operator surface, but nothing ever fetched it. On a fresh install `load_eur_rate()` stayed `None`, so the čl. 46 st. 1 check silently did not run until an admin happened to find the tab | `25168ba` — `settings.rs::auto_refresh_eur_rate_if_due` (`settings.rs:620`) attempts one NBS fetch on the first **admin** session of a calendar day, kicked off detached from `auth_login` (`auth.rs:68–74`) so it can never delay a login, sale or shift. The last **attempt** is persisted (`settings.rs:651`), not the last success, so an offline shop pays the 8 s timeout once a day. Plus an admin-only readiness badge in the shell status strip (`AppShell.tsx:515–583`) that names the unrun check, says selling is not blocked, and carries no penalty figure |
+
+**Verification gates (all six green at HEAD, `25168ba`; every command exited `0`):**
+
+| Gate | Result |
+|---|---|
+| `bun run test` | **304 passed** / 0 failed, 19 files (was 296) |
+| `bun run build` | pass — tsc + vite, 2732 modules transformed |
+| `cargo test -- --test-threads=1` | **476 passed** / 0 failed, 0 ignored (was 460) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `git diff --check` | clean |
+
+Latest migration: **v16**.
+
+**Still open after this batch** (requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3):
+
+- **Req 39 / §4 item 8 — false archive duty still on screen.** `src/app/settings/SettingsScreen.tsx:1773`
+  still tells the operator „Pravna lica ne smeju uništavati dokumentarni materijal bez pismenog odobrenja
+  arhiva.“ ZAG čl. 16 st. 2 confines prior written archive approval to the public sector. Pre-existing
+  (SW-3, `062250d`); untouched by this batch.
+- **Req 35–38, 42, 43 — retention engine.** No `retention_class`, `retain_until`, `legal_hold` or
+  upward-only extension in the schema; no čl. 32 objekti/ulaganja register (req 37); no documented
+  plain-text archival export (req 43). `SettingsScreen.tsx:1771` still attributes the 10-year floor to
+  **ZPDV čl. 47** — the miscitation corrected in `backup.rs` was never carried into the UI copy.
+- **Req 5(b)(c) — one-year aggregation.** Disclosed in writing, but the optional buyer tag and the rolling
+  365-day running total are not built. `[PRUDENTIAL]`; blocked on §5 Q-3.
+- **Req 15, second half — the 3-day advance announcement** for withdrawals over 1.500.000 RSD
+  (Pravilnik čl. 3 st. 1) is not surfaced anywhere. The 150.000 RSD/day lane now is. `[PRUDENTIAL]`.
+- **Req 17 — polog evidence trail: CSV ships, print does not.** *Correcting the previous batch's entry* —
+  the CSV export exists end to end (`commands/cash_deposit.rs:41` → `ports.ts:360` →
+  `CashDepositReport.tsx:95` „Izvezi CSV“). Only the printable view for the knjigovođa is missing.
+- **Req 29 — preduzetnik constant lint** (>500.000 range / >150.000 fixed) is not implemented; the
+  `legal.rs` guard covers the forbidden substrings and the UNSET case only.
+- **Req 34 — ESIR re-confirmation prompt** (annual, or on any reported ESIR update) is not built; the
+  registry check is still one-time.
+- **Req 40 — SEF / e-otpremnica copy** does not exist yet, so the korporacijska-kartica and
+  public-sector-buyer exceptions have nowhere to be stated.
+- **Req 9 — rule-version date gating** is conditional on a historical/retrospective AML report, which is
+  not built. Not a gap today; a precondition on that report.
+- **`legal.rs` exclusivity, known exception:** `src/app/reklamacije/ReklamacijeModule.tsx:128` still
+  hard-codes the regime-versioned reklamacija amounts — an SW-7 follow-up, in flight separately.
 
 ---
 
