@@ -47,12 +47,33 @@ pub fn auth_get_session(state: State<'_, AppState>) -> Result<Option<AuthSession
     get_current_session(state.inner())
 }
 
+/// Signing in is also where the opportunistic NBS rate refresh is kicked off —
+/// see `settings::auto_refresh_eur_rate_if_due`. It runs on a detached thread
+/// and its result is dropped: on a fresh install nothing has ever fetched the
+/// EUR middle rate, so the AML čl. 46 st. 1 check silently does not run, and
+/// this is what closes that gap without an admin having to go find the Kurs tab.
+///
+/// Detached deliberately. The fetch carries an 8-second timeout, and login must
+/// return at once whether or not the NBS answers — obtaining the rate is the
+/// precondition for a check, never a gate on working. The helper itself decides
+/// whether anything happens at all (admin session, once a calendar day), so the
+/// role test lives in one place rather than being duplicated here.
 #[tauri::command]
 pub fn auth_login(
     state: State<'_, AppState>,
     request: LoginRequest,
 ) -> Result<AuthSession, CommandError> {
-    login_user(state.inner(), request)
+    let session = login_user(state.inner(), request)?;
+
+    let state_for_rate = state.inner().clone();
+    std::thread::spawn(move || {
+        if let Err(error) = crate::commands::settings::auto_refresh_eur_rate_if_due(&state_for_rate)
+        {
+            log::warn!("opportunistic NBS rate refresh could not run: {error}");
+        }
+    });
+
+    Ok(session)
 }
 
 #[tauri::command]

@@ -1,5 +1,6 @@
 import {
   AlertCircleIcon,
+  CoinsIcon,
   DatabaseBackupIcon,
   LogInIcon,
   LogOutIcon,
@@ -106,6 +107,7 @@ import type {
   BackupStatus,
   CashMovementDirection,
   CommandError,
+  EurRateStatus,
   SaveUserRequest,
   ShiftSummary,
   UserAccount,
@@ -125,6 +127,9 @@ const ROLE_LABELS: Record<UserRole, string> = {
   admin: "Admin",
   cashier: "Kasir",
 };
+
+/** How often the shell re-reads the EUR rate readiness state. */
+const EUR_RATE_POLL_INTERVAL_MS = 60_000;
 
 export function AppShell({ services }: AppShellProps) {
   const [activeId, setActiveId] = useState<NavigationItemId>("register");
@@ -331,6 +336,7 @@ export function AppShell({ services }: AppShellProps) {
             <Badge variant={session.currentShift ? "secondary" : "outline"}>
               {shiftBadge}
             </Badge>
+            <ShellEurRateStatus services={services} role={session.user.role} />
             <ShellBackupStatus services={services} />
             <BackendStatus services={services} />
           </header>
@@ -483,6 +489,97 @@ function renderModule({
   }
 
   return null;
+}
+
+/**
+ * "Can the cash-limit check run at all?" answered in the shell status strip,
+ * next to the DB, backup and shift state.
+ *
+ * The AML čl. 46 st. 1 check is derived from the NBS middle rate. With no rate
+ * cached the check silently does not run, and until now nothing said so outside
+ * Podešavanja → Kurs — an admin had to go looking. This is the readiness signal
+ * that ends the scavenger hunt.
+ *
+ * Three things it must not get wrong. **Obtaining the rate is not itself a
+ * statutory duty** — it is the precondition for a check the shop *is* bound by,
+ * so the copy names an unrun check, never an offence, and carries no penalty
+ * figure (those live only in `src-tauri/src/legal.rs`). **Selling is never
+ * blocked**, so the copy says so out loud rather than letting a red badge imply
+ * the till is stuck. And it is **admin-only**: a cashier can do nothing about
+ * the rate — the Kurs tab is admin-gated — so telling them would be noise, and
+ * the shell does not even ask on their behalf.
+ *
+ * A failed read is silence, not an error badge: a readiness hint that itself
+ * turns into an alarm is worse than no hint.
+ */
+function ShellEurRateStatus({
+  services,
+  role,
+}: {
+  services: PosServices;
+  role: UserRole;
+}) {
+  const settingsService = (services as Partial<PosServices>).settings;
+  const [status, setStatus] = useState<EurRateStatus | null>(null);
+
+  useEffect(() => {
+    if (
+      role !== "admin" ||
+      !settingsService ||
+      typeof settingsService.getEurRate !== "function"
+    ) {
+      return;
+    }
+
+    let ignore = false;
+    const read = () => {
+      settingsService.getEurRate().then(
+        (next) => {
+          if (!ignore) {
+            setStatus(next);
+          }
+        },
+        () => {
+          // Deliberately silent — see the note above.
+        },
+      );
+    };
+
+    read();
+    // Re-read on a slow tick rather than only on mount. Two things land after
+    // the first read and both have to clear the badge on their own: the
+    // opportunistic NBS refresh, which login kicks off detached and which
+    // finishes a second or two later, and the admin fixing the rate by hand in
+    // Podešavanja → Kurs. A badge still claiming „kurs nije poznat“ after the
+    // operator has just set one is worse than no badge. It is one local SQLite
+    // read a minute.
+    const timer = window.setInterval(read, EUR_RATE_POLL_INTERVAL_MS);
+
+    return () => {
+      ignore = true;
+      window.clearInterval(timer);
+    };
+  }, [settingsService, role]);
+
+  if (!status || (status.rate !== null && !status.isStale)) {
+    return null;
+  }
+
+  const missing = status.rate === null;
+
+  return (
+    <Badge
+      variant={missing ? "destructive" : "outline"}
+      title={
+        missing
+          ? "Provera dinarskog limita za gotovinu ne može da se izvrši dok kurs evra nije poznat. Prodaja nije blokirana — račun se može završiti i bez kursa. Otvorite Podešavanja → Kurs i osvežite kurs sa NBS-a ili ga unesite ručno."
+          : "Provera dinarskog limita za gotovinu se računa po starijem kursu jer sačuvani kurs evra nije od današnjeg dana. Prodaja nije blokirana. Otvorite Podešavanja → Kurs i osvežite kurs sa NBS-a ili unesite današnji kurs ručno."
+      }
+    >
+      <CoinsIcon data-icon="inline-start" />
+      {missing ? "Kurs nije poznat" : "Kurs nije od danas"}
+    </Badge>
+  );
 }
 
 function ShellBackupStatus({ services }: { services: PosServices }) {

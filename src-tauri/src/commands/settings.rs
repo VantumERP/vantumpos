@@ -13,6 +13,7 @@ pub(crate) const BACKUP_ENCRYPTION_KEY: &str = "backup_encryption";
 pub(crate) const SALES_SETTINGS_KEY: &str = "sales";
 pub(crate) const SHOP_PROFILE_KEY: &str = "shop_profile";
 pub(crate) const EUR_RATE_KEY: &str = "eur_rate";
+pub(crate) const EUR_RATE_AUTO_REFRESH_KEY: &str = "eur_rate_auto_refresh";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -575,6 +576,89 @@ pub fn refresh_eur_rate_with(
     }
 
     eur_rate_status(state, today)
+}
+
+/// The bookkeeping behind the once-a-day opportunistic refresh.
+///
+/// It records the last *attempt*, not the last success, and deliberately so: a
+/// shop with no internet would otherwise pay the NBS timeout on every admin
+/// login, all day, forever. One attempt a day is the whole budget.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EurRateAutoRefresh {
+    /// `YYYY-MM-DD` of the last attempt, or `None` on a fresh install.
+    #[serde(default)]
+    pub last_attempted_on: Option<String>,
+}
+
+/// Is the signed-in user an admin? Unlike `require_admin` this answers `false`
+/// instead of erroring, because the opportunistic refresh is a silent no-op for
+/// a cashier — not a rejected action anybody should be told about.
+fn session_user_is_admin(state: &AppState) -> Result<bool, AppError> {
+    let Some(user_id) = state.session_user_id()? else {
+        return Ok(false);
+    };
+    let Some(user) = super::auth::active_user_by_id(state, user_id)? else {
+        return Ok(false);
+    };
+    Ok(user.role == "admin")
+}
+
+/// One opportunistic NBS refresh per calendar day, for admin sessions only.
+///
+/// Obtaining the rate is **not itself a statutory duty**: it is the precondition
+/// for the AML čl. 46 st. 1 check the shop *is* bound by. On a fresh install
+/// nothing has ever fetched it, so that check silently does not run — this is
+/// what closes that gap without anyone having to go looking for the Kurs tab.
+///
+/// It is a best-effort side errand and nothing may hang off its result: the
+/// caller runs it detached so it can never delay a login, a sale or a shift, and
+/// a failure degrades into the existing path (cached rate + staleness warning,
+/// or unavailable) exactly as a manual refresh does.
+///
+/// Returns whether an attempt was made, which is what the tests assert on.
+pub fn auto_refresh_eur_rate_if_due(state: &AppState) -> Result<bool, AppError> {
+    let today = today_utc()?;
+    auto_refresh_eur_rate_if_due_with(state, &today, crate::nbs_rate::fetch_nbs_middle_rate)
+}
+
+/// `auto_refresh_eur_rate_if_due` with the day and the fetch injected, so the
+/// once-a-day budget and the degrade path are testable without a network.
+pub fn auto_refresh_eur_rate_if_due_with(
+    state: &AppState,
+    today: &str,
+    fetch: impl FnOnce() -> Result<crate::nbs_rate::EurRate, AppError>,
+) -> Result<bool, AppError> {
+    // A cashier session (or none at all) never reaches the network, and never
+    // spends the day's attempt either — otherwise the admin who signs in after
+    // the morning cashier would find the budget already gone.
+    if !session_user_is_admin(state)? {
+        return Ok(false);
+    }
+
+    let mut marker: EurRateAutoRefresh = load_json_setting(
+        state,
+        EUR_RATE_AUTO_REFRESH_KEY,
+        EurRateAutoRefresh::default(),
+    )?;
+    if marker.last_attempted_on.as_deref() == Some(today) {
+        return Ok(false);
+    }
+
+    // Stamped *before* the fetch, on purpose: a failed attempt has to spend the
+    // day just as a successful one does, or an offline shop retries on every
+    // admin login and pays the timeout each time.
+    marker.last_attempted_on = Some(today.to_string());
+    save_json_setting(state, EUR_RATE_AUTO_REFRESH_KEY, &marker)?;
+
+    match fetch() {
+        Ok(rate) => save_eur_rate(state, &rate)?,
+        Err(error) => {
+            log::warn!("opportunistic NBS rate refresh failed, keeping the cached rate: {error}");
+        }
+    }
+
+    Ok(true)
 }
 
 /// The plausible RSD/EUR band a hand-typed rate has to fall in, in para
@@ -1467,6 +1551,165 @@ mod tests {
                 .expect("the fetched rate is cached");
             assert_eq!(cached.rate_minor, 11_800);
             assert_eq!(cached.source, RateSource::Nbs);
+        });
+    }
+
+    /// A fresh install has no cached rate at all, so the AML čl. 46 st. 1 check
+    /// silently does not run until an admin happens to open Podešavanja → Kurs.
+    /// The opportunistic refresh closes that gap — but at a cost of at most one
+    /// attempt a day, because a shop with no internet would otherwise pay an
+    /// 8-second NBS timeout on every admin login.
+    #[test]
+    fn the_auto_refresh_attempts_the_rate_at_most_once_a_day() {
+        with_state("eur_rate_auto_refresh_once_a_day", |state| {
+            sign_in_admin(state);
+
+            let calls = std::cell::Cell::new(0_u32);
+            let fetch = |rate_date: &str| {
+                calls.set(calls.get() + 1);
+                Ok(EurRate {
+                    rate_minor: 11_723,
+                    rate_date: rate_date.to_string(),
+                    source: RateSource::Nbs,
+                })
+            };
+
+            assert!(
+                auto_refresh_eur_rate_if_due_with(state, "2026-07-31", || fetch("2026-07-31"))
+                    .expect("the first attempt of the day should run"),
+                "a fresh install has never attempted a fetch"
+            );
+            assert_eq!(calls.get(), 1);
+
+            assert!(
+                !auto_refresh_eur_rate_if_due_with(state, "2026-07-31", || fetch("2026-07-31"))
+                    .expect("a second same-day call should be a no-op"),
+                "the day's attempt is already spent"
+            );
+            assert_eq!(calls.get(), 1, "no second outbound call on the same day");
+
+            let attempted_next_day =
+                auto_refresh_eur_rate_if_due_with(state, "2026-08-01", || fetch("2026-08-01"))
+                    .expect("the next day earns a fresh attempt");
+            assert!(attempted_next_day, "a new calendar day refills the budget");
+            assert_eq!(calls.get(), 2);
+            assert_eq!(
+                load_eur_rate(state)
+                    .expect("rate should load")
+                    .expect("the fetched rate is cached")
+                    .rate_date,
+                "2026-08-01"
+            );
+        });
+    }
+
+    /// A failed opportunistic refresh must leave the app exactly as it was:
+    /// no error out of the call, the cached rate untouched, and the day's
+    /// attempt spent so a dead network is not retried on every admin action.
+    #[test]
+    fn a_failed_auto_refresh_leaves_the_cached_rate_and_the_app_usable() {
+        with_state("eur_rate_auto_refresh_degrades", |state| {
+            sign_in_admin(state);
+            save_eur_rate(
+                state,
+                &EurRate {
+                    rate_minor: 11_723,
+                    rate_date: "2026-07-30".to_string(),
+                    source: RateSource::Nbs,
+                },
+            )
+            .expect("rate should save");
+
+            let attempted = auto_refresh_eur_rate_if_due_with(state, "2026-07-31", || {
+                Err(AppError::business(
+                    "nbs_rate_unavailable",
+                    "Kurs NBS-a trenutno nije dostupan.",
+                ))
+            })
+            .expect("a dead network must never surface as an error here");
+            assert!(attempted, "the attempt was made and is now spent");
+
+            let status = eur_rate_status(state, "2026-07-31").expect("status should compute");
+            let rate = status.rate.expect("the cached rate still stands");
+            assert_eq!(rate.rate_minor, 11_723);
+            assert_eq!(rate.rate_date, "2026-07-30");
+            assert!(status.is_stale, "the operator is warned, not blocked");
+
+            let calls = std::cell::Cell::new(0_u32);
+            assert!(
+                !auto_refresh_eur_rate_if_due_with(state, "2026-07-31", || {
+                    calls.set(calls.get() + 1);
+                    Err(AppError::business("nbs_rate_unavailable", "i dalje ništa."))
+                })
+                .expect("the same-day retry is a no-op"),
+                "a failed attempt still spends the day, so an offline shop stops retrying"
+            );
+            assert_eq!(calls.get(), 0);
+        });
+    }
+
+    /// The opportunistic refresh is an admin-session affordance. A cashier
+    /// session must not reach the network at all — and must not spend the day's
+    /// attempt either, or the admin who signs in later would find it gone.
+    #[test]
+    fn the_auto_refresh_never_runs_for_a_cashier_session() {
+        with_state("eur_rate_auto_refresh_cashier", |state| {
+            sign_in_cashier(state);
+
+            let calls = std::cell::Cell::new(0_u32);
+            assert!(
+                !auto_refresh_eur_rate_if_due_with(state, "2026-07-31", || {
+                    calls.set(calls.get() + 1);
+                    Ok(EurRate {
+                        rate_minor: 11_723,
+                        rate_date: "2026-07-31".to_string(),
+                        source: RateSource::Nbs,
+                    })
+                })
+                .expect("a cashier session is a silent no-op, not an error"),
+                "a cashier must never trigger the outbound NBS call"
+            );
+            assert_eq!(calls.get(), 0);
+            assert!(
+                load_eur_rate(state).expect("rate should load").is_none(),
+                "nothing was fetched, so nothing was cached"
+            );
+
+            sign_in_admin(state);
+            assert!(
+                auto_refresh_eur_rate_if_due_with(state, "2026-07-31", || {
+                    calls.set(calls.get() + 1);
+                    Ok(EurRate {
+                        rate_minor: 11_723,
+                        rate_date: "2026-07-31".to_string(),
+                        source: RateSource::Nbs,
+                    })
+                })
+                .expect("the admin session should attempt"),
+                "the cashier session must not have consumed the day's attempt"
+            );
+            assert_eq!(calls.get(), 1);
+        });
+    }
+
+    /// No session at all (the app is open at the login screen) must not fetch
+    /// either — the refresh belongs to an admin session, not to app launch.
+    #[test]
+    fn the_auto_refresh_never_runs_without_a_session() {
+        with_state("eur_rate_auto_refresh_no_session", |state| {
+            let calls = std::cell::Cell::new(0_u32);
+            let attempted = auto_refresh_eur_rate_if_due_with(state, "2026-07-31", || {
+                calls.set(calls.get() + 1);
+                Ok(EurRate {
+                    rate_minor: 11_723,
+                    rate_date: "2026-07-31".to_string(),
+                    source: RateSource::Nbs,
+                })
+            })
+            .expect("no session is a silent no-op");
+
+            assert!(!attempted, "app launch alone must not reach the NBS");
+            assert_eq!(calls.get(), 0);
         });
     }
 

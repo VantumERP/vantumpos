@@ -57,6 +57,35 @@ function buildAuthServices(overrides: Record<string, unknown> = {}) {
   } as unknown as PosServices;
 }
 
+/**
+ * Services for the shell's EUR-rate readiness signal: a fixed session plus a
+ * stubbed `getEurRate`, so the test can assert both what the shell renders and
+ * whether it asked at all (a cashier session must not).
+ */
+function buildEurRateServices(
+  session: AppSession,
+  getEurRate: ReturnType<typeof vi.fn>,
+) {
+  return buildAuthServices({
+    settings: {
+      getHealth: vi.fn().mockResolvedValue(readyHealth),
+      getCompanySettings: vi.fn().mockResolvedValue(readyCompany),
+      listTaxRates: vi
+        .fn()
+        .mockResolvedValue([
+          { id: 1, name: "PDV 20%", rateBasisPoints: 2000, active: true },
+        ]),
+      seedTaxRates: vi.fn().mockResolvedValue([]),
+      getEurRate,
+    },
+    auth: {
+      getSession: vi.fn().mockResolvedValue(session),
+      login: vi.fn(),
+      logout: vi.fn().mockResolvedValue(undefined),
+    },
+  });
+}
+
 const cashierSession: AppSession = {
   user: {
     id: 2,
@@ -187,6 +216,88 @@ describe("AppShell", () => {
     expect(
       await screen.findByRole("button", { name: "Podešavanja" }),
     ).toBeInTheDocument();
+  });
+
+  it("tells an admin in the shell when no EUR rate exists at all", async () => {
+    const getEurRate = vi.fn().mockResolvedValue({
+      rate: null,
+      isStale: true,
+      checkedFor: "2026-07-31",
+    });
+    const services = buildEurRateServices(adminSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    const badge = await screen.findByText("Kurs nije poznat");
+    // The copy has to carry all three facts: the check cannot run, what to do,
+    // and that selling is not blocked. A missing rate is the precondition for
+    // the AML čl. 46 st. 1 check — never itself an offence.
+    const detail = badge.getAttribute("title") ?? "";
+    expect(detail).toContain("Provera dinarskog limita za gotovinu");
+    expect(detail).toContain("Podešavanja → Kurs");
+    expect(detail).toContain("Prodaja nije blokirana");
+    expect(detail).not.toMatch(/kazn|prekršaj/i);
+  });
+
+  it("warns an admin in the shell when the cached EUR rate is stale", async () => {
+    const getEurRate = vi.fn().mockResolvedValue({
+      rate: { rateMinor: 11723, rateDate: "2026-07-30", source: "nbs" },
+      isStale: true,
+      checkedFor: "2026-07-31",
+    });
+    const services = buildEurRateServices(adminSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    const badge = await screen.findByText("Kurs nije od danas");
+    expect(badge.getAttribute("title") ?? "").toContain(
+      "Prodaja nije blokirana",
+    );
+  });
+
+  it("clears the EUR rate signal once a rate for today exists", async () => {
+    const getEurRate = vi.fn().mockResolvedValue({
+      rate: { rateMinor: 11723, rateDate: "2026-07-31", source: "nbs" },
+      isStale: false,
+      checkedFor: "2026-07-31",
+    });
+    const services = buildEurRateServices(adminSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    await screen.findByText("Administrator");
+    await waitFor(() => expect(getEurRate).toHaveBeenCalled());
+
+    expect(screen.queryByText("Kurs nije poznat")).not.toBeInTheDocument();
+    expect(screen.queryByText("Kurs nije od danas")).not.toBeInTheDocument();
+  });
+
+  it("keeps the EUR rate signal away from a cashier session", async () => {
+    const getEurRate = vi.fn().mockResolvedValue({
+      rate: null,
+      isStale: true,
+      checkedFor: "2026-07-31",
+    });
+    const services = buildEurRateServices(cashierSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    await screen.findByRole("heading", { name: "Otvori smenu" });
+
+    expect(screen.queryByText("Kurs nije poznat")).not.toBeInTheDocument();
+    expect(getEurRate).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when the EUR rate cannot be read at all", async () => {
+    const getEurRate = vi.fn().mockRejectedValue(new Error("nedostupno"));
+    const services = buildEurRateServices(adminSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    await screen.findByText("Administrator");
+    await waitFor(() => expect(getEurRate).toHaveBeenCalled());
+
+    expect(screen.queryByText("Kurs nije poznat")).not.toBeInTheDocument();
   });
 
   it("shows Serbian login errors without leaking technical messages", async () => {
