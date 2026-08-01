@@ -12,7 +12,9 @@
 
 #![allow(dead_code)]
 
-use time::Date;
+use std::cmp::Ordering;
+
+use time::{Date, Month};
 
 use crate::cash_deposit::parse_iso_date;
 
@@ -123,6 +125,224 @@ fn monday_of_week(day: &str) -> Option<Date> {
     Date::from_julian_day(date.to_julian_day() - offset).ok()
 }
 
+/// ZoR čl. 87 — a zaposleni mlađi od 18 godina may not work longer than eight
+/// hours a day. Minutes, never floating point.
+pub const MINOR_DAILY_CAP_MINUTES: i64 = 8 * 60;
+
+/// ZoR čl. 88 st. 1 — the prohibition runs to „mlađi od 18 godina života“.
+const PUNOLETSTVO_GODINA: i32 = 18;
+
+/// ZoR čl. 91 st. 1 — „jedan od roditelja sa detetom do tri godine života“.
+const SAGLASNOST_DETE_GODINA: i32 = 3;
+
+/// ZoR čl. 91 st. 2 — „samohrani roditelj koji ima dete do sedam godina života“.
+/// SEVEN. The widely-repeated fourteen belongs to no provision of ZoR and would
+/// silently widen the gate instead of guarding it.
+const SAGLASNOST_SAMOHRANI_DETE_GODINA: i32 = 7;
+
+/// The čl. 87–91 age and status facts about one employee, mirrored from the v17
+/// `users` columns.
+///
+/// Every field is what the employer has *asserted*, never evidence: `trudnoca_ili_dojenje`
+/// is a flag set from a nalaz nadležnog zdravstvenog organa and the nalaz itself is
+/// never stored, and `saglasnost_prekovremeni_od` records that a written consent
+/// exists and from when — it does not collect one. Neither is a ZZPL pristanak.
+///
+/// `saglasnost_prekovremeni_od` is the čl. 91 consent and nothing else. The čl. 57
+/// st. 4 preraspodela conversion has its own column, `saglasnost_preraspodela_od`,
+/// which is deliberately absent from this struct so it cannot be read here by
+/// accident — the two consents are legally distinct and not interchangeable.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EmployeeProtection {
+    pub datum_rodjenja: Option<String>,
+    pub datum_rodjenja_najmladjeg_deteta: Option<String>,
+    pub samohrani_roditelj: Option<bool>,
+    pub dete_tezak_invalid: Option<bool>,
+    pub trudnoca_ili_dojenje: Option<bool>,
+    pub saglasnost_prekovremeni_od: Option<String>,
+    pub radi_u_preraspodeli: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProtectionKind {
+    /// čl. 88 st. 1 — overtime of an employee under 18 is prohibited outright.
+    MaloletanPrekovremeni,
+    /// čl. 87 — an employee under 18 is capped at eight hours a day.
+    MaloletanDnevniLimit,
+    /// čl. 91 — a protected parent works overtime only on their written consent.
+    SaglasnostRoditelja,
+    /// čl. 90 — pregnancy or nursing, conditional on a health authority's finding.
+    TrudnocaNocniIPrekovremeni,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtectionBlock {
+    pub kind: ProtectionKind,
+    /// `true` where the statute states the prohibition itself, `false` where it
+    /// makes the prohibition conditional on a finding this application does not
+    /// hold and must not simulate.
+    pub blocking: bool,
+    pub poruka: String,
+}
+
+/// Applies the ZoR čl. 87–91 protection guards to one day of one employee.
+///
+/// `day` is the sole authority for every age computation — never a wall clock.
+/// A guard that reads `now()` answers a different question on every run and
+/// silently changes what a stored day means, which is exactly what an append-only
+/// register must not do. As in `assess_caps`, `entry.dan` is not read; pass `day`
+/// and `entry` from the same source.
+///
+/// The čl. 91 and čl. 90 guards are drawn on the day carrying overtime. Both
+/// provisions read „prekovremeno, odnosno noću“, and the night leg is not visible
+/// in `DayHours` — night hours are a čl. 62 computation over clock times, tagged
+/// `izračunato radi provere usklađenosti`, and belong wherever those are modelled.
+/// A plain day with no overtime raises nothing here.
+///
+/// Two limits of this function, both deliberate:
+///
+/// 1. **The čl. 87 weekly leg (35 časova nedeljno) is not checked.** It needs the
+///    employee's week, which this signature does not carry; `assess_caps` is where
+///    a week is already in hand.
+/// 2. **An absent or unreadable `datum_rodjenja` raises nothing.** v17 adds the
+///    column nullable and does not backfill it, so treating "unknown" as "minor"
+///    would block every employee nobody has filled in yet — and a register that
+///    refuses to describe days that actually happened hides exposure instead of
+///    surfacing it. Filling the profile is what turns the guard on.
+pub fn check_protection(
+    p: &EmployeeProtection,
+    day: &str,
+    entry: &DayHours,
+) -> Vec<ProtectionBlock> {
+    let mut blocks = Vec::new();
+    let ima_prekovremeni = entry.prekovremeni_minuta > 0;
+
+    if is_younger_than(p.datum_rodjenja.as_deref(), day, PUNOLETSTVO_GODINA) {
+        if ima_prekovremeni {
+            blocks.push(ProtectionBlock {
+                kind: ProtectionKind::MaloletanPrekovremeni,
+                blocking: true,
+                poruka: "Zabranjen je prekovremeni rad zaposlenog mlađeg od 18 godina života \
+                         (ZoR čl. 88 st. 1). Prekovremeni časovi za ovaj dan ne mogu se unositi."
+                    .to_string(),
+            });
+        }
+        if entry.efektivno_minuta + entry.prekovremeni_minuta > MINOR_DAILY_CAP_MINUTES {
+            blocks.push(ProtectionBlock {
+                kind: ProtectionKind::MaloletanDnevniLimit,
+                blocking: true,
+                poruka: "Zaposleni mlađi od 18 godina života ne može da radi duže od osam \
+                         časova dnevno (ZoR čl. 87)."
+                    .to_string(),
+            });
+        }
+    }
+
+    if ima_prekovremeni
+        && parental_consent_required(p, day)
+        && p.saglasnost_prekovremeni_od.is_none()
+    {
+        blocks.push(ProtectionBlock {
+            kind: ProtectionKind::SaglasnostRoditelja,
+            blocking: true,
+            poruka: "Ovaj zaposleni može da radi prekovremeno samo uz svoju pisanu saglasnost \
+                     (ZoR čl. 91). Saglasnost nije evidentirana — upišite datum pisane \
+                     saglasnosti u profil zaposlenog."
+                .to_string(),
+        });
+    }
+
+    if ima_prekovremeni && p.trudnoca_ili_dojenje == Some(true) {
+        blocks.push(ProtectionBlock {
+            kind: ProtectionKind::TrudnocaNocniIPrekovremeni,
+            blocking: false,
+            poruka: "Zaposlena za vreme trudnoće i zaposlena koja doji dete ne može da radi \
+                     prekovremeno i noću ako bi takav rad bio štetan za njeno zdravlje i \
+                     zdravlje deteta, na osnovu nalaza nadležnog zdravstvenog organa \
+                     (ZoR čl. 90). Ocenu daje nadležni zdravstveni organ, ne aplikacija."
+                .to_string(),
+        });
+    }
+
+    blocks
+}
+
+/// čl. 58 — „Preraspodela radnog vremena ne smatra se prekovremenim radom.“
+///
+/// The naive `hours > 8 ⇒ prekovremeni` derivation is legally wrong for an
+/// employee in preraspodela and would inflate the čl. 55 st. 6 register, which is
+/// the penalised one. This is the hard branch §4 req. 9 demands, not a display
+/// toggle: it says whether overtime may be *derived* at all, and never whether an
+/// operator may record overtime they know happened.
+pub fn derives_overtime_automatically(p: &EmployeeProtection) -> bool {
+    !p.radi_u_preraspodeli
+}
+
+/// Whether čl. 91 puts this day's overtime behind a written consent.
+///
+/// Both legs of st. 2, not just the age one: the statute reads „Samohrani
+/// roditelj koji ima dete do sedam godina života **ili dete koje je težak
+/// invalid**“, and the disability leg carries no age bound at all. An age-only
+/// guard drops it the day the child turns seven.
+fn parental_consent_required(p: &EmployeeProtection, day: &str) -> bool {
+    let samohrani = p.samohrani_roditelj == Some(true);
+    if samohrani && p.dete_tezak_invalid == Some(true) {
+        return true;
+    }
+    let prag = if samohrani {
+        SAGLASNOST_SAMOHRANI_DETE_GODINA
+    } else {
+        SAGLASNOST_DETE_GODINA
+    };
+    child_within_years(p.datum_rodjenja_najmladjeg_deteta.as_deref(), day, prag)
+}
+
+/// True when `birth` is strictly less than `years` old on `day`.
+///
+/// čl. 88 st. 1 says „mlađi od 18 godina života“, so the eighteenth birthday
+/// itself is already outside the prohibition.
+fn is_younger_than(birth: Option<&str>, day: &str, years: i32) -> bool {
+    compare_day_to_birthday(birth, day, years) == Some(Ordering::Less)
+}
+
+/// True when a child born on `birth` is still „do `years` godina života“ on `day`.
+///
+/// The anniversary itself counts as inside. „Do“ is not „mlađi od“, and of the two
+/// readings only this one errs toward keeping the guard: one extra day of asking
+/// for a consent that was already on file costs a prompt, while one day short
+/// drops the čl. 91 gate on the very day the threshold is reached.
+fn child_within_years(birth: Option<&str>, day: &str, years: i32) -> bool {
+    matches!(
+        compare_day_to_birthday(birth, day, years),
+        Some(Ordering::Less | Ordering::Equal)
+    )
+}
+
+/// Orders `day` against the `years`-th anniversary of `birth`.
+///
+/// `None` when either date is absent or unreadable — the caller then raises no
+/// guard at all rather than guessing an age.
+fn compare_day_to_birthday(birth: Option<&str>, day: &str, years: i32) -> Option<Ordering> {
+    let birth = parse_iso_date(birth?)?;
+    let day = parse_iso_date(day)?;
+    Some(day.cmp(&anniversary(birth, years)?))
+}
+
+/// The `years`-th anniversary of `birth`.
+///
+/// A 29 February birth has no anniversary in a common year; it falls to 1 March,
+/// which keeps the protection through the whole of 28 February. The other choice
+/// would end a minor's or a child's protection a day early, and that is the one
+/// direction that costs something.
+fn anniversary(birth: Date, years: i32) -> Option<Date> {
+    let godina = birth.year().checked_add(years)?;
+    Date::from_calendar_date(godina, birth.month(), birth.day())
+        .or_else(|_| Date::from_calendar_date(godina, Month::March, 1))
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +353,28 @@ mod tests {
             efektivno_minuta: effective,
             prekovremeni_minuta: overtime,
         }
+    }
+
+    /// An employee with nothing asserted about them except their own date of
+    /// birth — every čl. 90/91 flag left unset, exactly as v17 leaves the
+    /// columns for an employee nobody has filled in yet.
+    fn protection_born(datum_rodjenja: &str) -> EmployeeProtection {
+        EmployeeProtection {
+            datum_rodjenja: Some(datum_rodjenja.to_string()),
+            datum_rodjenja_najmladjeg_deteta: None,
+            samohrani_roditelj: None,
+            dete_tezak_invalid: None,
+            trudnoca_ili_dojenje: None,
+            saglasnost_prekovremeni_od: None,
+            radi_u_preraspodeli: false,
+        }
+    }
+
+    /// An adult parent whose youngest child was born on `dete`.
+    fn protection_child_born(dete: &str) -> EmployeeProtection {
+        let mut p = protection_born("1990-04-11");
+        p.datum_rodjenja_najmladjeg_deteta = Some(dete.to_string());
+        p
     }
 
     #[test]
@@ -250,5 +492,211 @@ mod tests {
             a.weekly_cap_exceeded,
             "over-counting warns; dropping the row would hide the breach"
         );
+    }
+
+    #[test]
+    fn an_employee_under_eighteen_cannot_be_given_overtime_at_all() {
+        // čl. 88 st. 1 — an unconditional prohibition, not a warning.
+        let p = protection_born("2009-09-01");
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let block = blocks
+            .iter()
+            .find(|b| b.kind == ProtectionKind::MaloletanPrekovremeni)
+            .expect("čl. 88 st. 1 fires on any overtime minute");
+        assert!(block.blocking, "this one blocks, it does not warn");
+    }
+
+    #[test]
+    fn an_employee_under_eighteen_is_capped_at_eight_hours_a_day() {
+        let p = protection_born("2009-09-01");
+        let blocks = check_protection(&p, "2026-08-03", &day(540, 0));
+        assert!(blocks
+            .iter()
+            .any(|b| b.kind == ProtectionKind::MaloletanDnevniLimit));
+    }
+
+    /// „Mlađi od 18 godina života“ is strictly younger, so the eighteenth
+    /// birthday itself is already outside čl. 87 and čl. 88. Off by one here
+    /// either blocks a lawful adult day or lets a minor's overtime through.
+    #[test]
+    fn the_minor_guards_stop_on_the_eighteenth_birthday() {
+        let p = protection_born("2008-08-03");
+        let on_the_birthday = check_protection(&p, "2026-08-03", &day(540, 60));
+        assert!(
+            on_the_birthday.is_empty(),
+            "an employee who turned 18 today is no longer „mlađi od 18 godina“"
+        );
+
+        let day_before = check_protection(&p, "2026-08-02", &day(540, 60));
+        assert!(
+            day_before
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanPrekovremeni),
+            "the day before the eighteenth birthday is still inside čl. 88 st. 1"
+        );
+    }
+
+    /// v17 leaves `datum_rodjenja` NULL and does not backfill it. Treating an
+    /// unknown date of birth as a minor would block every employee nobody has
+    /// filled in yet, so the guard stays silent and Task 9's profile screen is
+    /// where the gap is closed.
+    #[test]
+    fn an_unknown_date_of_birth_raises_no_minor_guard() {
+        let mut p = protection_born("2009-09-01");
+        p.datum_rodjenja = None;
+        assert!(check_protection(&p, "2026-08-03", &day(540, 60)).is_empty());
+    }
+
+    /// The threshold is SEVEN for a samohrani roditelj (čl. 91 st. 2). The
+    /// commonly-quoted fourteen is wrong and would silently drop the guard.
+    #[test]
+    fn a_single_parent_of_a_child_under_seven_needs_recorded_consent() {
+        let mut p = protection_child_born("2020-06-01"); // 6 years old on the test day
+        p.samohrani_roditelj = Some(true);
+        p.saglasnost_prekovremeni_od = None;
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let block = blocks
+            .iter()
+            .find(|b| b.kind == ProtectionKind::SaglasnostRoditelja)
+            .expect("a samohrani roditelj of a six-year-old is inside čl. 91 st. 2");
+        assert!(
+            block.blocking,
+            "čl. 91 requires the written consent before the overtime, not after"
+        );
+
+        p.saglasnost_prekovremeni_od = Some("2026-01-15".to_string());
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(!blocks
+            .iter()
+            .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
+    }
+
+    #[test]
+    fn a_single_parent_of_a_child_over_seven_needs_no_consent() {
+        let mut p = protection_child_born("2018-06-01"); // 8 years old
+        p.samohrani_roditelj = Some(true);
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(!blocks
+            .iter()
+            .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
+    }
+
+    /// čl. 91 st. 2 is „dete do sedam godina života ILI dete koje je težak invalid“.
+    /// The disability leg has NO age limit — an age-only guard drops it silently.
+    #[test]
+    fn a_single_parent_of_a_disabled_child_needs_consent_at_any_age() {
+        let mut p = protection_child_born("2010-06-01"); // 16 years old
+        p.samohrani_roditelj = Some(true);
+        p.dete_tezak_invalid = Some(true);
+        p.saglasnost_prekovremeni_od = None;
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja),
+            "the težak-invalid leg of čl. 91 st. 2 is not bounded by the seven-year threshold"
+        );
+    }
+
+    #[test]
+    fn a_non_single_parent_threshold_is_three_not_seven() {
+        let mut p = protection_child_born("2022-06-01"); // 4 years old
+        p.samohrani_roditelj = Some(false);
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja),
+            "čl. 91 st. 1 covers a child up to three"
+        );
+    }
+
+    /// „Dete do tri godine života“ is read through the third birthday itself:
+    /// a day of consent nobody needed costs a prompt, a day too few drops the
+    /// čl. 91 guard on the exact day the statute is most obviously engaged.
+    #[test]
+    fn the_child_threshold_includes_the_birthday_itself() {
+        let mut p = protection_child_born("2023-08-03"); // turns three on the test day
+        p.samohrani_roditelj = Some(false);
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja),
+            "the third birthday is still „dete do tri godine života“"
+        );
+
+        let blocks = check_protection(&p, "2026-08-04", &day(480, 60));
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja),
+            "the day after ends čl. 91 st. 1"
+        );
+    }
+
+    /// The consent gate is drawn on overtime. A plain eight-hour day of a
+    /// protected parent is nobody's business and must raise nothing.
+    #[test]
+    fn a_day_without_overtime_raises_no_consent_requirement() {
+        let mut p = protection_child_born("2024-06-01");
+        p.samohrani_roditelj = Some(true);
+        assert!(check_protection(&p, "2026-08-03", &day(480, 0)).is_empty());
+    }
+
+    /// čl. 90 is NOT an unconditional block — it fires on a health authority's
+    /// finding. We store the flag; we never store the finding.
+    #[test]
+    fn pregnancy_warns_rather_than_blocks() {
+        let mut p = protection_born("1995-01-01");
+        p.trudnoca_ili_dojenje = Some(true);
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let block = blocks
+            .iter()
+            .find(|b| b.kind == ProtectionKind::TrudnocaNocniIPrekovremeni)
+            .expect("a warning is raised");
+        assert!(
+            !block.blocking,
+            "čl. 90 depends on a nalaz — the app must not decide it"
+        );
+    }
+
+    /// Every statutory amount in this application lives in `legal.rs` and is
+    /// named by article everywhere else. The profile is a fixture chosen to
+    /// raise all four kinds at once, not a plausible employee.
+    #[test]
+    fn no_protection_message_carries_a_fine_figure() {
+        let mut p = protection_born("2009-09-01");
+        p.trudnoca_ili_dojenje = Some(true);
+        p.samohrani_roditelj = Some(true);
+        p.datum_rodjenja_najmladjeg_deteta = Some("2024-01-01".to_string());
+        let blocks = check_protection(&p, "2026-08-03", &day(540, 60));
+        assert_eq!(
+            blocks.len(),
+            4,
+            "this must exercise every kind or it guards nothing: {blocks:?}"
+        );
+        for block in &blocks {
+            let poruka = block.poruka.to_lowercase();
+            assert!(
+                !poruka.contains("dinara") && !poruka.contains("kazn") && !poruka.contains(".000"),
+                "a fine figure escaped legal.rs: {}",
+                block.poruka
+            );
+        }
+    }
+
+    #[test]
+    fn preraspodela_suppresses_automatic_overtime_derivation() {
+        let mut p = protection_born("1995-01-01");
+        p.radi_u_preraspodeli = true;
+        assert!(
+            !derives_overtime_automatically(&p),
+            "čl. 58 hours are not overtime"
+        );
+        p.radi_u_preraspodeli = false;
+        assert!(derives_overtime_automatically(&p));
     }
 }
