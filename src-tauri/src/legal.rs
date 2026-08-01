@@ -7,7 +7,8 @@
 //! unknown we render no figure rather than a plausible one.
 //!
 //! Verified against primary text on 31.07.2026 — see
-//! `docs/SW11-SW15-VERIFIED-RULES.md` §2.
+//! `docs/SW11-SW15-VERIFIED-RULES.md` §2. The two ZoR working-time notices are
+//! verified against `docs/SW14-VERIFIED-RULES.md` §3 W1.
 //!
 //! Rendered by the AML, cash-deposit and declaration surfaces (Tasks 8, 13 and
 //! 19), so `dead_code` is allowed here until that wiring lands — mirroring the
@@ -150,6 +151,47 @@ pub fn lpfr_required(profile: &ShopProfile) -> LegalNotice {
     }
 }
 
+/// ZoR čl. 55 st. 6 — the daily overtime register.
+pub fn overtime_record_missing(profile: &ShopProfile) -> LegalNotice {
+    LegalNotice {
+        summary: "Poslodavac je dužan da vodi dnevnu evidenciju o prekovremenom radu \
+                  zaposlenih."
+            .to_string(),
+        penalty: tiered(
+            profile,
+            "Prekršaj: novčana kazna od 50.000 do 150.000 dinara \
+             (čl. 276 st. 1 u vezi sa tač. 1a).",
+            "Prekršaj: novčana kazna od 150.000 do 300.000 dinara (čl. 276 st. 1 tač. 1a), \
+             uz kaznu za odgovorno lice od 10.000 do 20.000 dinara (čl. 276 st. 2).",
+        ),
+        citation: "Zakon o radu, čl. 55 st. 6. Nadzor: inspektor rada. \
+                   Ovi članovi ne propisuju zaštitnu meru."
+            .to_string(),
+        is_legal_duty: true,
+    }
+}
+
+/// ZoR čl. 53 — the overtime caps. This is the LARGER exposure, ~2.7× the
+/// missing-register fine, and it is why the cap checks are the feature.
+pub fn overtime_caps_exceeded(profile: &ShopProfile) -> LegalNotice {
+    LegalNotice {
+        summary: "Prekovremeni rad ne može trajati duže od osam časova nedeljno, \
+                  niti ukupno radno vreme sa prekovremenim duže od 12 časova dnevno."
+            .to_string(),
+        penalty: tiered(
+            profile,
+            "Prekršaj: novčana kazna od 200.000 do 400.000 dinara \
+             (čl. 274 st. 1 tač. 3 u vezi sa st. 2).",
+            "Prekršaj: novčana kazna od 600.000 do 1.500.000 dinara (čl. 274 st. 1 tač. 3), \
+             uz kaznu za odgovorno lice od 30.000 do 150.000 dinara (čl. 274 st. 3).",
+        ),
+        citation: "Zakon o radu, čl. 53 st. 2 i st. 3. Nadzor: inspektor rada. \
+                   Ovi članovi ne propisuju zaštitnu meru."
+            .to_string(),
+        is_legal_duty: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +213,8 @@ mod tests {
             declaration_missing(p),
             declaration_defective(p),
             lpfr_required(p),
+            overtime_record_missing(p),
+            overtime_caps_exceeded(p),
         ]
     }
 
@@ -188,6 +232,8 @@ mod tests {
             declaration_missing(&p),
             declaration_defective(&p),
             lpfr_required(&p),
+            overtime_record_missing(&p),
+            overtime_caps_exceeded(&p),
         ] {
             assert!(
                 enumerated.contains(&notice),
@@ -410,5 +456,58 @@ mod tests {
             !defective_penalty.contains("zabran"),
             "čl. 67 prescribes no zaštitne mere: {defective_penalty}"
         );
+    }
+
+    #[test]
+    fn overtime_notices_are_tier_correct_and_carry_no_zeor_figure() {
+        let p = profile(Some(PravnaForma::Preduzetnik));
+
+        let missing = overtime_record_missing(&p);
+        let penalty = missing.penalty.expect("known");
+        assert!(penalty.contains("50.000"), "{penalty}");
+        assert!(penalty.contains("150.000"), "{penalty}");
+        assert!(
+            !penalty.contains("300.000"),
+            "300.000 is the pravno-lice tier for čl. 276 st. 1: {penalty}"
+        );
+        assert!(
+            !penalty.contains("odgovorno lice"),
+            "čl. 276 st. 2 does not reach a preduzetnik: {penalty}"
+        );
+
+        let caps = overtime_caps_exceeded(&p);
+        let penalty = caps.penalty.expect("known");
+        assert!(
+            penalty.contains("200.000") && penalty.contains("400.000"),
+            "{penalty}"
+        );
+    }
+
+    /// ZEOR čl. 50/51 tiers are unresolved — čl. 51 exceeds the ZoP čl. 39
+    /// ceiling for a "fizičko lice koje ima zaposlene". Silence beats a wrong
+    /// number, so no ZEOR amount may appear in any notice, under any profile.
+    #[test]
+    fn no_zeor_figure_is_reachable_in_any_notice() {
+        for forma in [
+            Some(PravnaForma::Preduzetnik),
+            Some(PravnaForma::PravnoLice),
+            None,
+        ] {
+            let p = profile(forma);
+            for notice in all_notices(&p) {
+                let rendered = format!(
+                    "{} {} {}",
+                    notice.summary,
+                    notice.penalty.clone().unwrap_or_default(),
+                    notice.citation
+                );
+                for forbidden in ["500.000 do 1.000.000", "300.000 do 500.000", "ZEOR"] {
+                    assert!(
+                        !rendered.contains(forbidden),
+                        "no ZEOR figure may reach an operator; found {forbidden:?} in: {rendered}"
+                    );
+                }
+            }
+        }
     }
 }
