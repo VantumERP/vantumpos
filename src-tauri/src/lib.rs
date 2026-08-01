@@ -92,6 +92,7 @@ pub fn run() {
             commands::users::users_create,
             commands::users::users_update,
             commands::users::users_deactivate,
+            commands::users::users_employee_profile,
             commands::shifts::shift_get_current,
             commands::shifts::shift_open,
             commands::shifts::shift_close,

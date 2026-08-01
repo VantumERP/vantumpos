@@ -164,6 +164,7 @@ function buildUsersService(): UsersService {
     createUser: vi.fn(),
     updateUser: vi.fn(),
     deactivateUser: vi.fn(),
+    getEmployeeProfile: vi.fn(),
   };
 }
 

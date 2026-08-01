@@ -109,6 +109,7 @@ import type {
   BackupStatus,
   CashMovementDirection,
   CommandError,
+  EmployeeProfile,
   EurRateStatus,
   SaveUserRequest,
   ShiftSummary,
@@ -1446,7 +1447,7 @@ function AdminForceCloseShiftPanel({
   );
 }
 
-function UsersScreen({
+export function UsersScreen({
   services,
   currentUser,
 }: {
@@ -1457,6 +1458,11 @@ function UsersScreen({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
+  // Fetched only when an admin opens one employee's account. The čl. 90 flag is
+  // health data, so it never rides along with the list that draws the table.
+  const [editingProfile, setEditingProfile] = useState<EmployeeProfile | null>(
+    null,
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
 
   useEffect(() => {
@@ -1511,6 +1517,7 @@ function UsersScreen({
           type="button"
           onClick={() => {
             setEditingUser(null);
+            setEditingProfile(null);
             setDialogOpen(true);
           }}
         >
@@ -1571,8 +1578,22 @@ function UsersScreen({
                           variant="outline"
                           size="sm"
                           onClick={() => {
-                            setEditingUser(user);
-                            setDialogOpen(true);
+                            void services.users
+                              .getEmployeeProfile(user.id)
+                              .then((profile) => {
+                                setEditingUser(user);
+                                setEditingProfile(profile);
+                                setError(null);
+                                setDialogOpen(true);
+                              })
+                              .catch((profileError) =>
+                                setError(
+                                  errorMessage(
+                                    profileError,
+                                    "Profil zaposlenog nije učitan.",
+                                  ),
+                                ),
+                              );
                           }}
                         >
                           Uredi
@@ -1620,6 +1641,7 @@ function UsersScreen({
       <UserDialog
         open={dialogOpen}
         user={editingUser}
+        profile={editingProfile}
         onOpenChange={setDialogOpen}
         onSave={async (request) => {
           const saved = editingUser
@@ -1638,14 +1660,39 @@ function UsersScreen({
   );
 }
 
-function UserDialog({
+/**
+ * „Nije upisano“ is a third state, not a false: v17 leaves every čl. 91 flag
+ * nullable because an employee nobody has profiled yet is not an employee whose
+ * child does not exist.
+ */
+type ProfileFlag = "" | "da" | "ne";
+
+function flagValue(value: boolean | null): ProfileFlag {
+  if (value === null) {
+    return "";
+  }
+
+  return value ? "da" : "ne";
+}
+
+function flagFromValue(value: ProfileFlag): boolean | null {
+  if (value === "") {
+    return null;
+  }
+
+  return value === "da";
+}
+
+export function UserDialog({
   open,
   user,
+  profile,
   onOpenChange,
   onSave,
 }: {
   open: boolean;
   user: UserAccount | null;
+  profile: EmployeeProfile | null;
   onOpenChange: (open: boolean) => void;
   onSave: (request: SaveUserRequest) => Promise<void>;
 }) {
@@ -1655,6 +1702,17 @@ function UserDialog({
   const [active, setActive] = useState(true);
   const [pin, setPin] = useState("");
   const [password, setPassword] = useState("");
+  const [datumRodjenja, setDatumRodjenja] = useState("");
+  const [datumRodjenjaDeteta, setDatumRodjenjaDeteta] = useState("");
+  const [samohraniRoditelj, setSamohraniRoditelj] = useState<ProfileFlag>("");
+  const [deteTezakInvalid, setDeteTezakInvalid] = useState<ProfileFlag>("");
+  const [trudnocaIliDojenje, setTrudnocaIliDojenje] = useState<ProfileFlag>("");
+  const [trudnocaIliDojenjeOd, setTrudnocaIliDojenjeOd] = useState("");
+  const [radiUPreraspodeli, setRadiUPreraspodeli] = useState(false);
+  const [ugovorenoRadnoVreme, setUgovorenoRadnoVreme] = useState("");
+  const [zanimanjeSifra, setZanimanjeSifra] = useState("");
+  const [kvalifikacijaSifra, setKvalifikacijaSifra] = useState("");
+  const [saglasnostPrekovremeniOd, setSaglasnostPrekovremeniOd] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1669,8 +1727,24 @@ function UserDialog({
     setActive(user?.active ?? true);
     setPin("");
     setPassword("");
+    setDatumRodjenja(profile?.datumRodjenja ?? "");
+    setDatumRodjenjaDeteta(profile?.datumRodjenjaNajmladjegDeteta ?? "");
+    setSamohraniRoditelj(flagValue(profile?.samohraniRoditelj ?? null));
+    setDeteTezakInvalid(flagValue(profile?.deteTezakInvalid ?? null));
+    setTrudnocaIliDojenje(flagValue(profile?.trudnocaIliDojenje ?? null));
+    setTrudnocaIliDojenjeOd(profile?.trudnocaIliDojenjeOd ?? "");
+    setRadiUPreraspodeli(profile?.radiUPreraspodeli ?? false);
+    setUgovorenoRadnoVreme(
+      profile?.ugovorenoRadnoVremeMinutaNedeljno === null ||
+        profile?.ugovorenoRadnoVremeMinutaNedeljno === undefined
+        ? ""
+        : String(profile.ugovorenoRadnoVremeMinutaNedeljno),
+    );
+    setZanimanjeSifra(profile?.zanimanjeSifra ?? "");
+    setKvalifikacijaSifra(profile?.kvalifikacijaSifra ?? "");
+    setSaglasnostPrekovremeniOd(profile?.saglasnostPrekovremeniOd ?? "");
     setError(null);
-  }, [open, user]);
+  }, [open, user, profile]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1691,6 +1765,12 @@ function UserDialog({
       return;
     }
 
+    const ugovoreno = Number(ugovorenoRadnoVreme.trim());
+    if (ugovorenoRadnoVreme.trim() && !Number.isInteger(ugovoreno)) {
+      setError("Ugovoreno radno vreme se unosi u celim minutima.");
+      return;
+    }
+
     setSubmitting(true);
     try {
       await onSave({
@@ -1700,6 +1780,21 @@ function UserDialog({
         active,
         pin: pin.trim() || null,
         password: password.trim() || null,
+        profile: {
+          datumRodjenja: datumRodjenja.trim() || null,
+          datumRodjenjaNajmladjegDeteta: datumRodjenjaDeteta.trim() || null,
+          samohraniRoditelj: flagFromValue(samohraniRoditelj),
+          deteTezakInvalid: flagFromValue(deteTezakInvalid),
+          trudnocaIliDojenje: flagFromValue(trudnocaIliDojenje),
+          trudnocaIliDojenjeOd: trudnocaIliDojenjeOd.trim() || null,
+          radiUPreraspodeli,
+          ugovorenoRadnoVremeMinutaNedeljno: ugovorenoRadnoVreme.trim()
+            ? ugovoreno
+            : null,
+          zanimanjeSifra: zanimanjeSifra.trim() || null,
+          kvalifikacijaSifra: kvalifikacijaSifra.trim() || null,
+          saglasnostPrekovremeniOd: saglasnostPrekovremeniOd.trim() || null,
+        },
       });
     } catch (saveError) {
       setError(errorMessage(saveError, "Korisnik nije sačuvan."));
@@ -1777,6 +1872,221 @@ function UserDialog({
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
               />
+            </Field>
+          </FieldGroup>
+
+          <Separator />
+
+          <FieldGroup>
+            <div className="flex flex-col gap-1">
+              <h3 className="text-sm font-semibold">
+                Evidencija radnog vremena — profil zaposlenog
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Iz ovih podataka se izvode provere ZoR čl. 87–91 nad dnevnim
+                unosom radnog vremena. Popunjava ih poslodavac iz ugovora o radu
+                i dokumentacije koju već čuva; zaposleni ih ne unosi i ništa u
+                ovoj aplikaciji ne potpisuje.
+              </p>
+            </div>
+
+            <Field>
+              <FieldLabel htmlFor="user-datum-rodjenja">Datum rođenja</FieldLabel>
+              <Input
+                id="user-datum-rodjenja"
+                type="date"
+                value={datumRodjenja}
+                onChange={(event) => setDatumRodjenja(event.target.value)}
+              />
+              <FieldDescription>
+                ZoR čl. 87 i ZoR čl. 88 st. 1 — zaposleni mlađi od 18 godina
+                života ne radi duže od osam časova dnevno, a prekovremeni rad i
+                preraspodela radnog vremena su mu zabranjeni.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-datum-deteta">
+                Datum rođenja najmlađeg deteta
+              </FieldLabel>
+              <Input
+                id="user-datum-deteta"
+                type="date"
+                value={datumRodjenjaDeteta}
+                onChange={(event) => setDatumRodjenjaDeteta(event.target.value)}
+              />
+              <FieldDescription>
+                ZoR čl. 91 st. 1 — roditelj deteta do tri godine života radi
+                prekovremeno samo uz svoju pisanu saglasnost.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-samohrani">Samohrani roditelj</FieldLabel>
+              <NativeSelect
+                id="user-samohrani"
+                value={samohraniRoditelj}
+                className="w-full"
+                onChange={(event) =>
+                  setSamohraniRoditelj(event.target.value as ProfileFlag)
+                }
+              >
+                <NativeSelectOption value="">Nije upisano</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>
+                ZoR čl. 91 st. 2 — kod samohranog roditelja granica je dete do
+                sedam godina života.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-dete-invalid">
+                Dete je težak invalid
+              </FieldLabel>
+              <NativeSelect
+                id="user-dete-invalid"
+                value={deteTezakInvalid}
+                className="w-full"
+                onChange={(event) =>
+                  setDeteTezakInvalid(event.target.value as ProfileFlag)
+                }
+              >
+                <NativeSelectOption value="">Nije upisano</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>
+                Druga alternativa iz ZoR čl. 91 st. 2, koja nema starosne
+                granice — pisana saglasnost se traži i kada je dete starije od
+                sedam godina.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-trudnoca">Trudnoća ili dojenje</FieldLabel>
+              <NativeSelect
+                id="user-trudnoca"
+                value={trudnocaIliDojenje}
+                className="w-full"
+                onChange={(event) =>
+                  setTrudnocaIliDojenje(event.target.value as ProfileFlag)
+                }
+              >
+                <NativeSelectOption value="">Nije upisano</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>
+                ZoR čl. 90 — ocenu daje nadležni zdravstveni organ, ne
+                aplikacija. Evidentira se samo da nalaz postoji i od kog datuma
+                važi; sam nalaz, dijagnoza i medicinska dokumentacija se ne unose
+                niti prilažu.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-trudnoca-od">Nalaz važi od</FieldLabel>
+              <Input
+                id="user-trudnoca-od"
+                type="date"
+                value={trudnocaIliDojenjeOd}
+                onChange={(event) => setTrudnocaIliDojenjeOd(event.target.value)}
+              />
+              <FieldDescription>
+                Datum od kog važi nalaz nadležnog zdravstvenog organa (ZoR čl.
+                90).
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-preraspodela">
+                Preraspodela radnog vremena
+              </FieldLabel>
+              <NativeSelect
+                id="user-preraspodela"
+                value={radiUPreraspodeli ? "da" : "ne"}
+                className="w-full"
+                onChange={(event) =>
+                  setRadiUPreraspodeli(event.target.value === "da")
+                }
+              >
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>
+                ZoR čl. 58 — u preraspodeli radnog vremena časovi preko punog
+                radnog vremena se ne izvode automatski kao prekovremeni rad.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-ugovoreno">
+                Ugovoreno radno vreme (minuta nedeljno)
+              </FieldLabel>
+              <Input
+                id="user-ugovoreno"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={2400}
+                step={1}
+                value={ugovorenoRadnoVreme}
+                onChange={(event) => setUgovorenoRadnoVreme(event.target.value)}
+              />
+              <FieldDescription>
+                ZoR čl. 51 st. 1 — puno radno vreme je 40 časova, odnosno 2400
+                minuta nedeljno. Nepuno radno vreme se upisuje kao manji broj
+                minuta.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-zanimanje">Šifra zanimanja</FieldLabel>
+              <Input
+                id="user-zanimanje"
+                value={zanimanjeSifra}
+                onChange={(event) => setZanimanjeSifra(event.target.value)}
+              />
+              <FieldDescription>
+                ZEOR čl. 44 st. 2 — upisuje se šifra iz Jedinstvenog kodeksa
+                šifara, ne opis posla.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-kvalifikacija">
+                Šifra kvalifikacije (nivo i vrsta)
+              </FieldLabel>
+              <Input
+                id="user-kvalifikacija"
+                value={kvalifikacijaSifra}
+                onChange={(event) => setKvalifikacijaSifra(event.target.value)}
+              />
+              <FieldDescription>
+                ZEOR čl. 44 st. 2 — šifra nivoa i vrste kvalifikacije iz istog
+                kodeksa.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-saglasnost">
+                Pisana saglasnost za prekovremeni rad — datum
+              </FieldLabel>
+              <Input
+                id="user-saglasnost"
+                type="date"
+                value={saglasnostPrekovremeniOd}
+                onChange={(event) =>
+                  setSaglasnostPrekovremeniOd(event.target.value)
+                }
+              />
+              <FieldDescription>
+                ZoR čl. 91 — upisuje se datum od kog postoji pisana saglasnost
+                zaposlenog. Aplikacija tu saglasnost ne prikuplja i ne zamenjuje;
+                dokument se čuva izvan aplikacije.
+              </FieldDescription>
             </Field>
           </FieldGroup>
           <DialogFooter>

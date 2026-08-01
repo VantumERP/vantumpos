@@ -25,6 +25,7 @@ import type {
   CreateBackupRequest,
   DailyTurnoverReport,
   DeclarationGapRow,
+  EmployeeProfile,
   EndCampaignOverride,
   EurRateStatus,
   ExportedFile,
@@ -170,6 +171,12 @@ export interface UsersService {
   createUser(request: SaveUserRequest): Promise<UserAccount>;
   updateUser(id: number, request: SaveUserRequest): Promise<UserAccount>;
   deactivateUser(id: number): Promise<void>;
+  /**
+   * One employee at a time, and only when an admin opens that employee's
+   * account. `trudnocaIliDojenje` is health data — the user list must not carry
+   * it for everyone just to draw a row.
+   */
+  getEmployeeProfile(id: number): Promise<EmployeeProfile>;
 }
 
 export interface ShiftService {

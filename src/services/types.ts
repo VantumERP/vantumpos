@@ -347,6 +347,36 @@ export interface CashMovementRequest {
   documentedPerPravilnik?: boolean | null;
 }
 
+/**
+ * The ZoR čl. 87–91 protection inputs plus the two ZEOR čl. 44 st. 2 codes, as
+ * the Users screen edits them.
+ *
+ * Two absences are deliberate and must stay that way:
+ *
+ * 1. `saglasnostPreraspodelaOd` (ZoR čl. 57 st. 4) is **not** here. It is a
+ *    legally distinct written consent from the čl. 91 one, and neither may be
+ *    read or written for the other's purpose.
+ * 2. No free text. `trudnocaIliDojenje` is a flag and an „od“ date and nothing
+ *    else — the nalaz nadležnog zdravstvenog organa that čl. 90 conditions the
+ *    prohibition on is never entered, attached or described here.
+ *
+ * Neither consent date collects a consent; each records that a written one
+ * exists and from when.
+ */
+export interface EmployeeProfile {
+  datumRodjenja: string | null;
+  datumRodjenjaNajmladjegDeteta: string | null;
+  samohraniRoditelj: boolean | null;
+  deteTezakInvalid: boolean | null;
+  trudnocaIliDojenje: boolean | null;
+  trudnocaIliDojenjeOd: string | null;
+  radiUPreraspodeli: boolean;
+  ugovorenoRadnoVremeMinutaNedeljno: number | null;
+  zanimanjeSifra: string | null;
+  kvalifikacijaSifra: string | null;
+  saglasnostPrekovremeniOd: string | null;
+}
+
 export interface SaveUserRequest {
   username: string;
   displayName: string;
@@ -354,6 +384,11 @@ export interface SaveUserRequest {
   active: boolean;
   pin?: string | null;
   password?: string | null;
+  /**
+   * Omitted means „this save does not carry the employee profile“ and the
+   * stored čl. 87–91 inputs stay exactly as they are.
+   */
+  profile?: EmployeeProfile | null;
 }
 
 export interface CategorySummary {

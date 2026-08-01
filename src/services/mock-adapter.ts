@@ -16,6 +16,7 @@ import type {
   DeclarationGapRow,
   DeclarationWarning,
   DepositBucket,
+  EmployeeProfile,
   EurRate,
   EurRateStatus,
   ImportJob,
@@ -56,6 +57,21 @@ const now = "2026-06-18T10:00:00Z";
  * uses `commands::settings::today_utc`.
  */
 const MOCK_TODAY = now.slice(0, 10);
+
+/** An employee nobody has profiled yet — every čl. 87–91 input unset. */
+const prazanProfilZaposlenog: EmployeeProfile = {
+  datumRodjenja: null,
+  datumRodjenjaNajmladjegDeteta: null,
+  samohraniRoditelj: null,
+  deteTezakInvalid: null,
+  trudnocaIliDojenje: null,
+  trudnocaIliDojenjeOd: null,
+  radiUPreraspodeli: false,
+  ugovorenoRadnoVremeMinutaNedeljno: null,
+  zanimanjeSifra: null,
+  kvalifikacijaSifra: null,
+  saglasnostPrekovremeniOd: null,
+};
 
 const AML_CAP_EUR = 10_000;
 const AML_SOFT_RATIO_PERCENT = 80;
@@ -458,6 +474,9 @@ export function createMockServices(): PosServices {
       lastLoginAt: null,
     },
   ];
+  // Every čl. 87–91 input starts empty: an employee nobody has profiled yet is
+  // not an employee with no protections, and the guards read it that way.
+  const employeeProfiles = new Map<number, EmployeeProfile>();
   let currentShift: ShiftSummary | null = {
     id: 1,
     userId: 1,
@@ -936,6 +955,9 @@ export function createMockServices(): PosServices {
           lastLoginAt: null,
         };
         users = [...users, user];
+        if (request.profile) {
+          employeeProfiles.set(user.id, request.profile);
+        }
         return user;
       },
       async updateUser(id, request) {
@@ -954,12 +976,24 @@ export function createMockServices(): PosServices {
           updatedAt: now,
         };
         users = users.map((user) => (user.id === id ? updated : user));
+        // A save that carries no profile leaves the čl. 87–91 inputs alone —
+        // the same rule the command enforces.
+        if (request.profile) {
+          employeeProfiles.set(id, request.profile);
+        }
         return updated;
       },
       async deactivateUser(id) {
         users = users.map((user) =>
           user.id === id ? { ...user, active: false, updatedAt: now } : user,
         );
+      },
+      async getEmployeeProfile(id) {
+        if (!users.some((user) => user.id === id)) {
+          throw { code: "not_found", message: "Korisnik nije pronađen." };
+        }
+
+        return employeeProfiles.get(id) ?? { ...prazanProfilZaposlenog };
       },
     },
     shifts: {

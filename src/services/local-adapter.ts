@@ -22,6 +22,7 @@ import type {
   CompletedSale,
   DailyTurnoverReport,
   DeclarationGapRow,
+  EmployeeProfile,
   EurRateStatus,
   ExportedFile,
   ImportHeaders,
@@ -142,6 +143,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       updateUser: (id, request) =>
         invoke<UserAccount>("users_update", { id, request }),
       deactivateUser: (id) => invoke<void>("users_deactivate", { id }),
+      getEmployeeProfile: (id) =>
+        invoke<EmployeeProfile>("users_employee_profile", { id }),
     },
     shifts: {
       getCurrentShift: () => invoke<ShiftSummary | null>("shift_get_current"),
