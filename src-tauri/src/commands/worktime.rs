@@ -1228,13 +1228,60 @@ fn guard_day_is_in_period(
         return Ok(());
     }
     Err(AppError::validation(
-        format!("Datum mora pripadati izabranom periodu — {trazeni_mesec:02}/{trazena_godina}."),
+        format!(
+            "Datum mora pripadati izabranom periodu — {}.",
+            naziv_perioda(trazena_godina, trazeni_mesec)
+        ),
         serde_json::json!({
             "dan": dan,
             "godina": trazena_godina,
             "mesec": trazeni_mesec,
         }),
     ))
+}
+
+/// The Serbian month names, in the ijekavica-free ekavica the rest of the app is
+/// written in — „avgust“, not „august“; „jun“ and „jul“, not „juni“/„juli“.
+///
+/// A deliberate second copy of `MESECI` in `src/app/worktime/WorkTimeModule.tsx`.
+/// The alternative is passing the rendered name down from the frontend, which
+/// would make an operator-visible statement about a refused write depend on the
+/// caller being refused — the backend must be able to name the period it is
+/// talking about on its own. Pinned string by string in
+/// `the_period_is_named_in_serbian`, which is the thing that has to notice if the
+/// two copies ever drift.
+const MESECI: [&str; 12] = [
+    "januar",
+    "februar",
+    "mart",
+    "april",
+    "maj",
+    "jun",
+    "jul",
+    "avgust",
+    "septembar",
+    "oktobar",
+    "novembar",
+    "decembar",
+];
+
+/// A period as the operator names it — „avgust 2026“, the same phrase the Mesec
+/// picker and the close dialog use, so a refusal names the period the operator
+/// selected in the words they selected it by.
+///
+/// Falls back to the numeric `MM/GGGG` form the rest of this module uses for a
+/// month outside 1–12. Unreachable through [`guard_day_is_in_period`], which runs
+/// after `validate_month`; it is a fallback rather than a panic because a
+/// malformed period is the caller's defect and no operator is helped by a crash
+/// or by an empty month name in the middle of a sentence.
+fn naziv_perioda(godina: i64, mesec: i64) -> String {
+    usize::try_from(mesec)
+        .ok()
+        .and_then(|redni| MESECI.get(redni.checked_sub(1)?))
+        .map_or_else(
+            || format!("{mesec:02}/{godina}"),
+            |naziv| format!("{naziv} {godina}"),
+        )
 }
 
 /// The civil date of an RFC3339 timestamp — its first ten characters.
@@ -2131,6 +2178,42 @@ mod tests {
         });
     }
 
+    /// The names an operator reads, pinned one by one.
+    ///
+    /// This table is a second copy of `MESECI` in `WorkTimeModule.tsx`, and the
+    /// two render the same period to the same person — the field guard and the
+    /// backend guard say the same sentence about the same mistake. Nothing in
+    /// either language can notice them drifting apart, so the twelve strings are
+    /// spelled out here rather than derived: „avgust“ and not „august“, „jun“ and
+    /// „jul“ and not „juni“/„juli“.
+    #[test]
+    fn the_period_is_named_in_serbian() {
+        let ocekivano = [
+            (1, "januar 2026"),
+            (2, "februar 2026"),
+            (3, "mart 2026"),
+            (4, "april 2026"),
+            (5, "maj 2026"),
+            (6, "jun 2026"),
+            (7, "jul 2026"),
+            (8, "avgust 2026"),
+            (9, "septembar 2026"),
+            (10, "oktobar 2026"),
+            (11, "novembar 2026"),
+            (12, "decembar 2026"),
+        ];
+        for (mesec, naziv) in ocekivano {
+            assert_eq!(super::naziv_perioda(2026, mesec), naziv);
+        }
+
+        // `validate_month` runs first, so this is unreachable through the guard —
+        // it is here so a month that somehow arrives out of range still renders as
+        // a period the operator can act on instead of panicking or printing an
+        // empty name.
+        assert_eq!(super::naziv_perioda(2026, 13), "13/2026");
+        assert_eq!(super::naziv_perioda(2026, 0), "00/2026");
+    }
+
     #[test]
     fn a_day_outside_the_stated_period_is_refused() {
         with_state("worktime_day_outside_period", |state| {
@@ -2151,7 +2234,7 @@ mod tests {
             assert_eq!(error.code(), "validation_error");
             assert_eq!(
                 error.to_string(),
-                "Datum mora pripadati izabranom periodu — 08/2026."
+                "Datum mora pripadati izabranom periodu — avgust 2026."
             );
 
             // A correction is the same write path and gets the same refusal, ahead
