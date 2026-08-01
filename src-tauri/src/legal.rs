@@ -204,8 +204,11 @@ mod tests {
         }
     }
 
-    /// Every public notice, under the preduzetnik regime, in one place. Adding a
-    /// new copy function without adding it here is a visible omission in review.
+    /// Every public notice, in one place. This list is what the
+    /// forbidden-substring, UNSET and ZEOR guards iterate, so a notice function
+    /// that is missing from it is an entirely unguarded fine figure. The
+    /// asserted length in `every_notice_function_is_enumerated_in_the_guard`
+    /// is what makes an omission fail rather than pass silently.
     fn all_notices(p: &ShopProfile) -> Vec<LegalNotice> {
         vec![
             aml_cash_cap(p),
@@ -218,13 +221,27 @@ mod tests {
         ]
     }
 
-    /// The enumerated list is the module's whole safety property: a notice that
-    /// is not in it is an unguarded fine figure, because neither the
-    /// forbidden-substring guard nor the UNSET guard ever sees it.
+    /// A notice that is not in `all_notices` is an unguarded fine figure,
+    /// because neither the forbidden-substring guard nor the UNSET guard nor
+    /// the ZEOR guard ever sees it.
+    ///
+    /// The containment loop below compares `all_notices` against a hand-written
+    /// copy of the same list, so on its own it catches only a one-sided typo —
+    /// never a function that was simply never added to either list. The
+    /// asserted count is what closes that hole: a new notice cannot be
+    /// introduced without this test being edited.
     #[test]
     fn every_notice_function_is_enumerated_in_the_guard() {
         let p = profile(Some(PravnaForma::Preduzetnik));
         let enumerated = all_notices(&p);
+
+        assert_eq!(
+            enumerated.len(),
+            7,
+            "adding a notice function means adding it to all_notices, to the \
+             list below, AND bumping this count — an omission from both lists \
+             is otherwise invisible"
+        );
 
         for notice in [
             aml_cash_cap(&p),
@@ -483,11 +500,73 @@ mod tests {
         );
     }
 
+    /// The two numbers in this summary are a statement of the law to a shop
+    /// owner, and no other test looks at `summary` at all. ZoR čl. 53 st. 2
+    /// caps overtime at eight hours a week; st. 3 caps the whole day at 12
+    /// hours **including** overtime. Drifted upward, the copy would tell a
+    /// preduzetnik that an unlawful roster is lawful — understating an exposure
+    /// that is itself the čl. 274 st. 2 fine of 200.000 do 400.000 dinara.
+    #[test]
+    fn overtime_caps_summary_quotes_the_cl_53_limits_and_cites_both_stavovi() {
+        // Summary and citation carry no figure, so the tier is irrelevant here
+        // and the UNSET arm exercises exactly the same two strings.
+        let notice = overtime_caps_exceeded(&profile(None));
+
+        assert!(
+            notice.summary.contains("osam časova nedeljno"),
+            "čl. 53 st. 2 — overtime may not exceed eight hours a week: {}",
+            notice.summary
+        );
+        assert!(
+            notice.summary.contains("12 časova dnevno"),
+            "čl. 53 st. 3 — no more than 12 hours a day in total: {}",
+            notice.summary
+        );
+        assert!(
+            notice
+                .summary
+                .contains("ukupno radno vreme sa prekovremenim"),
+            "the 12 h cap is total working time INCLUDING overtime, not 12 h of \
+             overtime on top of a full day: {}",
+            notice.summary
+        );
+        assert!(
+            notice.citation.contains("čl. 53 st. 2 i st. 3"),
+            "both stavovi — the weekly cap and the daily cap are separate: {}",
+            notice.citation
+        );
+        assert!(
+            notice.is_legal_duty,
+            "čl. 53 is an obaveza, never a preporuka"
+        );
+    }
+
     /// ZEOR čl. 50/51 tiers are unresolved — čl. 51 exceeds the ZoP čl. 39
     /// ceiling for a "fizičko lice koje ima zaposlene". Silence beats a wrong
     /// number, so no ZEOR amount may appear in any notice, under any profile.
+    ///
+    /// The amount check must be form-independent, not literal. This module
+    /// writes ranges as „od X do Y dinara“, but every table in `docs/` writes
+    /// them with an EN DASH (300.000–500.000) — and a paste out of the memo is
+    /// the single most likely way a quarantined figure ever lands here.
+    /// Normalising away everything that is not a digit or a dot collapses en
+    /// dash, em dash, hyphen, whitespace and the word „do“ alike, so every
+    /// separator form reduces to the same needle.
+    ///
+    /// Note the one known collision: ZoR čl. 273 st. 1 carries the same
+    /// 300.000–500.000 preduzetnik range. No notice quotes it today, and if one
+    /// ever must, this guard fails loudly first — which is the right way round
+    /// for a figure that must never ship by accident.
     #[test]
     fn no_zeor_figure_is_reachable_in_any_notice() {
+        // Keeps digits and dots, drops everything else — separators, the word
+        // „do“, and any dash variant — so the needle is the bare range.
+        fn digits_and_dots(s: &str) -> String {
+            s.chars()
+                .filter(|c| c.is_ascii_digit() || *c == '.')
+                .collect()
+        }
+
         for forma in [
             Some(PravnaForma::Preduzetnik),
             Some(PravnaForma::PravnoLice),
@@ -501,10 +580,27 @@ mod tests {
                     notice.penalty.clone().unwrap_or_default(),
                     notice.citation
                 );
-                for forbidden in ["500.000 do 1.000.000", "300.000 do 500.000", "ZEOR"] {
+
+                let normalised = digits_and_dots(&rendered);
+                // čl. 50 st. 1 (pravno lice) and čl. 51 ("fizičko lice koje
+                // ima zaposlene"), in whatever punctuation they arrive.
+                for forbidden in ["500.0001.000.000", "300.000500.000"] {
                     assert!(
-                        !rendered.contains(forbidden),
-                        "no ZEOR figure may reach an operator; found {forbidden:?} in: {rendered}"
+                        !normalised.contains(forbidden),
+                        "no ZEOR figure may reach an operator; found {forbidden:?} \
+                         (normalised) in: {rendered}"
+                    );
+                }
+
+                // "ZEOR" is an internal abbreviation that appears in no operator
+                // string in this module — every citation spells the statute out
+                // — so guarding on it alone can never fire. Match the name.
+                let haystack = rendered.to_lowercase();
+                for forbidden in ["evidencijama u oblasti rada", "zeor"] {
+                    assert!(
+                        !haystack.contains(forbidden),
+                        "no ZEOR notice may reach an operator while čl. 50/51 is \
+                         unresolved; found {forbidden:?} in: {rendered}"
                     );
                 }
             }
