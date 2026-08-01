@@ -594,6 +594,85 @@ ALTER TABLE cash_movements ADD COLUMN documented_per_pravilnik INTEGER
     CHECK (documented_per_pravilnik IS NULL OR documented_per_pravilnik IN (0, 1));
 "#,
     },
+    Migration {
+        version: 17,
+        name: "worktime_records_and_retention",
+        sql: r#"
+ALTER TABLE users ADD COLUMN datum_rodjenja TEXT;
+ALTER TABLE users ADD COLUMN datum_rodjenja_najmladjeg_deteta TEXT;
+ALTER TABLE users ADD COLUMN samohrani_roditelj INTEGER CHECK (samohrani_roditelj IS NULL OR samohrani_roditelj IN (0, 1));
+ALTER TABLE users ADD COLUMN trudnoca_ili_dojenje INTEGER CHECK (trudnoca_ili_dojenje IS NULL OR trudnoca_ili_dojenje IN (0, 1));
+ALTER TABLE users ADD COLUMN trudnoca_ili_dojenje_od TEXT;
+ALTER TABLE users ADD COLUMN radi_u_preraspodeli INTEGER NOT NULL DEFAULT 0 CHECK (radi_u_preraspodeli IN (0, 1));
+ALTER TABLE users ADD COLUMN ugovoreno_radno_vreme_minuta_nedeljno INTEGER;
+ALTER TABLE users ADD COLUMN zanimanje_sifra TEXT;
+ALTER TABLE users ADD COLUMN kvalifikacija_sifra TEXT;
+ALTER TABLE users ADD COLUMN saglasnost_prekovremeni_od TEXT;
+
+CREATE TABLE work_time_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    dan TEXT NOT NULL,
+    moguci_minuta INTEGER NOT NULL DEFAULT 0 CHECK (moguci_minuta >= 0),
+    ukupno_ostvareni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (ukupno_ostvareni_minuta >= 0),
+    efektivno_izvrseni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (efektivno_izvrseni_minuta >= 0),
+    casovi_cekanja_i_zastoja_minuta INTEGER NOT NULL DEFAULT 0 CHECK (casovi_cekanja_i_zastoja_minuta >= 0),
+    obustava_rada_strajk_minuta INTEGER NOT NULL DEFAULT 0 CHECK (obustava_rada_strajk_minuta >= 0),
+    ukupno_neizvrseni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (ukupno_neizvrseni_minuta >= 0),
+    godisnji_odmor_minuta INTEGER NOT NULL DEFAULT 0 CHECK (godisnji_odmor_minuta >= 0),
+    praznik_odmor_minuta INTEGER NOT NULL DEFAULT 0 CHECK (praznik_odmor_minuta >= 0),
+    odsustvo_uz_naknadu_minuta INTEGER NOT NULL DEFAULT 0 CHECK (odsustvo_uz_naknadu_minuta >= 0),
+    strucno_osposobljavanje_minuta INTEGER NOT NULL DEFAULT 0 CHECK (strucno_osposobljavanje_minuta >= 0),
+    sprecenost_poslodavac_minuta INTEGER NOT NULL DEFAULT 0 CHECK (sprecenost_poslodavac_minuta >= 0),
+    naknada_drugi_poslodavci_minuta INTEGER NOT NULL DEFAULT 0 CHECK (naknada_drugi_poslodavci_minuta >= 0),
+    sprecenost_rfzo_minuta INTEGER NOT NULL DEFAULT 0 CHECK (sprecenost_rfzo_minuta >= 0),
+    porodiljsko_minuta INTEGER NOT NULL DEFAULT 0 CHECK (porodiljsko_minuta >= 0),
+    neplaceno_odsustvo_minuta INTEGER NOT NULL DEFAULT 0 CHECK (neplaceno_odsustvo_minuta >= 0),
+    prekovremeni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (prekovremeni_minuta >= 0),
+    nocni_minuta INTEGER NOT NULL DEFAULT 0 CHECK (nocni_minuta >= 0),
+    rad_na_praznik_minuta INTEGER NOT NULL DEFAULT 0 CHECK (rad_na_praznik_minuta >= 0),
+    kategorija_odsustva TEXT CHECK (kategorija_odsustva IS NULL OR kategorija_odsustva IN (
+        'godisnji_odmor', 'praznik', 'placeno_odsustvo', 'strucno_osposobljavanje',
+        'sprecenost_poslodavac', 'sprecenost_rfzo', 'porodiljsko', 'neplaceno_odsustvo',
+        'naknada_drugi_poslodavac', 'strajk'
+    )),
+    cap_override_razlog TEXT,
+    supersedes_id INTEGER REFERENCES work_time_entries(id),
+    korekcija_razlog TEXT,
+    unio_user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_work_time_entries_user_day
+    ON work_time_entries(user_id, dan) WHERE supersedes_id IS NULL;
+CREATE INDEX idx_work_time_entries_dan ON work_time_entries(dan);
+
+CREATE TABLE work_time_periods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    godina INTEGER NOT NULL,
+    mesec INTEGER NOT NULL CHECK (mesec BETWEEN 1 AND 12),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+    closed_at TEXT,
+    closed_by INTEGER REFERENCES users(id),
+    klasifikacija_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_work_time_periods_user_month ON work_time_periods(user_id, godina, mesec);
+
+CREATE TABLE retention_policies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_class TEXT NOT NULL UNIQUE,
+    retain_until TEXT,
+    legal_hold INTEGER NOT NULL DEFAULT 0 CHECK (legal_hold IN (0, 1)),
+    never_purge INTEGER NOT NULL DEFAULT 0 CHECK (never_purge IN (0, 1)),
+    napomena TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -1480,6 +1559,168 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             assert_eq!(
                 unasserted, 1,
                 "a movement written without the flag must stay unasserted, not default to 1"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn migration_v17_adds_worktime_schema() {
+        let path = test_database_path("migration_v17_schema");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            for column in [
+                "datum_rodjenja",
+                "datum_rodjenja_najmladjeg_deteta",
+                "samohrani_roditelj",
+                "trudnoca_ili_dojenje",
+                "trudnoca_ili_dojenje_od",
+                "radi_u_preraspodeli",
+                "ugovoreno_radno_vreme_minuta_nedeljno",
+                "zanimanje_sifra",
+                "kvalifikacija_sifra",
+            ] {
+                assert!(
+                    column_exists(&conn, "users", column),
+                    "users.{column} should exist after v17"
+                );
+            }
+
+            // The fifteen statutory buckets, letter-by-letter from ZEOR čl. 24 tač. 1.
+            for column in [
+                "moguci_minuta",
+                "ukupno_ostvareni_minuta",
+                "efektivno_izvrseni_minuta",
+                "casovi_cekanja_i_zastoja_minuta",
+                "obustava_rada_strajk_minuta",
+                "ukupno_neizvrseni_minuta",
+                "godisnji_odmor_minuta",
+                "praznik_odmor_minuta",
+                "odsustvo_uz_naknadu_minuta",
+                "strucno_osposobljavanje_minuta",
+                "sprecenost_poslodavac_minuta",
+                "naknada_drugi_poslodavci_minuta",
+                "sprecenost_rfzo_minuta",
+                "porodiljsko_minuta",
+                "neplaceno_odsustvo_minuta",
+                "prekovremeni_minuta",
+            ] {
+                assert!(
+                    column_exists(&conn, "work_time_entries", column),
+                    "work_time_entries.{column} should exist after v17"
+                );
+            }
+
+            // Advisory, not statutory — must exist but is labelled in code.
+            assert!(column_exists(&conn, "work_time_entries", "nocni_minuta"));
+            assert!(column_exists(
+                &conn,
+                "work_time_entries",
+                "rad_na_praznik_minuta"
+            ));
+
+            // One row per (employee, date).
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (700, 'radnik7', 'Radnik Sedam', 'cashier', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+                 INSERT INTO work_time_entries (user_id, dan, efektivno_izvrseni_minuta, created_at, updated_at)
+                     VALUES (700, '2026-08-03', 480, '2026-08-03T18:00:00Z', '2026-08-03T18:00:00Z');",
+            )
+            .expect("first entry should insert");
+
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, efektivno_izvrseni_minuta, created_at, updated_at)
+                     VALUES (700, '2026-08-03', 60, '2026-08-03T19:00:00Z', '2026-08-03T19:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a second row for the same (employee, day) must be rejected"
+            );
+
+            // Absence category is a closed enum enforced by the DB, not the UI.
+            assert!(
+                conn.execute(
+                    "INSERT INTO work_time_entries (user_id, dan, kategorija_odsustva, created_at, updated_at)
+                     VALUES (700, '2026-08-04', 'nesto_izmisljeno', '2026-08-04T18:00:00Z', '2026-08-04T18:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "an unknown absence category must be rejected by the CHECK"
+            );
+
+            conn.execute_batch(
+                "INSERT INTO work_time_periods (user_id, godina, mesec, status, created_at, updated_at)
+                     VALUES (700, 2026, 8, 'open', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+                 INSERT INTO retention_policies (record_class, retain_until, legal_hold, created_at, updated_at)
+                     VALUES ('worktime_classification', NULL, 0, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');",
+            )
+            .expect("period and retention rows should insert");
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    #[test]
+    fn migration_v17_preserves_pre_existing_users() {
+        let path = test_database_path("migration_v17_survival");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw connection");
+            conn.execute_batch(
+                "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);",
+            )
+            .expect("migrations table");
+
+            for migration in &MIGRATIONS[..16] {
+                assert!(
+                    migration.version <= 16,
+                    "the pre-v17 prefix must stop at v16, saw v{}",
+                    migration.version
+                );
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, '2026-07-01T00:00:00Z')",
+                    rusqlite::params![migration.version, migration.name],
+                )
+                .expect("record the migration");
+            }
+
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, pin_hash, active, created_at, updated_at, last_login_at)
+                 VALUES (701, 'stara', 'Stara Radnica', 'cashier', 'hash-701', 1,
+                         '2025-01-02T08:00:00Z', '2025-06-02T08:00:00Z', '2026-07-30T08:00:00Z');",
+            )
+            .expect("seed a v16-era user");
+            drop(conn);
+
+            let db = Db::new(&path).expect("database should migrate forward");
+            let conn = db.open().expect("database should open");
+
+            let (username, pin, created, last): (String, String, String, String) = conn
+                .query_row(
+                    "SELECT username, pin_hash, created_at, last_login_at FROM users WHERE id = 701",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("the pre-v17 user must survive verbatim");
+
+            assert_eq!(username, "stara");
+            assert_eq!(pin, "hash-701");
+            assert_eq!(created, "2025-01-02T08:00:00Z");
+            assert_eq!(last, "2026-07-30T08:00:00Z");
+
+            let profile: Option<String> = conn
+                .query_row(
+                    "SELECT datum_rodjenja FROM users WHERE id = 701",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the new column exists");
+            assert_eq!(
+                profile, None,
+                "new profile columns are nullable, not backfilled"
             );
         }
         std::fs::remove_file(&path).expect("test database should be removed");

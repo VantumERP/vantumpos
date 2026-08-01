@@ -133,6 +133,9 @@ mod tests {
         "kalkulacije",
         "kep_closures",
         "non_working_days",
+        "work_time_entries",
+        "work_time_periods",
+        "retention_policies",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -161,6 +164,9 @@ mod tests {
         "idx_kalkulacije_product",
         "idx_kep_closures_year",
         "idx_cash_movements_created_at",
+        "idx_work_time_entries_user_day",
+        "idx_work_time_entries_dan",
+        "idx_work_time_periods_user_month",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -791,7 +797,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 16);
+                assert_eq!(migration_count, 17);
             },
         );
     }
