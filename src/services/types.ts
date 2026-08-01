@@ -1341,3 +1341,204 @@ export interface KalkulacijaSummary {
   prodajnaVrednostSaPdvMinor: number;
   createdAt: string;
 }
+
+/**
+ * One day's hours in the statutory buckets — mirrors
+ * `crate::commands::worktime::WorkTimeMinutes` (serde camelCase).
+ *
+ * **Integer minutes, never hours and never floating point.** `ukupnoOstvareni`
+ * and `ukupnoNeizvrseni` are DERIVED backend-side from the buckets they
+ * enumerate; nothing on this side may recompute or override them.
+ *
+ * `nocniMinuta` and `radNaPraznikMinuta` are advisory — no Serbian provision
+ * requires either, so every surface tags them `izračunato radi provere
+ * usklađenosti` and never as a statutory field (§4 req. 4).
+ */
+export interface WorkTimeMinutes {
+  moguciMinuta: number;
+  ukupnoOstvareniMinuta: number;
+  efektivnoIzvrseniMinuta: number;
+  casoviCekanjaIZastojaMinuta: number;
+  obustavaRadaStrajkMinuta: number;
+  ukupnoNeizvrseniMinuta: number;
+  godisnjiOdmorMinuta: number;
+  praznikOdmorMinuta: number;
+  odsustvoUzNaknaduMinuta: number;
+  strucnoOsposobljavanjeMinuta: number;
+  sprecenostPoslodavacMinuta: number;
+  naknadaDrugiPoslodavciMinuta: number;
+  sprecenostRfzoMinuta: number;
+  porodiljskoMinuta: number;
+  neplacenoOdsustvoMinuta: number;
+  prekovremeniMinuta: number;
+  nocniMinuta: number;
+  radNaPraznikMinuta: number;
+}
+
+/**
+ * The closed absence vocabulary migration v17's `CHECK` accepts, mirroring
+ * `crate::commands::worktime::KATEGORIJE_ODSUSTVA`. A closed union because
+ * there is no free-text sibling and never will be — a free-text column would
+ * eventually be filled with a diagnosis (§5 item 4).
+ */
+export type AbsenceCategory =
+  | "godisnji_odmor"
+  | "praznik_odmor"
+  | "odsustvo_uz_naknadu"
+  | "strucno_osposobljavanje"
+  | "sprecenost_poslodavac"
+  | "sprecenost_rfzo"
+  | "porodiljsko"
+  | "neplaceno_odsustvo"
+  | "naknada_drugi_poslodavci"
+  | "obustava_rada_strajk";
+
+/** The ZoR čl. 53 st. 1 grounds — `crate::commands::worktime::CAP_OVERRIDE_RAZLOZI`. */
+export type CapOverrideReason =
+  | "visa_sila"
+  | "iznenadno_povecanje_obima_posla"
+  | "neplanirani_posao_u_roku"
+  | "drugo";
+
+/** Correction reasons — `crate::commands::worktime::KOREKCIJA_RAZLOZI`. */
+export type CorrectionReason =
+  | "greska_u_unosu"
+  | "ispravka_sati"
+  | "ispravka_kategorije"
+  | "naknadno_dostavljen_dokument"
+  | "drugo";
+
+/**
+ * One stored version of one day — `crate::commands::worktime::WorkTimeEntryView`.
+ * The whole chain is returned, not just the live row: `zamenjen` marks a version
+ * a later one supersedes, and it is rendered struck through rather than hidden
+ * (§4 req. 6).
+ */
+export interface WorkTimeEntryView {
+  id: number;
+  userId: number;
+  dan: string;
+  verzija: number;
+  zamenjen: boolean;
+  supersedesId: number | null;
+  kategorijaOdsustva: string | null;
+  capOverrideRazlog: string | null;
+  korekcijaRazlog: string | null;
+  unioUserId: number | null;
+  unioIme: string | null;
+  createdAt: string;
+  updatedAt: string;
+  minuti: WorkTimeMinutes;
+}
+
+/** One employee's month — `crate::commands::worktime::WorkTimeMonth`. */
+export interface WorkTimeMonth {
+  userId: number;
+  zaposleni: string;
+  godina: number;
+  mesec: number;
+  zatvoren: boolean;
+  closedAt: string | null;
+  entries: WorkTimeEntryView[];
+  /** Live rows only. */
+  ukupno: WorkTimeMinutes;
+  /** The čl. 55 st. 6 sentence, carried so no surface retypes it. */
+  napomena: string;
+  /** The advisory tag for the two computed columns (§4 req. 4). */
+  advisoryNapomena: string;
+}
+
+/** The frozen Class A classification — `crate::commands::worktime::PeriodClassification`. */
+export interface WorkTimePeriodClassification {
+  userId: number;
+  godina: number;
+  mesec: number;
+  danaSaUnosom: number;
+  minuti: WorkTimeMinutes;
+  izvedenoU: string;
+}
+
+/** A recorded period close — `crate::commands::worktime::ClosedPeriod`. */
+export interface WorkTimeClosedPeriod {
+  userId: number;
+  godina: number;
+  mesec: number;
+  closedAt: string;
+  closedBy: number;
+  klasifikacija: WorkTimePeriodClassification;
+}
+
+/**
+ * One day as the operator enters it — `crate::commands::worktime::SaveEntryRequest`.
+ * The b) and v) totals are absent by design: they are derived backend-side.
+ */
+export interface SaveWorkTimeEntryRequest {
+  userId: number;
+  dan: string;
+  moguciMinuta: number;
+  efektivnoIzvrseniMinuta: number;
+  casoviCekanjaIZastojaMinuta: number;
+  prekovremeniMinuta: number;
+  nocniMinuta: number;
+  radNaPraznikMinuta: number;
+  kategorijaOdsustva: AbsenceCategory | null;
+  odsustvoMinuta: number;
+  capOverrideRazlog: CapOverrideReason | null;
+}
+
+/** `crate::commands::worktime::CorrectEntryRequest` — the flattened entry plus a reason. */
+export interface CorrectWorkTimeEntryRequest extends SaveWorkTimeEntryRequest {
+  korekcijaRazlog: CorrectionReason;
+}
+
+/**
+ * The ZoR čl. 53 assessment a write was measured against — mirrors
+ * `crate::worktime::CapAssessment`. Minutes throughout.
+ */
+export interface WorkTimeCapAssessment {
+  weeklyOvertimeMinutes: number;
+  dailyTotalMinutes: number;
+  weeklyTotalMinutes: number;
+  weeklyCapExceeded: boolean;
+  dailyCapExceeded: boolean;
+  preraspodelaWeeklyCapExceeded: boolean;
+  requiresOverride: boolean;
+}
+
+/** `crate::worktime::ProtectionKind`, serde camelCase. */
+export type WorkTimeProtectionKind =
+  | "maloletanPrekovremeni"
+  | "maloletanPreraspodela"
+  | "maloletanDnevniLimit"
+  | "saglasnostRoditelja"
+  | "trudnocaNocniIPrekovremeni"
+  | "neispravanDatumUProfilu";
+
+/**
+ * A čl. 87–91 finding — `crate::worktime::ProtectionBlock`. `blocking` is `true`
+ * only where the statute states the prohibition itself; a čl. 90 finding is
+ * conditional on a nalaz nadležnog zdravstvenog organa the app never holds.
+ */
+export interface WorkTimeProtectionBlock {
+  kind: WorkTimeProtectionKind;
+  blocking: boolean;
+  poruka: string;
+}
+
+/** What a write returns — `crate::commands::worktime::SavedEntry`. */
+export interface SavedWorkTimeEntry {
+  entry: WorkTimeEntryView;
+  caps: WorkTimeCapAssessment;
+  protections: WorkTimeProtectionBlock[];
+}
+
+/**
+ * The two ZoR notices the register surfaces, already resolved against the
+ * stored legal form — `crate::commands::worktime::WorkTimeNotices`. Every
+ * penalty figure is authored in `legal.rs` and rides here; this side never
+ * composes one.
+ */
+export interface WorkTimeNotices {
+  recordMissing: LegalNotice;
+  capsExceeded: LegalNotice;
+}

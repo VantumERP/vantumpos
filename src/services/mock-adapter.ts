@@ -42,6 +42,11 @@ import type {
   TaxRate,
   UserAccount,
   TaxRateSummary,
+  AbsenceCategory,
+  SaveWorkTimeEntryRequest,
+  WorkTimeEntryView,
+  WorkTimeMinutes,
+  WorkTimeMonth,
 } from "./types";
 
 const now = "2026-06-18T10:00:00Z";
@@ -128,6 +133,142 @@ const declarationMissingNotice: LegalNotice = {
   citation: "Zakon o trgovini, čl. 34 st. 1–2, čl. 68 st. 1 tač. 9.",
   isLegalDuty: true,
 };
+
+/** Mirrors `legal::overtime_record_missing`. `penalty` null for the same reason. */
+const overtimeRecordMissingNotice: LegalNotice = {
+  summary:
+    "Poslodavac je dužan da vodi dnevnu evidenciju o prekovremenom radu zaposlenih.",
+  penalty: null,
+  citation:
+    "Zakon o radu, čl. 55 st. 6. Nadzor: inspektor rada. " +
+    "Ovi članovi ne propisuju zaštitnu meru.",
+  isLegalDuty: true,
+};
+
+/** Mirrors `legal::overtime_caps_exceeded`. `penalty` null for the same reason. */
+const overtimeCapsExceededNotice: LegalNotice = {
+  summary:
+    "Prekovremeni rad ne može trajati duže od osam časova nedeljno, " +
+    "niti ukupno radno vreme sa prekovremenim duže od 12 časova dnevno.",
+  penalty: null,
+  citation:
+    "Zakon o radu, čl. 53 st. 2 i st. 3. Nadzor: inspektor rada. " +
+    "Ovi članovi ne propisuju zaštitnu meru.",
+  isLegalDuty: true,
+};
+
+/** `crate::commands::worktime::EVIDENCIJA_ZAGLAVLJE`, verbatim (§4 req. 22). */
+const EVIDENCIJA_ZAGLAVLJE =
+  "Evidencija prekovremenog rada — ZoR čl. 55 st. 6. Zakon ne propisuje obrazac.";
+
+/** `crate::commands::worktime::ADVISORY_TAG` (§4 req. 4). */
+const ADVISORY_TAG = "izračunato radi provere usklađenosti";
+
+/** `crate::worktime::WEEKLY_OVERTIME_CAP_MINUTES` / `DAILY_TOTAL_CAP_MINUTES`. */
+const WEEKLY_OVERTIME_CAP_MINUTES = 8 * 60;
+const DAILY_TOTAL_CAP_MINUTES = 12 * 60;
+
+function emptyMinutes(): WorkTimeMinutes {
+  return {
+    moguciMinuta: 0,
+    ukupnoOstvareniMinuta: 0,
+    efektivnoIzvrseniMinuta: 0,
+    casoviCekanjaIZastojaMinuta: 0,
+    obustavaRadaStrajkMinuta: 0,
+    ukupnoNeizvrseniMinuta: 0,
+    godisnjiOdmorMinuta: 0,
+    praznikOdmorMinuta: 0,
+    odsustvoUzNaknaduMinuta: 0,
+    strucnoOsposobljavanjeMinuta: 0,
+    sprecenostPoslodavacMinuta: 0,
+    naknadaDrugiPoslodavciMinuta: 0,
+    sprecenostRfzoMinuta: 0,
+    porodiljskoMinuta: 0,
+    neplacenoOdsustvoMinuta: 0,
+    prekovremeniMinuta: 0,
+    nocniMinuta: 0,
+    radNaPraznikMinuta: 0,
+  };
+}
+
+/**
+ * `kategorija_odsustva` → its own minute bucket, DERIVED from the category name
+ * exactly as `crate::commands::worktime::book_absence` derives it. A
+ * hand-maintained map is the rejected design: one wrong line would post an
+ * absence into the wrong statutory letter with nothing able to notice.
+ */
+function absenceBucket(kategorija: AbsenceCategory): keyof WorkTimeMinutes {
+  const parts = kategorija.split("_");
+  const camel = parts
+    .map((part, index) =>
+      index === 0 ? part : part.charAt(0).toUpperCase() + part.slice(1),
+    )
+    .join("");
+  return `${camel}Minuta` as keyof WorkTimeMinutes;
+}
+
+/** `crate::commands::worktime::derive_totals` — b) and v) are sums of their indents. */
+function deriveTotals(minuti: WorkTimeMinutes): void {
+  minuti.ukupnoOstvareniMinuta =
+    minuti.efektivnoIzvrseniMinuta +
+    minuti.casoviCekanjaIZastojaMinuta +
+    minuti.obustavaRadaStrajkMinuta;
+  minuti.ukupnoNeizvrseniMinuta =
+    minuti.godisnjiOdmorMinuta +
+    minuti.praznikOdmorMinuta +
+    minuti.odsustvoUzNaknaduMinuta +
+    minuti.strucnoOsposobljavanjeMinuta +
+    minuti.sprecenostPoslodavacMinuta +
+    minuti.naknadaDrugiPoslodavciMinuta +
+    minuti.sprecenostRfzoMinuta +
+    minuti.porodiljskoMinuta +
+    minuti.neplacenoOdsustvoMinuta;
+}
+
+function buildWorkTimeMinutes(
+  request: SaveWorkTimeEntryRequest,
+): WorkTimeMinutes {
+  const minuti = emptyMinutes();
+  minuti.moguciMinuta = request.moguciMinuta;
+  minuti.efektivnoIzvrseniMinuta = request.efektivnoIzvrseniMinuta;
+  minuti.casoviCekanjaIZastojaMinuta = request.casoviCekanjaIZastojaMinuta;
+  minuti.prekovremeniMinuta = request.prekovremeniMinuta;
+  minuti.nocniMinuta = request.nocniMinuta;
+  minuti.radNaPraznikMinuta = request.radNaPraznikMinuta;
+
+  if (request.kategorijaOdsustva) {
+    minuti[absenceBucket(request.kategorijaOdsustva)] = request.odsustvoMinuta;
+  }
+
+  deriveTotals(minuti);
+  return minuti;
+}
+
+/** The Monday of `dan`'s calendar week, as `YYYY-MM-DD`. */
+function mondayOf(dan: string): string {
+  const date = new Date(`${dan}T00:00:00Z`);
+
+  if (Number.isNaN(date.getTime())) {
+    return dan;
+  }
+
+  const weekday = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - weekday);
+  return date.toISOString().slice(0, 10);
+}
+
+/** Marks every row a later `verzija` for the same day supersedes. */
+function withSupersedes(entries: WorkTimeEntryView[]): WorkTimeEntryView[] {
+  return entries.map((entry) => ({
+    ...entry,
+    zamenjen: entries.some(
+      (other) =>
+        other.userId === entry.userId &&
+        other.dan === entry.dan &&
+        other.verzija > entry.verzija,
+    ),
+  }));
+}
 
 /** `catalog::is_valid_gtin` — modulo-10 over GTIN-8/12/13/14. Runs only for a
  *  code the shop asserted to be a GTIN. */
@@ -288,6 +429,12 @@ export function createMockServices(): PosServices {
     },
   ];
   const kepClosures: KepClosureView[] = [];
+  // Mock fidelity only: the real register is `work_time_entries`, append-only,
+  // with the live row for a day being MAX(verzija). This double keeps the same
+  // shape in memory — a correction appends, it never mutates.
+  const workTimeEntries: WorkTimeEntryView[] = [];
+  const workTimePeriods: { userId: number; godina: number; mesec: number; closedAt: string }[] =
+    [];
   const receipt = createReceiptDetail();
   let users: UserAccount[] = [
     {
@@ -1750,11 +1897,227 @@ export function createMockServices(): PosServices {
         };
       },
     },
+    // Mock fidelity only: `crate::commands::worktime` is the source of truth.
+    // Reproduced here because the register's UI turns on behaviour a naive stub
+    // would flatten — a cap breach that ASKS for a ground instead of refusing,
+    // and a correction that appends a new verzija instead of overwriting.
+    worktime: {
+      async listMonth(userId, godina, mesec) {
+        return buildMonth(userId, godina, mesec);
+      },
+      async saveEntry(request) {
+        return writeWorkTimeEntry(request, null);
+      },
+      async correctEntry(request) {
+        const { korekcijaRazlog, ...entry } = request;
+        return writeWorkTimeEntry(entry, korekcijaRazlog);
+      },
+      async closePeriod(userId, godina, mesec) {
+        if (
+          workTimePeriods.some(
+            (period) =>
+              period.userId === userId &&
+              period.godina === godina &&
+              period.mesec === mesec,
+          )
+        ) {
+          throw {
+            code: "period_closed",
+            message: `Period ${String(mesec).padStart(2, "0")}/${godina} je zaključen i više se ne može menjati. Zaključenje je konačno.`,
+          };
+        }
+
+        workTimePeriods.push({ userId, godina, mesec, closedAt: now });
+        const month = buildMonth(userId, godina, mesec);
+
+        return {
+          userId,
+          godina,
+          mesec,
+          closedAt: now,
+          closedBy: session?.user.id ?? 1,
+          klasifikacija: {
+            userId,
+            godina,
+            mesec,
+            danaSaUnosom: month.entries.filter((entry) => !entry.zamenjen).length,
+            minuti: month.ukupno,
+            izvedenoU: now,
+          },
+        };
+      },
+      async exportCsv(userId, godina, mesec) {
+        const month = buildMonth(userId, godina, mesec);
+        const fileName = `evidencija-radnog-vremena-${userId}-${godina}-${String(mesec).padStart(2, "0")}.csv`;
+
+        return {
+          fileName,
+          path: `mock://exports/${fileName}`,
+          mimeType: "text/csv" as const,
+          rowCount: month.entries.filter((entry) => !entry.zamenjen).length,
+        };
+      },
+      async myHours(godina, mesec) {
+        return buildMonth(session?.user.id ?? 1, godina, mesec);
+      },
+      async notices() {
+        return {
+          recordMissing: overtimeRecordMissingNotice,
+          capsExceeded: overtimeCapsExceededNotice,
+        };
+      },
+    },
     print: {
       async openForPrint() {},
       async openExternalUrl() {},
     },
   };
+
+  function buildMonth(
+    userId: number,
+    godina: number,
+    mesec: number,
+  ): WorkTimeMonth {
+    const prefix = `${godina}-${String(mesec).padStart(2, "0")}`;
+    const entries = withSupersedes(
+      workTimeEntries.filter((entry) => entry.userId === userId),
+    )
+      .filter((entry) => entry.dan.startsWith(prefix))
+      .sort((left, right) =>
+        left.dan === right.dan
+          ? left.verzija - right.verzija
+          : left.dan.localeCompare(right.dan),
+      );
+
+    const ukupno = emptyMinutes();
+    for (const entry of entries.filter((candidate) => !candidate.zamenjen)) {
+      for (const key of Object.keys(ukupno) as (keyof WorkTimeMinutes)[]) {
+        ukupno[key] += entry.minuti[key];
+      }
+    }
+
+    const closed = workTimePeriods.find(
+      (period) =>
+        period.userId === userId &&
+        period.godina === godina &&
+        period.mesec === mesec,
+    );
+
+    return {
+      userId,
+      zaposleni:
+        users.find((user) => user.id === userId)?.displayName ?? "Zaposleni",
+      godina,
+      mesec,
+      zatvoren: Boolean(closed),
+      closedAt: closed?.closedAt ?? null,
+      entries,
+      ukupno,
+      napomena: EVIDENCIJA_ZAGLAVLJE,
+      advisoryNapomena: ADVISORY_TAG,
+    };
+  }
+
+  function writeWorkTimeEntry(
+    request: SaveWorkTimeEntryRequest,
+    korekcijaRazlog: string | null,
+  ) {
+    const godina = Number(request.dan.slice(0, 4));
+    const mesec = Number(request.dan.slice(5, 7));
+
+    if (
+      workTimePeriods.some(
+        (period) =>
+          period.userId === request.userId &&
+          period.godina === godina &&
+          period.mesec === mesec,
+      )
+    ) {
+      throw {
+        code: "period_closed",
+        message: `Period ${String(mesec).padStart(2, "0")}/${godina} je zaključen i više se ne može menjati. Zaključenje je konačno.`,
+      };
+    }
+
+    const live = withSupersedes(workTimeEntries).find(
+      (entry) =>
+        entry.userId === request.userId &&
+        entry.dan === request.dan &&
+        !entry.zamenjen,
+    );
+
+    if (korekcijaRazlog && !live) {
+      throw {
+        code: "not_found",
+        message: "Za ovaj dan ne postoji unos koji bi se ispravio.",
+      };
+    }
+    if (!korekcijaRazlog && live) {
+      throw {
+        code: "entry_exists",
+        message:
+          "Za ovaj dan već postoji unos. Izmena se evidentira kao ispravka.",
+      };
+    }
+
+    const minuti = buildWorkTimeMinutes(request);
+    const week = mondayOf(request.dan);
+    const weeklyOvertimeMinutes =
+      minuti.prekovremeniMinuta +
+      withSupersedes(workTimeEntries)
+        .filter(
+          (entry) =>
+            entry.userId === request.userId &&
+            !entry.zamenjen &&
+            entry.dan !== request.dan &&
+            mondayOf(entry.dan) === week,
+        )
+        .reduce((sum, entry) => sum + entry.minuti.prekovremeniMinuta, 0);
+    const dailyTotalMinutes =
+      minuti.efektivnoIzvrseniMinuta + minuti.prekovremeniMinuta;
+    const weeklyCapExceeded = weeklyOvertimeMinutes > WEEKLY_OVERTIME_CAP_MINUTES;
+    const dailyCapExceeded = dailyTotalMinutes > DAILY_TOTAL_CAP_MINUTES;
+    const caps = {
+      weeklyOvertimeMinutes,
+      dailyTotalMinutes,
+      weeklyTotalMinutes: dailyTotalMinutes,
+      weeklyCapExceeded,
+      dailyCapExceeded,
+      preraspodelaWeeklyCapExceeded: false,
+      requiresOverride: weeklyCapExceeded || dailyCapExceeded,
+    };
+
+    // Never a dead end: the day is recordable, it just has to say why.
+    if (caps.requiresOverride && !request.capOverrideRazlog) {
+      throw {
+        code: "cap_override_required",
+        message:
+          "Prekoračen je zakonski limit iz ZoR čl. 53. Dan se može evidentirati, " +
+          "ali morate izabrati razlog prekoračenja.",
+        details: { caps },
+      };
+    }
+
+    const entry: WorkTimeEntryView = {
+      id: workTimeEntries.length + 1,
+      userId: request.userId,
+      dan: request.dan,
+      verzija: live ? live.verzija + 1 : 1,
+      zamenjen: false,
+      supersedesId: live?.id ?? null,
+      kategorijaOdsustva: request.kategorijaOdsustva,
+      capOverrideRazlog: request.capOverrideRazlog,
+      korekcijaRazlog,
+      unioUserId: session?.user.id ?? 1,
+      unioIme: session?.user.displayName ?? "Administrator",
+      createdAt: now,
+      updatedAt: now,
+      minuti,
+    };
+    workTimeEntries.push(entry);
+
+    return { entry, caps, protections: [] };
+  }
 
   return services;
 }

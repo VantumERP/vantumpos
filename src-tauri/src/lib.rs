@@ -205,7 +205,8 @@ pub fn run() {
             commands::worktime::worktime_correct_entry,
             commands::worktime::worktime_close_period,
             commands::worktime::worktime_export_csv,
-            commands::worktime::worktime_my_hours
+            commands::worktime::worktime_my_hours,
+            commands::worktime::worktime_notices
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -89,6 +89,12 @@ import type {
   ImportValidationResult,
   VoidReceiptRequest,
   TaxRate,
+  CorrectWorkTimeEntryRequest,
+  SaveWorkTimeEntryRequest,
+  SavedWorkTimeEntry,
+  WorkTimeClosedPeriod,
+  WorkTimeMonth,
+  WorkTimeNotices,
 } from "./types";
 
 export interface SettingsService {
@@ -330,6 +336,45 @@ export interface KepService {
   exportBook(bookYear: number): Promise<ExportedFile>;
 }
 
+/**
+ * The ZoR čl. 55 st. 6 daily working-time register. Every method maps 1:1 to a
+ * `worktime_*` command name.
+ *
+ * Three properties of the backend this interface must not paper over. Writes are
+ * **append-only**: `correctEntry` appends a superseding version and the
+ * predecessor survives, so `listMonth` returns the whole chain and the caller
+ * renders the superseded row struck through rather than dropping it. A ZoR
+ * čl. 53 cap breach is **never a refusal** — `saveEntry` rejects with
+ * `cap_override_required` and the same call succeeds once `capOverrideRazlog`
+ * carries a čl. 53 st. 1 ground, because a register that cannot describe a day
+ * that actually happened hides the exposure instead of surfacing it. A čl. 87–91
+ * `protection_block` is the opposite and is final. `closePeriod` is
+ * **irreversible** and there is no reopen method, by design.
+ *
+ * Every method except `myHours` is admin-gated backend-side; `myHours` is
+ * session-gated to the caller's own rows.
+ */
+export interface WorkTimeService {
+  listMonth(userId: number, godina: number, mesec: number): Promise<WorkTimeMonth>;
+  saveEntry(request: SaveWorkTimeEntryRequest): Promise<SavedWorkTimeEntry>;
+  correctEntry(request: CorrectWorkTimeEntryRequest): Promise<SavedWorkTimeEntry>;
+  closePeriod(
+    userId: number,
+    godina: number,
+    mesec: number,
+  ): Promise<WorkTimeClosedPeriod>;
+  /** Per-employee month, columns 1:1 onto the statutory buckets. Offline, from the till. */
+  exportCsv(userId: number, godina: number, mesec: number): Promise<ExportedFile>;
+  /** The employee's own read-only month (ZoR čl. 83 st. 1, ZZPL čl. 26). */
+  myHours(godina: number, mesec: number): Promise<WorkTimeMonth>;
+  /**
+   * The two ZoR notices with their penalty already resolved against the stored
+   * legal form. Read-only: the frontend decides whether to show a duty, never
+   * what it costs.
+   */
+  notices(): Promise<WorkTimeNotices>;
+}
+
 export interface PrintService {
   /** Opens an exported document in the OS default handler for printing. */
   openForPrint(path: string): Promise<void>;
@@ -375,5 +420,6 @@ export interface PosServices {
   campaigns: CampaignsService;
   reklamacije: ReklamacijeService;
   kep: KepService;
+  worktime: WorkTimeService;
   print: PrintService;
 }

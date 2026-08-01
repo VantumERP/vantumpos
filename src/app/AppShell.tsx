@@ -27,6 +27,7 @@ import {
   type NavigationItemId,
 } from "@/app/navigation";
 import { ReklamacijeModule } from "@/app/reklamacije/ReklamacijeModule";
+import { WorkTimeModule } from "@/app/worktime/WorkTimeModule";
 import { ReportsScreen } from "@/app/reports/ReportsScreen";
 import { ReceiptsScreen } from "@/app/ReceiptsScreen";
 import { RegisterScreen } from "@/app/register/RegisterScreen";
@@ -478,6 +479,10 @@ function renderModule({
 
   if (activeId === "kep") {
     return <KepModule services={services} />;
+  }
+
+  if (activeId === "worktime") {
+    return <WorkTimeModule services={services} currentUser={session.user} />;
   }
 
   if (activeId === "campaigns") {

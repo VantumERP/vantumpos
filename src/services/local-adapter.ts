@@ -59,6 +59,10 @@ import type {
   StockListResult,
   TaxRate,
   UserAccount,
+  SavedWorkTimeEntry,
+  WorkTimeClosedPeriod,
+  WorkTimeMonth,
+  WorkTimeNotices,
 } from "./types";
 
 export type InvokeFn = <T>(
@@ -331,6 +335,25 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<ExportedFile>("kep_export_close", { bookYear }),
       exportBook: (bookYear) =>
         invoke<ExportedFile>("kep_export_book", { bookYear }),
+    },
+    worktime: {
+      listMonth: (userId, godina, mesec) =>
+        invoke<WorkTimeMonth>("worktime_list_month", { userId, godina, mesec }),
+      saveEntry: (request) =>
+        invoke<SavedWorkTimeEntry>("worktime_save_entry", { request }),
+      correctEntry: (request) =>
+        invoke<SavedWorkTimeEntry>("worktime_correct_entry", { request }),
+      closePeriod: (userId, godina, mesec) =>
+        invoke<WorkTimeClosedPeriod>("worktime_close_period", {
+          userId,
+          godina,
+          mesec,
+        }),
+      exportCsv: (userId, godina, mesec) =>
+        invoke<ExportedFile>("worktime_export_csv", { userId, godina, mesec }),
+      myHours: (godina, mesec) =>
+        invoke<WorkTimeMonth>("worktime_my_hours", { godina, mesec }),
+      notices: () => invoke<WorkTimeNotices>("worktime_notices"),
     },
     print: {
       openForPrint: (path) => openPath(path),

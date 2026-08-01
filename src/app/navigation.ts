@@ -3,6 +3,7 @@ import {
   ArchiveIcon,
   BarChart3Icon,
   BookIcon,
+  ClockIcon,
   FileSpreadsheetIcon,
   MessageSquareWarningIcon,
   PackageIcon,
@@ -51,6 +52,12 @@ export const navigationItems = [
     id: "kep",
     label: "KEP",
     icon: BookIcon,
+    adminOnly: true,
+  },
+  {
+    id: "worktime",
+    label: "Radno vreme",
+    icon: ClockIcon,
     adminOnly: true,
   },
   {

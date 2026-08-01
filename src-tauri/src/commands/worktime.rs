@@ -279,6 +279,18 @@ pub struct CorrectEntryRequest {
     pub korekcija_razlog: String,
 }
 
+/// The two ZoR notices this register surfaces, already tier-resolved.
+///
+/// They travel together because they are the two halves of the same exposure:
+/// not keeping the register at all (čl. 276 st. 1 tač. 1a) and keeping one that
+/// records a breach of the čl. 53 caps (čl. 274 st. 1 tač. 3, the larger fine).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTimeNotices {
+    pub record_missing: crate::legal::LegalNotice,
+    pub caps_exceeded: crate::legal::LegalNotice,
+}
+
 /// What a write returns: the stored row, the čl. 53 assessment it was measured
 /// against, and any non-blocking čl. 87–91 findings the operator must see.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -335,6 +347,16 @@ pub fn worktime_export_csv(
     export_month_csv(state.inner(), user_id, godina, mesec).map_err(Into::into)
 }
 
+/// The two ZoR notices the register surfaces, resolved against the stored
+/// legal form.
+///
+/// Read-only and not admin-gated, mirroring `settings_lpfr_notice`: it states a
+/// duty and its tier, and holds no employee data of any kind.
+#[tauri::command]
+pub fn worktime_notices(state: State<'_, AppState>) -> Result<WorkTimeNotices, CommandError> {
+    notices(state.inner()).map_err(Into::into)
+}
+
 /// The employee's own read-only view. Session-gated, own rows only.
 #[tauri::command]
 pub fn worktime_my_hours(
@@ -353,6 +375,20 @@ pub fn list_month(
 ) -> Result<WorkTimeMonth, AppError> {
     crate::commands::auth::require_admin(state)?;
     load_month(state, user_id, godina, mesec)
+}
+
+/// Resolves both ZoR notices against the shop's stored legal form.
+///
+/// The register's surfaces render this and never compose a figure of their own —
+/// `legal.rs` is the only place a fine amount is decided, and its enumerated
+/// `all_notices` guard is what keeps a ZEOR amount out of every one of them.
+pub fn notices(state: &AppState) -> Result<WorkTimeNotices, AppError> {
+    let profile = crate::commands::settings::load_shop_profile(state)?;
+
+    Ok(WorkTimeNotices {
+        record_missing: crate::legal::overtime_record_missing(&profile),
+        caps_exceeded: crate::legal::overtime_caps_exceeded(&profile),
+    })
 }
 
 /// ZoR čl. 83 st. 1 and ZZPL čl. 26 in one read-only surface. The employee is
@@ -1213,7 +1249,7 @@ mod tests {
     use tauri::Manager;
 
     use super::{
-        close_period, correct_entry, export_month_csv, list_month, my_hours, save_entry,
+        close_period, correct_entry, export_month_csv, list_month, my_hours, notices, save_entry,
         worktime_save_entry, CorrectEntryRequest, SaveEntryRequest,
     };
     use crate::db::{test_database_path, Db};
@@ -1973,6 +2009,72 @@ mod tests {
             // Advisory columns are labelled, never presented as statutory fields.
             assert!(csv.contains("izračunato radi provere usklađenosti"));
             assert!(csv.contains("420"), "the live version is the exported one");
+        });
+    }
+
+    /// The register's UI never composes a fine figure; it renders what this
+    /// returns. So the tier has to be resolved from the **stored** legal form,
+    /// and an unset form has to yield no figure at all rather than a plausible
+    /// one — and no ZEOR amount may ever appear, under any profile.
+    #[test]
+    fn notices_resolve_the_stored_tier_and_stay_silent_while_it_is_unset() {
+        with_state("worktime_notices_tier", |state| {
+            sign_in_admin(state);
+
+            let unset = notices(state).expect("notices should resolve");
+            assert!(
+                unset.record_missing.penalty.is_none() && unset.caps_exceeded.penalty.is_none(),
+                "no legal form is stored yet, so no figure may be quoted"
+            );
+            assert!(unset.record_missing.citation.contains("čl. 55 st. 6"));
+            assert!(unset.caps_exceeded.citation.contains("čl. 53"));
+
+            crate::commands::settings::save_shop_profile(
+                state,
+                crate::commands::settings::ShopProfileRequest {
+                    pravna_forma: Some(crate::commands::settings::PravnaForma::Preduzetnik),
+                    pdv_obveznik: Some(false),
+                    distance_selling: Some(false),
+                    lpfr_in_premises: Some(false),
+                    lpfr_carve_out_internet_only: Some(false),
+                    lpfr_carve_out_own_used_assets: Some(false),
+                    esir_elements: Vec::new(),
+                },
+            )
+            .expect("admin should save the profile");
+
+            let resolved = notices(state).expect("notices should resolve");
+            let missing = resolved
+                .record_missing
+                .penalty
+                .expect("the stored tier is known");
+            let caps = resolved
+                .caps_exceeded
+                .penalty
+                .expect("the stored tier is known");
+
+            assert!(
+                missing.contains("50.000 do 150.000"),
+                "the preduzetnik row is ZoR čl. 276 st. 1: {missing}"
+            );
+            assert!(
+                !missing.contains("odgovorno lice"),
+                "čl. 276 st. 2 does not reach a preduzetnik: {missing}"
+            );
+            assert!(
+                caps.contains("200.000 do 400.000"),
+                "the caps carry the larger fine: {caps}"
+            );
+
+            // The ZEOR tiers are unresolved; silence beats a wrong number.
+            for rendered in [missing, caps] {
+                for forbidden in ["500.000 do 1.000.000", "300.000 do 500.000"] {
+                    assert!(
+                        !rendered.contains(forbidden),
+                        "no ZEOR figure may be reachable here: {rendered}"
+                    );
+                }
+            }
         });
     }
 }
