@@ -248,6 +248,19 @@ pub fn run() {
             commands::kep::kep_list_closures,
             commands::kep::kep_export_close,
             commands::kep::kep_export_book,
+            // SW-16. There is deliberately no delete command and no „edit posted
+            // popis“ command here: čl. 14 st. 3 with ZoRač čl. 8 st. 4 makes a
+            // correction a new popis, and the retention purge (req. 42) is not a
+            // command at all.
+            commands::popis::popis_list,
+            commands::popis::popis_get,
+            commands::popis::popis_open,
+            commands::popis::popis_save_line,
+            commands::popis::popis_start_count,
+            commands::popis::popis_sign_phase_a,
+            commands::popis::popis_compute,
+            commands::popis::popis_sign_phase_b,
+            commands::popis::popis_post,
             commands::sales::sales_preview,
             commands::sales::sales_complete,
             commands::sales::sales_assess_cash_payment,

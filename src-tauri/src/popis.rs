@@ -143,12 +143,7 @@ pub fn advance(current: PopisStatus, event: PopisEvent) -> Result<PopisStatus, A
     // Checked before the sequence, so a posted popis answers „the popis is
     // closed“ to every event rather than „that step is out of order“ — the same
     // order, and the same wording, the v20 posting lock uses.
-    if current == PopisStatus::Posted {
-        return Err(AppError::business(
-            "popis_proknjizen",
-            "Proknjižen popis se ne menja — ispravka se sprovodi novim popisom.",
-        ));
-    }
+    posting_lock(current)?;
 
     match (current, event) {
         (PopisStatus::Draft, PopisEvent::Count) => Ok(PopisStatus::Counting),
@@ -172,6 +167,25 @@ pub fn advance(current: PopisStatus, event: PopisEvent) -> Result<PopisStatus, A
             ),
         )),
     }
+}
+
+/// Req. 41 / PoP čl. 14 st. 3 with ZoRač čl. 8 st. 4 — the one refusal a posted
+/// popis gives, to a transition and to a row write alike.
+///
+/// It lives here, and [`advance`] calls it, so that the module has **one**
+/// definition of that sentence rather than one per caller: the command layer
+/// refuses edits that are not transitions at all (a line write, a komisija row),
+/// and a second hand-written copy of the wording would be free to drift from
+/// this one and from the v20 trigger both spellings answer for.
+pub fn posting_lock(status: PopisStatus) -> Result<(), AppError> {
+    if status == PopisStatus::Posted {
+        return Err(AppError::business(
+            "popis_proknjizen",
+            "Proknjižen popis se ne menja — ispravka se sprovodi novim popisom.",
+        ));
+    }
+
+    Ok(())
 }
 
 /// The **status limb** of PoP čl. 8 st. 5 — false for every state in Phase A,
