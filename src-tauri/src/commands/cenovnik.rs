@@ -35,17 +35,18 @@
 //! §2, §3.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
 use crate::cenovnik::{
-    content_hash, published_prices, render_csv, CenovnikRow, NotConfigured, PublishOutcome,
-    PublishTarget,
+    content_hash, published_prices, render_csv, CenovnikRow, LocalFolderTarget, NotConfigured,
+    PublishOutcome, PublishTarget,
 };
-use crate::commands::settings::{CompanySettings, COMPANY_SETTINGS_KEY};
+use crate::commands::settings::{save_json_setting, CompanySettings, COMPANY_SETTINGS_KEY};
 use crate::retention::{
     assert_never_purge_intact, expiry_cutoff, is_purgeable, load_policy, never_purge_row_counts,
     RecordClass, CENOVNIK_ARCHIVE_RETENTION_YEARS,
@@ -56,6 +57,36 @@ use crate::state::AppState;
 /// rather than a column on `cenovnik_snapshots`: v19 is the plan's only new
 /// schema, and `settings` is already the generic per-shop key/value store.
 const OUTLET_SETTINGS_KEY: &str = "cenovnik_prodajno_mesto";
+
+/// Where the shop has said its cenovnik should go. Its own `settings` row, as
+/// every other per-shop choice is.
+const PUBLISH_TARGET_SETTINGS_KEY: &str = "cenovnik_publish_target";
+
+/// The shop's answer to „where does the published file go“ (req. 15).
+///
+/// Req. 15 asks for a hosted endpoint — a stable public URL per prodajni
+/// objekat — and **that is a founder decision, not an engineering one**: a
+/// hosted endpoint means Actaer runs a public service carrying the shop's
+/// prices. So this cycle ships the two states it can honestly ship, and the
+/// hosted variant is a third arm added here when that decision lands, without
+/// touching a single write path.
+///
+/// A shop that already has a website discharges čl. 6 st. 2 today by pointing
+/// [`PublishTargetSettings::LocalFolder`] at the folder that site serves.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PublishTargetSettings {
+    /// Nothing receives the file. The snapshot is still generated and archived
+    /// — an honest state, not a failure, and **never a statement that the shop
+    /// is in breach**: whether a trader with no website must create one is
+    /// unresolved (§2b).
+    #[default]
+    NotConfigured,
+    /// A folder on this machine: one the shop's web host serves, one a sync
+    /// client mirrors, or simply the one it uploads from by hand.
+    #[serde(rename_all = "camelCase")]
+    LocalFolder { folder: String },
+}
 
 /// Republishes after a price move that has ALREADY COMMITTED.
 ///
@@ -68,12 +99,104 @@ const OUTLET_SETTINGS_KEY: &str = "cenovnik_prodajno_mesto";
 /// stands; the next price write repairs the published file, exactly as it
 /// repairs a crash between the commit and the publish.
 ///
-/// The single place the publish target is chosen, so Task 7's founder decision
-/// (req. 15) lands here once rather than at each of the four write paths.
+/// **The single place the publish target is chosen**, so req. 15's founder
+/// decision lands here once rather than at each of the four write paths — and
+/// so a target that cannot be read is one more thing that fails toward „the
+/// file was archived but went nowhere“ rather than toward a failed sale.
 pub fn republish_after_price_move(connection: &Connection, now: &str) {
-    if let Err(error) = publish_current(connection, &NotConfigured, now) {
+    let target = match load_publish_target(connection) {
+        Ok(settings) => configured_target(&settings),
+        Err(error) => {
+            log::warn!("Mesto objave cenovnika nije pročitano, fajl se samo arhivira: {error}");
+            Box::new(NotConfigured) as Box<dyn PublishTarget>
+        }
+    };
+
+    if let Err(error) = publish_current(connection, target.as_ref(), now) {
         log::warn!("Cenovnik nije ponovo objavljen posle promene cene: {error}");
     }
+}
+
+/// The configured setting as the thing that actually writes the file.
+fn configured_target(settings: &PublishTargetSettings) -> Box<dyn PublishTarget> {
+    match settings {
+        PublishTargetSettings::NotConfigured => Box::new(NotConfigured),
+        PublishTargetSettings::LocalFolder { folder } => Box::new(LocalFolderTarget::new(folder)),
+    }
+}
+
+/// What the shop has configured, read off the connection the publish path
+/// already holds.
+///
+/// A settings row that will not parse answers [`PublishTargetSettings::
+/// NotConfigured`] rather than failing: this is read on a path that runs after
+/// a price write has committed, and a corrupt row must cost the shop its
+/// publication, never its sale.
+fn load_publish_target(connection: &Connection) -> Result<PublishTargetSettings, AppError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![PUBLISH_TARGET_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored
+        .and_then(|value| serde_json::from_str::<PublishTargetSettings>(&value).ok())
+        .unwrap_or_default())
+}
+
+/// What the shop has configured (req. 15), for the settings panel.
+///
+/// Not admin-gated: knowing where the shop's own published prices go is not a
+/// privilege, and čl. 6 st. 5 wants that file findable. Changing it is
+/// [`save_publish_target`], which is.
+pub fn publish_target(state: &AppState) -> Result<PublishTargetSettings, AppError> {
+    load_publish_target(&state.db().open()?)
+}
+
+/// Chooses where the cenovnik is published, from the owner's settings screen.
+///
+/// **Admin only.** Where the shop's published prices go is the thing čl. 6
+/// st. 4 then binds it to, and an operator who could move it — or silently turn
+/// it off — could put the shop out of step with st. 3 from a screen the owner
+/// never opened.
+///
+/// The folder is validated but not written to here: a drive that is unmounted
+/// this minute is not a wrong setting, and refusing to save it would leave the
+/// shop unable to configure the target it uses. The publish path reports what
+/// actually happened, and Task 8's panel is where the operator sees a
+/// publication that did not land.
+pub fn save_publish_target(
+    state: &AppState,
+    request: PublishTargetSettings,
+) -> Result<PublishTargetSettings, AppError> {
+    super::auth::require_admin(state)?;
+
+    let settings = match request {
+        PublishTargetSettings::NotConfigured => PublishTargetSettings::NotConfigured,
+        PublishTargetSettings::LocalFolder { folder } => {
+            let folder = folder.trim().to_string();
+            if folder.is_empty() {
+                return Err(AppError::validation(
+                    "Folder za objavu cenovnika je obavezan.",
+                    serde_json::json!({ "field": "folder" }),
+                ));
+            }
+            if !Path::new(&folder).is_absolute() {
+                // A relative path resolves against whatever directory the app
+                // was launched from, so the shop would be told the cenovnik is
+                // published and be unable to say where.
+                return Err(AppError::validation(
+                    "Putanja do foldera mora biti puna putanja, na primer „/Users/ana/cenovnik“.",
+                    serde_json::json!({ "field": "folder" }),
+                ));
+            }
+            PublishTargetSettings::LocalFolder { folder }
+        }
+    };
+
+    save_json_setting(state, PUBLISH_TARGET_SETTINGS_KEY, &settings)?;
+    Ok(settings)
 }
 
 /// Renders the outlet's cenovnik from the catalog, archives it as a new
@@ -553,6 +676,21 @@ pub fn cenovnik_get_snapshot(
     read_snapshot(state.inner(), snapshot_id).map_err(Into::into)
 }
 
+#[tauri::command]
+pub fn cenovnik_get_publish_target(
+    state: State<'_, AppState>,
+) -> Result<PublishTargetSettings, CommandError> {
+    publish_target(state.inner()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn cenovnik_set_publish_target(
+    state: State<'_, AppState>,
+    request: PublishTargetSettings,
+) -> Result<PublishTargetSettings, CommandError> {
+    save_publish_target(state.inner(), request).map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -560,11 +698,12 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        current_published_cenovnik, list_snapshots, publish_current, purge_expired_snapshots,
-        read_snapshot,
+        current_published_cenovnik, list_snapshots, publish_current, publish_target,
+        purge_expired_snapshots, read_snapshot, republish_after_price_move, save_publish_target,
+        PublishTargetSettings,
     };
     use crate::app_error::AppError;
-    use crate::cenovnik::{NotConfigured, PublishOutcome, PublishTarget};
+    use crate::cenovnik::{published_file_name, NotConfigured, PublishOutcome, PublishTarget};
     use crate::commands::catalog::{
         create_product, set_product_active, update_product, SaveProductRequest,
     };
@@ -608,6 +747,58 @@ mod tests {
         }
 
         std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// The same shop reached through an `AppState`, so the admin gate on the
+    /// publish target (Task 7) can be exercised.
+    fn with_shop(test_name: &str, test: impl FnOnce(&AppState)) {
+        let path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            seed(&db);
+            test(&AppState::new(db));
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// A folder of this test's own, removed afterwards — `std::env::temp_dir`
+    /// plus a nanosecond suffix, as `db::test_database_path` does it.
+    fn with_publish_folder(test_name: &str, test: impl FnOnce(&std::path::Path)) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let folder = std::env::temp_dir().join(format!("vantumpos-{test_name}-{unique}"));
+        std::fs::create_dir_all(&folder).expect("the publish folder should be created");
+
+        test(&folder);
+
+        std::fs::remove_dir_all(&folder).expect("the publish folder should be removed");
+    }
+
+    fn sign_in_admin(state: &AppState) {
+        let admin = admin_id(state.db());
+        state
+            .set_session_user_id(admin)
+            .expect("admin session should set");
+    }
+
+    fn sign_in_cashier(state: &AppState) {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, created_at, updated_at)
+                 VALUES ('marko', 'Marko Marković', 'cashier',
+                         '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z')",
+                [],
+            )
+            .expect("cashier should insert");
+        let cashier = connection.last_insert_rowid();
+        state
+            .set_session_user_id(cashier)
+            .expect("cashier session should set");
     }
 
     fn seed(db: &Db) {
@@ -1828,6 +2019,278 @@ mod tests {
                 found.push((relative, shipped_statements(&source)));
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 7 — where the file goes (reqs. 13, 15)
+    // ---------------------------------------------------------------------
+
+    /// Req. 15 leaves the hosting question to the founder, so where the file
+    /// goes is the shop's own setting — and the shop owner's alone. A cashier
+    /// able to move it could point the published prices at a folder nobody
+    /// serves, and čl. 6 st. 3 would be breached by a screen the owner never
+    /// opened.
+    #[test]
+    fn only_an_admin_can_choose_where_the_cenovnik_is_published() {
+        with_shop("cenovnik_publish_target_is_admin_only", |state| {
+            with_publish_folder("cenovnik-target-admin-only", |folder| {
+                let configured = PublishTargetSettings::LocalFolder {
+                    folder: folder.display().to_string(),
+                };
+
+                sign_in_cashier(state);
+                let error = save_publish_target(state, configured.clone())
+                    .expect_err("a cashier may not move the shop's published prices");
+                assert_eq!(error.code(), "forbidden");
+                assert_eq!(
+                    publish_target(state).expect("the setting should read"),
+                    PublishTargetSettings::NotConfigured,
+                    "the refused write must not have landed"
+                );
+
+                sign_in_admin(state);
+                assert_eq!(
+                    save_publish_target(state, configured.clone())
+                        .expect("the owner configures the target"),
+                    configured
+                );
+                assert_eq!(
+                    publish_target(state).expect("the setting should read"),
+                    configured
+                );
+            });
+        });
+    }
+
+    /// The default is the honest one: nothing is configured, and nothing claims
+    /// otherwise. A shop that has never opened the panel is not misdescribed as
+    /// publishing somewhere.
+    #[test]
+    fn nothing_is_configured_until_the_shop_says_so() {
+        with_shop("cenovnik_publish_target_defaults_to_none", |state| {
+            assert_eq!(
+                publish_target(state).expect("an unset target is not an error"),
+                PublishTargetSettings::NotConfigured
+            );
+        });
+    }
+
+    /// Req. 11 through req. 15: a price write republishes, and with a local
+    /// folder configured the file actually leaves the database. What lands on
+    /// disk is the archived body byte for byte — čl. 6 st. 4 binds the shop to
+    /// what a fetch of that file returns, and the archive is the evidence of
+    /// what it published.
+    #[test]
+    fn a_price_write_publishes_into_the_configured_folder() {
+        with_shop("cenovnik_publishes_into_the_configured_folder", |state| {
+            with_publish_folder("cenovnik-target-price-write", |folder| {
+                sign_in_admin(state);
+                save_publish_target(
+                    state,
+                    PublishTargetSettings::LocalFolder {
+                        folder: folder.display().to_string(),
+                    },
+                )
+                .expect("the owner configures the target");
+
+                let acting = admin_id(state.db());
+                update_product(state.db(), 1, product_request(31_900), acting)
+                    .expect("price should save");
+
+                let archived = snapshots(state.db());
+                assert_eq!(archived.len(), 1, "{archived:?}");
+
+                let path = folder.join(published_file_name(OUTLET));
+                let written = std::fs::read(&path).expect("the published file should read");
+                assert_eq!(
+                    written.as_slice(),
+                    archived[0].body.as_bytes(),
+                    "the file the shop serves is the file the archive kept"
+                );
+                assert!(
+                    archived[0].body.contains("319.00"),
+                    "{:?}",
+                    archived[0].body
+                );
+                assert!(
+                    archived[0].published_at.is_some(),
+                    "a snapshot a target accepted must say so: {archived:?}"
+                );
+                assert_eq!(
+                    archived[0].published_target.as_deref(),
+                    Some(path.display().to_string().as_str()),
+                    "and must name where it went"
+                );
+            });
+        });
+    }
+
+    /// The republish path is where Task 7's founder decision lands, so the
+    /// resolution of the configured target has to happen there rather than at
+    /// each of the four write paths. With nothing configured the file is still
+    /// generated and archived — it simply goes nowhere, which is what a NULL
+    /// `published_at` says.
+    #[test]
+    fn with_nothing_configured_the_republish_archives_and_publishes_nowhere() {
+        with_shop("cenovnik_republish_without_a_target", |state| {
+            let connection = state.db().open().expect("database should open");
+            republish_after_price_move(&connection, "2026-08-02T09:15:00Z");
+
+            let archived = snapshots(state.db());
+            assert_eq!(archived.len(), 1, "{archived:?}");
+            assert_eq!(archived[0].published_at, None);
+            assert_eq!(archived[0].published_target, None);
+            assert!(!archived[0].body.is_empty());
+        });
+    }
+
+    /// A configured folder that cannot be written is the routine failure — an
+    /// unmounted drive, a folder the shop deleted, a name that is really a
+    /// file. The publish runs after the price write has committed, so it may
+    /// cost neither the price nor the archived snapshot; the file simply is not
+    /// published, and the NULL `published_at` is what Task 8's panel reads to
+    /// tell the operator the published copy is stale.
+    #[test]
+    fn a_target_that_cannot_be_written_costs_neither_the_price_nor_the_snapshot() {
+        with_shop("cenovnik_target_that_cannot_be_written", |state| {
+            with_publish_folder("cenovnik-target-unwritable", |folder| {
+                let occupied = folder.join("zauzeto");
+                std::fs::write(&occupied, b"ovo nije folder").expect("the blocker should write");
+
+                sign_in_admin(state);
+                save_publish_target(
+                    state,
+                    PublishTargetSettings::LocalFolder {
+                        folder: occupied.display().to_string(),
+                    },
+                )
+                .expect("the owner may name a folder that later stops working");
+
+                let acting = admin_id(state.db());
+                update_product(state.db(), 1, product_request(31_900), acting)
+                    .expect("a committed price save must not be reported as failed");
+
+                let archived = snapshots(state.db());
+                assert_eq!(archived.len(), 1, "the archive still has the file");
+                assert_eq!(
+                    archived[0].published_at, None,
+                    "and must not claim a publication that failed"
+                );
+                assert_eq!(archived[0].published_target, None);
+                let saved: i64 = state
+                    .db()
+                    .open()
+                    .expect("database should open")
+                    .query_row(
+                        "SELECT sale_price_minor FROM products WHERE id = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("price should read");
+                assert_eq!(saved, 31_900);
+            });
+        });
+    }
+
+    /// A settings row this cannot parse must not take a price save down with
+    /// it. It lands in „nothing is configured“ — the same honest state as an
+    /// unconfigured shop — rather than erroring on the till.
+    #[test]
+    fn an_unreadable_target_setting_publishes_nowhere_instead_of_failing() {
+        with_shop("cenovnik_target_setting_is_corrupt", |state| {
+            let connection = state.db().open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO settings (key, value_json, updated_at)
+                     VALUES ('cenovnik_publish_target', 'ovo nije JSON', '2026-08-02T09:15:00Z')",
+                    [],
+                )
+                .expect("a corrupt setting should insert");
+
+            assert_eq!(
+                publish_target(state).expect("a corrupt setting is not an error"),
+                PublishTargetSettings::NotConfigured
+            );
+
+            let acting = admin_id(state.db());
+            update_product(state.db(), 1, product_request(31_900), acting)
+                .expect("the price save must not fail for want of a readable target");
+            let archived = snapshots(state.db());
+            assert_eq!(archived.len(), 1, "{archived:?}");
+            assert_eq!(archived[0].published_at, None);
+        });
+    }
+
+    /// The folder is typed by hand into a settings field. An empty one is not a
+    /// target, and a relative one resolves against whatever directory the app
+    /// happened to be launched from — so the shop would be told its cenovnik is
+    /// published and be unable to say where.
+    #[test]
+    fn the_folder_must_be_named_and_must_be_an_absolute_path() {
+        with_shop("cenovnik_target_folder_is_validated", |state| {
+            sign_in_admin(state);
+
+            for folder in ["", "   "] {
+                let error = save_publish_target(
+                    state,
+                    PublishTargetSettings::LocalFolder {
+                        folder: folder.to_string(),
+                    },
+                )
+                .expect_err("an empty folder is not a target");
+                assert_eq!(error.code(), "validation_error");
+            }
+
+            let error = save_publish_target(
+                state,
+                PublishTargetSettings::LocalFolder {
+                    folder: "cenovnik/javno".to_string(),
+                },
+            )
+            .expect_err("a relative folder is not somewhere the shop can point at");
+            assert_eq!(error.code(), "validation_error");
+
+            assert_eq!(
+                publish_target(state).expect("the setting should read"),
+                PublishTargetSettings::NotConfigured,
+                "no refused folder may have landed"
+            );
+        });
+    }
+
+    /// Turning publication back off has to be possible: a shop that moves its
+    /// site, or decides to upload by hand for a while, must be able to say so —
+    /// and the file must then stop leaving the machine.
+    #[test]
+    fn the_target_can_be_set_back_to_nothing_configured() {
+        with_shop("cenovnik_target_can_be_cleared", |state| {
+            with_publish_folder("cenovnik-target-cleared", |folder| {
+                sign_in_admin(state);
+                save_publish_target(
+                    state,
+                    PublishTargetSettings::LocalFolder {
+                        folder: folder.display().to_string(),
+                    },
+                )
+                .expect("the owner configures the target");
+                save_publish_target(state, PublishTargetSettings::NotConfigured)
+                    .expect("the owner turns publication back off");
+
+                let connection = state.db().open().expect("database should open");
+                republish_after_price_move(&connection, "2026-08-02T09:15:00Z");
+
+                let archived = snapshots(state.db());
+                assert_eq!(archived.len(), 1, "{archived:?}");
+                assert_eq!(archived[0].published_at, None);
+                assert_eq!(
+                    std::fs::read_dir(folder)
+                        .expect("the folder should read")
+                        .count(),
+                    0,
+                    "nothing leaves the machine once the target is cleared"
+                );
+            });
+        });
     }
 
     fn shipped_statements(source: &str) -> String {

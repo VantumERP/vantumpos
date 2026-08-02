@@ -200,6 +200,8 @@ pub fn run() {
             commands::catalog::catalog_prethodna_cena,
             commands::cenovnik::cenovnik_list_snapshots,
             commands::cenovnik::cenovnik_get_snapshot,
+            commands::cenovnik::cenovnik_get_publish_target,
+            commands::cenovnik::cenovnik_set_publish_target,
             commands::campaigns::campaigns_list,
             commands::campaigns::campaigns_get,
             commands::campaigns::campaigns_validate,

@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
@@ -223,14 +224,41 @@ pub enum PublishOutcome {
 
 /// Where a rendered cenovnik goes once it exists.
 ///
-/// Task 7 (reqs. 13, 15) adds the local-folder implementation and writes the
-/// čl. 6 st. 5 fetchability rules into this contract. Task 3 needs only the seam
-/// and the honest default below, so the republish-on-write path can land without
-/// pre-empting the hosting decision.
-///
 /// **The publish path calls this AFTER the price write has committed** — a
 /// target must never be handed prices the catalog then rolls back, because
 /// čl. 6 st. 4 binds the shop to what it published.
+///
+/// # The fetchability contract (req. 13)
+///
+/// Čl. 6 st. 5 is a duty to **enable** a comparison of the previously published
+/// prices with the ones published in real time. A target that makes the file
+/// hard to fetch therefore manufactures a breach for the very shop it was built
+/// to protect — the file exists, and the comparison the statute asks for still
+/// cannot be made. **Every implementation of this trait owes all seven, the
+/// local folder below and the hosted endpoint req. 15 leaves to the founder
+/// alike:**
+///
+/// 1. **No login and no session.** Whoever compares prices is a consumer or an
+///    inspector, and neither has an account with the shop.
+/// 2. **No CAPTCHA, no bot-fight rule and no WAF challenge.** The reader that
+///    matters most is a script comparing many traders at once, which is exactly
+///    what a bot challenge is built to stop.
+/// 3. **No JavaScript-rendering requirement.** A plain file at a plain URL: a
+///    page that assembles the prices in a browser publishes nothing to anything
+///    that does not run one.
+/// 4. **No `robots.txt` disallow** covering the file's path.
+/// 5. **No aggressive rate limit.** A comparison across a shop's whole catalog
+///    is one fetch; a limit that answers the second one with 429 defeats it.
+/// 6. **A stable URL per prodajni objekat.** The address may not move between
+///    republishes — see [`published_file_name`], which is why the name is
+///    derived from the outlet and never from the date.
+/// 7. **The correct `Content-Type`** for what was rendered: `text/csv` with
+///    `charset=utf-8` for this file. A cenovnik served as
+///    `application/octet-stream` is a download prompt, not a published price.
+///
+/// None of this is testable against an endpoint that does not exist yet, so
+/// `the_fetchability_contract_is_written_into_the_publish_target_trait` asserts
+/// the contract itself is still here for whoever writes that endpoint.
 pub trait PublishTarget {
     fn publish(
         &self,
@@ -252,6 +280,145 @@ impl PublishTarget for NotConfigured {
         _now: &str,
     ) -> Result<PublishOutcome, AppError> {
         Ok(PublishOutcome::NotConfigured)
+    }
+}
+
+/// The local half of req. 15: the file lands in a folder on this machine.
+///
+/// The folder is the shop's own — a folder its web host serves, a folder a sync
+/// client mirrors, or simply the folder it uploads from by hand. **Nothing here
+/// touches the network.** Whether Actaer runs a public endpoint is a founder
+/// decision (req. 15) and this cycle does not make it; what it does make is a
+/// shop with a website able to discharge čl. 6 st. 2 today, by pointing this at
+/// the folder that site publishes.
+///
+/// The trait's fetchability contract is satisfied trivially here: a file on
+/// disk has no login, no challenge and no rate limit, its name is stable per
+/// outlet, and the `.csv` extension is what makes an ordinary web server answer
+/// with `text/csv`.
+#[derive(Debug, Clone)]
+pub struct LocalFolderTarget {
+    folder: PathBuf,
+}
+
+impl LocalFolderTarget {
+    pub fn new(folder: impl Into<PathBuf>) -> Self {
+        Self {
+            folder: folder.into(),
+        }
+    }
+
+    /// Where this target puts `prodajno_mesto`'s cenovnik.
+    pub fn path_for(&self, prodajno_mesto: &str) -> PathBuf {
+        self.folder.join(published_file_name(prodajno_mesto))
+    }
+}
+
+impl PublishTarget for LocalFolderTarget {
+    fn publish(
+        &self,
+        body: &str,
+        prodajno_mesto: &str,
+        _now: &str,
+    ) -> Result<PublishOutcome, AppError> {
+        // The operator names the folder in settings; nothing guarantees it
+        // exists. Refusing until they create it by hand would leave the shop
+        // with a configured target and no published file.
+        std::fs::create_dir_all(&self.folder)?;
+
+        let path = self.path_for(prodajno_mesto);
+        // Written beside its destination and renamed over it: a rename within
+        // one directory is atomic, so a fetch that lands mid-publish reads the
+        // previous cenovnik rather than half of the new one — and čl. 6 st. 4
+        // binds the shop to whatever that fetch returns.
+        let temporary = self
+            .folder
+            .join(format!(".{}.tmp", published_file_name(prodajno_mesto)));
+        let written = std::fs::write(&temporary, body.as_bytes())
+            .and_then(|()| std::fs::rename(&temporary, &path));
+        if let Err(error) = written {
+            // A half-written temporary in a folder the shop serves would be
+            // served too, and nothing else would ever clean it up.
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+
+        Ok(PublishOutcome::Published {
+            target: path.display().to_string(),
+        })
+    }
+}
+
+/// The file name an outlet's cenovnik is published under.
+///
+/// **Stable per prodajni objekat** (req. 13, rule 6): derived from the frozen
+/// archive key and never from the date, so the address a consumer bookmarked or
+/// an inspector was given keeps resolving to the file in force. A dated name
+/// would hand every republish a new URL and break the čl. 6 st. 5 comparison at
+/// the moment it is asked for.
+///
+/// **Folded to ASCII**, because this segment is also the last segment of the
+/// eventual URL: a name carrying č or đ is normalised differently by different
+/// filesystems and re-escaped differently by each link in the chain, which is
+/// how a „stable URL“ quietly stops being stable. The `.csv` extension is what
+/// makes an ordinary web server answer with `text/csv` (rule 7) without further
+/// configuration.
+///
+/// And it is why free text can never compose a path: `/`, `\` and `.` are not
+/// in the retained set, so `../../etc/passwd` folds to one flat segment inside
+/// the configured folder.
+pub fn published_file_name(prodajno_mesto: &str) -> String {
+    format!("cenovnik-{}.csv", slug(prodajno_mesto))
+}
+
+/// Long enough for a Serbian street address, short enough to stay inside the
+/// path limits of every filesystem the app runs on once the folder is prepended.
+const SLUG_MAX: usize = 60;
+
+/// What an outlet whose whole name folds away is published as. It still has to
+/// publish somewhere, and this has to be as stable as any other name.
+const FALLBACK_SLUG: &str = "objekat";
+
+fn slug(value: &str) -> String {
+    let mut out = String::new();
+    let mut separator_pending = false;
+
+    for character in value.chars().map(fold_diacritic) {
+        if character.is_ascii_alphanumeric() {
+            if separator_pending && !out.is_empty() {
+                out.push('-');
+            }
+            separator_pending = false;
+            out.push(character.to_ascii_lowercase());
+            if out.len() >= SLUG_MAX {
+                break;
+            }
+        } else {
+            separator_pending = true;
+        }
+    }
+
+    if out.is_empty() {
+        FALLBACK_SLUG.to_string()
+    } else {
+        out
+    }
+}
+
+/// Serbian Latin to its ASCII skeleton. Anything else is left alone and falls
+/// out as a separator above — including Cyrillic, which has no one-to-one Latin
+/// fold this function could honestly claim to make.
+fn fold_diacritic(character: char) -> char {
+    match character {
+        'č' | 'ć' => 'c',
+        'Č' | 'Ć' => 'C',
+        'ž' => 'z',
+        'Ž' => 'Z',
+        'š' => 's',
+        'Š' => 'S',
+        'đ' => 'd',
+        'Đ' => 'D',
+        other => other,
     }
 }
 
@@ -363,6 +530,8 @@ fn format_date(rfc3339: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn row(sifra: &str) -> CenovnikRow {
@@ -720,5 +889,286 @@ mod tests {
             !csv.replace("\r\n", "").contains(['\r', '\n']),
             "no bare CR or LF may survive outside a CRLF pair: {csv:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 7 — publish targets (reqs. 13, 15)
+    // ---------------------------------------------------------------------
+
+    const OUTLET: &str = "Bulevar oslobođenja 1, Novi Sad";
+    const OUTLET_FILE: &str = "cenovnik-bulevar-oslobodenja-1-novi-sad.csv";
+    const NOW: &str = "2026-08-02T09:15:00Z";
+
+    /// A folder of this test's own, removed afterwards. `std::env::temp_dir` and
+    /// a nanosecond suffix, exactly as `db::test_database_path` does it — the
+    /// crate carries no temp-file dependency.
+    fn with_publish_folder(test_name: &str, test: impl FnOnce(&Path)) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let folder = std::env::temp_dir().join(format!("vantumpos-{test_name}-{unique}"));
+        std::fs::create_dir_all(&folder).expect("the publish folder should be created");
+
+        test(&folder);
+
+        std::fs::remove_dir_all(&folder).expect("the publish folder should be removed");
+    }
+
+    fn entries(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .expect("the publish folder should read")
+            .map(|entry| {
+                entry
+                    .expect("a directory entry should read")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Req. 15 is a founder decision, not an engineering one, so „nothing is
+    /// configured“ has to be a state the caller can read — never an error. The
+    /// publish runs after the price write has committed; an `Err` here would be
+    /// logged as a failure on a save that in fact succeeded.
+    #[test]
+    fn nothing_configured_is_a_state_and_never_an_error() {
+        let outcome = NotConfigured
+            .publish(&render_csv(&[row_priced(27_900)]), OUTLET, NOW)
+            .expect("a shop with no publish target has not failed at anything");
+        assert_eq!(outcome, PublishOutcome::NotConfigured);
+    }
+
+    /// What the target writes has to be what the archive kept, byte for byte —
+    /// BOM, CRLF and diacritics included. Čl. 6 st. 4 binds the shop to what a
+    /// fetch of this file returns, so anything the adapter normalises on the way
+    /// out is a price the shop is answerable for but never archived.
+    #[test]
+    fn the_local_folder_target_writes_the_snapshot_body_byte_for_byte() {
+        with_publish_folder("cenovnik-local-target-body", |folder| {
+            let body = render_csv(&[row_with_unit_price()]);
+            let outcome = LocalFolderTarget::new(folder)
+                .publish(&body, OUTLET, NOW)
+                .expect("the local folder should accept the file");
+
+            let path = folder.join(OUTLET_FILE);
+            assert_eq!(
+                outcome,
+                PublishOutcome::Published {
+                    target: path.display().to_string()
+                },
+                "the snapshot has to record which target took it"
+            );
+
+            let written = std::fs::read(&path).expect("the published file should read");
+            assert_eq!(written.as_slice(), body.as_bytes(), "byte for byte");
+            assert_eq!(
+                &written[..3],
+                [0xEF, 0xBB, 0xBF],
+                "the BOM reaches the disk: {written:?}"
+            );
+            assert!(
+                String::from_utf8(written)
+                    .expect("the file is UTF-8")
+                    .contains("Sok od jabuke 0,75 l"),
+                "the diacritics survive the write"
+            );
+        });
+    }
+
+    /// Req. 13's stable URL per prodajni objekat. A dated file name would give
+    /// every republish a new address and break the bookmark a consumer or an
+    /// inspector was handed — at the very moment čl. 6 st. 5 asks them to
+    /// compare the published prices with the realtime ones.
+    #[test]
+    fn republishing_overwrites_the_one_stable_file_per_outlet() {
+        with_publish_folder("cenovnik-local-target-stable", |folder| {
+            let target = LocalFolderTarget::new(folder);
+            let first = target
+                .publish(&render_csv(&[row_priced(27_900)]), OUTLET, NOW)
+                .expect("first publish");
+            let second = target
+                .publish(
+                    &render_csv(&[row_priced(31_900)]),
+                    OUTLET,
+                    "2026-08-03T09:15:00Z",
+                )
+                .expect("second publish");
+
+            assert_eq!(first, second, "the address does not move between publishes");
+            assert_eq!(entries(folder), [OUTLET_FILE], "one outlet, one file");
+            let published =
+                std::fs::read_to_string(folder.join(OUTLET_FILE)).expect("the file should read");
+            assert!(published.contains("319.00"), "{published:?}");
+            assert!(
+                !published.contains("279.00"),
+                "the fetched file is the current one: {published:?}"
+            );
+        });
+    }
+
+    /// Čl. 6 st. 2 publishes „posebno za svaki prodajni objekat“, so two outlets
+    /// sharing one folder — a synced drive, a single web root — must not
+    /// overwrite each other's cenovnik.
+    #[test]
+    fn two_outlets_publish_to_two_files() {
+        with_publish_folder("cenovnik-local-target-per-outlet", |folder| {
+            let target = LocalFolderTarget::new(folder);
+            target
+                .publish(&render_csv(&[row_priced(27_900)]), OUTLET, NOW)
+                .expect("the first outlet publishes");
+            target
+                .publish(&render_csv(&[row_priced(31_900)]), "Kneza Miloša 8", NOW)
+                .expect("the second outlet publishes");
+
+            assert_eq!(
+                entries(folder),
+                [
+                    "cenovnik-bulevar-oslobodenja-1-novi-sad.csv",
+                    "cenovnik-kneza-milosa-8.csv"
+                ]
+            );
+        });
+    }
+
+    /// The name is folded to ASCII because the last path segment is also the
+    /// last segment of the eventual URL, and a name carrying č or đ is
+    /// normalised differently by each filesystem and re-escaped differently by
+    /// each link in the chain — which is how a „stable URL“ stops being stable.
+    /// The `.csv` extension is what makes an ordinary web server answer with the
+    /// right `Content-Type` without further configuration (req. 13).
+    #[test]
+    fn the_published_file_name_is_a_stable_ascii_name_ending_in_csv() {
+        assert_eq!(published_file_name(OUTLET), OUTLET_FILE);
+        assert_eq!(
+            published_file_name("Čačak — Žitni trg 5/б"),
+            "cenovnik-cacak-zitni-trg-5.csv"
+        );
+        assert_eq!(
+            published_file_name("Đurđevdanska 12, Šabac"),
+            "cenovnik-durdevdanska-12-sabac.csv"
+        );
+
+        // A name that folds away entirely still has to publish somewhere, and
+        // the fallback has to be as stable as every other name.
+        assert_eq!(published_file_name("   "), "cenovnik-objekat.csv");
+        assert_eq!(published_file_name("«»"), "cenovnik-objekat.csv");
+
+        // Bounded, and the same input always gives the same answer.
+        let long = "Ulica ".repeat(60);
+        assert!(published_file_name(&long).len() < 100, "{long}");
+        assert_eq!(published_file_name(&long), published_file_name(&long));
+    }
+
+    /// `prodajno_mesto` is free text out of the shop's own settings. It names a
+    /// file, so it must never be able to compose a path: a name carrying `..` or
+    /// a separator has to fold into one flat segment inside the configured
+    /// folder, not walk out of it.
+    #[test]
+    fn an_outlet_name_can_never_compose_a_path() {
+        with_publish_folder("cenovnik-local-target-traversal", |folder| {
+            let outcome = LocalFolderTarget::new(folder)
+                .publish(&render_csv(&[row_priced(100)]), "../../etc/passwd", NOW)
+                .expect("publish");
+
+            assert_eq!(
+                outcome,
+                PublishOutcome::Published {
+                    target: folder.join("cenovnik-etc-passwd.csv").display().to_string()
+                }
+            );
+            assert_eq!(entries(folder), ["cenovnik-etc-passwd.csv"]);
+        });
+    }
+
+    /// The file is written beside its destination and renamed over it, so a
+    /// fetch that lands mid-publish reads the previous cenovnik rather than half
+    /// of the new one — čl. 6 st. 4 binds the shop to whatever that fetch
+    /// returns. The temporary must not survive the publish either way: a folder
+    /// the shop serves would then also serve it.
+    #[test]
+    fn a_publish_leaves_no_temporary_file_behind() {
+        with_publish_folder("cenovnik-local-target-no-temp", |folder| {
+            LocalFolderTarget::new(folder)
+                .publish(&render_csv(&[row_priced(100)]), OUTLET, NOW)
+                .expect("publish");
+            assert_eq!(entries(folder), [OUTLET_FILE]);
+        });
+    }
+
+    /// The operator names a folder in settings; nothing guarantees it exists
+    /// yet, and refusing to publish until they create it by hand would leave the
+    /// shop with a configured target and no published file.
+    #[test]
+    fn a_folder_that_does_not_exist_yet_is_created() {
+        with_publish_folder("cenovnik-local-target-mkdir", |folder| {
+            let nested = folder.join("javno").join("cenovnik");
+            LocalFolderTarget::new(&nested)
+                .publish(&render_csv(&[row_priced(100)]), OUTLET, NOW)
+                .expect("publish");
+            assert_eq!(entries(&nested), [OUTLET_FILE]);
+        });
+    }
+
+    /// A target that cannot write is the routine case — an unmounted drive, a
+    /// folder the shop deleted, a name that is really a file. It has to surface
+    /// as an `AppError` the publish path can log, because that path runs after
+    /// the price write has committed and must never panic on it.
+    #[test]
+    fn a_folder_that_cannot_be_created_is_an_error_rather_than_a_panic() {
+        with_publish_folder("cenovnik-local-target-unwritable", |folder| {
+            let occupied = folder.join("zauzeto");
+            std::fs::write(&occupied, b"ovo nije folder").expect("the blocker should write");
+
+            let error = LocalFolderTarget::new(&occupied)
+                .publish(&render_csv(&[row_priced(100)]), OUTLET, NOW)
+                .expect_err("a folder that is really a file cannot take the cenovnik");
+            assert_eq!(error.code(), "file_system_error");
+        });
+    }
+
+    /// Req. 13 has no implementation to test this cycle — the hosted endpoint is
+    /// the founder decision req. 15 leaves open — so what ships is the contract
+    /// itself, written where whoever implements that endpoint will read it.
+    /// A contract nothing asserts is a comment, and comments get deleted.
+    ///
+    /// The rules are looked for in the trait's own doc block rather than
+    /// anywhere in the file, so moving them into unrelated prose does not
+    /// satisfy this.
+    #[test]
+    fn the_fetchability_contract_is_written_into_the_publish_target_trait() {
+        const SOURCE: &str = include_str!("cenovnik.rs");
+
+        let before = SOURCE
+            .split("pub trait PublishTarget")
+            .next()
+            .expect("the trait must be in this file");
+        let documented = before
+            .lines()
+            .rev()
+            .take_while(|line| line.trim_start().starts_with("///"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+
+        for rule in [
+            "login",
+            "captcha",
+            "bot",
+            "javascript",
+            "robots.txt",
+            "rate limit",
+            "stable url",
+            "content-type",
+        ] {
+            assert!(
+                documented.contains(rule),
+                "čl. 6 st. 5 is a duty to ENABLE, so every publish target owes the reader this \
+                 rule and the trait doc has lost it: {rule}"
+            );
+        }
     }
 }
