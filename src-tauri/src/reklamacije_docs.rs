@@ -107,6 +107,13 @@ pub fn render_potvrda_html(view: &ReklamacijaView) -> String {
     ));
     html.push_str("</table>\n");
 
+    // NEW regime only — gated on the Option, never on a regime test of this
+    // renderer's own. An old-regime potvrda must not promise a right that
+    // 88/2021 čl. 55 st. 3 does not give.
+    if let Some(no_fee) = view.no_fee_notice.as_deref() {
+        html.push_str(&format!("<p class=\"meta\">{}</p>\n", escape_html(no_fee)));
+    }
+
     html.push_str(
         "<footer>Ova potvrda nije fiskalni dokument.</footer>\n\
          </body>\n</html>\n",
@@ -153,6 +160,10 @@ pub fn render_notice_html() -> String {
          od dana prijema reklamacije.</p>\n",
     );
     html.push_str(
+        "<p>Zabranjeno je naplatiti utvrđivanje nesaobraznosti (čl. 63 st. 3). Otklanjanje \
+         nesaobraznosti — popravka ili zamena — je bez naknade (čl. 56 st. 1).</p>\n",
+    );
+    html.push_str(
         "<p>Nemogućnost dostavljanja ambalaže ne može biti uslov za rešavanje reklamacije.</p>\n",
     );
     html.push_str(
@@ -194,6 +205,49 @@ mod tests {
             roba_kind: "tehnicka".into(),
             filed_at: filed_at.into(),
         }
+    }
+
+    #[test]
+    fn potvrda_carries_the_fee_ban_only_for_a_new_regime_record() {
+        with_reklamacija_db("docs_potvrda_no_fee", |conn| {
+            let new = create_reklamacija(
+                conn,
+                &intake_input("2026-09-01T00:00:00Z", "Petar Petrović"),
+                1,
+                "2026-09-01T08:00:00Z",
+            )
+            .unwrap();
+            let html = render_potvrda_html(&new);
+            assert!(
+                html.contains("Zabranjeno je naplatiti utvrđivanje nesaobraznosti"),
+                "a new-regime potvrda must carry čl. 63 st. 3"
+            );
+
+            // A pre-cutover complaint is governed by 88/2021 čl. 55 st. 3, which
+            // has no fee ban. Printing one on its potvrda tells the consumer they
+            // have a right the law does not give them for this complaint.
+            let old = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z", "Marija Marić"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            let html = render_potvrda_html(&old);
+            assert!(
+                !html.contains("Zabranjeno je naplatiti"),
+                "an old-regime potvrda must not assert the fee ban"
+            );
+        });
+    }
+
+    #[test]
+    fn prodajno_mesto_notice_always_states_the_fee_ban() {
+        // The display notice is static and forward-looking — every complaint
+        // lodged from today on is new-regime — so it states current law.
+        let html = render_notice_html();
+        assert!(html.contains("Zabranjeno je naplatiti utvrđivanje nesaobraznosti"));
+        assert!(html.contains("čl. 63 st. 3"));
     }
 
     #[test]
