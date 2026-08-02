@@ -75,6 +75,13 @@ interface DoubleOptions {
   target?: CenovnikPublishTarget;
   snapshots?: CenovnikSnapshot[];
   penalty?: string | null;
+  /**
+   * `commands::cenovnik::outlet` — the prodajni objekat the archive is keyed on,
+   * or `null` while the shop has named neither an address nor a shop name. The
+   * default is an identified shop, because that is what every other assertion
+   * here is about.
+   */
+  outlet?: string | null;
   setPublishTarget?: CenovnikService["setPublishTarget"];
 }
 
@@ -82,6 +89,7 @@ function cenovnikDouble({
   target = { kind: "notConfigured" },
   snapshots = [current, older],
   penalty = PREDUZETNIK_PENALTY,
+  outlet = "Bulevar 1, Beograd",
   setPublishTarget,
 }: DoubleOptions = {}): { cenovnik: CenovnikService } {
   let stored = target;
@@ -97,6 +105,9 @@ function cenovnikDouble({
         return found
           ? { snapshot: found, body: found.current ? CURRENT_BODY : OLDER_BODY }
           : null;
+      },
+      async getOutlet() {
+        return outlet;
       },
       async getPublishTarget() {
         return stored;
@@ -274,6 +285,97 @@ describe("CenovnikPanel", () => {
 
     const rows = await screen.findAllByRole("row");
     expect(within(rows[1]).getByText(/nije objavljen/i)).toBeInTheDocument();
+  });
+
+  /**
+   * `publish_current` returns `Ok(None)` and archives NOTHING while
+   * `commands::cenovnik::outlet` is `None`, and a fresh install sits exactly
+   * there: `load_json_setting` hands back `CompanySettings::default()` without
+   * persisting it, so until Podešavanja → Radnja is saved every price write
+   * archives nothing, forever. Copy that says a file is made on every price
+   * change would then be a promise the code does not keep — the one defect this
+   * project has shipped four times, every time on a screen an owner reads.
+   */
+  describe("a shop that has not identified its prodajni objekat", () => {
+    it("names the missing prodajni objekat and what to do about it", async () => {
+      renderPanel(cenovnikDouble({ outlet: null, snapshots: [] }));
+
+      expect(
+        await screen.findByText(/prodajni objekat još nije identifikovan/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getAllByText(/Podešavanja → Radnja/).length,
+      ).toBeGreaterThan(0);
+      // Still not a claim of breach: whether a trader with no website must make
+      // one is unresolved (§2b), and this is a settings gap, not a verdict.
+      expect(screen.queryByText(/u prekršaju|kršite/i)).not.toBeInTheDocument();
+    });
+
+    it("never says a cenovnik is made on every price change", async () => {
+      renderPanel(cenovnikDouble({ outlet: null, snapshots: [] }));
+
+      await screen.findByText(/prodajni objekat još nije identifikovan/i);
+      // „Cenovnik se i dalje pravi … kad god se cena promeni“ and „Prvi
+      // cenovnik nastaje čim se promeni neka cena“ — both were on this screen
+      // unconditionally, and both are false here. The anchors matter: the
+      // qualified copy still ends in the second sentence, and what must not
+      // survive is the sentence standing on its own.
+      expect(
+        screen.queryByText(/^Cenovnik se i dalje pravi/i),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/^Prvi cenovnik nastaje čim se promeni neka cena/i),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByText(/^Cenovnik se ne pravi dok prodajni objekat nije identifikovan/i),
+      ).toBeInTheDocument();
+    });
+
+    it("does not say a configured folder is receiving files", async () => {
+      renderPanel(
+        cenovnikDouble({
+          outlet: null,
+          snapshots: [],
+          target: { kind: "localFolder", folder: "/Users/ana/sajt/cenovnik" },
+        }),
+      );
+
+      expect(
+        await screen.findByText(/u njega još ništa ne upisuje/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/^Cenovnik se upisuje u folder$/i),
+      ).not.toBeInTheDocument();
+    });
+
+    it("leaves the identified shop's copy unqualified", async () => {
+      renderPanel(cenovnikDouble({ snapshots: [] }));
+
+      // The precondition is met, so the plain statement is true and stays.
+      expect(
+        await screen.findByText(/^Prvi cenovnik nastaje čim se promeni neka cena/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/prodajni objekat još nije identifikovan/i),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  /**
+   * A snapshot purged between the list and the click resolves to `null`. Doing
+   * nothing at all leaves the operator watching a button that does not work.
+   */
+  it("says a snapshot is gone rather than letting the button do nothing", async () => {
+    const user = userEvent.setup();
+    const { cenovnik } = cenovnikDouble();
+    renderPanel({ cenovnik: { ...cenovnik, getSnapshot: async () => null } });
+
+    const rows = await screen.findAllByRole("row");
+    await user.click(within(rows[1]).getByRole("button", { name: /prikaži/i }));
+
+    expect(
+      await screen.findByText(/nije više u arhivi/i),
+    ).toBeInTheDocument();
   });
 
   it("surfaces a failed load instead of rendering an empty archive", async () => {

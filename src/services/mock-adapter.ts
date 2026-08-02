@@ -2513,6 +2513,27 @@ export function createMockServices(): PosServices {
           body: found.body,
         };
       },
+      /**
+       * `commands::cenovnik::outlet`: the frozen archive key once anything has
+       * been published, otherwise what the company settings identify the shop
+       * as — address first, then the name. The seeded shop has published, so
+       * this is the frozen key and an edit to the address does not move it.
+       *
+       * `null` is the state in which nothing is generated, archived or
+       * published at all, and a double that always answered a name would hide
+       * the branch the panel exists to show.
+       */
+      async getOutlet() {
+        if (cenovnikArchive.length > 0) {
+          return MOCK_OUTLET;
+        }
+
+        return (
+          [companySettings.address, companySettings.shopName]
+            .map((candidate) => candidate.trim())
+            .find((candidate) => candidate.length > 0) ?? null
+        );
+      },
       async getPublishTarget() {
         return cenovnikTarget;
       },

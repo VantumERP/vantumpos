@@ -1174,6 +1174,7 @@ describe("local service adapter", () => {
       folder: "/Users/ana/sajt/cenovnik",
     });
     await services.cenovnik.getNotice();
+    await services.cenovnik.getOutlet();
 
     expect(invoke).toHaveBeenNthCalledWith(1, "cenovnik_list_snapshots");
     expect(invoke).toHaveBeenNthCalledWith(2, "cenovnik_get_snapshot", {
@@ -1184,6 +1185,7 @@ describe("local service adapter", () => {
       request: { kind: "localFolder", folder: "/Users/ana/sajt/cenovnik" },
     });
     expect(invoke).toHaveBeenNthCalledWith(5, "cenovnik_get_notice");
+    expect(invoke).toHaveBeenNthCalledWith(6, "cenovnik_get_outlet");
 
     // Čl. 6 st. 3 wants the published file to match the outlet's current prices
     // „u realnom vremenu“, so publication rides on the write that moved a price
@@ -1192,6 +1194,7 @@ describe("local service adapter", () => {
     // object, not over the five calls this test happened to make.
     expect(Object.keys(services.cenovnik).sort()).toEqual([
       "getNotice",
+      "getOutlet",
       "getPublishTarget",
       "getSnapshot",
       "listSnapshots",

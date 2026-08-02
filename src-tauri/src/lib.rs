@@ -201,6 +201,7 @@ pub fn run() {
             commands::cenovnik::cenovnik_list_snapshots,
             commands::cenovnik::cenovnik_get_snapshot,
             commands::cenovnik::cenovnik_get_notice,
+            commands::cenovnik::cenovnik_get_outlet,
             commands::cenovnik::cenovnik_get_publish_target,
             commands::cenovnik::cenovnik_set_publish_target,
             commands::campaigns::campaigns_list,

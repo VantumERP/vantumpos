@@ -411,6 +411,7 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<CenovnikSnapshotDetail | null>("cenovnik_get_snapshot", {
           snapshotId,
         }),
+      getOutlet: () => invoke<string | null>("cenovnik_get_outlet"),
       getPublishTarget: () =>
         invoke<CenovnikPublishTarget>("cenovnik_get_publish_target"),
       setPublishTarget: (request) =>

@@ -387,7 +387,7 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
       jedinicnaCenaSadrzaj:
         product.jedinicnaCenaSadrzajMilli == null
           ? ""
-          : quantityInput(product.jedinicnaCenaSadrzajMilli),
+          : quantityFieldValue(product.jedinicnaCenaSadrzajMilli),
       salePrice: minorUnitsInput(product.salePriceMinor),
       purchasePrice: minorUnitsInput(product.purchasePriceMinor),
       taxRateId: product.taxRateId.toString(),
@@ -1765,8 +1765,9 @@ function ProductSheet({
                       Jedinična cena je cena po jedinici mere — na primer po
                       litru ili po kilogramu. Za flašu od 0,75 l unesite „l“ i
                       „0,75“; program sam deli prodajnu cenu i objavljuje
-                      rezultat u cenovniku. Ostavite prazno za artikal koji se
-                      prodaje po komadu.
+                      rezultat u cenovniku. Sadržaj se piše bez tačke za hiljade
+                      — za kesu od 1 kg unesite „g“ i „1000“. Ostavite prazno za
+                      artikal koji se prodaje po komadu.
                     </FieldDescription>
                     <Field orientation="horizontal">
                       <Switch
@@ -2805,6 +2806,24 @@ function quantityInput(value: number) {
   return (value / 1000).toLocaleString("sr-RS", {
     maximumFractionDigits: 3,
   });
+}
+
+/**
+ * A milli quantity as an editable form value — **never grouped**.
+ *
+ * `quantityInput` is for reading: sr-RS groups thousands with a DOT, so a 1 kg
+ * bag stored as 1.000.000 milli of „g“ displays as „1.000“. Put that string back
+ * into an input and `parseQuantityInput` reads the group separator as a decimal
+ * point, so the next ordinary edit — one that never touched the field — saves
+ * 1000 milli, one gram, and the published jedinična cena (ZZP čl. 6 st. 1/st. 2)
+ * comes out a thousand times too high as a statement of fact under st. 4.
+ * Nothing downstream can catch it: one gram is a perfectly valid sadržaj.
+ */
+function quantityFieldValue(value: number) {
+  return new Intl.NumberFormat("sr-RS", {
+    useGrouping: false,
+    maximumFractionDigits: 3,
+  }).format(value / 1000);
 }
 
 function formatQuantity(value: number) {

@@ -463,6 +463,95 @@ describe("CatalogModule", () => {
     });
 
     /**
+     * The same round trip at the thousand, where `toLocaleString("sr-RS")`
+     * starts grouping: a 1 kg bag entered in grams reads back as „1.000“, and
+     * `parseQuantityInput` takes that dot for a decimal point and saves 1000
+     * milli — one gram. Nothing downstream catches it, because one gram is a
+     * perfectly valid sadržaj, and `CenovnikRow::jedinicna_cena_minor` then
+     * publishes a jedinična cena a thousand times too high as fact under čl. 6
+     * st. 4. The read-back has to carry no group separator at all.
+     */
+    it("round-trips a package content of a thousand units without collapsing it", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Jedinica za jediničnu cenu"),
+        "g",
+      );
+      await user.type(screen.getByLabelText("Sadržaj pakovanja"), "1000");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() =>
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({ jedinicnaCenaSadrzajMilli: 1_000_000 }),
+        ),
+      );
+
+      // Reopen and save again, touching neither field.
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      expect(await screen.findByLabelText("Sadržaj pakovanja")).toHaveValue(
+        "1000",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenLastCalledWith(
+          1,
+          expect.objectContaining({
+            jedinicnaCenaJedinica: "g",
+            jedinicnaCenaSadrzajMilli: 1_000_000,
+          }),
+        );
+      });
+    });
+
+    /** The same defect one grouped value up: a 1,5 l bottle entered in ml. */
+    it("round-trips a package content above the thousand without collapsing it", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Jedinica za jediničnu cenu"),
+        "ml",
+      );
+      await user.type(screen.getByLabelText("Sadržaj pakovanja"), "1500");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      expect(await screen.findByLabelText("Sadržaj pakovanja")).toHaveValue(
+        "1500",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenLastCalledWith(
+          1,
+          expect.objectContaining({ jedinicnaCenaSadrzajMilli: 1_500_000 }),
+        );
+      });
+    });
+
+    /**
      * A sadržaj without its measure divides by nothing, so it can state no
      * jedinična cena at all — the Rust side refuses that pairing and the form
      * says so before the round trip rather than after it.

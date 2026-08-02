@@ -66,6 +66,13 @@ import type {
  *    write that moved a price. A button here would be a second answer to „when
  *    did this shop last publish“, and the one thing an operator could then do
  *    wrong is believe it.
+ * 5. **Never say a cenovnik is made on every price change without checking that
+ *    one can be.** `publish_current` returns `Ok(None)` and archives NOTHING
+ *    while `commands::cenovnik::outlet` is `None` — čl. 6 st. 2 publishes
+ *    *„posebno za svaki prodajni objekat“*, so with no outlet there is nothing
+ *    to key a lineage on. A fresh install sits exactly there until Podešavanja
+ *    → Radnja is saved, so the unqualified sentence would promise a file that
+ *    never appears.
  */
 interface CenovnikPanelProps {
   cenovnik: CenovnikService;
@@ -78,6 +85,8 @@ type LoadState =
       target: CenovnikPublishTarget;
       snapshots: CenovnikSnapshot[];
       notice: LegalNotice;
+      /** `null` while nothing is generated, archived or published at all. */
+      outlet: string | null;
     }
   | { status: "error"; message: string };
 
@@ -95,10 +104,11 @@ export function CenovnikPanel({ cenovnik }: CenovnikPanelProps) {
       cenovnik.getPublishTarget(),
       cenovnik.listSnapshots(),
       cenovnik.getNotice(),
+      cenovnik.getOutlet(),
     ])
-      .then(([target, snapshots, notice]) => {
+      .then(([target, snapshots, notice, outlet]) => {
         if (!ignore) {
-          setState({ status: "ready", target, snapshots, notice });
+          setState({ status: "ready", target, snapshots, notice, outlet });
           setFolderDraft(target.kind === "localFolder" ? target.folder : "");
         }
       })
@@ -136,7 +146,16 @@ export function CenovnikPanel({ cenovnik }: CenovnikPanelProps) {
   async function openSnapshot(snapshotId: number) {
     setSaveError(null);
     try {
-      setOpened(await cenovnik.getSnapshot(snapshotId));
+      const detail = await cenovnik.getSnapshot(snapshotId);
+      setOpened(detail);
+      if (!detail) {
+        // Purged between the list and the click. Rendering nothing would leave
+        // the operator watching a button that does not work.
+        setSaveError(
+          "Taj cenovnik nije više u arhivi — istekao je rok čuvanja. " +
+            "Osvežite stranicu da vidite arhivu kakva je sada.",
+        );
+      }
     } catch (error) {
       setSaveError(errorMessage(error, "Objavljeni cenovnik nije pročitan."));
     }
@@ -161,7 +180,7 @@ export function CenovnikPanel({ cenovnik }: CenovnikPanelProps) {
     );
   }
 
-  const { target, snapshots, notice } = state;
+  const { target, snapshots, notice, outlet } = state;
 
   return (
     <div className="flex flex-col gap-6">
@@ -171,10 +190,11 @@ export function CenovnikPanel({ cenovnik }: CenovnikPanelProps) {
             Cenovnik na internet stranici
           </CardTitle>
           <CardDescription>
-            Program pravi mašinski čitljiv cenovnik prodajnog objekta i ponovo ga
-            objavljuje posle svake izmene cene. Ništa se ne objavljuje po
-            rasporedu i ništa se ne objavljuje na dugme — cenovnik prati cenu koju
-            kasa naplaćuje.
+            {outlet === null
+              ? // Nothing is generated at all in this state, so the plain
+                // sentence below would promise a file that never appears.
+                "Cenovnik se pravi posebno za svaki prodajni objekat, pa ga program ne pravi dok ne zna koji je to objekat — pogledajte „Mesto objave“ ispod. Kada ga bude znao, praviće ga i obnavljati posle svake izmene cene: ništa po rasporedu i ništa na dugme."
+              : `Program pravi mašinski čitljiv cenovnik prodajnog objekta „${outlet}“ i ponovo ga objavljuje posle svake izmene cene. Ništa se ne objavljuje po rasporedu i ništa se ne objavljuje na dugme — cenovnik prati cenu koju kasa naplaćuje.`}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
@@ -199,12 +219,43 @@ export function CenovnikPanel({ cenovnik }: CenovnikPanelProps) {
             Mesto objave
           </CardTitle>
           <CardDescription>
-            Folder u koji program upisuje novi cenovnik čim se neka cena promeni.
-            Najčešće je to folder koji vaš sajt objavljuje, folder koji sinhronizuje
-            neki servis, ili folder iz kojeg fajl šaljete ručno.
+            Folder u koji program upisuje novi cenovnik čim se neka cena promeni
+            — pod uslovom da zna za koji prodajni objekat ga pravi. Najčešće je
+            to folder koji vaš sajt objavljuje, folder koji sinhronizuje neki
+            servis, ili folder iz kojeg fajl šaljete ručno.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
+          {/*
+            The precondition for everything below it. `publish_current` returns
+            `Ok(None)` and archives nothing while the shop has named neither an
+            address nor a shop name, and `load_json_setting` never persists the
+            default company row — so a fresh install stays here until the owner
+            saves Podešavanja → Radnja, with no other signal anywhere in the
+            program that its cenovnik is not being made.
+          */}
+          {outlet === null ? (
+            <Alert>
+              <AlertCircleIcon aria-hidden="true" />
+              <AlertTitle>Prodajni objekat još nije identifikovan</AlertTitle>
+              <AlertDescription>
+                <div className="flex flex-col gap-2">
+                  <p>
+                    Cenovnik se objavljuje posebno za svaki prodajni objekat
+                    (čl. 6 st. 2), pa program ne pravi nijedan dok ne zna koji je
+                    to objekat. Upišite naziv ili adresu radnje u Podešavanja →
+                    Radnja.
+                  </p>
+                  <p>
+                    Do tada se pri izmeni cene ne pravi nijedan cenovnik i arhiva
+                    ostaje prazna. Prodaja i izmena cena rade normalno — čl. 6
+                    nije razlog da kasa ne radi.
+                  </p>
+                </div>
+              </AlertDescription>
+            </Alert>
+          ) : null}
+
           {target.kind === "notConfigured" ? (
             <Alert>
               <FolderOpenIcon aria-hidden="true" />
@@ -212,8 +263,9 @@ export function CenovnikPanel({ cenovnik }: CenovnikPanelProps) {
               <AlertDescription>
                 <div className="flex flex-col gap-2">
                   <p>
-                    Cenovnik se i dalje pravi i čuva u arhivi kad god se cena
-                    promeni, ali ne odlazi nigde sa ovog računara.
+                    {outlet === null
+                      ? "Kada prodajni objekat bude upisan, cenovnik će se praviti i čuvati u arhivi pri svakoj izmeni cene, ali neće odlaziti nigde sa ovog računara."
+                      : "Cenovnik se i dalje pravi i čuva u arhivi kad god se cena promeni, ali ne odlazi nigde sa ovog računara."}
                   </p>
                   <p>
                     Zakon nigde ne propisuje obavezu trgovca da ima internet
@@ -228,10 +280,20 @@ export function CenovnikPanel({ cenovnik }: CenovnikPanelProps) {
           ) : (
             <Alert>
               <FolderOpenIcon aria-hidden="true" />
-              <AlertTitle>Cenovnik se upisuje u folder</AlertTitle>
+              <AlertTitle>
+                {outlet === null
+                  ? "Folder je podešen, ali se u njega još ništa ne upisuje"
+                  : "Cenovnik se upisuje u folder"}
+              </AlertTitle>
               <AlertDescription>
                 <div className="flex flex-col gap-2">
                   <p className="font-medium break-all">{target.folder}</p>
+                  {outlet === null ? (
+                    <p>
+                      Dok prodajni objekat nije identifikovan, cenovnik se ne
+                      pravi, pa u ovaj folder ne stiže nijedan fajl.
+                    </p>
+                  ) : null}
                   <p>
                     Folder na ovom računaru sam po sebi nije objava na internetu.
                     Čl. 6 st. 2 traži cenovnik na internet stranici radnje, pa ovaj
@@ -313,8 +375,9 @@ export function CenovnikPanel({ cenovnik }: CenovnikPanelProps) {
                 <EmptyTitle>Nijedan cenovnik još nije napravljen</EmptyTitle>
               </EmptyHeader>
               <EmptyContent>
-                Prvi cenovnik nastaje čim se promeni neka cena — u šifarniku, kroz
-                akciju, kroz uvoz ili nivelacijom.
+                {outlet === null
+                  ? "Cenovnik se ne pravi dok prodajni objekat nije identifikovan: upišite naziv ili adresu radnje u Podešavanja → Radnja. Posle toga prvi cenovnik nastaje čim se promeni neka cena — u šifarniku, kroz akciju, kroz uvoz ili nivelacijom."
+                  : "Prvi cenovnik nastaje čim se promeni neka cena — u šifarniku, kroz akciju, kroz uvoz ili nivelacijom."}
               </EmptyContent>
             </Empty>
           ) : (

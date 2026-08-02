@@ -510,6 +510,17 @@ export interface CenovnikService {
   listSnapshots(): Promise<CenovnikSnapshot[]>;
   /** One archived cenovnik with its file, or `null` when no such snapshot exists. */
   getSnapshot(snapshotId: number): Promise<CenovnikSnapshotDetail | null>;
+  /**
+   * The prodajni objekat the archive is keyed on, or `null` while the shop has
+   * named neither an address nor a shop name.
+   *
+   * **`null` is the state in which nothing is made at all.** `publish_current`
+   * returns `Ok(None)` and archives nothing on every price write until the shop
+   * identifies itself, and a fresh install sits there until Podešavanja →
+   * Radnja is saved. Any surface that says a cenovnik is made on every price
+   * change has to read this first, or it is promising a file that never appears.
+   */
+  getOutlet(): Promise<string | null>;
   getPublishTarget(): Promise<CenovnikPublishTarget>;
   setPublishTarget(target: CenovnikPublishTarget): Promise<CenovnikPublishTarget>;
   /**

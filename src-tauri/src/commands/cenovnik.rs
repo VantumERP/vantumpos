@@ -171,6 +171,28 @@ pub fn cenovnik_notice(state: &AppState) -> Result<crate::legal::LegalNotice, Ap
     ))
 }
 
+/// The prodajni objekat the archive is keyed on — the frozen key once anything
+/// has been published, otherwise what the shop's settings identify it as today.
+///
+/// **`None` is the state [`publish_current`] answers `Ok(None)` for**, and the
+/// reason this is readable at all: nothing is rendered, nothing is archived and
+/// nothing is published, on every price write, until the shop names itself. A
+/// fresh install sits exactly there — `load_json_setting` hands back
+/// `CompanySettings::default()` without persisting it, and `save_company_settings`
+/// is the only writer of that row — so a panel that could not see this state
+/// would tell the owner a file is made on every price change while nothing ever
+/// is. That is a promise the code does not keep, on a screen a shop owner reads.
+///
+/// Not admin-gated, for the same reason [`publish_target`] is not: knowing
+/// whether the shop's own cenovnik is being made is not a privilege.
+pub fn outlet(state: &AppState) -> Result<Option<String>, AppError> {
+    let connection = state.db().open()?;
+    if let Some(frozen) = frozen_outlet(&connection)? {
+        return Ok(Some(frozen));
+    }
+    identified_outlet(&connection)
+}
+
 /// Chooses where the cenovnik is published, from the owner's settings screen.
 ///
 /// **Admin only.** Where the shop's published prices go is the thing čl. 6
@@ -701,6 +723,11 @@ pub fn cenovnik_get_notice(
 }
 
 #[tauri::command]
+pub fn cenovnik_get_outlet(state: State<'_, AppState>) -> Result<Option<String>, CommandError> {
+    outlet(state.inner()).map_err(Into::into)
+}
+
+#[tauri::command]
 pub fn cenovnik_get_publish_target(
     state: State<'_, AppState>,
 ) -> Result<PublishTargetSettings, CommandError> {
@@ -722,7 +749,7 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        cenovnik_notice, current_published_cenovnik, list_snapshots, publish_current,
+        cenovnik_notice, current_published_cenovnik, list_snapshots, outlet, publish_current,
         publish_target, purge_expired_snapshots, read_snapshot, republish_after_price_move,
         save_publish_target, PublishTargetSettings,
     };
@@ -1406,6 +1433,57 @@ mod tests {
                 update_product(db, 1, product_request(31_900), acting)
                     .expect("the price save must not fail for want of an outlet");
                 assert!(snapshots(db).is_empty());
+            },
+        );
+    }
+
+    /// The state above, made readable — because a panel that cannot see it
+    /// tells the shop a file is written on every price change while nothing is.
+    ///
+    /// A fresh install sits here: `load_json_setting` hands back
+    /// `CompanySettings::default()` without ever persisting it, and
+    /// `save_company_settings` is the only writer of the row, so until
+    /// Podešavanja → Radnja is saved there is no outlet, no lineage and no
+    /// archive — silently, forever.
+    #[test]
+    fn an_unidentified_shop_reports_no_outlet() {
+        with_shop("an_unidentified_shop_reports_no_outlet", |state| {
+            set_company(state.db(), "", "");
+            assert_eq!(outlet(state).expect("the outlet should read"), None);
+
+            let connection = state.db().open().expect("database should open");
+            publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                .expect("an unidentified outlet is not an error");
+            assert!(
+                snapshots(state.db()).is_empty(),
+                "and `None` is exactly the state that archives nothing"
+            );
+        });
+    }
+
+    /// The identified shop reports the key its archive is (and will stay) keyed
+    /// on — the frozen one once anything has been published, so the panel and
+    /// the archive can never name two different outlets.
+    #[test]
+    fn an_identified_shop_reports_the_outlet_its_archive_is_keyed_on() {
+        with_shop(
+            "an_identified_shop_reports_the_outlet_its_archive_is_keyed_on",
+            |state| {
+                assert_eq!(
+                    outlet(state).expect("the outlet should read").as_deref(),
+                    Some(OUTLET)
+                );
+
+                let connection = state.db().open().expect("database should open");
+                publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                    .expect("publish");
+                // The settings move; the frozen key does not, and the panel
+                // follows the key rather than today's company name.
+                set_company(state.db(), "Knez Mihailova 2, Beograd", "Butik Ana");
+                assert_eq!(
+                    outlet(state).expect("the outlet should read").as_deref(),
+                    Some(OUTLET)
+                );
             },
         );
     }
