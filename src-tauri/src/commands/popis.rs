@@ -29,21 +29,11 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
-use crate::popis::{advance, book_quantities_released, PopisEvent, PopisStatus, PopisVrsta};
+use crate::popis::{
+    advance, book_quantities_released, konsignacija_rok, nedostajuce_liste, PopisEvent, PopisLista,
+    PopisStatus, PopisVrsta,
+};
 use crate::state::AppState;
-
-/// The six `popis_lines.lista_vrsta` values of migration v20 (req. 36). Which of
-/// them is *required* when its category is present is Task 5's rule; this module
-/// only refuses a value the column would refuse anyway, so the shop reads a
-/// sentence rather than a CHECK-constraint failure.
-const LISTE_VRSTE: [&str; 6] = [
-    "roba",
-    "ostecena",
-    "van_objekta",
-    "gotovina",
-    "potrazivanja",
-    "konsignacija",
-];
 
 /// The three `popis_commission.uloga` values of migration v20. `jedno_lice` is the
 /// PoP čl. 6 st. 1 single-person popis, which is its own legal shape and not a
@@ -100,7 +90,9 @@ pub struct OpenPopisRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopisLineInput {
-    /// One of [`LISTE_VRSTE`].
+    /// The stored value of one [`PopisLista`]. A string rather than the enum so an
+    /// unknown lista comes back as a sentence naming it, instead of a serde
+    /// rejection of the whole payload.
     pub lista_vrsta: String,
     #[serde(default)]
     pub sifra: Option<String>,
@@ -165,6 +157,35 @@ pub struct PopisLineView {
     pub cena_minor: Option<i64>,
 }
 
+/// One of the six popisne liste of req. 36 with what is on it (and, for five of
+/// them, the article that requires it). All six are always reported, empty ones
+/// included: a posebna lista the count sheet never shows is a posebna lista the
+/// shop never fills.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListaPregled {
+    pub vrsta: PopisLista,
+    pub naziv: String,
+    pub pravni_osnov: String,
+    pub broj_stavki: i64,
+}
+
+/// The req. 36 readiness report: the declared categories checked against the
+/// liste. `spremno` is what Task 6's izveštaj generation rests on — čl. 13 st. 1
+/// has the izveštaj report the stvarno stanje of the popis, and a popis that
+/// declared a category and wrote none of it down reports a stanje that is not the
+/// shop's.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProveraListiView {
+    pub spremno: bool,
+    pub nedostaju: Vec<ListaPregled>,
+    /// The refusal `crate::popis::ensure_liste_kompletne` gives, carried as text so
+    /// a screen can show the same sentence the generator will refuse with — one
+    /// wording, not two.
+    pub poruka: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopisSessionView {
@@ -190,7 +211,15 @@ pub struct PopisSessionView {
     pub komisija: Vec<KomisijaClanView>,
     pub potpisi: Vec<PopisSignatureView>,
     pub linije: Vec<PopisLineView>,
-    /// Req. 40 — warnings, never blocks.
+    /// Req. 36 — all six liste with what is on each.
+    pub liste: Vec<ListaPregled>,
+    /// PoP čl. 2 st. 6 — the day by which a signed copy of the konsignaciona lista
+    /// must be in the owner's hands. `None` when the popis carries no tuđa roba,
+    /// and also when the count date is such that the rok cannot be computed — in
+    /// which case the duty is reported in `upozorenja` instead, because arithmetic
+    /// failing is not an obligation ending.
+    pub konsignacija_rok: Option<String>,
+    /// Req. 40 — warnings, never blocks. Also carries the čl. 2 st. 6 reminder.
     pub upozorenja: Vec<String>,
 }
 
@@ -341,6 +370,15 @@ fn read_commission(
 /// column to the count sheet would have to be done here, in the open, against
 /// this comment. Selecting everything and blanking it in Rust would look the same
 /// from the outside and be a different thing.
+///
+/// **The one thing the blind read does carry out of the Phase B block is the
+/// apoen** (req. 36 / čl. 11 st. 1). On the gotovina lista `cena_minor` is not the
+/// čl. 9 st. 1 t. 5 obračunska cena — it is the denomination the commission itself
+/// counted, and withholding it would leave the cash lista unreadable exactly while
+/// it is being written. Čl. 8 st. 5 keeps back podatke iz knjigovodstva **o
+/// količinama**; it does not keep the commission from its own count. Everywhere
+/// else the cena stays withheld, because there it is an obračun figure and the
+/// obračun has not happened yet.
 fn read_lines(
     connection: &Connection,
     session_id: i64,
@@ -349,26 +387,30 @@ fn read_lines(
     if !released {
         let mut statement = connection.prepare(
             "SELECT id, lista_vrsta, sifra, naziv, vrsta, jedinica_mere,
-                    stvarna_kolicina_milli, blizi_opis
+                    stvarna_kolicina_milli, blizi_opis,
+                    CASE WHEN lista_vrsta = ?2 THEN cena_minor END
              FROM popis_lines
              WHERE session_id = ?1
              ORDER BY id",
         )?;
-        let rows = statement.query_map(params![session_id], |row| {
-            Ok(PopisLineView {
-                id: row.get(0)?,
-                lista_vrsta: row.get(1)?,
-                sifra: row.get(2)?,
-                naziv: row.get(3)?,
-                vrsta: row.get(4)?,
-                jedinica_mere: row.get(5)?,
-                stvarna_kolicina_milli: row.get(6)?,
-                blizi_opis: row.get(7)?,
-                knjigovodstvena_kolicina_milli: None,
-                razlika_milli: None,
-                cena_minor: None,
-            })
-        })?;
+        let rows = statement.query_map(
+            params![session_id, PopisLista::Gotovina.as_db_str()],
+            |row| {
+                Ok(PopisLineView {
+                    id: row.get(0)?,
+                    lista_vrsta: row.get(1)?,
+                    sifra: row.get(2)?,
+                    naziv: row.get(3)?,
+                    vrsta: row.get(4)?,
+                    jedinica_mere: row.get(5)?,
+                    stvarna_kolicina_milli: row.get(6)?,
+                    blizi_opis: row.get(7)?,
+                    knjigovodstvena_kolicina_milli: None,
+                    razlika_milli: None,
+                    cena_minor: row.get(8)?,
+                })
+            },
+        )?;
 
         return rows
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -405,6 +447,83 @@ fn read_lines(
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+/// Req. 36 — the six liste with what is on each. Counting rows rather than
+/// listing them, and reporting the empty ones too: which liste a popis has *not*
+/// touched is the question čl. 10–12 and čl. 2 st. 5 actually ask.
+fn read_liste(connection: &Connection, session_id: i64) -> Result<Vec<ListaPregled>, AppError> {
+    let mut statement = connection.prepare(
+        "SELECT lista_vrsta, COUNT(*)
+         FROM popis_lines
+         WHERE session_id = ?1
+         GROUP BY lista_vrsta",
+    )?;
+    let rows = statement.query_map(params![session_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let broj = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(PopisLista::ALL
+        .into_iter()
+        .map(|lista| ListaPregled {
+            vrsta: lista,
+            naziv: lista.naziv().to_string(),
+            pravni_osnov: lista.pravni_osnov().to_string(),
+            broj_stavki: broj
+                .iter()
+                .find(|(vrsta, _)| vrsta == lista.as_db_str())
+                .map_or(0, |(_, count)| *count),
+        })
+        .collect())
+}
+
+/// The liste this popis actually has stavke on — the „present“ half of req. 36's
+/// „required where the category is present“.
+fn liste_sa_stavkama(liste: &[ListaPregled]) -> Vec<PopisLista> {
+    liste
+        .iter()
+        .filter(|pregled| pregled.broj_stavki > 0)
+        .map(|pregled| pregled.vrsta)
+        .collect()
+}
+
+/// PoP čl. 2 st. 6 — „дужан је да примерак потписане посебне пописне листе достави
+/// … власнику те имовине најкасније у року од десет дана од дана на који је попис
+/// извршен“.
+///
+/// The duty attaches to the popis that recorded tuđa roba, so the reminder is
+/// derived from the liste rather than from a switch somebody has to remember to
+/// set. Two things the copy must do and one it must not: it carries the rok and
+/// it says the delivery is the shop's to make — this module stores a popis, it
+/// does not send anything to anybody, and a reminder that read like a scheduled
+/// job would promise behaviour that does not exist.
+///
+/// When the rok cannot be computed from the count date the duty is still
+/// reported, with the date it could not be computed from. Dropping the reminder
+/// because the arithmetic left the calendar would be the app deciding away an
+/// obligation it merely failed to date.
+fn konsignacija_podsetnik(datum_popisa: &str) -> (Option<String>, String) {
+    match konsignacija_rok(datum_popisa) {
+        Ok(rok) => {
+            let poruka = format!(
+                "Podsetnik: popis obuhvata tuđu (konsignacionu) robu — potpisan primerak posebne \
+                 popisne liste dostavlja se vlasniku najkasnije do „{rok}“, u roku od deset dana \
+                 od dana popisa (PoP čl. 2 st. 6). Aplikacija tu listu ne dostavlja umesto vas."
+            );
+            (Some(rok), poruka)
+        }
+        Err(error) => (
+            None,
+            format!(
+                "Podsetnik: popis obuhvata tuđu (konsignacionu) robu i potpisan primerak posebne \
+                 popisne liste dostavlja se vlasniku u roku od deset dana od dana popisa (PoP \
+                 čl. 2 st. 6). Rok nije izračunat iz datuma popisa „{datum_popisa}“: {error} \
+                 Obaveza time ne prestaje — izračunajte rok ručno. Aplikacija tu listu ne \
+                 dostavlja umesto vas."
+            ),
+        ),
+    }
 }
 
 fn phase_signed(connection: &Connection, session_id: i64, faza: &str) -> Result<bool, AppError> {
@@ -485,8 +604,18 @@ pub(crate) fn load_session(connection: &Connection, id: i64) -> Result<PopisSess
     let faza_b_potpisana = potpisi.iter().any(|potpis| potpis.faza == "b");
     let knjigovodstvo_dostupno = book_quantities_released(session.status, faza_a_potpisana);
     let komisija = read_commission(connection, id)?;
-    let upozorenja = komisija_upozorenja(&komisija);
+    let mut upozorenja = komisija_upozorenja(&komisija);
     let linije = read_lines(connection, id, knjigovodstvo_dostupno)?;
+    let liste = read_liste(connection, id)?;
+
+    // Req. 36 / čl. 2 st. 6 — the ten-day duty follows the tuđa roba, so it is
+    // read off the liste and not off a flag.
+    let mut konsignacija_rok = None;
+    if liste_sa_stavkama(&liste).contains(&PopisLista::Konsignacija) {
+        let (rok, podsetnik) = konsignacija_podsetnik(&session.datum_popisa);
+        konsignacija_rok = rok;
+        upozorenja.push(podsetnik);
+    }
 
     Ok(PopisSessionView {
         id: session.id,
@@ -507,7 +636,41 @@ pub(crate) fn load_session(connection: &Connection, id: i64) -> Result<PopisSess
         komisija,
         potpisi,
         linije,
+        liste,
+        konsignacija_rok,
         upozorenja,
+    })
+}
+
+/// Req. 36 through the query layer: the categories the shop declared present,
+/// checked against the liste it actually filled.
+///
+/// The refusal itself is `crate::popis::ensure_liste_kompletne` — the same
+/// function Task 6 calls before it composes the izveštaj — so the sentence a
+/// screen shows and the sentence a generator refuses with are one sentence.
+pub(crate) fn provera_listi(
+    connection: &Connection,
+    session_id: i64,
+    prijavljene: &[PopisLista],
+) -> Result<ProveraListiView, AppError> {
+    // A report about a popis that exists: an id nobody opened is not „spremno“.
+    read_session(connection, session_id)?;
+
+    let liste = read_liste(connection, session_id)?;
+    let sa_stavkama = liste_sa_stavkama(&liste);
+    let poruka = crate::popis::ensure_liste_kompletne(prijavljene, &sa_stavkama)
+        .err()
+        .map(|error| error.to_string());
+    let nedostaju_vrste = nedostajuce_liste(prijavljene, &sa_stavkama);
+    let nedostaju: Vec<ListaPregled> = liste
+        .into_iter()
+        .filter(|pregled| nedostaju_vrste.contains(&pregled.vrsta))
+        .collect();
+
+    Ok(ProveraListiView {
+        spremno: poruka.is_none(),
+        nedostaju,
+        poruka,
     })
 }
 
@@ -695,6 +858,10 @@ struct PotpisanaStavka {
     jedinica_mere: Option<String>,
     stvarna_kolicina_milli: i64,
     blizi_opis: Option<String>,
+    /// On the gotovina lista this is the **apoen** and therefore part of what was
+    /// counted; everywhere else it is the čl. 9 st. 1 t. 5 cena and the obračun's
+    /// to fill in. Read back so the two cases can be told apart.
+    cena_minor: Option<i64>,
 }
 
 impl PotpisanaStavka {
@@ -724,6 +891,33 @@ impl PotpisanaStavka {
         }
         polja
     }
+
+    fn lista(&self) -> Option<PopisLista> {
+        PopisLista::from_db_str(&self.lista_vrsta)
+    }
+
+    /// Whether a Phase B payload moves the apoen of a signed gotovina line. `None`
+    /// leaves it alone — the UPDATE coalesces — so only a payload that actually
+    /// carries a different apoen is a move.
+    fn apoen_pomeren(&self, input: &PopisLineInput) -> bool {
+        self.lista() == Some(PopisLista::Gotovina)
+            && input.cena_minor.is_some()
+            && input.cena_minor != self.cena_minor
+    }
+
+    /// What the obračun may still fill in on this stavka, said in the refusal
+    /// above. It differs by lista and the difference matters: on the gotovina lista
+    /// the „cena“ is the apoen and is frozen with the count, so telling the shop it
+    /// may still edit a cena there would be an operator string promising something
+    /// the very next call refuses.
+    fn obracunska_polja(&self) -> &'static str {
+        if self.lista() == Some(PopisLista::Gotovina) {
+            "U obračunu se popunjava samo knjigovodstvena količina — „cena“ na listi gotovine je \
+             apoen i deo je potpisanog stvarnog stanja"
+        } else {
+            "U obračunu se popunjavaju samo cena i knjigovodstvena količina"
+        }
+    }
 }
 
 fn read_potpisana_stavka(
@@ -734,7 +928,7 @@ fn read_potpisana_stavka(
     connection
         .query_row(
             "SELECT lista_vrsta, sifra, naziv, vrsta, jedinica_mere,
-                    stvarna_kolicina_milli, blizi_opis
+                    stvarna_kolicina_milli, blizi_opis, cena_minor
              FROM popis_lines
              WHERE id = ?1 AND session_id = ?2",
             params![line_id, session_id],
@@ -747,11 +941,58 @@ fn read_potpisana_stavka(
                     jedinica_mere: row.get(4)?,
                     stvarna_kolicina_milli: row.get(5)?,
                     blizi_opis: row.get(6)?,
+                    cena_minor: row.get(7)?,
                 })
             },
         )
         .optional()?
         .ok_or_else(|| AppError::not_found("Stavka popisne liste nije pronađena."))
+}
+
+/// Milli-units per counted piece — the schema's own quantity unit. A banknote is
+/// one piece and never a fraction of one.
+const MILLI: i64 = 1_000;
+
+/// What each lista must carry to be the document its own article asks for.
+///
+/// Only the gotovina lista has such a rule today, and it is the one req. 36 spells
+/// out: **PoP čl. 11 st. 1 counts cash „по апоенима“.** A single „u kasi ima
+/// 45.000 dinara“ line is a figure, not a count, and it is exactly what a
+/// denomination breakdown exists to replace — so a cash line names the apoen it
+/// counted (`cena_minor`, para) and the number of whole notes or coins found at
+/// it. Half a banknote was never counted; a popis is evidence, and admitting the
+/// typo would put an amount in the izveštaj that no drawer ever held.
+///
+/// The other four posebne liste are left with the rules every line has (a naziv,
+/// a non-negative count): nothing in čl. 10 st. 3, čl. 10 st. 4 or čl. 12 st. 2
+/// prescribes a field, and inventing one here would refuse a lawful count in the
+/// name of a duty that does not exist.
+fn ensure_stavka(lista: PopisLista, input: &PopisLineInput) -> Result<(), AppError> {
+    if lista != PopisLista::Gotovina {
+        return Ok(());
+    }
+
+    if input.cena_minor.unwrap_or(0) <= 0 {
+        return Err(AppError::business(
+            "popis_gotovina_bez_apoena",
+            "Gotovina se popisuje po apoenima (PoP čl. 11 st. 1) — uz svaku stavku upišite apoen \
+             i broj novčanica odnosno kovanica tog apoena, a ne jedan ukupan iznos.",
+        ));
+    }
+
+    if input.stvarna_kolicina_milli % MILLI != 0 {
+        return Err(AppError::business(
+            "popis_gotovina_deo_apoena",
+            format!(
+                "Broj novčanica odnosno kovanica jednog apoena mora da bude ceo broj (PoP čl. 11 \
+                 st. 1), a prebrojano je „{},{:03}“.",
+                input.stvarna_kolicina_milli / MILLI,
+                input.stvarna_kolicina_milli % MILLI
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn save_line(
@@ -766,7 +1007,7 @@ pub(crate) fn save_line(
     // popis is closed“ is the truer answer than „that field is frozen“.
     crate::popis::posting_lock(session.status)?;
 
-    if !LISTE_VRSTE.contains(&input.lista_vrsta.as_str()) {
+    let Some(lista) = PopisLista::from_db_str(&input.lista_vrsta) else {
         return Err(AppError::business(
             "popis_nepoznata_lista",
             format!(
@@ -774,7 +1015,7 @@ pub(crate) fn save_line(
                 input.lista_vrsta
             ),
         ));
-    }
+    };
     if input.naziv.trim().is_empty() {
         return Err(AppError::business(
             "popis_bez_naziva",
@@ -811,7 +1052,7 @@ pub(crate) fn save_line(
     // record behind them — but only over lines the commission actually counted,
     // and without moving what it counted.
     match session.status {
-        PopisStatus::Draft | PopisStatus::Counting => {}
+        PopisStatus::Draft | PopisStatus::Counting => ensure_stavka(lista, input)?,
         PopisStatus::Computed => {
             let Some(line_id) = line_id else {
                 return Err(AppError::business(
@@ -849,10 +1090,25 @@ pub(crate) fn save_line(
                     "popis_stvarno_stanje_potpisano",
                     format!(
                         "Potpisana stavka popisne liste se više ne menja (PoP čl. 8 st. 5, čl. 9 \
-                         st. 1 t. 1), a razlikuje se: {polja}. U obračunu se popunjavaju samo \
-                         cena i knjigovodstvena količina — ispravka same stavke sprovodi se novim \
-                         popisom."
+                         st. 1 t. 1), a razlikuje se: {polja}. {} — ispravka same stavke sprovodi \
+                         se novim popisom.",
+                        potpisana.obracunska_polja()
                     ),
+                ));
+            }
+
+            // Req. 36 / čl. 11 st. 1 — on the gotovina lista `cena_minor` is the
+            // APOEN, part of what the commission counted and signed, and not a
+            // price the obračun fills in under čl. 9 st. 1 t. 5. Left unpinned, a
+            // signed „5 × 1.000“ could become „5 × 5.000“ in Phase B with the
+            // količina untouched, and the čl. 8 st. 5 potpis would attest to a cash
+            // count nobody took.
+            if potpisana.apoen_pomeren(input) {
+                return Err(AppError::business(
+                    "popis_apoen_potpisan",
+                    "Na popisnoj listi gotovine „cena“ je apoen — deo prebrojanog stvarnog stanja \
+                     (PoP čl. 11 st. 1), a ne obračunska cena. Potpisani apoen se više ne menja \
+                     (PoP čl. 8 st. 5) — ispravka se sprovodi novim popisom.",
                 ));
             }
         }
@@ -1183,6 +1439,24 @@ pub fn popis_get(state: State<'_, AppState>, id: i64) -> Result<PopisSessionView
     load_session(&connection, id).map_err(Into::into)
 }
 
+/// Req. 36 — which of the declared categories still has an empty lista.
+///
+/// The declaration is a parameter and not a stored flag because presence is a
+/// fact about the shop that no ledger here holds: nothing in the books says that
+/// part of the stock is damaged, that a carton is at a third party's, or that a
+/// rail belongs to somebody else on consignment. The person taking the popis
+/// answers, and the answer is checked against the liste.
+#[tauri::command]
+pub fn popis_provera_listi(
+    state: State<'_, AppState>,
+    id: i64,
+    prijavljene: Vec<PopisLista>,
+) -> Result<ProveraListiView, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    provera_listi(&connection, id, &prijavljene).map_err(Into::into)
+}
+
 #[tauri::command]
 pub fn popis_open(
     state: State<'_, AppState>,
@@ -1381,6 +1655,61 @@ mod tests {
             knjigovodstvena_kolicina_milli: None,
             cena_minor: None,
         }
+    }
+
+    /// One line for each posebna popisna lista of req. 36, carrying the field that
+    /// lista exists to record: what is wrong with the goods (čl. 10 st. 3), where
+    /// they are (čl. 10 st. 4), which apoen was counted (čl. 11 st. 1), the iznos
+    /// of an undocumented claim (čl. 12 st. 2) and whose the goods are (čl. 2
+    /// st. 5).
+    fn lista_line(lista: PopisLista) -> PopisLineInput {
+        let mut input = PopisLineInput {
+            lista_vrsta: lista.as_db_str().into(),
+            sifra: None,
+            naziv: String::new(),
+            vrsta: None,
+            jedinica_mere: Some("kom".into()),
+            stvarna_kolicina_milli: 0,
+            blizi_opis: None,
+            knjigovodstvena_kolicina_milli: None,
+            cena_minor: None,
+        };
+
+        match lista {
+            PopisLista::Roba => {
+                input.sifra = Some("KOS-1".into());
+                input.naziv = "Košulja".into();
+                input.stvarna_kolicina_milli = 7_000;
+                input.blizi_opis = Some("Polica A2".into());
+            }
+            PopisLista::Ostecena => {
+                input.naziv = "Košulja sa oštećenjem".into();
+                input.stvarna_kolicina_milli = 1_000;
+                input.blizi_opis = Some("Pocepan rukav — za otpis".into());
+            }
+            PopisLista::VanObjekta => {
+                input.naziv = "Mantil".into();
+                input.stvarna_kolicina_milli = 2_000;
+                input.blizi_opis = Some("Na popravci kod krojača".into());
+            }
+            PopisLista::Gotovina => {
+                input.naziv = "Novčanica 1.000 RSD".into();
+                input.stvarna_kolicina_milli = 5_000;
+                input.cena_minor = Some(100_000);
+            }
+            PopisLista::Potrazivanja => {
+                input.naziv = "Potraživanje bez isprave".into();
+                input.blizi_opis = Some("Dobavljač „Tekstil promet“".into());
+                input.cena_minor = Some(350_000);
+            }
+            PopisLista::Konsignacija => {
+                input.naziv = "Torba".into();
+                input.stvarna_kolicina_milli = 3_000;
+                input.blizi_opis = Some("Vlasnik: „Moda“ doo".into());
+            }
+        }
+
+        input
     }
 
     /// Opens a session, records one counted line for `sifra`, and leaves it in
@@ -1783,6 +2112,8 @@ mod tests {
             komisija: Vec::new(),
             potpisi: Vec::new(),
             linije: vec![linija],
+            liste: Vec::new(),
+            konsignacija_rok: None,
             upozorenja: Vec::new(),
         }
     }
@@ -1995,6 +2326,521 @@ mod tests {
                 Some(KNJIGOVODSTVENO_STANJE_MILLI),
                 "the pricing edit must not blank what the potpis released"
             );
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Req. 36 — the posebne popisne liste
+    // -----------------------------------------------------------------
+
+    /// Req. 36 — the five posebne liste are required wherever their category is
+    /// present, so each of them has to be a list this module can actually take
+    /// lines onto, not a value the CHECK constraint tolerates. The count per lista
+    /// is asserted through the session view because that is what a count sheet
+    /// renders: six liste, each with what is on it.
+    #[test]
+    fn each_popisna_lista_takes_its_own_lines() {
+        with_app("popis_six_liste", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+
+            // Before anything is written onto them, all five posebne liste are
+            // already reported as the empty liste they are: a lista the count sheet
+            // never shows is a lista the shop never fills, and req. 36 is about the
+            // ones that are missing.
+            let prazne = load_session(&connection, id).expect("the session should load");
+            assert_eq!(prazne.liste.len(), 6);
+            for pregled in &prazne.liste {
+                assert_eq!(
+                    pregled.broj_stavki,
+                    i64::from(pregled.vrsta == PopisLista::Roba),
+                    "„{}“ before any posebna lista is written",
+                    pregled.naziv
+                );
+            }
+
+            for lista in PopisLista::ALL {
+                if lista == PopisLista::Roba {
+                    continue; // already counted by `seeded_count`
+                }
+                save_line(
+                    &connection,
+                    id,
+                    None,
+                    &lista_line(lista),
+                    "2026-12-31T09:20:00Z",
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the {} lista must take its own lines: {error}",
+                        lista.naziv()
+                    )
+                });
+            }
+
+            let session = load_session(&connection, id).expect("the session should load");
+            assert_eq!(session.linije.len(), 6);
+            assert_eq!(
+                session.liste.len(),
+                6,
+                "all six liste are reported, including the empty ones — a lista nobody can see \
+                 is a lista nobody fills"
+            );
+
+            for pregled in &session.liste {
+                assert_eq!(
+                    pregled.broj_stavki, 1,
+                    "„{}“ should carry exactly the one line saved onto it",
+                    pregled.naziv
+                );
+                assert_eq!(pregled.naziv, pregled.vrsta.naziv());
+                assert!(
+                    pregled.pravni_osnov.contains("čl."),
+                    "„{}“ must carry the article that requires it, carries „{}“",
+                    pregled.naziv,
+                    pregled.pravni_osnov
+                );
+            }
+        });
+    }
+
+    /// PoP čl. 11 st. 1 — gotovina is counted **po apoenima**. A single „u kasi
+    /// ima 45.000 dinara“ line is exactly what that provision refuses: it is a
+    /// figure, not a count. So a cash line carries the apoen it counted, and it
+    /// counts whole notes and coins — half a novčanica is a typo, and a popis is
+    /// evidence.
+    #[test]
+    fn a_cash_line_that_is_not_denominated_by_apoen_is_refused() {
+        with_app("popis_gotovina_apoen", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+
+            let mut bez_apoena = lista_line(PopisLista::Gotovina);
+            bez_apoena.cena_minor = None;
+            let error = save_line(&connection, id, None, &bez_apoena, "2026-12-31T09:20:00Z")
+                .expect_err("a lump sum is not a count po apoenima");
+            assert_eq!(error.code(), "popis_gotovina_bez_apoena");
+            assert!(
+                error.to_string().contains("čl. 11 st. 1"),
+                "the refusal must name the article, said: {error}"
+            );
+
+            let mut nula = lista_line(PopisLista::Gotovina);
+            nula.cena_minor = Some(0);
+            assert_eq!(
+                save_line(&connection, id, None, &nula, "2026-12-31T09:21:00Z")
+                    .expect_err("an apoen of zero is no apoen")
+                    .code(),
+                "popis_gotovina_bez_apoena"
+            );
+
+            let mut pola = lista_line(PopisLista::Gotovina);
+            pola.stvarna_kolicina_milli = 5_500;
+            let error = save_line(&connection, id, None, &pola, "2026-12-31T09:22:00Z")
+                .expect_err("half a banknote was never counted");
+            assert_eq!(error.code(), "popis_gotovina_deo_apoena");
+
+            // The positive control: a properly denominated line saves, or the three
+            // refusals above would be a wall rather than a rule.
+            let session = save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Gotovina),
+                "2026-12-31T09:23:00Z",
+            )
+            .expect("5 × 1.000 RSD is a count po apoenima");
+            let gotovina = session
+                .linije
+                .iter()
+                .find(|linija| linija.lista_vrsta == "gotovina")
+                .expect("the cash line should be there");
+            assert_eq!(gotovina.cena_minor, Some(100_000));
+            assert_eq!(gotovina.stvarna_kolicina_milli, 5_000);
+        });
+    }
+
+    /// The blind read withholds the whole Phase B block, and the čl. 9 st. 1 t. 5
+    /// cena with it — but on the gotovina lista that column is the **apoen**, part
+    /// of what the commission itself counted (čl. 11 st. 1). Čl. 8 st. 5 keeps
+    /// podatke iz knjigovodstva o količinama away from the commission; it does not
+    /// keep the commission from its own count, and a cash lista that cannot show
+    /// „5 × 1.000“ while it is being written is unreadable exactly when it matters.
+    #[test]
+    fn the_blind_read_shows_the_apoen_and_still_withholds_the_obracun_cena() {
+        with_app("popis_blind_apoen", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+
+            let session = load_session(&connection, id).expect("the session should load");
+            let roba_id = session.linije[0].id;
+            let mut sa_cenom = lista_line(PopisLista::Roba);
+            sa_cenom.cena_minor = Some(249_900);
+            save_line(
+                &connection,
+                id,
+                Some(roba_id),
+                &sa_cenom,
+                "2026-12-31T09:15:00Z",
+            )
+            .expect("a cena may be recorded on a roba line");
+            save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Gotovina),
+                "2026-12-31T09:20:00Z",
+            )
+            .expect("the cash line should save");
+
+            let counting = load_session(&connection, id).expect("the session should load");
+            assert!(!counting.knjigovodstvo_dostupno, "still Phase A");
+            let roba = &counting.linije[0];
+            let gotovina = &counting.linije[1];
+            assert_eq!(roba.lista_vrsta, "roba");
+            assert_eq!(
+                roba.cena_minor, None,
+                "the obračun cena stays withheld until the čl. 8 st. 5 potpis"
+            );
+            assert_eq!(
+                gotovina.cena_minor,
+                Some(100_000),
+                "the apoen is part of the count and must be readable during it"
+            );
+        });
+    }
+
+    /// On the gotovina lista `cena_minor` is the **apoen** — part of what the
+    /// commission counted and signed under čl. 8 st. 5, not a price the obračun
+    /// fills in under čl. 9 st. 1 t. 5. Left unpinned, a signed „5 × 1.000“ could
+    /// become „5 × 5.000“ in Phase B and the potpis would attest to a cash count
+    /// nobody took.
+    #[test]
+    fn the_signed_apoen_does_not_move_in_the_obracun() {
+        with_app("popis_gotovina_apoen_frozen", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let mut connection = state.db().open().expect("database should open");
+            save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Gotovina),
+                "2026-12-31T09:20:00Z",
+            )
+            .expect("the cash line should save");
+            sign_phase_a(
+                &mut connection,
+                id,
+                &["Miloš Đurđević".to_string()],
+                "2026-12-31T17:00:00Z",
+            )
+            .expect("the čl. 8 st. 5 potpis should record");
+            let computed = compute_differences(&connection, id, "2027-01-02T09:00:00Z")
+                .expect("the obračun should open");
+            let line_id = computed
+                .linije
+                .iter()
+                .find(|linija| linija.lista_vrsta == "gotovina")
+                .expect("the cash line should be there")
+                .id;
+
+            let mut podmetnut = lista_line(PopisLista::Gotovina);
+            podmetnut.cena_minor = Some(500_000);
+            let error = save_line(
+                &connection,
+                id,
+                Some(line_id),
+                &podmetnut,
+                "2027-01-02T10:00:00Z",
+            )
+            .expect_err("the signed apoen must not move");
+
+            assert_eq!(error.code(), "popis_apoen_potpisan");
+            assert!(
+                error.to_string().contains("čl. 11 st. 1"),
+                "the refusal must say why „cena“ is not editable here, said: {error}"
+            );
+
+            // Leaving the apoen alone is still a legal obračun edit.
+            let mut netaknuto = lista_line(PopisLista::Gotovina);
+            netaknuto.cena_minor = None;
+            save_line(
+                &connection,
+                id,
+                Some(line_id),
+                &netaknuto,
+                "2027-01-02T10:05:00Z",
+            )
+            .expect("an obračun edit that does not touch the apoen must go through");
+            let after = load_session(&connection, id).expect("the session should load");
+            assert_eq!(
+                after
+                    .linije
+                    .iter()
+                    .find(|linija| linija.lista_vrsta == "gotovina")
+                    .expect("the cash line should be there")
+                    .cena_minor,
+                Some(100_000),
+                "the apoen the commission signed is what stays on the lista"
+            );
+        });
+    }
+
+    /// The freeze refusal tells the shop what the obračun may still fill in, and
+    /// on the gotovina lista that is a different answer: „cena“ there is the apoen
+    /// and is frozen with the count. One wording for both would tell a shop it may
+    /// still edit a cena that the very next call refuses — an operator string
+    /// promising behaviour this module does not implement.
+    #[test]
+    fn the_freeze_refusal_says_what_is_still_editable_on_the_lista_it_is_about() {
+        with_app("popis_freeze_refusal_wording", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let mut connection = state.db().open().expect("database should open");
+            save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Gotovina),
+                "2026-12-31T09:20:00Z",
+            )
+            .expect("the cash line should save");
+            sign_phase_a(
+                &mut connection,
+                id,
+                &["Miloš Đurđević".to_string()],
+                "2026-12-31T17:00:00Z",
+            )
+            .expect("the čl. 8 st. 5 potpis should record");
+            let computed = compute_differences(&connection, id, "2027-01-02T09:00:00Z")
+                .expect("the obračun should open");
+
+            for (lista, mora, ne_sme) in [
+                (
+                    PopisLista::Roba,
+                    "popunjavaju samo cena i knjigovodstvena količina",
+                    "apoen",
+                ),
+                (
+                    PopisLista::Gotovina,
+                    "apoen i deo je potpisanog stvarnog stanja",
+                    "popunjavaju samo cena",
+                ),
+            ] {
+                let line_id = computed
+                    .linije
+                    .iter()
+                    .find(|linija| linija.lista_vrsta == lista.as_db_str())
+                    .expect("the line should be there")
+                    .id;
+                let mut podmetnut = lista_line(lista);
+                podmetnut.naziv = "Nešto sasvim drugo".into();
+
+                let error = save_line(
+                    &connection,
+                    id,
+                    Some(line_id),
+                    &podmetnut,
+                    "2027-01-02T10:00:00Z",
+                )
+                .expect_err("a signed naziv must not move");
+                let poruka = error.to_string();
+
+                assert!(
+                    poruka.contains(mora),
+                    "the {} refusal must say „{mora}“, said: {poruka}",
+                    lista.naziv()
+                );
+                assert!(
+                    !poruka.contains(ne_sme),
+                    "the {} refusal must not say „{ne_sme}“, said: {poruka}",
+                    lista.naziv()
+                );
+            }
+        });
+    }
+
+    /// PoP čl. 2 st. 6 — a signed copy of the posebna lista for tuđa roba reaches
+    /// its owner within ten days of the count. The rok is computed from the count
+    /// date and surfaced with the popis, because a rok nobody is shown is not a
+    /// reminder; and the copy says plainly that the app does not do the delivering,
+    /// because a reminder that implied otherwise would promise behaviour this
+    /// module does not implement.
+    #[test]
+    fn a_konsignacija_lista_carries_the_ten_day_reminder() {
+        with_app("popis_konsignacija_reminder", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+
+            let session = save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Konsignacija),
+                "2026-12-31T09:20:00Z",
+            )
+            .expect("the consignment line should save");
+
+            assert_eq!(
+                session.konsignacija_rok.as_deref(),
+                Some("2027-01-10"),
+                "ten days from the 31 December count"
+            );
+            let podsetnik = session
+                .upozorenja
+                .iter()
+                .find(|poruka| poruka.contains("čl. 2 st. 6"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the čl. 2 st. 6 duty must be surfaced, warnings were: {:?}",
+                        session.upozorenja
+                    )
+                });
+            assert!(
+                podsetnik.contains("2027-01-10"),
+                "the reminder must carry the rok itself, said: {podsetnik}"
+            );
+            assert!(
+                podsetnik.contains("ne dostavlja"),
+                "the reminder must say the app does not deliver the lista, said: {podsetnik}"
+            );
+        });
+    }
+
+    /// The other side of the same rule: a popis with no tuđa roba on it owes
+    /// nobody a copy, and a reminder that fired anyway would be the noise that
+    /// teaches a shop to click past the ones that matter.
+    #[test]
+    fn a_popis_without_tudja_roba_carries_no_konsignacija_reminder() {
+        with_app("popis_no_konsignacija_reminder", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+
+            let session = load_session(&connection, id).expect("the session should load");
+
+            assert_eq!(session.konsignacija_rok, None);
+            assert!(
+                session
+                    .upozorenja
+                    .iter()
+                    .all(|poruka| !poruka.contains("čl. 2 st. 6")),
+                "warnings were: {:?}",
+                session.upozorenja
+            );
+        });
+    }
+
+    /// The degrade path, and it degrades in the safe direction. A count date whose
+    /// ten-day rok leaves the calendar has no rok this module may invent — but the
+    /// čl. 2 st. 6 duty does not go away because arithmetic did, so the session
+    /// still loads and the shop is told the duty stands and the date is theirs to
+    /// work out. Silently dropping the reminder would be the app deciding an
+    /// obligation away.
+    #[test]
+    fn a_count_date_whose_rok_leaves_the_calendar_still_reports_the_duty() {
+        with_app("popis_konsignacija_rok_overflow", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count_on(state.inner(), "KOS-1", "9999-12-31");
+            let connection = state.db().open().expect("database should open");
+
+            let session = save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Konsignacija),
+                "9999-12-31T09:20:00Z",
+            )
+            .expect("the consignment line should save");
+
+            assert_eq!(session.konsignacija_rok, None, "no rok may be invented");
+            let podsetnik = session
+                .upozorenja
+                .iter()
+                .find(|poruka| poruka.contains("čl. 2 st. 6"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the duty must be reported even when its rok cannot be computed, \
+                         warnings were: {:?}",
+                        session.upozorenja
+                    )
+                });
+            assert!(
+                podsetnik.contains("9999-12-31"),
+                "the reminder must name the count date it could not compute from, said: \
+                 {podsetnik}"
+            );
+        });
+    }
+
+    /// Req. 36 through the command layer: the declaration the shop makes about
+    /// which categories exist is checked against the liste, and the report names
+    /// what is missing and the article behind it. `spremno` is the flag Task 6's
+    /// izveštaj generation rests on.
+    #[test]
+    fn the_lista_report_names_the_declared_liste_that_are_empty() {
+        with_app("popis_provera_listi", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let prijavljene = vec![
+                PopisLista::Roba,
+                PopisLista::Gotovina,
+                PopisLista::Konsignacija,
+            ];
+
+            sign_in_cashier(state.inner());
+            assert_eq!(
+                popis_provera_listi(app.state::<AppState>(), id, prijavljene.clone())
+                    .expect_err("a cashier must not read the popis")
+                    .code,
+                "forbidden"
+            );
+
+            sign_in_admin(state.inner());
+            let provera = popis_provera_listi(app.state::<AppState>(), id, prijavljene.clone())
+                .expect("an admin should read the report");
+
+            assert!(!provera.spremno);
+            assert_eq!(
+                provera
+                    .nedostaju
+                    .iter()
+                    .map(|pregled| pregled.vrsta)
+                    .collect::<Vec<_>>(),
+                vec![PopisLista::Gotovina, PopisLista::Konsignacija],
+                "only the declared categories with an empty lista"
+            );
+            let poruka = provera
+                .poruka
+                .clone()
+                .expect("an unready popis needs a reason");
+            assert!(
+                poruka.contains("gotovina po apoenima") && poruka.contains("čl. 11 st. 1"),
+                "the message must name the lista and its article, said: {poruka}"
+            );
+
+            let connection = state.db().open().expect("database should open");
+            for lista in [PopisLista::Gotovina, PopisLista::Konsignacija] {
+                save_line(
+                    &connection,
+                    id,
+                    None,
+                    &lista_line(lista),
+                    "2026-12-31T09:25:00Z",
+                )
+                .expect("the declared lista should take its line");
+            }
+
+            let provera = popis_provera_listi(app.state::<AppState>(), id, prijavljene)
+                .expect("an admin should read the report");
+            assert!(provera.spremno, "the declared liste are no longer empty");
+            assert!(provera.nedostaju.is_empty());
+            assert_eq!(provera.poruka, None);
         });
     }
 

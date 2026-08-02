@@ -254,6 +254,7 @@ pub fn run() {
             // command at all.
             commands::popis::popis_list,
             commands::popis::popis_get,
+            commands::popis::popis_provera_listi,
             commands::popis::popis_open,
             commands::popis::popis_save_line,
             commands::popis::popis_start_count,

@@ -227,6 +227,164 @@ pub fn book_quantities_released(status: PopisStatus, phase_a_signed: bool) -> bo
     book_quantities_visible(status) && phase_a_signed
 }
 
+/// The six popisne liste of req. 36: the ordinary lista of goods in the objekat,
+/// and the five **posebne popisne liste** the bylaw requires wherever their
+/// category is present. They are required, not optional extras — čl. 10 st. 3,
+/// čl. 10 st. 4, čl. 11 st. 1, čl. 12 st. 2 and čl. 2 st. 5 each say the category
+/// is entered on a lista of its own.
+///
+/// The stored values are [`PopisLista::as_db_str`] and they are the vocabulary of
+/// the v20 `popis_lines.lista_vrsta` CHECK, asserted equal by test for the reason
+/// [`PopisStatus`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PopisLista {
+    /// The ordinary lista — the goods in the objekat, counted under čl. 9 st. 1
+    /// t. 1. Not a posebna lista; everything below is.
+    Roba,
+    /// Oštećena, zastarela i neupotrebljiva roba — čl. 10 st. 3.
+    Ostecena,
+    /// Roba van objekta, uključujući robu na popravci i robu kod trećeg lica —
+    /// čl. 10 st. 4.
+    VanObjekta,
+    /// Gotovina, popisana **po apoenima** — čl. 11 st. 1. The apoen is what makes
+    /// this a denomination breakdown rather than a single figure in a drawer.
+    Gotovina,
+    /// Nedokumentovana potraživanja i obaveze — čl. 12 st. 2. Čl. 12 st. 1 counts
+    /// the documented ones from the books; these are the ones with no verodostojna
+    /// isprava behind them, and they get their own lista.
+    Potrazivanja,
+    /// Konsignaciona i svaka druga tuđa roba — čl. 2 st. 5, with the čl. 2 st. 6
+    /// ten-day duty to put a signed copy of that lista in the owner's hands. See
+    /// [`konsignacija_rok`].
+    Konsignacija,
+}
+
+impl PopisLista {
+    pub const ALL: [Self; 6] = [
+        Self::Roba,
+        Self::Ostecena,
+        Self::VanObjekta,
+        Self::Gotovina,
+        Self::Potrazivanja,
+        Self::Konsignacija,
+    ];
+
+    /// The value stored in `popis_lines.lista_vrsta`.
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Roba => "roba",
+            Self::Ostecena => "ostecena",
+            Self::VanObjekta => "van_objekta",
+            Self::Gotovina => "gotovina",
+            Self::Potrazivanja => "potrazivanja",
+            Self::Konsignacija => "konsignacija",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|lista| lista.as_db_str() == value)
+    }
+
+    /// What the lista is called in front of the shop. The stored keys are
+    /// ASCII-folded column values and no operator string may quote one.
+    pub fn naziv(self) -> &'static str {
+        match self {
+            Self::Roba => "roba u objektu",
+            Self::Ostecena => "oštećena, zastarela i neupotrebljiva roba",
+            Self::VanObjekta => "roba van objekta (na popravci i kod trećeg lica)",
+            Self::Gotovina => "gotovina po apoenima",
+            Self::Potrazivanja => "nedokumentovana potraživanja i obaveze",
+            Self::Konsignacija => "konsignaciona i druga tuđa roba",
+        }
+    }
+
+    /// The provision that requires this lista. Carried with the lista rather than
+    /// written into each refusal, so the shop is always sent to the same article
+    /// for the same list.
+    pub fn pravni_osnov(self) -> &'static str {
+        match self {
+            Self::Roba => "PoP čl. 9 st. 1 t. 1",
+            Self::Ostecena => "PoP čl. 10 st. 3",
+            Self::VanObjekta => "PoP čl. 10 st. 4",
+            Self::Gotovina => "PoP čl. 11 st. 1",
+            Self::Potrazivanja => "PoP čl. 12 st. 2",
+            Self::Konsignacija => "PoP čl. 2 st. 5",
+        }
+    }
+
+    /// True for the five liste req. 36 calls *posebne*. The ordinary roba lista is
+    /// the popis itself and is not one of them.
+    pub fn posebna(self) -> bool {
+        !matches!(self, Self::Roba)
+    }
+}
+
+/// The liste that were declared present and have nothing on them (req. 36).
+///
+/// **Why the presence is declared and not derived.** A posebna lista is required
+/// „where the category applies“, and whether it applies is a fact about the shop
+/// that no ledger in this database holds: nothing in the books says that some of
+/// the stock is damaged, that a carton is at a third party's, or that a rail of
+/// dresses belongs to somebody else on consignment. So the person taking the
+/// popis answers for it, and this function is what makes that answer binding
+/// rather than decorative — a category declared present whose lista is empty is
+/// named here, and the izveštaj gate refuses on it.
+///
+/// The order is [`PopisLista::ALL`] and the result carries no duplicate, because
+/// what comes back is read by a person: a caller that declared the same category
+/// twice owes one lista, not two.
+pub fn nedostajuce_liste(
+    prijavljene: &[PopisLista],
+    sa_stavkama: &[PopisLista],
+) -> Vec<PopisLista> {
+    PopisLista::ALL
+        .into_iter()
+        .filter(|lista| prijavljene.contains(lista) && !sa_stavkama.contains(lista))
+        .collect()
+}
+
+/// The gate req. 36 puts in front of the izveštaj: **a category the shop declared
+/// present may not go to the izveštaj on an empty lista.**
+///
+/// Čl. 13 st. 1 has the izveštaj report the stvarno stanje, the knjigovodstveno
+/// stanje and the razlike — of the whole popis. A popis that declared damaged
+/// goods, goods at a third party's or cash on hand and then wrote none of them
+/// down reports a stvarno stanje that is not the shop's, and every figure derived
+/// from it is wrong by whatever was left out. So the declaration is checked
+/// against the liste before an izveštaj can rest on them.
+///
+/// Pure, and separate from the report [`nedostajuce_liste`] produces, because the
+/// two are read by different things: a screen wants the missing liste to render
+/// them, and a generator wants to be stopped. **Task 6 calls this before it
+/// composes the izveštaj** — that is what makes the declaration binding rather
+/// than decorative.
+pub fn ensure_liste_kompletne(
+    prijavljene: &[PopisLista],
+    sa_stavkama: &[PopisLista],
+) -> Result<(), AppError> {
+    let nedostaju = nedostajuce_liste(prijavljene, sa_stavkama);
+    if nedostaju.is_empty() {
+        return Ok(());
+    }
+
+    let spisak = nedostaju
+        .iter()
+        .map(|lista| format!("„{}“ ({})", lista.naziv(), lista.pravni_osnov()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(AppError::business(
+        "popis_prazna_prijavljena_lista",
+        format!(
+            "Popisne liste nisu potpune: prijavljeno je da postoji {spisak} — a te liste su \
+             prazne. Popunite ih pre sastavljanja izveštaja o popisu (PoP čl. 13 st. 1)."
+        ),
+    ))
+}
+
 /// The two popis obligations, which are two modes and not one mode with a flag:
 /// the annual popis at the balance date (ZoRač čl. 20 st. 2) and the popis on a
 /// retail price change in a maloprodajni objekat (ZoRač čl. 21, PoP čl. 3). They
@@ -355,6 +513,34 @@ pub fn izvestaj_due(
     })
 }
 
+/// PoP čl. 2 st. 6 — the signed posebna popisna lista for tuđa roba reaches its
+/// owner „најкасније у року од десет дана од дана на који је попис извршен“.
+pub const KONSIGNACIJA_ROK_DANA: i64 = 10;
+
+/// The rok for putting the signed konsignaciona popisna lista in the owner's
+/// hands, as `gggg-MM-dd` (req. 36).
+///
+/// **Anchored on the count date and on nothing else.** Čl. 2 st. 6 says „од дана
+/// на који је попис извршен“, so neither potpis moves it, the knjiženje does not
+/// move it, and today does not move it — a rok that slid with the app's clock
+/// would tell a shop that has already missed it that it has ten days left.
+///
+/// Computed the same way [`izvestaj_due`] is and refused the same way: an
+/// unreadable count date does not become a guessed rok, because this one ends in
+/// another person's hands and the shop plans a delivery around it.
+pub fn konsignacija_rok(datum_popisa: &str) -> Result<String, AppError> {
+    popis_datum(datum_popisa, "datum popisa")?
+        .checked_add(Duration::days(KONSIGNACIJA_ROK_DANA))
+        .and_then(iso_datum)
+        .ok_or_else(|| {
+            AppError::business(
+                "popis_rok_van_kalendara",
+                "Rok za dostavljanje potpisane popisne liste vlasniku tuđe robe izlazi iz \
+                 kalendara — proverite datum popisa.",
+            )
+        })
+}
+
 /// One date in, strictly `gggg-MM-dd` — exactly the shape every date column in
 /// the v20 schema is GLOB-checked into. Strict on purpose: '2027-3-31' and an
 /// RFC3339 stamp are both refused rather than truncated or repaired, because a
@@ -396,8 +582,9 @@ mod tests {
     use rusqlite::{params, Connection};
 
     use super::{
-        advance, book_quantities_released, book_quantities_visible, izvestaj_due, PopisEvent,
-        PopisStatus, PopisVrsta,
+        advance, book_quantities_released, book_quantities_visible, ensure_liste_kompletne,
+        izvestaj_due, konsignacija_rok, nedostajuce_liste, PopisEvent, PopisLista, PopisStatus,
+        PopisVrsta,
     };
     use crate::app_error::AppError;
     use crate::db::{test_database_path, Db};
@@ -468,21 +655,21 @@ mod tests {
         }
     }
 
-    /// The `'…'` tokens of a closed `popis_sessions` CHECK, read back off the
-    /// live schema rather than copied out of the migration source.
-    fn check_vocabulary(connection: &Connection, column: &str) -> Vec<String> {
+    /// The `'…'` tokens of a closed CHECK, read back off the live schema rather
+    /// than copied out of the migration source.
+    fn check_vocabulary(connection: &Connection, table: &str, column: &str) -> Vec<String> {
         let schema: String = connection
             .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'popis_sessions'",
-                [],
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
                 |row| row.get(0),
             )
-            .expect("popis_sessions schema should load");
+            .unwrap_or_else(|error| panic!("the {table} schema should load: {error}"));
 
         let opening = format!("CHECK ({column} IN (");
         let start = schema
             .find(&opening)
-            .unwrap_or_else(|| panic!("popis_sessions must carry a closed {column} CHECK"))
+            .unwrap_or_else(|| panic!("{table} must carry a closed {column} CHECK"))
             + opening.len();
         let rest = &schema[start..];
         let end = rest.find("))").expect("the CHECK should close");
@@ -633,7 +820,10 @@ mod tests {
                 .collect();
             modelled.sort();
 
-            assert_eq!(check_vocabulary(connection, "status"), modelled);
+            assert_eq!(
+                check_vocabulary(connection, "popis_sessions", "status"),
+                modelled
+            );
 
             for (index, status) in PopisStatus::ALL.into_iter().enumerate() {
                 seed_session(connection, 100 + index as i64, status);
@@ -965,7 +1155,10 @@ mod tests {
                 .collect();
             modelled.sort();
 
-            assert_eq!(check_vocabulary(connection, "vrsta"), modelled);
+            assert_eq!(
+                check_vocabulary(connection, "popis_sessions", "vrsta"),
+                modelled
+            );
 
             for (index, vrsta) in PopisVrsta::ALL.into_iter().enumerate() {
                 seed_session_of(connection, 400 + index as i64, vrsta, PopisStatus::Draft);
@@ -986,6 +1179,211 @@ mod tests {
                 "an unknown stored value must not resolve to a vrsta"
             );
         });
+    }
+
+    // ---------------------------------------------------------------------
+    // The posebne popisne liste (req. 36)
+    // ---------------------------------------------------------------------
+
+    /// The lista enum and the v20 `popis_lines.lista_vrsta` CHECK are one
+    /// vocabulary, pinned for the reason the two above are. Here the drift has its
+    /// own shape: a lista the engine stores but this enum cannot name is a
+    /// statutory list the module can never ask the shop for, and a lista this enum
+    /// names but the engine refuses is a list the shop is asked to fill and the
+    /// database throws away.
+    #[test]
+    fn the_lista_vocabulary_is_exactly_the_schema_check() {
+        with_test_database("popis_lista_vocabulary", |connection| {
+            let mut modelled: Vec<String> = PopisLista::ALL
+                .into_iter()
+                .map(|lista| lista.as_db_str().to_string())
+                .collect();
+            modelled.sort();
+
+            assert_eq!(
+                check_vocabulary(connection, "popis_lines", "lista_vrsta"),
+                modelled
+            );
+
+            for lista in PopisLista::ALL {
+                assert_eq!(
+                    PopisLista::from_db_str(lista.as_db_str()),
+                    Some(lista),
+                    "{lista:?} should survive the round trip through its stored value"
+                );
+                assert_eq!(
+                    serde_json::to_string(&lista).expect("a lista should serialize"),
+                    format!("\"{}\"", lista.as_db_str()),
+                    "{lista:?} must reach the frontend as its stored value"
+                );
+            }
+
+            assert!(
+                PopisLista::from_db_str("ostalo").is_none(),
+                "an unknown stored value must not resolve to a lista"
+            );
+        });
+    }
+
+    /// Req. 36 is a list of articles, not a taste in categories: each posebna lista
+    /// exists because one provision requires it. The pravni osnov is what the
+    /// refusals and the count sheet quote, so a lista citing the wrong article — or
+    /// none — would send the shop to the wrong provision.
+    #[test]
+    fn every_posebna_lista_names_the_article_that_requires_it() {
+        for (lista, osnov) in [
+            (PopisLista::Ostecena, "čl. 10 st. 3"),
+            (PopisLista::VanObjekta, "čl. 10 st. 4"),
+            (PopisLista::Gotovina, "čl. 11 st. 1"),
+            (PopisLista::Potrazivanja, "čl. 12 st. 2"),
+            (PopisLista::Konsignacija, "čl. 2 st. 5"),
+        ] {
+            assert!(
+                lista.posebna(),
+                "{lista:?} is one of the posebne popisne liste of req. 36"
+            );
+            assert!(
+                lista.pravni_osnov().contains(osnov),
+                "{lista:?} must cite {osnov}, cites „{}“",
+                lista.pravni_osnov()
+            );
+            assert!(
+                !lista.naziv().is_empty(),
+                "{lista:?} needs a name a shop can read"
+            );
+        }
+
+        assert!(
+            !PopisLista::Roba.posebna(),
+            "the ordinary lista is not one of the čl. 2 / čl. 10–12 posebne liste"
+        );
+        assert_eq!(
+            PopisLista::ALL.len(),
+            6,
+            "req. 36 names five posebne liste beside the ordinary one"
+        );
+    }
+
+    /// PoP čl. 2 st. 6 — „најкасније у року од десет дана од дана на који је попис
+    /// извршен“. Ten calendar days from the **count date**, which is the only
+    /// anchor the article gives: not the potpis, not the knjiženje and not today.
+    /// The cases cross a month end, a year end and a 29 February, so the ten are
+    /// calendar days and not „a week and a half“ of anything.
+    #[test]
+    fn the_konsignacija_copy_is_due_ten_days_after_the_count() {
+        for (datum_popisa, expected) in [
+            ("2026-12-31", "2027-01-10"),
+            ("2026-11-25", "2026-12-05"),
+            ("2028-02-20", "2028-03-01"),
+            ("2027-02-20", "2027-03-02"),
+        ] {
+            assert_eq!(
+                konsignacija_rok(datum_popisa)
+                    .unwrap_or_else(|error| panic!("{datum_popisa} should have a rok: {error}")),
+                expected,
+                "a popis taken on {datum_popisa}"
+            );
+        }
+    }
+
+    /// The same refusal discipline the izveštaj rok keeps, and for the same reason:
+    /// a date this module invents is one the shop will act on, and čl. 2 st. 6 puts
+    /// a signed lista in another owner's hands by a day certain.
+    #[test]
+    fn the_konsignacija_rok_refuses_a_date_it_cannot_read_or_reach() {
+        for (datum_popisa, code) in [
+            ("25.11.2026.", "popis_rok_neispravan_datum"),
+            ("2026-11-25T08:00:00Z", "popis_rok_neispravan_datum"),
+            ("2026-11-31", "popis_rok_neispravan_datum"),
+            ("", "popis_rok_neispravan_datum"),
+            ("9999-12-31", "popis_rok_van_kalendara"),
+        ] {
+            let error = konsignacija_rok(datum_popisa)
+                .expect_err("an unreadable or unreachable rok must not be returned as a rok");
+            assert_eq!(error.code(), code, "for „{datum_popisa}“");
+        }
+    }
+
+    /// Req. 36's actual bite. A posebna lista is required **where its category is
+    /// present**, and presence is a fact about the shop that no ledger holds —
+    /// nothing in the books says „we have damaged goods“ or „some of this stock
+    /// belongs to somebody else“. So the person taking the popis declares it, and
+    /// this is what makes the declaration binding: a category declared present
+    /// whose lista is empty comes back named, in the fixed order of the enum so a
+    /// caller can render it the same way twice.
+    #[test]
+    fn a_declared_category_with_an_empty_lista_is_missing() {
+        assert_eq!(
+            nedostajuce_liste(
+                &[
+                    PopisLista::Gotovina,
+                    PopisLista::Konsignacija,
+                    PopisLista::Ostecena
+                ],
+                &[PopisLista::Roba, PopisLista::Konsignacija],
+            ),
+            vec![PopisLista::Ostecena, PopisLista::Gotovina],
+            "only the declared categories with nothing on their lista are missing"
+        );
+    }
+
+    /// The two edges of the same rule, neither of which may drift. A shop with no
+    /// consignment goods owes no consignment lista — req. 36 says „where it
+    /// applies“, and a gate that demanded all six of everyone would be clicked past
+    /// by the second popis. And a category declared twice is one missing lista, not
+    /// two: the izveštaj gate's message is read by a person.
+    #[test]
+    fn an_undeclared_category_is_never_required() {
+        assert!(nedostajuce_liste(&[], &[PopisLista::Roba]).is_empty());
+        assert!(nedostajuce_liste(&[], &[]).is_empty());
+        assert!(
+            nedostajuce_liste(&[PopisLista::Roba, PopisLista::Roba], &[PopisLista::Roba])
+                .is_empty()
+        );
+        assert_eq!(
+            nedostajuce_liste(&[PopisLista::Roba, PopisLista::Roba], &[]),
+            vec![PopisLista::Roba]
+        );
+    }
+
+    /// The gate itself. Čl. 13 st. 1 has the izveštaj report the stvarno stanje of
+    /// the popis, so an izveštaj resting on a lista the shop said exists and never
+    /// filled reports a stanje that is not the shop's. The refusal names every
+    /// missing lista **and** the article behind it — „nešto nedostaje“ is not
+    /// something a shop owner can act on — and names nothing that is not missing.
+    #[test]
+    fn the_izvestaj_gate_refuses_a_declared_category_with_an_empty_lista() {
+        ensure_liste_kompletne(
+            &[PopisLista::Roba, PopisLista::Gotovina],
+            &[PopisLista::Roba, PopisLista::Gotovina],
+        )
+        .expect("declared categories that have lines pass the gate");
+        ensure_liste_kompletne(&[], &[]).expect("a popis that declared nothing owes no lista");
+
+        let error = ensure_liste_kompletne(
+            &[PopisLista::Roba, PopisLista::Gotovina, PopisLista::Ostecena],
+            &[PopisLista::Roba, PopisLista::Konsignacija],
+        )
+        .expect_err("an empty declared lista must stop the izveštaj");
+
+        assert_eq!(error.code(), "popis_prazna_prijavljena_lista");
+        let poruka = error.to_string();
+        for trazeno in [
+            "oštećena, zastarela i neupotrebljiva roba",
+            "čl. 10 st. 3",
+            "gotovina po apoenima",
+            "čl. 11 st. 1",
+            "čl. 13 st. 1",
+        ] {
+            assert!(
+                poruka.contains(trazeno),
+                "the refusal must name „{trazeno}“, said: {poruka}"
+            );
+        }
+        assert!(
+            !poruka.contains("roba u objektu") && !poruka.contains("konsignaciona"),
+            "a lista that is not missing must not be named, said: {poruka}"
+        );
     }
 
     /// Every spelling of „read the wall clock“ this codebase can reach. The first
