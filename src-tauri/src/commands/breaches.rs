@@ -525,6 +525,7 @@ fn validate(draft: BreachDraft, now: &str) -> Result<BreachDraft, AppError> {
 
     let delay_reason_required = delay_reason_required(
         saznanje,
+        draft.risk_outcome,
         draft.notify_decision,
         draft.poverenik_notified_at.as_deref(),
         now,
@@ -578,21 +579,30 @@ fn validate(draft: BreachDraft, now: &str) -> Result<BreachDraft, AppError> {
 /// od saznanja za povredu, dužan je da obrazloži razloge…“*
 ///
 /// St. 2 asks why the **st. 1** deadline was missed, so it can only bind where
-/// st. 1 bound. A recorded — and, above, reasoned — decision that the breach
-/// cannot produce a risk means st. 1 never attached and there is no missed
-/// deadline to explain. Every other state does owe the explanation once the
-/// window is spent, including the state where nothing has been decided at all:
-/// an undecided breach past 72 h is precisely *„nije postupio u tom roku“*.
+/// st. 1 bound. It takes BOTH halves of that to exempt a record: an assessment
+/// finding that the breach cannot produce a risk (so st. 1 never attached) AND
+/// the recorded — and, above, reasoned — decision not to notify. The decision
+/// alone is not a discharge; *„odlučili smo da ne obavestimo“* against an
+/// assessed rizik is the very state st. 2 exists to make the shop explain, and
+/// letting it out would produce a record that tells the Poverenik `notifiable`
+/// and „no justification owed“ in the same breath.
+///
+/// Every other state does owe the explanation once the window is spent,
+/// including the state where nothing has been assessed at all: an undecided
+/// breach past 72 h is precisely *„nije postupio u tom roku“*.
 ///
 /// The boundary is inclusive of the deadline — at saznanje + 72 h exactly the
 /// window is spent — and instants are compared parsed, never as strings.
 fn delay_reason_required(
     saznanje: OffsetDateTime,
+    risk_outcome: Option<RiskOutcome>,
     notify_decision: Option<NotifyDecision>,
     poverenik_notified_at: Option<&str>,
     now: &str,
 ) -> Result<bool, AppError> {
-    if notify_decision == Some(NotifyDecision::NeObavestiti) {
+    if notify_decision == Some(NotifyDecision::NeObavestiti)
+        && risk_outcome == Some(RiskOutcome::BezRizika)
+    {
         return Ok(false);
     }
 
@@ -740,6 +750,7 @@ fn with_derived(mut breach: Breach, now: &str) -> Result<Breach, AppError> {
 
     breach.delay_reason_required = delay_reason_required(
         saznanje,
+        breach.risk_outcome,
         breach.notify_decision,
         breach.poverenik_notified_at.as_deref(),
         now,
@@ -1046,6 +1057,50 @@ mod tests {
                 .expect("st. 2 explains a missed st. 1 deadline, and st. 1 never attached");
                 assert!(!not_notifiable.delay_reason_required);
                 assert_eq!(not_notifiable.notifiable, Some(false));
+
+                // The exemption reaches exactly that far. Where the assessment
+                // says rizik, st. 1 DID attach, and „odlučili smo da ne
+                // obavestimo“ is not a discharge of it — it is the very state
+                // st. 2 exists to make the shop explain.
+                let decided_against_despite_risk = update_breach(
+                    state,
+                    opened.id,
+                    BreachDraft {
+                        risk_outcome: Some(RiskOutcome::VisokRizik),
+                        notify_decision: Some(NotifyDecision::NeObavestiti),
+                        notify_obrazlozenje: Some(
+                            "Procenili smo da je incident interne prirode.".to_string(),
+                        ),
+                        ..minimal_draft()
+                    },
+                    NA_ROKU,
+                )
+                .expect_err("a decision not to notify does not undo an attached st. 1 duty");
+                assert_eq!(decided_against_despite_risk.code(), "validation_error");
+                assert!(
+                    decided_against_despite_risk
+                        .to_string()
+                        .contains("čl. 52 st. 2"),
+                    "the operator is told which stav is owed: {decided_against_despite_risk}"
+                );
+
+                // And an unassessed record is not an exemption either: „nije
+                // postupio u tom roku“ covers the shop that never decided.
+                let never_assessed = update_breach(
+                    state,
+                    opened.id,
+                    BreachDraft {
+                        risk_outcome: None,
+                        notify_decision: Some(NotifyDecision::NeObavestiti),
+                        notify_obrazlozenje: Some(
+                            "Još uvek utvrđujemo obim incidenta.".to_string(),
+                        ),
+                        ..minimal_draft()
+                    },
+                    NA_ROKU,
+                )
+                .expect_err("without an assessment nothing establishes that st. 1 never attached");
+                assert_eq!(never_assessed.code(), "validation_error");
 
                 // And notifying inside the window closes the question for good.
                 let in_time = update_breach(
