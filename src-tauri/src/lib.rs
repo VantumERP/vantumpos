@@ -254,7 +254,8 @@ pub fn run() {
             commands::breaches::breaches_list,
             commands::breaches::breaches_record,
             commands::breaches::breaches_update,
-            commands::breaches::breaches_notice
+            commands::breaches::breaches_notice,
+            commands::breaches::breaches_export_obrazac
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

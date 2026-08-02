@@ -34,12 +34,14 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::app_error::{AppError, CommandError};
-use crate::audit::{AuditAction, AuditDraft, AuditObjectType, AuditReason};
+use crate::audit::{AuditAction, AuditDraft, AuditObjectType, AuditReason, AuditRecipient};
 use crate::clock::utc_now;
-use crate::commands::audit::append_audit_event;
+use crate::commands::audit::{append_audit_event, record_audit, AuditEntry};
+use crate::commands::reports::ExportedFile;
+use crate::commands::settings::CompanySettings;
 use crate::legal::LegalNotice;
 use crate::state::AppState;
 
@@ -86,6 +88,21 @@ impl RiskOutcome {
 
     pub fn from_code(code: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|value| value.as_code() == code)
+    }
+
+    /// How the assessment reads on the Pravilnik 40/2019 obrazac — the statute's
+    /// own wording of the two thresholds, so the Poverenik reads the test he
+    /// applies rather than this app's shorthand for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BezRizika => {
+                "povreda ne može da proizvede rizik po prava i slobode fizičkih lica"
+            }
+            Self::Rizik => "povreda može da proizvede rizik po prava i slobode fizičkih lica",
+            Self::VisokRizik => {
+                "povreda može da proizvede visok rizik po prava i slobode fizičkih lica"
+            }
+        }
     }
 }
 
@@ -153,6 +170,24 @@ impl Cl53Izuzetak {
 
     pub fn from_code(code: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|value| value.as_code() == code)
+    }
+
+    /// Each exception as čl. 53 st. 3 states it, with its tačka — the obrazac
+    /// has to say which one was relied on, and a code says nothing to a reader.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PrimenjeneMereZastite => {
+                "primenjene su mere zaštite zbog kojih su podaci nerazumljivi neovlašćenim \
+                 licima (čl. 53 st. 3 t. 1)"
+            }
+            Self::NaknadneMere => {
+                "naknadno su preduzete mere kojima je otklonjen visok rizik (čl. 53 st. 3 t. 2)"
+            }
+            Self::NesrazmeranUtrosakVremenaISredstava => {
+                "obaveštavanje svakog lica zahtevalo bi nesrazmeran utrošak vremena i sredstava, \
+                 pa je dato javno obaveštenje (čl. 53 st. 3 t. 3)"
+            }
+        }
     }
 }
 
@@ -266,6 +301,14 @@ pub fn breaches_update(
 #[tauri::command]
 pub fn breaches_notice(state: State<'_, AppState>) -> Result<LegalNotice, CommandError> {
     notice(state.inner()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn breaches_export_obrazac(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<ExportedFile, CommandError> {
+    export_obrazac(state.inner(), id, &utc_now()?).map_err(Into::into)
 }
 
 /// Every recorded breach, newest saznanje first.
@@ -449,6 +492,328 @@ pub fn update_breach(
 pub fn notice(state: &AppState) -> Result<LegalNotice, AppError> {
     let profile = crate::commands::settings::load_shop_profile(state)?;
     Ok(crate::legal::breach_notification_missing(&profile))
+}
+
+// ---------------------------------------------------------------------------
+// The Pravilnik 40/2019 obrazac (req. 45)
+// ---------------------------------------------------------------------------
+
+/// Renders the prescribed obaveštenje for one record and writes it to
+/// `exports/`, ready to print, sign and file.
+///
+/// **There is no submission API and this must not grow one.** Pravilnik čl. 5
+/// is the whole filing route — *u pisanom obliku, neposredno ili putem pošte*,
+/// with a scanned copy to the Poverenik's mailbox as the alternative — so the
+/// deliverable is a document and the sending is the operator's act. The route
+/// is printed on the form itself, because a form that does not say how it is
+/// filed invites the assumption that the app filed it.
+///
+/// This is also the one place in this module that writes a čl. 48 st. 2
+/// **otkrivanje** line: reading the log is not a disclosure, and rendering the
+/// obrazac is — it is the copy that leaves the till, and the primalac is named.
+/// The line is written after the file exists, because an export that failed
+/// disclosed nothing.
+pub fn export_obrazac(state: &AppState, id: i64, now: &str) -> Result<ExportedFile, AppError> {
+    require_admin(state)?;
+
+    let stored = {
+        let connection = state.db().open()?;
+        load_breach(&connection, id)?
+    };
+    let breach = with_derived(stored, now)?;
+    let company = crate::commands::settings::load_company_settings(state)?;
+
+    let exported = super::campaigns::write_export(
+        state,
+        &format!("obrazac-povreda-podataka-{id}.html"),
+        &render_obrazac_html(&company, &breach),
+        1,
+    )?;
+
+    record_audit(
+        state,
+        AuditEntry {
+            action: AuditAction::Otkrivanje,
+            object_type: AuditObjectType::DataBreach,
+            object_id: id.to_string(),
+            reason_code: Some(AuditReason::BezbednosniIncident),
+            recipient: Some(AuditRecipient::Poverenik),
+            support_session_id: None,
+        },
+        now,
+    )?;
+
+    Ok(exported)
+}
+
+/// The obrazac annexed to Pravilnik 40/2019, verbatim: five numbered sections in
+/// the prescribed order, the sub-fields of sections 1 and 2 with the pravilnik's
+/// own labels, then the „Prilog:“ slot and the mesto/datum + Ime i prezime +
+/// Potpis block it ends with.
+///
+/// **Every value on it is a value the shop holds.** Section 2 (4) asks for the
+/// number of *podaci* whose security was breached and this record holds a number
+/// of *lica* — a different count — so that slot stays empty for the operator
+/// rather than being answered with the wrong number; the same goes for section 1
+/// (3), which asks for a lice za zaštitu podataka this shop is not required to
+/// appoint (čl. 56 st. 2) and has not configured. The place, the date and the
+/// signer's name are left blank too: they are written when the form is signed,
+/// and an unsigned form must not assert a signing date that has not happened or
+/// a signatory who has not agreed to be one.
+///
+/// The countdown cites **Pravilnik čl. 3**, which restates the čl. 52 st. 1
+/// deadline as a flat 72 h od saznanja without the statute's *„bez nepotrebnog
+/// odlaganja“* softener — and the softener is deliberately nowhere on the page,
+/// because printed beside a deadline it reads as permission to miss it.
+pub fn render_obrazac_html(company: &CompanySettings, breach: &Breach) -> String {
+    let mut html = String::new();
+    html.push_str("<!doctype html>\n<html lang=\"sr-Latn\">\n<head>\n");
+    html.push_str("<meta charset=\"utf-8\">\n");
+    html.push_str("<title>Obaveštenje o povredi podataka o ličnosti</title>\n");
+    html.push_str(
+        "<style>\n\
+         @page { margin: 1.2cm }\n\
+         body { font-family: sans-serif; color: #111; margin: 1.2cm; line-height: 1.45; }\n\
+         h1 { font-size: 1.3rem; text-align: center; }\n\
+         h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }\n\
+         .meta { color: #444; font-size: 0.9rem; }\n\
+         .rok { border: 1px solid #999; padding: 0.4rem 0.6rem; }\n\
+         table { border-collapse: collapse; width: 100%; }\n\
+         th, td { border: 1px solid #999; padding: 0.3rem 0.5rem; text-align: left; \
+         vertical-align: top; }\n\
+         th { width: 40%; font-weight: normal; }\n\
+         .unos { border: 1px solid #999; padding: 0.5rem; min-height: 3rem; }\n\
+         .potpis { margin-top: 2.5rem; text-align: right; }\n\
+         .potpis p { margin: 0.35rem 0; }\n\
+         </style>\n</head>\n<body>\n",
+    );
+
+    html.push_str("<h1>OBAVEŠTENJE O POVREDI PODATAKA O LIČNOSTI</h1>\n");
+    html.push_str(
+        "<p class=\"meta\">Obrazac iz člana 2 Pravilnika o obrascu obaveštenja o povredi \
+         podataka o ličnosti („Službeni glasnik RS“, broj 40/2019).</p>\n",
+    );
+
+    let istekao = if breach.delay_reason_required {
+        " Rok je istekao — uz obaveštenje se navode razlozi zbog kojih nije postupljeno u tom \
+         roku (ZZPL čl. 52 st. 2)."
+    } else {
+        ""
+    };
+    html.push_str(&format!(
+        "<p class=\"rok\"><strong>Rok:</strong> obaveštenje se dostavlja Povereniku u roku od \
+         72 časa od saznanja za povredu (Pravilnik 40/2019 čl. 3). Saznanje: {}. Rok ističe: \
+         {}.{istekao}</p>\n",
+        escape_html(&instant_for_print(&breach.saznanje_at)),
+        escape_html(&instant_for_print(&breach.rok_obavestavanja_istice_at)),
+    ));
+    html.push_str(
+        "<p class=\"meta\"><strong>Način dostavljanja (Pravilnik 40/2019 čl. 5):</strong> \
+         u pisanom obliku, neposredno ili putem pošte; skenirani primerak može da se dostavi \
+         na povredapodataka@poverenik.rs. Program ne dostavlja obaveštenje — obrazac se \
+         štampa, potpisuje i dostavlja.</p>\n",
+    );
+
+    // 1) Podaci o rukovaocu — three sub-fields.
+    html.push_str("<h2>1) Podaci o rukovaocu</h2>\n<table>\n");
+    html.push_str(&obrazac_row(
+        "(1) naziv rukovaoca",
+        Some(company.shop_name.as_str()),
+    ));
+    html.push_str(&obrazac_row(
+        "(2) adresa/sedište",
+        Some(company.address.as_str()),
+    ));
+    html.push_str(&obrazac_row(
+        "(3) ime i kontakt podaci lica za zaštitu podataka o ličnosti rukovaoca ili informacije \
+         o drugom načinu na koji se mogu dobiti podaci o povredi",
+        None,
+    ));
+    html.push_str("</table>\n");
+
+    // 2) Podaci o povredi podataka — five sub-fields.
+    html.push_str("<h2>2) Podaci o povredi podataka</h2>\n<table>\n");
+    html.push_str(&obrazac_row(
+        "(1) opis prirode povrede podataka, uključujući okolnosti koje se odnose na povredu",
+        Some(breach.opis.as_str()),
+    ));
+    html.push_str(&obrazac_row(
+        "(2) vrsta podataka o ličnosti",
+        breach.kategorije_podataka.as_deref(),
+    ));
+    let broj_lica = breach.broj_lica.map(|broj| broj.to_string());
+    html.push_str(&obrazac_row(
+        "(3) broj lica na koja se podaci odnose",
+        broj_lica.as_deref(),
+    ));
+    html.push_str(&obrazac_row(
+        "(4) broj podataka o ličnosti čija je bezbednost povređena",
+        None,
+    ));
+    let povreda_at = breach.occurred_at.as_deref().map(instant_for_print);
+    html.push_str(&obrazac_row(
+        "(5) datum i vreme povrede bezbednosti podataka (ukoliko je poznat, ili prema proceni)",
+        povreda_at.as_deref(),
+    ));
+    html.push_str("</table>\n");
+
+    // 3) and 4) — the other two čl. 52 st. 6 elements, as free text.
+    html.push_str("<h2>3) Opis mogućih posledica povrede</h2>\n");
+    html.push_str(&format!(
+        "<p class=\"unos\">{}</p>\n",
+        escape_html(&breach.posledice)
+    ));
+    html.push_str(
+        "<h2>4) Opis mera koje je rukovalac preduzeo ili čije je preduzimanje predloženo</h2>\n",
+    );
+    html.push_str(&format!(
+        "<p class=\"unos\">{}</p>\n",
+        escape_html(&breach.mere)
+    ));
+
+    // 5) Ostali podaci — everything else the record holds that bears on this
+    // notification. A fact the record does not hold raises no row: an empty
+    // labelled slot reads as an unanswered question, and these are not questions
+    // the obrazac asks.
+    html.push_str("<h2>5) Ostali podaci od značaja za obaveštavanje o povredi podataka</h2>\n");
+    html.push_str("<table>\n");
+    html.push_str(&obrazac_row(
+        "Datum i vreme saznanja za povredu (ZZPL čl. 52 st. 1)",
+        Some(instant_for_print(&breach.saznanje_at).as_str()),
+    ));
+    html.push_str(&obrazac_row(
+        "Rok za obaveštavanje Poverenika (Pravilnik 40/2019 čl. 3)",
+        Some(instant_for_print(&breach.rok_obavestavanja_istice_at).as_str()),
+    ));
+    for (label, value) in [
+        ("Datum otkrivanja povrede", breach.discovered_at.as_deref()),
+        (
+            "Obrađivač je saznao za povredu (ZZPL čl. 52 st. 3)",
+            breach.obradjivac_saznanje_at.as_deref(),
+        ),
+        (
+            "Rukovalac obavešten od strane obrađivača (ZZPL čl. 52 st. 3)",
+            breach.rukovalac_obavesten_at.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            html.push_str(&obrazac_row(label, Some(instant_for_print(value).as_str())));
+        }
+    }
+    if let Some(outcome) = breach.risk_outcome {
+        html.push_str(&obrazac_row(
+            "Procena rizika (ZZPL čl. 52 st. 1 i čl. 53 st. 1)",
+            Some(outcome.label()),
+        ));
+    }
+    if let Some(notified) = breach.poverenik_notified_at.as_deref() {
+        html.push_str(&obrazac_row(
+            "Obaveštenje dostavljeno Povereniku",
+            Some(instant_for_print(notified).as_str()),
+        ));
+    }
+    if breach.delay_reason_required || breach.delay_reason.is_some() {
+        html.push_str(&obrazac_row(
+            "Razlozi zbog kojih obaveštenje nije dostavljeno u roku (ZZPL čl. 52 st. 2)",
+            breach.delay_reason.as_deref(),
+        ));
+    }
+    if let Some(obavestena) = breach.lica_obavestena {
+        let value = if obavestena {
+            match breach.lica_obavestena_at.as_deref() {
+                Some(at) => format!("da, dana {}", instant_for_print(at)),
+                None => "da".to_string(),
+            }
+        } else {
+            "ne".to_string()
+        };
+        html.push_str(&obrazac_row(
+            "Lica na koja se podaci odnose obaveštena (ZZPL čl. 53 st. 1)",
+            Some(value.as_str()),
+        ));
+    }
+    if let Some(izuzetak) = breach.cl53_izuzetak {
+        html.push_str(&obrazac_row(
+            "Izuzetak od obaveštavanja lica (ZZPL čl. 53 st. 3)",
+            Some(izuzetak.label()),
+        ));
+    }
+    if let Some(obrazlozenje) = breach.cl53_izuzetak_obrazlozenje.as_deref() {
+        html.push_str(&obrazac_row(
+            "Obrazloženje izuzetka (ZZPL čl. 53 st. 3)",
+            Some(obrazlozenje),
+        ));
+    }
+    html.push_str("</table>\n");
+
+    // Pravilnik čl. 4 st. 1 makes the čl. 47 evidencija a mandatory attachment,
+    // so the Prilog slot names it rather than leaving the operator to guess.
+    html.push_str(
+        "<p><strong>Prilog:</strong> evidencija radnji obrade koja se odnosi na podatke koji su \
+         bili predmet povrede, a koju rukovalac vodi u skladu sa članom 47 Zakona \
+         (Pravilnik 40/2019 čl. 4 st. 1).</p>\n",
+    );
+
+    html.push_str("<div class=\"potpis\">\n");
+    html.push_str("<p>U ______________________________, dana ______________________. godine</p>\n");
+    html.push_str("<p>Za RUKOVAOCA</p>\n");
+    html.push_str("<p>______________________________</p>\n");
+    html.push_str("<p>Ime i prezime</p>\n");
+    html.push_str("<p>______________________________</p>\n");
+    html.push_str("<p>Potpis</p>\n");
+    html.push_str("</div>\n");
+
+    html.push_str("</body>\n</html>\n");
+    html
+}
+
+/// One prescribed field and its answer. `None` prints an empty cell — a slot the
+/// operator fills in by hand, never a value this app invented for it.
+fn obrazac_row(label: &str, value: Option<&str>) -> String {
+    format!(
+        "<tr><th>{}</th><td>{}</td></tr>\n",
+        escape_html(label),
+        value.map(escape_html).unwrap_or_default()
+    )
+}
+
+/// `01.08.2026. 09:00 (UTC)` — the written Serbian form, resolved to UTC so that
+/// an instant recorded with an offset and the same instant recorded as `Z` read
+/// identically on paper. The zone is named rather than assumed.
+///
+/// Anything unparseable prints as stored: every column this renderer reads was
+/// parsed on the way in, and swallowing a value on a form filed with a regulator
+/// would be worse than showing it raw.
+fn instant_for_print(value: &str) -> String {
+    let Ok(parsed) = OffsetDateTime::parse(value.trim(), &Rfc3339) else {
+        return value.trim().to_string();
+    };
+    let utc = parsed.to_offset(UtcOffset::UTC);
+    format!(
+        "{:02}.{:02}.{:04}. {:02}:{:02} (UTC)",
+        utc.day(),
+        u8::from(utc.month()),
+        utc.year(),
+        utc.hour(),
+        utc.minute()
+    )
+}
+
+/// Escapes the five HTML-significant characters, so an incident description that
+/// contains `<` or `&` can never break out of the document.
+fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -798,9 +1163,10 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        list_breaches, record_breach, update_breach, Breach, BreachDraft, Cl53Izuzetak,
-        NotifyDecision, RiskOutcome,
+        export_obrazac, list_breaches, record_breach, render_obrazac_html, update_breach, Breach,
+        BreachDraft, Cl53Izuzetak, NotifyDecision, RiskOutcome,
     };
+    use crate::commands::settings::CompanySettings;
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
 
@@ -1445,6 +1811,413 @@ mod tests {
                         .len(),
                     RiskOutcome::ALL.len() * NotifyDecision::ALL.len() * Cl53Izuzetak::ALL.len(),
                 );
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 7 — the Pravilnik 40/2019 obrazac (req. 45)
+    // -----------------------------------------------------------------------
+
+    /// The five prescribed section headings, verbatim, in the order the obrazac
+    /// annexed to Pravilnik 40/2019 puts them in.
+    const SEKCIJE: [&str; 5] = [
+        "1) Podaci o rukovaocu",
+        "2) Podaci o povredi podataka",
+        "3) Opis mogućih posledica povrede",
+        "4) Opis mera koje je rukovalac preduzeo ili čije je preduzimanje predloženo",
+        "5) Ostali podaci od značaja za obaveštavanje o povredi podataka",
+    ];
+
+    fn company() -> CompanySettings {
+        CompanySettings {
+            shop_name: "Butik Milena preduzetnik".to_string(),
+            address: "Njegoševa 12, Beograd".to_string(),
+            pib: "111222333".to_string(),
+            ..CompanySettings::default()
+        }
+    }
+
+    /// The value the obrazac prints for one prescribed field — the contents of
+    /// the cell that follows the field's label.
+    fn polje(html: &str, label: &str) -> String {
+        let at = html
+            .find(label)
+            .unwrap_or_else(|| panic!("the obrazac must carry the field {label:?}"));
+        let rest = &html[at + label.len()..];
+        let cell = rest
+            .find("<td")
+            .unwrap_or_else(|| panic!("the field {label:?} must be followed by its cell"));
+        let start = cell
+            + rest[cell..]
+                .find('>')
+                .expect("the opening cell tag must close")
+            + 1;
+        let end = start
+            + rest[start..]
+                .find("</td>")
+                .expect("the cell must close")
+                .to_owned();
+        rest[start..end].trim().to_string()
+    }
+
+    /// Asserts the markers appear in the document in exactly this order.
+    fn redom(html: &str, markers: &[&str]) {
+        let mut previous = 0usize;
+        for marker in markers {
+            let at = html
+                .find(marker)
+                .unwrap_or_else(|| panic!("the obrazac must carry {marker:?}"));
+            assert!(
+                at >= previous,
+                "{marker:?} is out of order — it appears at {at}, before position {previous}"
+            );
+            previous = at;
+        }
+    }
+
+    /// A record with something in every column the obrazac can draw on, so the
+    /// renderer is exercised at its widest.
+    fn full_draft() -> BreachDraft {
+        BreachDraft {
+            occurred_at: Some("2026-07-31T18:20:00Z".to_string()),
+            discovered_at: Some("2026-08-01T08:40:00Z".to_string()),
+            obradjivac_saznanje_at: Some("2026-08-01T07:00:00Z".to_string()),
+            rukovalac_obavesten_at: Some("2026-08-01T08:55:00Z".to_string()),
+            broj_lica: Some(37),
+            kategorije_podataka: Some("Ime i prezime, broj telefona".to_string()),
+            risk_outcome: Some(RiskOutcome::VisokRizik),
+            notify_decision: Some(NotifyDecision::Obavestiti),
+            notify_obrazlozenje: Some("Povreda može da ugrozi prava kupaca.".to_string()),
+            poverenik_notified_at: Some(PRE_ROKA.to_string()),
+            lica_obavestena: Some(false),
+            cl53_izuzetak: Some(Cl53Izuzetak::PrimenjeneMereZastite),
+            cl53_izuzetak_obrazlozenje: Some(
+                "Podaci na uređaju su bili šifrovani, a ključ nije bio na njemu.".to_string(),
+            ),
+            ..minimal_draft()
+        }
+    }
+
+    /// Req. 45 — the obrazac is reproduced **verbatim** in its five-section
+    /// structure. Not a summary of it, not a re-ordering of it: the Poverenik
+    /// receives the form his own pravilnik prescribes, with the record's answers
+    /// in the prescribed slots.
+    #[test]
+    fn the_obrazac_renders_all_five_prescribed_sections_in_order() {
+        with_state(
+            "the_obrazac_renders_all_five_prescribed_sections_in_order",
+            |state| {
+                sign_in_admin(state);
+                let breach =
+                    record_breach(state, full_draft(), SAZNANJE).expect("the record should open");
+                let html = render_obrazac_html(&company(), &breach);
+
+                redom(&html, &SEKCIJE);
+
+                // Section 1 — three sub-fields, and the two the shop's own
+                // settings answer are answered.
+                redom(
+                    &html,
+                    &[
+                        "1) Podaci o rukovaocu",
+                        "(1) naziv rukovaoca",
+                        "(2) adresa/sedište",
+                        "(3) ime i kontakt podaci lica za zaštitu podataka o ličnosti",
+                        "2) Podaci o povredi podataka",
+                    ],
+                );
+                assert_eq!(polje(&html, "(1) naziv rukovaoca"), company().shop_name);
+                assert_eq!(polje(&html, "(2) adresa/sedište"), company().address);
+
+                // Section 2 — five sub-fields, in the prescribed order.
+                redom(
+                    &html,
+                    &[
+                        "2) Podaci o povredi podataka",
+                        "(1) opis prirode povrede podataka",
+                        "(2) vrsta podataka o ličnosti",
+                        "(3) broj lica na koja se podaci odnose",
+                        "(4) broj podataka o ličnosti čija je bezbednost povređena",
+                        "(5) datum i vreme povrede bezbednosti podataka",
+                        "3) Opis mogućih posledica povrede",
+                    ],
+                );
+                assert_eq!(
+                    polje(&html, "(1) opis prirode povrede podataka"),
+                    breach.opis
+                );
+                assert_eq!(
+                    polje(&html, "(2) vrsta podataka o ličnosti"),
+                    "Ime i prezime, broj telefona"
+                );
+                assert_eq!(polje(&html, "(3) broj lica na koja se podaci odnose"), "37");
+                assert_eq!(
+                    polje(&html, "(5) datum i vreme povrede bezbednosti podataka"),
+                    "31.07.2026. 18:20 (UTC)",
+                    "the incident's own instant, not saznanje"
+                );
+
+                // Sections 3 and 4 are the other two čl. 52 st. 6 elements.
+                assert!(html.contains(&breach.posledice), "posledice");
+                assert!(html.contains(&breach.mere), "preduzete mere");
+
+                // Section 5 carries what st. 7 needs and section 2 has no slot
+                // for: the saznanje anchor and the čl. 53 block.
+                redom(
+                    &html,
+                    &[
+                        "5) Ostali podaci od značaja za obaveštavanje o povredi podataka",
+                        "Datum i vreme saznanja za povredu",
+                        "Lica na koja se podaci odnose obaveštena",
+                        "Izuzetak od obaveštavanja lica",
+                    ],
+                );
+                assert_eq!(
+                    polje(&html, "Datum i vreme saznanja za povredu"),
+                    "01.08.2026. 09:00 (UTC)"
+                );
+            },
+        );
+    }
+
+    /// Req. 45 — the form ends with the „Prilog:“ slot and the mesto/datum +
+    /// Ime i prezime + Potpis block, in that order and with nothing after it.
+    ///
+    /// The Prilog is not decoration: Pravilnik čl. 4 st. 1 makes the čl. 47
+    /// evidencija radnji obrade a **mandatory** attachment, so the slot names
+    /// what has to travel with the form.
+    #[test]
+    fn the_obrazac_ends_with_the_prilog_and_the_signature_block() {
+        with_state(
+            "the_obrazac_ends_with_the_prilog_and_the_signature_block",
+            |state| {
+                sign_in_admin(state);
+                let breach = record_breach(state, minimal_draft(), SAZNANJE)
+                    .expect("the record should open");
+                let html = render_obrazac_html(&company(), &breach);
+
+                redom(
+                    &html,
+                    &[
+                        "5) Ostali podaci od značaja za obaveštavanje o povredi podataka",
+                        "Prilog:",
+                        "evidencija radnji obrade",
+                        "čl. 4 st. 1",
+                        ", dana ",
+                        ". godine",
+                        "Za RUKOVAOCA",
+                        "Ime i prezime",
+                        "Potpis",
+                    ],
+                );
+
+                let after =
+                    &html[html.find("Potpis").expect("the signature line") + "Potpis".len()..];
+                for section in SEKCIJE {
+                    assert!(
+                        !after.contains(section),
+                        "nothing of the form follows Potpis, found {section:?}"
+                    );
+                }
+
+                // The signer writes the place, the date and the name by hand —
+                // an unsigned form must not assert a signing date that has not
+                // happened, and the person who signs za rukovaoca is not
+                // necessarily whoever is logged in.
+                assert_eq!(
+                    html.matches("Ime i prezime").count(),
+                    1,
+                    "„Ime i prezime“ belongs to the signature block and to nothing else"
+                );
+            },
+        );
+    }
+
+    /// Pravilnik 40/2019 čl. 3 restates the čl. 52 st. 1 deadline as a **flat**
+    /// 72 h od saznanja, without the statute's *„bez nepotrebnog odlaganja, ili,
+    /// ako je to moguće“* softener. That is the article an in-app countdown
+    /// cites, and the softener must not travel beside it — a form that prints
+    /// both tells the shop the deadline is negotiable.
+    #[test]
+    fn the_seventy_two_hour_countdown_cites_pravilnik_cl_3() {
+        with_state(
+            "the_seventy_two_hour_countdown_cites_pravilnik_cl_3",
+            |state| {
+                sign_in_admin(state);
+                let opened = record_breach(state, minimal_draft(), SAZNANJE)
+                    .expect("the record should open");
+                let html = render_obrazac_html(&company(), &opened);
+
+                let rok = html
+                    .lines()
+                    .find(|line| line.contains("72 časa"))
+                    .expect("the obrazac states the deadline");
+                assert!(
+                    rok.contains("Pravilnik") && rok.contains("čl. 3"),
+                    "the countdown cites its own source: {rok}"
+                );
+                assert!(
+                    rok.contains("04.08.2026. 09:00 (UTC)"),
+                    "and prints saznanje + 72 h as an instant: {rok}"
+                );
+                assert!(
+                    !html.contains("bez nepotrebnog odlaganja"),
+                    "čl. 3 carries no softener and neither does the countdown"
+                );
+
+                // Past the deadline the st. 2 explanation travels on the form
+                // itself, in the section that has room for it.
+                let late = update_breach(
+                    state,
+                    opened.id,
+                    BreachDraft {
+                        delay_reason: Some(
+                            "Povredu smo utvrdili u petak uveče, a obim tek posle vikenda."
+                                .to_string(),
+                        ),
+                        ..minimal_draft()
+                    },
+                    NA_ROKU,
+                )
+                .expect("with the justification supplied the record saves");
+                let late_html = render_obrazac_html(&company(), &late);
+                assert!(late.delay_reason_required);
+                assert!(
+                    late_html.contains("čl. 52 st. 2"),
+                    "the late form names the stav that asks for the explanation"
+                );
+                assert!(
+                    late_html.contains(late.delay_reason.as_deref().expect("razlog")),
+                    "and carries the explanation itself"
+                );
+            },
+        );
+    }
+
+    /// The obrazac is a statement to the regulator, so every value on it has to
+    /// be a value the shop actually holds. Two slots have no counterpart in this
+    /// record and must stay empty for the operator to complete by hand — and
+    /// **(4) broj podataka** must never be filled from **(3) broj lica**: they
+    /// are different counts, and answering one with the other is a false
+    /// statement to the Poverenik.
+    ///
+    /// There is no roster anywhere: the form asks for a count of the individuals
+    /// and this record holds a count.
+    #[test]
+    fn the_obrazac_prints_no_field_the_record_does_not_hold() {
+        with_state(
+            "the_obrazac_prints_no_field_the_record_does_not_hold",
+            |state| {
+                sign_in_admin(state);
+                let full =
+                    record_breach(state, full_draft(), SAZNANJE).expect("the record should open");
+                let html = render_obrazac_html(&company(), &full);
+
+                assert_eq!(polje(&html, "(3) broj lica na koja se podaci odnose"), "37");
+                assert_eq!(
+                    polje(&html, "(4) broj podataka o ličnosti čija je bezbednost povređena"),
+                    "",
+                    "a count of records is not a count of people and the record holds no such count"
+                );
+                assert_eq!(
+                    polje(&html, "(3) ime i kontakt podaci lica za zaštitu podataka o ličnosti"),
+                    "",
+                    "no lice za zaštitu podataka is configured, so the slot is left to be filled in"
+                );
+
+                // A record opened with nothing but the three st. 6 elements
+                // leaves every optional slot empty rather than inventing a zero,
+                // a date or a risk assessment nobody made.
+                let minimal = record_breach(state, minimal_draft(), SAZNANJE)
+                    .expect("a minimal record should open");
+                let bare = render_obrazac_html(&company(), &minimal);
+                for label in [
+                    "(2) vrsta podataka o ličnosti",
+                    "(3) broj lica na koja se podaci odnose",
+                    "(4) broj podataka o ličnosti čija je bezbednost povređena",
+                    "(5) datum i vreme povrede bezbednosti podataka",
+                ] {
+                    assert_eq!(
+                        polje(&bare, label),
+                        "",
+                        "{label:?} has no answer in the record and must print none"
+                    );
+                }
+                for absent in ["Procena rizika", "Izuzetak od obaveštavanja lica"] {
+                    assert!(
+                        !bare.contains(absent),
+                        "{absent:?} was never recorded, so the form does not raise it"
+                    );
+                }
+
+                // No submission API exists (req. 45) — the form says how it is
+                // actually filed (Pravilnik čl. 5) and the app never sends it.
+                assert!(
+                    html.contains("Pravilnik 40/2019 čl. 5")
+                        && html.contains("povredapodataka@poverenik.rs"),
+                    "the filing route is on the form because there is no other one"
+                );
+            },
+        );
+    }
+
+    /// The obrazac is the disclosure that leaves the till, so it — and not the
+    /// panel that merely displays the log — is where the čl. 48 st. 2
+    /// **otkrivanje** line belongs, naming the Poverenik as the primalac. And
+    /// like every other verb on this record it is admin-only (req. 48).
+    #[test]
+    fn the_export_records_the_cl_48_otkrivanje_line_and_is_admin_only() {
+        with_state(
+            "the_export_records_the_cl_48_otkrivanje_line_and_is_admin_only",
+            |state| {
+                let admin_id = sign_in_admin(state);
+                let breach =
+                    record_breach(state, full_draft(), SAZNANJE).expect("the record should open");
+
+                let exported =
+                    export_obrazac(state, breach.id, SAZNANJE).expect("the obrazac should render");
+                let written =
+                    std::fs::read_to_string(&exported.path).expect("the file should be written");
+                std::fs::remove_file(&exported.path).expect("the export should be removable");
+
+                assert_eq!(exported.mime_type, "text/html");
+                for section in SEKCIJE {
+                    assert!(written.contains(section), "{section:?} reached the file");
+                }
+
+                let rows: Vec<String> = audit_table_text(state)
+                    .lines()
+                    .map(str::to_string)
+                    .collect();
+                let disclosure = rows.last().expect("the export writes a line").clone();
+                assert!(
+                    disclosure.contains("|otkrivanje|data_breach|"),
+                    "čl. 48 st. 2: what was done and to which object: {disclosure}"
+                );
+                assert!(
+                    disclosure.contains(&format!("|data_breach|{}|", breach.id)),
+                    "referenced by opaque id: {disclosure}"
+                );
+                assert!(
+                    disclosure.contains("|poverenik|"),
+                    "čl. 48 st. 2 primalac: {disclosure}"
+                );
+                assert!(
+                    disclosure.contains(&format!("|{admin_id}|")),
+                    "čl. 48 st. 2 identitet lica: {disclosure}"
+                );
+                for forbidden in [breach.opis.as_str(), breach.posledice.as_str()] {
+                    assert!(
+                        !audit_table_text(state).contains(forbidden),
+                        "the incident prose never follows the export into audit_events"
+                    );
+                }
+
+                sign_in_cashier(state);
+                let refused = export_obrazac(state, breach.id, SAZNANJE)
+                    .expect_err("a kasir may not export the obrazac");
+                assert_eq!(refused.code(), "forbidden");
             },
         );
     }
