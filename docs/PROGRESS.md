@@ -485,6 +485,115 @@ Net **+9 cargo / +7 bun**. Latest migration: **v18** — this batch adds none.
 
 ---
 
+### ZZPL fix batch — final gate run and closing audit (2026-08-02)
+
+`4fbe147` (D2–D4) landed without a gate table, so the counts recorded immediately above are two cargo
+tests behind the tree. This section carries the true figures and the closing audit of the whole ZZPL
+effort — SW-10, SW-13, SW-17 and the generated čl. 47 evidencija radnji obrade that SW-17 depends on.
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **407 passed** / 0 failed, 28 files | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **672 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 670 — `4fbe147` added two) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Against the ZZPL-trio plan baseline (`1216194` — cargo **558**, bun **359**, migration **v17**) the whole
+effort is net **+114 cargo / +48 bun**. Latest migration: **v18**, and the fix batch adds none.
+
+**What the fix batch closed.** Four defects, each one a document asserting behaviour the code did not
+have, and in each case a guard that could not see it because nothing read that line.
+
+| # | Closed | Commit |
+|---|---|---|
+| D1 | Req. 6 and req. 22 — the rok čuvanja is a **setting**, not a promise. `AdjustableClass` + `retention_list_policies` / `retention_extend_policy` + „Rokovi čuvanja“ in Podešavanja, with the čl. 47 register regenerated in the same call so req. 22's third limb lands immediately | `0ca0f90` |
+| D2 | The register re-introduced the wrong offence tačka for `legal.rs::preraspodela_caps_exceeded`. čl. 57 and čl. 60 sit in **čl. 274 st. 1 tač. 4**; tač. 3 is the čl. 53 offence. The preduzetnik amount is identical either way, so no figure guard could ever have caught it | `4fbe147` |
+| D3 | 26 Serbian quotations in the register opened with „ and closed with an ASCII mark. All closed, and `no_compliance_prose_closes_a_serbian_quotation_with_an_ascii_quote` now reads every document this crate embeds plus the stored `napomena` strings | `4fbe147` |
+| D4 | The register asserted SW-14's raw punch events are purged on period close. `draft_purge_eligible` is a **gate, not a sweep**, with no production caller; the row now says so, and `no_retention_row_promises_a_purge_no_job_performs` reads the register as well as the čl. 23 notice | `4fbe147` |
+| — | Earlier in the same effort: the čl. 23 notice's class-B retention row, which promised a deletion nothing performs | `0604420` |
+
+**Closing audit — findings, honestly stated.**
+
+1. **`legal.rs` guard integrity: intact.** Nine `pub fn … -> LegalNotice` functions exist and no
+   `LegalNotice` is constructed anywhere else in the crate. All nine appear in `all_notices`, all nine
+   appear in the duplicated hand-written list inside
+   `every_notice_function_is_enumerated_in_the_guard`, and the asserted count is **9**. The forbidden-
+   substring, UNSET and ZEOR guards therefore reach every notice.
+2. **One operator- or employee-facing document still prints a pravno-lice fine band.**
+   `docs/compliance/obavestenje-zaposlenima.md` header. It is mitigated — the preduzetnik tier is printed
+   beside it with the correct stav, and the sentence says the amount depends on the employer's legal form
+   — but it remains the only such document with no guard, while its sibling
+   `evidencija-obrade-cl47.md` is pinned by `the_cl_47_record_prints_only_the_preduzetnik_fine_tier`.
+   Already disclosed above; restated here because the closing audit confirmed it is the **only** one.
+3. **The generated čl. 47 register does not over-claim.** `cl47::mere_zastite` reads the backup settings
+   and states in both directions whether encryption and automatic copies are actually in force;
+   `cl47::rok_cuvanja` reads `retention_policies` at generation time, so the register cannot print a
+   period the till does not apply; the two `prenos` prompts deliberately refuse a flat *„ne“* the program
+   cannot verify. `evidencija_povreda` and `tehnicka_podrska` both say plainly that no rok is configured
+   and that nothing is discarded until one is.
+
+**Still open — by requirement number in `docs/REMAINING-SW-VERIFIED-RULES.md` §4.**
+
+Previously disclosed, unchanged:
+
+- **Req. 47 (SW-17)** — the obrađivač→rukovalac breach leg is not built. The row can hold both instants;
+  nothing produces the vendor-side one. §6 R-3 is the question behind it.
+- **Req. 49 (SW-17)** — neither half is built: there is no breach-log retention class in
+  `RecordClass` and no redaction path, so the row is simply kept. The heading above called this „the
+  redaction half“; both halves are open.
+- **SW-14 req. 28** — remote-support masking of the absence-reason column. Its stated dependency
+  (SW-10) has landed, so nothing blocks it.
+- **SW-2** — backup encryption is opt-in, so the čl. 50 st. 2 tač. 1 measure is available rather than in
+  force. Register row 8 and `cl47::mere_zastite` both say so.
+- **§6 R-9** — which article of the ZZPL nadzor chapter carries the opomena and the nalog. Only the
+  verified half (*no prekršaj is prescribed for čl. 50*) is asserted anywhere.
+
+Found by this closing audit and **not previously disclosed**:
+
+- **Req. 26 (SW-13), ledger half.** Per-category retention floors are enforced in code for the seven
+  `RecordClass` variants, and personnel correctly has no configurable period at all — but **no variant
+  covers the ledger categories**, so the ZoRač čl. 28 floors and the st. 5 / st. 9 clock split the
+  requirement calls out are not enforced by the shared table. Register row 21 discloses the same gap as
+  „a general upward-only `retain_until` engine over trading data“; PROGRESS.md did not. SW-3 is the
+  action.
+- **Req. 48 (SW-17), encryption-at-rest limb.** Admin-only RBAC ✓, own čl. 47 entry ✓, exclusion from
+  routine exports and support bundles ✓ — but the database is **plaintext on disk**: `rusqlite` is built
+  with `bundled` / `backup` / `functions` and no `sqlcipher` feature. The requirement asks for encryption
+  at rest for this store specifically; that limb is unbuilt, and it is a different question from SW-2,
+  which concerns the backup file.
+- **Req. 1 (SW-10), middle row of the three-row penalty cell.** The čl. 42 row lives in register row 12
+  and the *čl. 50 → no prekršaj prescribed* row in register row 8, but the **čl. 46 → čl. 95 st. 1
+  t. 23** row exists only in code doc-comments (`commands/audit.rs`, `db/migrations.rs`) and never in the
+  compliance matrix itself.
+- **Req. 5 (SW-10), fourth limb.** The čl. 23 notice adopts all four purposes of čl. 48 st. 3 verbatim;
+  the čl. 47 register's `evidencija_pristupa` svrha carries three of them. čl. 47 st. 1 t. 2 is what the
+  Poverenik reads, so the two documents should not differ on the stated purpose.
+- **Two compliance templates sit outside `docs_guard::prose_sources`.**
+  `docs/compliance/runbook-povreda-podataka.md` and `docs/compliance/ugovor-o-obradi-nacrt.md` are not
+  embedded, and both still describe SW-10 and SW-17 as future work („budući ekran“, „budući modul …
+  do njegovog uvođenja obrađivač vodi ručnu evidenciju sesija“) although both shipped on 02.08.2026.
+  The runbook additionally cites **čl. 53 st. 1** for the controller→Poverenik 72 h clock; the clock is
+  **čl. 52 st. 1**, which is what `commands/breaches.rs` and register row 10 both cite, and čl. 53 is the
+  duty toward the affected individuals.
+- **`evidencija-obrade-cl47.md` A.7 lists kriptozaštita rezervnih kopija as an applied čl. 50 measure**
+  without the opt-in caveat. The generated register states the same measure conditionally, in both
+  directions; the hand-kept narrative version does not, and it is the copy handed over on request.
+- **The čl. 23 notice §4 asserts flatly that there is no cross-border transfer**, where the generated
+  register deliberately refuses that flat assertion because the program cannot check it and §6.5 / R-5 is
+  unresolved. The notice carries a bracketed reconciliation note, but the assertion is made first.
+- **`cl47::Template::mere` is the one behaviour-claim column of the generated register that no guard
+  reads.** `retention_prose()` exposes `kljuc`, the retention class and `rok_osnov`; the per-radnja
+  measures string is a claim about what the program does and reaches the Poverenik unguarded.
+
+Nothing above regressed a gate: all six are green at 407 bun / 672 cargo, and migration **v18** is
+unchanged.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.
