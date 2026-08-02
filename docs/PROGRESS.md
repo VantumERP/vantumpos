@@ -293,6 +293,50 @@ a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export
 - **W-1 remains open** (`docs/SW14-VERIFIED-RULES.md` §6): whether ZEOR čl. 51 reaches a preduzetnik at
   all. Until a lawyer answers, no ZEOR figure is rendered — the `legal.rs` guard enforces it.
 
+### SW-14 write-path guards — future day, wrong period, period naming (2026-08-02)
+
+Three defects in the one write path, `commands/worktime.rs::write_entry`, and so in both
+`worktime_save_entry` and `worktime_correct_entry` at once. **No schema change — v17 is untouched**, and
+`legal.rs` is not in the diff. Baseline before the batch: cargo **556**, bun **355**.
+
+| Defect | What was wrong | Fixed by |
+|---|---|---|
+| **D1 — §4 req. 6 + req. 17** `[LEGAL]` | `write_entry` parsed `dan` and checked the closed-period freeze, but never compared the day against the `now` already threaded through it: `2028-03-04` recorded as `verzija 1`. Hours nobody has worked yet are a forecast, not the „dnevna evidencija“ ZoR čl. 55 st. 6 asks for — the thing that makes a register look invented, which is the čl. 276 st. 1 tač. 1a exposure the module exists to remove. `close_period` had `guard_period_has_ended` from the start; the write path had no equivalent one day at a time, and the log is append-only, so a mistyped year lands a permanent row that can only be superseded — a correction entry about a day that never happened | `f1cee97` — `guard_day_has_happened` (`commands/worktime.rs:1184`), first check in `write_entry` (`:571`). Decides off the `now` **parameter**, never a wall clock of its own, so the day is a caller's statement and the guard is testable. The day **in progress** stays writable: req. 17 wants a contemporaneous write, so the boundary is the calendar day of `now`, not the day before it. An unreadable `now` refuses with its own message rather than guessing — the row is permanent and would carry that same unreadable stamp as its `created_at`. Sits ahead of the live-row lookup, so a correction aimed at a future day is told why instead of „nema unosa za taj dan“ |
+| **D2 — write integrity** | `SaveEntryRequest` carried only `user_id` and `dan`, and the month was derived from that day, so the backend could not see the mismatch the Datum field already refuses: a septembar day typed while avgust is on screen is a valid date and every backend check passed it. `list_month` filters by period, so the operator is told „Dan je evidentiran“ about a row that is not on the screen they are looking at and, in an append-only log, cannot be withdrawn — only superseded from a month they have to know to open. It also slips the closed-period freeze they would have hit: that check runs on the **day's own** month, so a stray day walks into a neighbouring month that may be open when the one on screen is shut | `55a54dc` — `godina`/`mesec` on `SaveEntryRequest` (`:253`), deliberately **not** `#[serde(default)]` (a default would let the caller the guard exists for drop it silently), and `guard_day_is_in_period` (`:1222`) at `:575`. The pair is an assertion *about* the write, never the source of the row's own month, which stays derived from `dan`. `validate_month` runs on the stated period first, so month 13 says so instead of reporting a mismatch against „13/2026“. Frontend: `toRequest` already had the selected period in hand and now sends it |
+| **D3 — operator copy** | The three period refusals in the module disagreed with each other and with the screen: the new one named the month, `period_closed_error` and `guard_period_has_ended` numbered it („Period 08/2026“) while the operator had picked that month from a list of names. Neither of the two older messages had any test on its text — only on `code()` | `085e18a`, `3a36d0f` — `MESECI` and `naziv_perioda` (`:1255`, `:1279`); all three call sites read the name and write the Serbian ordinal dot themselves. Both older messages are now pinned, the „još nije završen“ case for **decembar** as well as avgust so the name has to come out of the table by index. Frontend: `MESECI` moves out of `WorkTimeModule.tsx` into `src/lib/period.ts` beside a mirroring `nazivPerioda`, and `WorkTimeModule`, `MyHoursPanel` and `mock-adapter` — which held two hard-coded copies of the `period_closed` message that would have been left numbering the month — all read it from there. Three frontend copies of the month list become one |
+
+**Verification gates (all six green at HEAD, `3a36d0f`; every command exited `0`):**
+
+| Gate | Result |
+|---|---|
+| `bun run test` | **359 passed** / 0 failed, 23 files (was 355 / 22) |
+| `bun run build` | pass — tsc + vite |
+| `cargo test -- --test-threads=1` | **559 passed** / 0 failed, 0 ignored (was 556) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `git diff --check` | clean |
+
+New tests: 3 in `commands/worktime.rs` (`a_day_that_has_not_happened_cannot_be_recorded`,
+`a_day_outside_the_stated_period_is_refused`, `the_period_is_named_in_serbian`), plus message assertions
+added to the two pre-existing period tests, which had asserted only `code()`; 4 frontend (1 in
+`WorkTimeModule.test.tsx`, 3 in the new `src/lib/period.test.ts`).
+
+Latest migration: **v17** — unchanged by this batch.
+
+**Residuals this batch leaves:**
+
+- **The month names now exist twice, once per language** — `crate::commands::worktime::MESECI` and
+  `src/lib/period.ts`. The backend has to be able to name a period it is refusing a write for without
+  being handed the name by the caller it is refusing, and the frontend has to fill a `<select>` without
+  asking the backend, so neither copy can be deleted. Both are pinned string by string
+  (`the_period_is_named_in_serbian`, `period.test.ts`) and each test spells the twelve names out rather
+  than reading the table it is checking — that pair of tests is the whole defence against a silent
+  divergence in what the operator is told.
+- **`godina`/`mesec` are now required on every write.** Any future caller of `worktime_save_entry` or
+  `worktime_correct_entry` must state the period; a payload without them fails deserialization rather
+  than defaulting to a period nobody chose. That is the intent, and it is the one breaking change in the
+  batch.
+
 ---
 
 ## Executive Summary
