@@ -1293,6 +1293,15 @@ CREATE INDEX idx_popis_commission_session ON popis_commission(session_id);
 -- the backup and every ad-hoc query. So the engine refuses to store one while the
 -- session is in Phase A, and the blind count becomes a property of the database.
 --
+-- The release condition is the POTPIS, not the status column. `status` is a claim
+-- any UPDATE can make — and a session can be born in 'counted_signed' — so a guard
+-- keyed on the flag alone would hand the book data to a commission that never
+-- signed anything, which is precisely the failure čl. 8 st. 5 names. The article
+-- makes both facts conditions („пре уписивања стварног стања … и пре него што
+-- чланови комисије … потпишу те листе“), so both are checked: the session must
+-- have left the counting states AND a faza 'a' signature must exist. The čl. 9
+-- st. 3 signature is a different event and does not stand in for it.
+--
 -- The two guards share one trigger per write event so each keeps its own message:
 -- the posting lock (req. 41) is checked first, because on a posted popis nothing
 -- may be written at all and „the popis is closed“ is the truer answer than „not
@@ -1304,8 +1313,10 @@ BEGIN
         WHEN (SELECT status FROM popis_sessions WHERE id = NEW.session_id) = 'posted'
             THEN RAISE(ABORT, 'Proknjižen popis se ne menja — ispravka se sprovodi novim popisom.')
         WHEN NEW.knjigovodstvena_kolicina_milli IS NOT NULL
-             AND (SELECT status FROM popis_sessions WHERE id = NEW.session_id)
-                 IN ('draft', 'counting')
+             AND ((SELECT status FROM popis_sessions WHERE id = NEW.session_id)
+                      IN ('draft', 'counting')
+                  OR NOT EXISTS (SELECT 1 FROM popis_signatures
+                                  WHERE session_id = NEW.session_id AND faza = 'a'))
             THEN RAISE(ABORT, 'Knjigovodstvena količina ne sme da se upiše pre nego što se stvarno stanje unese u popisne liste i potpiše (PoP čl. 8 st. 5).')
     END;
 END;
@@ -1321,8 +1332,10 @@ BEGIN
              OR (SELECT status FROM popis_sessions WHERE id = NEW.session_id) = 'posted'
             THEN RAISE(ABORT, 'Proknjižen popis se ne menja — ispravka se sprovodi novim popisom.')
         WHEN NEW.knjigovodstvena_kolicina_milli IS NOT NULL
-             AND (SELECT status FROM popis_sessions WHERE id = NEW.session_id)
-                 IN ('draft', 'counting')
+             AND ((SELECT status FROM popis_sessions WHERE id = NEW.session_id)
+                      IN ('draft', 'counting')
+                  OR NOT EXISTS (SELECT 1 FROM popis_signatures
+                                  WHERE session_id = NEW.session_id AND faza = 'a'))
             THEN RAISE(ABORT, 'Knjigovodstvena količina ne sme da se upiše pre nego što se stvarno stanje unese u popisne liste i potpiše (PoP čl. 8 st. 5).')
     END;
 END;
@@ -1350,6 +1363,17 @@ WHEN (SELECT status FROM popis_sessions WHERE id = OLD.session_id) = 'posted'
      OR (SELECT status FROM popis_sessions WHERE id = NEW.session_id) = 'posted'
 BEGIN
     SELECT RAISE(ABORT, 'Sastav komisije je deo proknjiženog popisa i ne može da se menja.');
+END;
+
+-- The posting lock reaches the signatures too, and this is the INSERT that most
+-- needs it: a potpis is the strongest evidence artefact in the module, so one
+-- dated after the čl. 14 st. 3 knjiženje would attest to a state that was already
+-- posted — the same defect as joining the commission after the fact.
+CREATE TRIGGER trg_popis_signatures_unos
+BEFORE INSERT ON popis_signatures
+WHEN (SELECT status FROM popis_sessions WHERE id = NEW.session_id) = 'posted'
+BEGIN
+    SELECT RAISE(ABORT, 'Potpis se ne dodaje na proknjižen popis — ispravka se sprovodi novim popisom.');
 END;
 
 -- A potpis is frozen when it is taken, not when the popis is posted: restamping
@@ -1491,6 +1515,34 @@ mod tests {
                      '2026-12-31T09:00:00Z', '2026-12-31T09:00:00Z')",
             params![session_id, naziv, knjigovodstvena],
         )
+    }
+
+    /// Take the PoP čl. 8 st. 5 signature — the event that releases the book data.
+    /// Phase B is anchored on THIS row existing rather than on the freely-settable
+    /// `status` flag, so every test that expects a book quantity to be accepted has
+    /// to sign first, which is the order the bylaw prescribes anyway.
+    fn sign_popis_phase_a(conn: &Connection, session_id: i64) {
+        conn.execute(
+            "INSERT INTO popis_signatures (session_id, faza, potpisnik, potpisano_at,
+                                           snapshot_hash, created_at)
+             VALUES (?1, 'a', 'Miloš Đurđević', '2026-12-31T17:00:00Z', 'hash-a',
+                     '2026-12-31T17:00:00Z')",
+            params![session_id],
+        )
+        .unwrap_or_else(|error| panic!("the čl. 8 st. 5 signature should record: {error}"));
+    }
+
+    /// Count the book quantities a query could hand the commission for one session.
+    /// Čl. 8 st. 5 is about the data REACHING them, so the assertion that matters is
+    /// not „the write was refused“ but „there is nothing there to read“.
+    fn stored_book_quantities(conn: &Connection, session_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM popis_lines
+              WHERE session_id = ?1 AND knjigovodstvena_kolicina_milli IS NOT NULL",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .expect("the blind-count check should query")
     }
 
     /// SW-16 Task 1 — the four popis stores. §2c settles that Pravilnik 89/2020
@@ -1847,23 +1899,60 @@ mod tests {
                     "nor may a book quantity be smuggled in by UPDATE in {status}"
                 );
 
-                let leaked: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM popis_lines
-                          WHERE session_id = ?1 AND knjigovodstvena_kolicina_milli IS NOT NULL",
-                        params![id],
-                        |row| row.get(0),
-                    )
-                    .expect("the blind-count check should query");
                 assert_eq!(
-                    leaked, 0,
+                    stored_book_quantities(&conn, id),
+                    0,
                     "in {status} no query may find a book quantity to hand the commission"
                 );
             }
 
-            // Once the counted state is written and signed, čl. 9 st. 1 t. 3 is the
-            // very next step and the book quantities may be entered.
+            // The status column is a CLAIM; the potpis is the EVIDENCE. A session
+            // can be born in counted_signed or flipped into it by any UPDATE, so a
+            // guard keyed on the flag alone would release the book data to a
+            // commission that never signed anything — the exact failure čl. 8 st. 5
+            // names. Session 3 is that attack: the flag says signed, the ledger of
+            // signatures is empty.
             seed_popis_session(&conn, 3, "counted_signed");
+            insert_popis_line(&conn, 3, "Marama svilena", None)
+                .expect("the counted state is written before the signature, not after");
+            assert!(
+                insert_popis_line(&conn, 3, "Marama svilena", Some(9000)).is_err(),
+                "a counted_signed flag with no potpis behind it must not release the book data"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE popis_lines SET knjigovodstvena_kolicina_milli = 9000
+                      WHERE session_id = 3",
+                    [],
+                )
+                .is_err(),
+                "nor may the unsigned flag be used to smuggle one in by UPDATE"
+            );
+
+            // And the čl. 9 st. 3 potpis is not the čl. 8 st. 5 one: only the Phase
+            // A signature releases the quantities, so a faza 'b' row changes nothing.
+            conn.execute(
+                "INSERT INTO popis_signatures (session_id, faza, potpisnik, potpisano_at,
+                                               snapshot_hash, created_at)
+                 VALUES (3, 'b', 'Miloš Đurđević', '2026-12-31T17:30:00Z', 'hash-b',
+                         '2026-12-31T17:30:00Z')",
+                [],
+            )
+            .expect("a faza 'b' signature is an ordinary row");
+            assert!(
+                insert_popis_line(&conn, 3, "Marama svilena", Some(9000)).is_err(),
+                "the čl. 9 st. 3 potpis does not stand in for the čl. 8 st. 5 one"
+            );
+            assert_eq!(
+                stored_book_quantities(&conn, 3),
+                0,
+                "with no čl. 8 st. 5 potpis in existence there is nothing for any query, \
+                 export or backup to hand the commission"
+            );
+
+            // Once the counted state is written and SIGNED, čl. 9 st. 1 t. 3 is the
+            // very next step and the book quantities may be entered.
+            sign_popis_phase_a(&conn, 3);
             insert_popis_line(&conn, 3, "Marama svilena", Some(9000))
                 .expect("after the čl. 8 st. 5 signature the book quantity may be written");
 
@@ -1873,20 +1962,16 @@ mod tests {
             insert_popis_line(&conn, 3, "Kaiš kožni", Some(-2000))
                 .expect("a negative book quantity is a real ledger state, not a typo");
 
-            let revealed: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM popis_lines
-                      WHERE session_id = 3 AND knjigovodstvena_kolicina_milli IS NOT NULL",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("the phase B check should query");
-            assert_eq!(revealed, 2, "phase B is where the book quantities live");
+            assert_eq!(
+                stored_book_quantities(&conn, 3),
+                2,
+                "phase B is where the book quantities live"
+            );
 
-            // Reopening a signed count must not become a way back to a blind state
-            // that already saw the book data — but the guard is anchored on the
-            // CURRENT status, so a session pushed back to counting is blind again
-            // for every subsequent write.
+            // The signature is necessary, not sufficient. Reopening a signed count
+            // puts the session back into a counting state, and the guard reads the
+            // CURRENT status too — so session 3, potpis and all, is blind again for
+            // every subsequent write.
             conn.execute(
                 "UPDATE popis_sessions SET status = 'counting' WHERE id = 3",
                 [],
@@ -1916,6 +2001,7 @@ mod tests {
             let conn = db.open().expect("database should open");
 
             seed_popis_session(&conn, 1, "computed_signed");
+            sign_popis_phase_a(&conn, 1);
             insert_popis_line(&conn, 1, "Marama svilena", Some(9000))
                 .expect("a computed line should insert before posting");
             conn.execute(
@@ -1944,7 +2030,9 @@ mod tests {
             ] {
                 assert!(
                     conn.execute(
-                        &format!("UPDATE popis_signatures SET {column} = '{value}' WHERE id = 1"),
+                        &format!(
+                            "UPDATE popis_signatures SET {column} = '{value}' WHERE faza = 'b'"
+                        ),
                         [],
                     )
                     .is_err(),
@@ -2005,6 +2093,21 @@ mod tests {
                 )
                 .is_err(),
                 "the commission cannot be joined after the result is posted"
+            );
+            // A potpis is the strongest evidence artefact in the module, so it is
+            // the one INSERT that most needs the lock: a signature dated after the
+            // čl. 14 st. 3 knjiženje would attest to a state that was already
+            // posted — the joined-after-posting defect by another name.
+            assert!(
+                conn.execute(
+                    "INSERT INTO popis_signatures (session_id, faza, potpisnik, potpisano_at,
+                                                   snapshot_hash, created_at)
+                     VALUES (1, 'b', 'Naknadni potpisnik', '2027-03-01T10:00:00Z', 'hash-x',
+                             '2027-03-01T10:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a popisna lista cannot be signed after the result is posted"
             );
 
             // A second, unposted popis is unaffected — the lock is per session, not
