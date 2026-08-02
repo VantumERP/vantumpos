@@ -1,3 +1,5 @@
+import { nazivPerioda } from "@/lib/period";
+
 import type { PosServices } from "./ports";
 import type {
   AmlAssessment,
@@ -1957,7 +1959,7 @@ export function createMockServices(): PosServices {
         ) {
           throw {
             code: "period_closed",
-            message: `Period ${String(mesec).padStart(2, "0")}/${godina} je zaključen i više se ne može menjati. Zaključenje je konačno.`,
+            message: `Period ${nazivPerioda(godina, mesec)}. je zaključen i više se ne može menjati. Zaključenje je konačno.`,
           };
         }
 
@@ -2069,7 +2071,7 @@ export function createMockServices(): PosServices {
     ) {
       throw {
         code: "period_closed",
-        message: `Period ${String(mesec).padStart(2, "0")}/${godina} je zaključen i više se ne može menjati. Zaključenje je konačno.`,
+        message: `Period ${nazivPerioda(godina, mesec)}. je zaključen i više se ne može menjati. Zaključenje je konačno.`,
       };
     }
 

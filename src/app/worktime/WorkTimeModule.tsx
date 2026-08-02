@@ -28,6 +28,7 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { MESECI, nazivPerioda } from "@/lib/period";
 import {
   NativeSelect,
   NativeSelectOption,
@@ -74,20 +75,6 @@ interface WorkTimeModuleProps {
 /** How many prior years the period selector offers alongside the current one. */
 const YEAR_RANGE = 3;
 
-export const MESECI = [
-  "januar",
-  "februar",
-  "mart",
-  "april",
-  "maj",
-  "jun",
-  "jul",
-  "avgust",
-  "septembar",
-  "oktobar",
-  "novembar",
-  "decembar",
-] as const;
 
 /**
  * The closed absence vocabulary, with the letter of the statutory hour bucket
@@ -1097,7 +1084,7 @@ export function validateDan(
   // filters by period, so the operator would be told „Dan je evidentiran“ about
   // a row they can never see again from this screen.
   if (dan < periodStart(godina, mesec) || dan > periodEnd(godina, mesec)) {
-    return `Datum mora pripadati izabranom periodu — ${MESECI[mesec - 1]} ${godina}.`;
+    return `Datum mora pripadati izabranom periodu — ${nazivPerioda(godina, mesec)}.`;
   }
 
   return null;

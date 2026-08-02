@@ -1100,8 +1100,9 @@ fn period_closed_error(godina: i64, mesec: i64) -> AppError {
     AppError::business_with_details(
         "period_closed",
         format!(
-            "Period {mesec:02}/{godina} je zaključen i više se ne može menjati. \
-             Zaključenje je konačno."
+            "Period {}. je zaključen i više se ne može menjati. \
+             Zaključenje je konačno.",
+            naziv_perioda(godina, mesec)
         ),
         serde_json::json!({ "godina": godina, "mesec": mesec }),
     )
@@ -1147,9 +1148,10 @@ fn guard_period_has_ended(godina: i64, mesec: i64, now: &str) -> Result<(), AppE
     }
     Err(AppError::validation(
         format!(
-            "Period {mesec:02}/{godina} još nije završen, pa se ne može zaključiti. \
+            "Period {}. još nije završen, pa se ne može zaključiti. \
              Zaključenje je konačno i posle njega se ni jedan dan tog meseca više ne \
-             može evidentirati. Zaključite ga najranije prvog dana narednog meseca."
+             može evidentirati. Zaključite ga najranije prvog dana narednog meseca.",
+            naziv_perioda(godina, mesec)
         ),
         serde_json::json!({ "godina": godina, "mesec": mesec }),
     ))
@@ -1613,6 +1615,12 @@ mod tests {
             )
             .expect_err("a day cannot be added to a closed month");
             assert_eq!(error.code(), "period_closed");
+            // The month the operator picked from a list of names, named.
+            assert_eq!(
+                error.to_string(),
+                "Period avgust 2026. je zaključen i više se ne može menjati. \
+                 Zaključenje je konačno."
+            );
 
             let error = correct_entry(
                 state,
@@ -2082,6 +2090,12 @@ mod tests {
             let error = close_period(state, radnik, 2026, 8, "2026-08-15T08:00:00Z")
                 .expect_err("a running month cannot be closed");
             assert_eq!(error.code(), "validation_error");
+            assert_eq!(
+                error.to_string(),
+                "Period avgust 2026. još nije završen, pa se ne može zaključiti. \
+                 Zaključenje je konačno i posle njega se ni jedan dan tog meseca više ne \
+                 može evidentirati. Zaključite ga najranije prvog dana narednog meseca."
+            );
 
             // Not on its last day either — 31 August is still a day of August.
             let error = close_period(state, radnik, 2026, 8, "2026-08-31T23:59:59Z")
@@ -2092,6 +2106,14 @@ mod tests {
             let error = close_period(state, radnik, 2026, 12, "2026-08-15T08:00:00Z")
                 .expect_err("a future month cannot be closed");
             assert_eq!(error.code(), "validation_error");
+            // A second month, so the name is read out of the table by index rather
+            // than being one hard-coded string that happens to fit avgust.
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("Period decembar 2026. još nije"),
+                "{error}"
+            );
 
             // The register keeps taking the rest of the month …
             save_entry(

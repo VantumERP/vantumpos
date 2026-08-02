@@ -7,7 +7,6 @@ import {
   danaSaUnosom,
   formatDan,
   formatMinutes,
-  MESECI,
   napomenaZa,
 } from "@/app/worktime/WorkTimeModule";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -25,6 +24,7 @@ import {
   NativeSelectOption,
 } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
+import { MESECI, nazivPerioda } from "@/lib/period";
 import {
   Table,
   TableBody,
@@ -101,7 +101,7 @@ export function MyHoursPanel({ hours }: MyHoursPanelProps) {
           {hours.napomena || EVIDENCIJA_ZAGLAVLJE}
         </p>
         <p className="text-sm text-muted-foreground">
-          {`${hours.zaposleni} — ${MESECI[hours.mesec - 1]} ${hours.godina}.`}
+          {`${hours.zaposleni} — ${nazivPerioda(hours.godina, hours.mesec)}.`}
         </p>
       </div>
 
