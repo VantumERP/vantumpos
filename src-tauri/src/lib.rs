@@ -22,6 +22,8 @@ mod kep_kalkulacija;
 mod kep_storno;
 mod legal;
 mod nbs_rate;
+/// The popis state machine and the PoP čl. 8 st. 5 blind-count property.
+mod popis;
 mod price_history;
 mod reklamacije;
 mod reklamacije_docs;
