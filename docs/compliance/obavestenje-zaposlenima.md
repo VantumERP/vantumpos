@@ -132,8 +132,9 @@ prosleđuje samo broj časova po vrstama (ZEOR čl. 24 tač. 1), bez iznosa.
 
 ## 4. Prenos u druge države
 
-Bez prenosa u druge države ili međunarodne organizacije.
-`[NAPOMENA: uskladiti sa odgovorom na pitanje da li AnyDesk sesija predstavlja prenos u drugu državu — v. §6.5 u docs/SERBIAN-LAW-COMPLIANCE.md]`
+Poslodavac ne prenosi ove podatke u druge države ni međunarodnim organizacijama.
+
+**Jedno pitanje je otvoreno i navodi se otvoreno:** tokom sesije daljinske podrške saobraćaj prolazi kroz posrednički server pružaoca te usluge. Da li to pravno predstavlja prenos u drugu državu u smislu ZZPL čl. 63 i dalje **nije razjašnjeno** (v. §6 stavka 5 u `docs/SERBIAN-LAW-COMPLIANCE.md`). Dok se ne razjasni, poslodavac ovu mogućnost ne poriče.
 
 ## 5. Rok čuvanja (kriterijumi)
 
