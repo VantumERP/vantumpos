@@ -428,12 +428,15 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("compliance_log schema should load");
-            // v16 rebuilt the table to widen this CHECK; the v8 pair must still be
-            // admitted alongside the AML event, and nothing beyond the three.
+            // v16 and then v19 each rebuilt the table to widen this CHECK. The v8
+            // pair must still be admitted alongside the AML event and the SW-12
+            // till-guard one, and nothing beyond the four: the trail is read back
+            // as evidence, so its vocabulary is closed on purpose.
             assert!(
                 schema.contains("trading_data_reset")
                     && schema.contains("backup_restored")
-                    && schema.contains("aml_cash_threshold"),
+                    && schema.contains("aml_cash_threshold")
+                    && schema.contains("cenovnik_price_divergence"),
                 "expected event_type CHECK, schema was: {schema}"
             );
         });

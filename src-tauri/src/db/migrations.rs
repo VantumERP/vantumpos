@@ -1090,6 +1090,27 @@ ALTER TABLE products ADD COLUMN jedinicna_cena_jedinica TEXT;
 ALTER TABLE products ADD COLUMN jedinicna_cena_sadrzaj_milli INTEGER
     CHECK (jedinicna_cena_sadrzaj_milli IS NULL
            OR (jedinicna_cena_sadrzaj_milli > 0 AND jedinicna_cena_jedinica IS NOT NULL));
+
+-- Req. 12 — the till-side price-integrity guard's record. Čl. 6 st. 4 binds a
+-- trader who publishes a cenovnik to adhere to the prices in it, so an article
+-- rung above its published price is a compliance event of exactly the kind the
+-- čl. 46 AML entry already is: warned about at the till, never refused, and
+-- recorded in the one never-deleted trail so an inspection can reproduce the
+-- decision from the log alone. SQLite cannot alter a CHECK, so admitting the
+-- event is a table rebuild in the style of v16's — which is what the ids, the
+-- details and the index below are carried across for.
+CREATE TABLE compliance_log_next (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL CHECK (event_type IN ('trading_data_reset', 'backup_restored', 'aml_cash_threshold', 'cenovnik_price_divergence')),
+    detail_json TEXT,
+    user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+INSERT INTO compliance_log_next (id, event_type, detail_json, user_id, created_at)
+SELECT id, event_type, detail_json, user_id, created_at FROM compliance_log;
+DROP TABLE compliance_log;
+ALTER TABLE compliance_log_next RENAME TO compliance_log;
+CREATE INDEX idx_compliance_log_created_at ON compliance_log(created_at);
 "#,
     },
 ];
@@ -1728,6 +1749,9 @@ VALUES (11, 900, 'cash', 120000, '2026-06-01T09:30:00Z'),
     /// The same upgrade adds `cash_movements.documented_per_pravilnik`, which must
     /// arrive NULL on every carried-forward movement: NULL means the operator has
     /// not asserted anything, and the exclusion it gates must default OFF.
+    ///
+    /// The seeded database is migrated all the way to head, so this also covers
+    /// **v19's second rebuild** of the same table for the SW-12 till-guard event.
     #[test]
     fn migration_v16_preserves_pre_existing_compliance_log_and_cash_movements() {
         let path = test_database_path("migration_v16_preserves_audit_rows");
@@ -3018,7 +3042,13 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                      VALUES (191, 'Marama svilena', 'MAR-001', '0123456789012', 'kom', 249900,
                              120000, 191, 0, '2026-07-01T08:00:00Z', '2026-07-20T08:00:00Z');
                  INSERT INTO price_history (id, product_id, effective_from, price_minor, source, created_at)
-                     VALUES (77, 191, '2026-07-20T08:00:00Z', 249900, 'update', '2026-07-20T08:00:00Z');",
+                     VALUES (77, 191, '2026-07-20T08:00:00Z', 249900, 'update', '2026-07-20T08:00:00Z');
+                 INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (191, 'stari_kasir', 'Stari Kasir', 'cashier', 1,
+                             '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');
+                 INSERT INTO compliance_log (id, event_type, detail_json, user_id, created_at)
+                     VALUES (191, 'aml_cash_threshold', '{\"cash_minor\":1000000}', 191,
+                             '2026-07-25T11:00:00Z');",
             )
             .expect("seed v18-era catalog rows");
             drop(conn);
@@ -3074,6 +3104,86 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             assert_eq!(
                 snapshots, 0,
                 "an upgrade publishes nothing on its own — that is the write path's job"
+            );
+
+            // v19 also rebuilds `compliance_log` to admit the SW-12 till-guard
+            // event (req. 12). It is the never-deleted trail: an upgrade that lost
+            // an AML entry would destroy the only evidence that the warning was
+            // ever shown, so the copy step is the whole point of the rebuild.
+            let (event_type, detail, user_id, created_at): (String, String, i64, String) = conn
+                .query_row(
+                    "SELECT event_type, detail_json, user_id, created_at
+                     FROM compliance_log WHERE id = 191",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("the pre-v19 audit row must survive with its id");
+            assert_eq!(
+                (
+                    event_type.as_str(),
+                    detail.as_str(),
+                    user_id,
+                    created_at.as_str()
+                ),
+                (
+                    "aml_cash_threshold",
+                    "{\"cash_minor\":1000000}",
+                    191,
+                    "2026-07-25T11:00:00Z"
+                ),
+                "the v19 rebuild must copy every audit row verbatim"
+            );
+
+            let index_exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type = 'index' AND name = 'idx_compliance_log_created_at'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("index metadata should query");
+            assert_eq!(
+                index_exists, 1,
+                "the rebuild drops the table, so the index the trail is read through must be back"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// Req. 12. The divergence between a rung price and the published one is a
+    /// compliance event of the same kind as the čl. 46 AML entry — warned about at
+    /// the till, never refused, recorded in the one never-deleted trail — so v19
+    /// widens the `event_type` CHECK to admit it. The vocabulary stays closed:
+    /// a trail read back as evidence cannot accept an event type nobody defined.
+    #[test]
+    fn migration_v19_admits_the_cenovnik_divergence_event_and_nothing_else() {
+        let path = test_database_path("migration_v19_divergence_event");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            for event_type in [
+                "trading_data_reset",
+                "backup_restored",
+                "aml_cash_threshold",
+                "cenovnik_price_divergence",
+            ] {
+                conn.execute(
+                    "INSERT INTO compliance_log (event_type, detail_json, created_at)
+                     VALUES (?1, '{}', '2026-08-02T09:00:00Z')",
+                    params![event_type],
+                )
+                .unwrap_or_else(|error| panic!("{event_type} should be admitted: {error}"));
+            }
+
+            assert!(
+                conn.execute(
+                    "INSERT INTO compliance_log (event_type, detail_json, created_at)
+                     VALUES ('nepoznat_dogadjaj', '{}', '2026-08-02T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the trail's vocabulary is closed"
             );
         }
         std::fs::remove_file(&path).expect("test database should be removed");

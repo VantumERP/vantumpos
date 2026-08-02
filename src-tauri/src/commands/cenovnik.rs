@@ -34,13 +34,16 @@
 //! 11, 14. Design: `docs/superpowers/specs/2026-08-01-sw12-cenovnik-design.md`
 //! §2, §3.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
 use crate::cenovnik::{
-    content_hash, render_csv, CenovnikRow, NotConfigured, PublishOutcome, PublishTarget,
+    content_hash, published_prices, render_csv, CenovnikRow, NotConfigured, PublishOutcome,
+    PublishTarget,
 };
 use crate::commands::settings::{CompanySettings, COMPANY_SETTINGS_KEY};
 use crate::retention::{
@@ -275,6 +278,71 @@ pub fn read_snapshot(
     Ok(found)
 }
 
+/// The outlet's current published cenovnik, reduced to what the till compares a
+/// rung price against (req. 12).
+///
+/// Carries the snapshot's identity as well as its prices, because a divergence
+/// record that did not name the file it was measured against would be an
+/// accusation with no exhibit: the archive holds many files for one outlet and
+/// čl. 6 st. 4 binds the shop only to the one in force at the time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedCenovnik {
+    pub snapshot_id: i64,
+    pub generated_at: String,
+    pub content_hash: String,
+    prices: BTreeMap<String, i64>,
+}
+
+impl PublishedCenovnik {
+    /// The prodajna cena this file publishes for `sifra`, or `None` when the file
+    /// does not carry the article at all — a new product the shop has not
+    /// republished for yet has no published price, and nothing may be inferred
+    /// for it.
+    pub fn prodajna_cena(&self, sifra: &str) -> Option<i64> {
+        self.prices.get(sifra).copied()
+    }
+}
+
+/// Reads the outlet's current cenovnik and the prices in it.
+///
+/// `None` means there is nothing to compare against — no prodajni objekat minted
+/// yet, or nothing published for it. **That is not an error and never a reason a
+/// till cannot sell**: a shop that has published nothing has made no čl. 6 st. 4
+/// promise to depart from, and the hosting question (req. 15) is deliberately
+/// still open.
+///
+/// „Current“ is the same reading the archive's list and its purge take — the
+/// newest `generated_at`, a same-second tie broken by the larger id — so the file
+/// the guard measures against is the file the panel calls current.
+pub fn current_published_cenovnik(
+    connection: &Connection,
+) -> Result<Option<PublishedCenovnik>, AppError> {
+    let Some(outlet) = frozen_outlet(connection)? else {
+        return Ok(None);
+    };
+
+    let found = connection
+        .query_row(
+            "SELECT id, generated_at, content_hash, body
+             FROM cenovnik_snapshots
+             WHERE prodajno_mesto = ?1
+             ORDER BY generated_at DESC, id DESC
+             LIMIT 1",
+            params![outlet],
+            |row| {
+                Ok(PublishedCenovnik {
+                    snapshot_id: row.get(0)?,
+                    generated_at: row.get(1)?,
+                    content_hash: row.get(2)?,
+                    prices: published_prices(&row.get::<_, String>(3)?),
+                })
+            },
+        )
+        .optional()?;
+
+    Ok(found)
+}
+
 /// The time-driven cut over the archive (req. 14).
 ///
 /// **This is the only code in the crate permitted to delete a published
@@ -491,7 +559,10 @@ mod tests {
 
     use rusqlite::params;
 
-    use super::{list_snapshots, publish_current, purge_expired_snapshots, read_snapshot};
+    use super::{
+        current_published_cenovnik, list_snapshots, publish_current, purge_expired_snapshots,
+        read_snapshot,
+    };
     use crate::app_error::AppError;
     use crate::cenovnik::{NotConfigured, PublishOutcome, PublishTarget};
     use crate::commands::catalog::{
@@ -1510,6 +1581,92 @@ mod tests {
                 "and once the moved rok is reached the expired file goes"
             );
             assert_eq!(CENOVNIK_ARCHIVE_RETENTION_YEARS, 2);
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 5 — what the till guard compares against (req. 12)
+    // ---------------------------------------------------------------------
+
+    /// The guard measures a rung price against the file the shop actually
+    /// published, not against the catalog that file was rendered from — the
+    /// catalog is the very thing that may have moved without a republish. So the
+    /// lookup returns the outlet's current snapshot, its identity, and the prices
+    /// read back out of its body.
+    #[test]
+    fn the_current_published_cenovnik_is_the_outlets_newest_file_and_its_prices() {
+        with_database("cenovnik_current_published_prices", |db| {
+            let connection = db.open().expect("database should open");
+            publish_current(&connection, &NotConfigured, "2026-08-01T09:15:00Z").expect("publish");
+
+            let acting = admin_id(db);
+            update_product(db, 1, product_request(31_900), acting).expect("price should save");
+
+            let published = current_published_cenovnik(&connection)
+                .expect("the archive should read")
+                .expect("a shop that has published has a current cenovnik");
+            let archived = snapshots(db);
+            assert_eq!(archived.len(), 2, "{archived:?}");
+            assert_eq!(published.snapshot_id, archived[1].id, "the newest file");
+            assert_eq!(published.generated_at, archived[1].generated_at);
+            assert_eq!(published.content_hash, archived[1].content_hash);
+            assert_eq!(published.prodajna_cena("SOK-075"), Some(31_900));
+            assert_eq!(
+                published.prodajna_cena("ARH-1"),
+                None,
+                "an article that is not offered has no published price"
+            );
+        });
+    }
+
+    /// „No published snapshot means no guard.“ A shop that has published nothing
+    /// — or has not identified its prodajni objekat yet — must still be able to
+    /// sell, so the lookup answers `None` rather than erroring or inventing a
+    /// baseline.
+    #[test]
+    fn a_shop_that_has_published_nothing_has_no_current_cenovnik() {
+        with_database("cenovnik_current_published_none", |db| {
+            let connection = db.open().expect("database should open");
+            assert_eq!(
+                current_published_cenovnik(&connection).expect("an empty archive is not an error"),
+                None
+            );
+
+            set_company(db, "", "");
+            assert_eq!(
+                current_published_cenovnik(&connection)
+                    .expect("an unidentified outlet is not an error"),
+                None,
+                "with no outlet there is no lineage to read"
+            );
+        });
+    }
+
+    /// Čl. 6 st. 2 publishes „posebno za svaki prodajni objekat“, so a foreign
+    /// outlet's newer file must never become the price this till is measured
+    /// against.
+    #[test]
+    fn another_outlets_newer_file_is_never_this_tills_published_price() {
+        with_database("cenovnik_current_published_per_outlet", |db| {
+            let connection = db.open().expect("database should open");
+            let ours = publish_current(&connection, &NotConfigured, "2026-08-01T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet publishes");
+            connection
+                .execute(
+                    "INSERT INTO cenovnik_snapshots (prodajno_mesto, generated_at, row_count,
+                                                     content_hash, body, created_at)
+                     VALUES ('Druga radnja', '2026-08-05T09:15:00Z', 1, 'h-druga',
+                             ?1, '2026-08-05T09:15:00Z')",
+                    params!["\u{feff}sifra;prodajna_cena\r\nSOK-075;1.00\r\n"],
+                )
+                .expect("a second outlet should insert");
+
+            let published = current_published_cenovnik(&connection)
+                .expect("the archive should read")
+                .expect("our outlet has a current cenovnik");
+            assert_eq!(published.snapshot_id, ours);
+            assert_eq!(published.prodajna_cena("SOK-075"), Some(27_900));
         });
     }
 

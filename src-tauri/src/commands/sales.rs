@@ -110,6 +110,34 @@ pub struct SalePreview {
     pub total_minor: i64,
 }
 
+/// One article rung above the price its outlet published (req. 12).
+///
+/// ZZP čl. 6 st. 4 binds a trader **who publishes** a cenovnik to adhere to the
+/// prices in it, so this is the till's cheapest way of keeping the shop out of
+/// čl. 207/206 territory. It is a warning and only a warning: the register has to
+/// be able to record what actually happened at the counter, and a hard block over
+/// a stale snapshot would be worse than the exposure it prevents.
+///
+/// Below-published is silent — a discount is not a breach — which is also what
+/// keeps the guard to a single comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceDivergence {
+    pub product_id: i64,
+    pub product_name: String,
+    pub product_sku: String,
+    /// What the till is about to charge for one unit, in para.
+    pub charged_unit_price_minor: i64,
+    /// What the outlet's current cenovnik says for that article, in para.
+    pub published_unit_price_minor: i64,
+    /// The snapshot the comparison was made against. An outlet's archive holds
+    /// many files and čl. 6 st. 4 binds the shop only to the one in force, so a
+    /// divergence that did not name its exhibit would be an accusation with none.
+    pub snapshot_id: i64,
+    pub snapshot_generated_at: String,
+    pub snapshot_content_hash: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletedSale {
@@ -216,11 +244,38 @@ pub fn sales_assess_cash_payment(
     ))
 }
 
+/// Asked by the till while the cart is being built, so the operator learns about
+/// a divergence before the money changes hands rather than from a log afterwards.
+///
+/// Advisory in exactly the way `sales_assess_cash_payment` is: `sales_complete`
+/// accepts the sale whatever this returns, and an empty answer is the ordinary
+/// case. The caller decides how loudly to say it (req. 12 — „refuse or loudly
+/// warn“; this product warns, see [`PriceDivergence`]).
+#[tauri::command]
+pub fn sales_assess_price_integrity(
+    state: State<'_, AppState>,
+    request: SaleDraftRequest,
+) -> Result<Vec<PriceDivergence>, CommandError> {
+    assess_draft_price_integrity(state.db(), request).map_err(Into::into)
+}
+
 pub fn build_sale_preview(db: &Db, request: SaleDraftRequest) -> Result<SalePreview, AppError> {
     let connection = db.open()?;
     let computation = compute_sale(&connection, &request)?;
 
     Ok(computation.preview)
+}
+
+/// The draft priced the way the till would ring it, measured against the outlet's
+/// published cenovnik.
+pub fn assess_draft_price_integrity(
+    db: &Db,
+    request: SaleDraftRequest,
+) -> Result<Vec<PriceDivergence>, AppError> {
+    let connection = db.open()?;
+    let computation = compute_sale(&connection, &request)?;
+
+    Ok(assess_price_integrity(&connection, &computation.lines))
 }
 
 pub fn complete_sale_transaction(
@@ -309,6 +364,24 @@ pub fn complete_sale_transaction(
                 user_id: acting_user_id.unwrap_or(shift.cashier_id),
                 created_at: &created_at,
             },
+        )?;
+    }
+
+    // Req. 12 / čl. 6 st. 4: an article charged above the price its outlet
+    // published leaves an entry in the same never-deleted trail. The sale is
+    // never refused for it — the guard warned while the cart was being built
+    // (`sales_assess_price_integrity`), and the register has to be able to record
+    // what actually happened at the counter.
+    for divergence in assess_price_integrity(&tx, &computation.lines) {
+        insert_price_divergence_event(
+            &tx,
+            &divergence,
+            sale_id,
+            &local_receipt_number,
+            // The signed-in operator when there is one, otherwise the cashier the
+            // open shift belongs to — the same reading the AML entry takes.
+            acting_user_id.unwrap_or(shift.cashier_id),
+            &created_at,
         )?;
     }
 
@@ -656,6 +729,113 @@ fn assess_sale_cash(
     }
 }
 
+/// Compares each rung unit price against the outlet's current published
+/// cenovnik, and reports only the lines above it (req. 12).
+///
+/// **Infallible on purpose.** An archive this cannot read degrades to „no
+/// guard“ — the same answer as an outlet that has published nothing — and never
+/// to an error, because čl. 6 is not a reason a till cannot sell. The failure is
+/// logged instead; a shop whose archive is unreadable has a problem the Task 8
+/// panel is the place to learn about, not the queue at the counter.
+///
+/// One entry per article, not per line: the unit price comes from the catalog, so
+/// the same article on two lines carries the same figure, and two identical
+/// entries would be two accusations over one departure from one published price.
+///
+/// **The comparison is against the unit price the article was offered at, not
+/// against the line total after a discount.** Čl. 6 st. 1 is about the article's
+/// prodajna cena; a discount is a reduction granted on that price, not a
+/// different price for the article — and a discount that cancelled the warning
+/// would be the obvious way to ring above the published cenovnik unremarked.
+fn assess_price_integrity(connection: &Connection, lines: &[ComputedLine]) -> Vec<PriceDivergence> {
+    let published = match crate::commands::cenovnik::current_published_cenovnik(connection) {
+        Ok(Some(published)) => published,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            log::warn!("Objavljeni cenovnik nije pročitan za proveru cena na kasi: {error}");
+            return Vec::new();
+        }
+    };
+
+    let mut divergences: Vec<PriceDivergence> = Vec::new();
+    for line in lines {
+        let Some(published_unit_price_minor) = published.prodajna_cena(&line.product.sku) else {
+            // An article the published file does not carry — created since the
+            // last republish — has no published price to depart from, and
+            // treating „absent“ as „zero“ would accuse the shop on every sale.
+            continue;
+        };
+        // Strictly greater: charging exactly the published price is adherence,
+        // and charging less is a discount.
+        if line.unit_price_minor <= published_unit_price_minor {
+            continue;
+        }
+        if divergences
+            .iter()
+            .any(|divergence| divergence.product_id == line.product.id)
+        {
+            continue;
+        }
+
+        divergences.push(PriceDivergence {
+            product_id: line.product.id,
+            product_name: line.product.name.clone(),
+            product_sku: line.product.sku.clone(),
+            charged_unit_price_minor: line.unit_price_minor,
+            published_unit_price_minor,
+            snapshot_id: published.snapshot_id,
+            snapshot_generated_at: published.generated_at.clone(),
+            snapshot_content_hash: published.content_hash.clone(),
+        });
+    }
+
+    divergences
+}
+
+/// Appends the divergence entry, on the sale's own transaction.
+///
+/// The entry and the sale commit together or not at all, exactly as the AML one
+/// does: „warn, never block“ is a rule about the **price**, not a licence for a
+/// charge above the published cenovnik to exist with no record that it did.
+///
+/// Stamped with the sale's own `created_at` rather than `datetime('now')` — the
+/// two records must not be able to disagree about when the price was charged.
+fn insert_price_divergence_event(
+    tx: &Connection,
+    divergence: &PriceDivergence,
+    sale_id: i64,
+    local_receipt_number: &str,
+    user_id: i64,
+    created_at: &str,
+) -> Result<(), AppError> {
+    let detail = serde_json::json!({
+        "sale_id": sale_id,
+        "local_receipt_number": local_receipt_number,
+        "product_id": divergence.product_id,
+        "sifra": divergence.product_sku,
+        "naziv": divergence.product_name,
+        // Both in para, never a rendered figure: the record is read back by code
+        // as often as by a person.
+        "naplacena_cena_minor": divergence.charged_unit_price_minor,
+        "objavljena_cena_minor": divergence.published_unit_price_minor,
+        // Which published file, by id, by date and by bytes.
+        "snapshot_id": divergence.snapshot_id,
+        "snapshot_generated_at": divergence.snapshot_generated_at,
+        "snapshot_content_hash": divergence.snapshot_content_hash,
+        "note": "Artikal je naplaćen iznad cene iz objavljenog cenovnika \
+                 (čl. 6 st. 4 Zakona o zaštiti potrošača). Prodaja nije zaustavljena.",
+    })
+    .to_string();
+
+    tx.execute(
+        "INSERT INTO compliance_log (event_type, detail_json, user_id, created_at)
+         VALUES ('cenovnik_price_divergence', ?1, ?2, ?3)",
+        params![detail, user_id, created_at],
+    )?;
+
+    Ok(())
+}
+
 /// What a breach of the čl. 46 st. 1 cash cap writes into the never-deleted
 /// `compliance_log`, in the shape `backup.rs` uses for the other two event
 /// types. §3 req 8 [PRUDENTIAL]: the soft block owes an immutable audit entry,
@@ -998,8 +1178,9 @@ mod tests {
     use rusqlite::params;
 
     use crate::commands::sales::{
-        build_sale_preview, complete_sale_transaction, CompleteSaleRequest, DiscountRequest,
-        PaymentDraft, PaymentMethod, SaleDraftItem, SaleDraftRequest,
+        assess_draft_price_integrity, build_sale_preview, complete_sale_transaction,
+        CompleteSaleRequest, DiscountRequest, PaymentDraft, PaymentMethod, SaleDraftItem,
+        SaleDraftRequest,
     };
     use crate::commands::settings::{
         save_eur_rate, save_shop_profile, PravnaForma, ShopProfile, ShopProfileRequest,
@@ -2225,6 +2406,392 @@ mod tests {
             .expect_err("a transfer overpayment must be refused");
 
             assert_eq!(error.code(), "payment_mismatch");
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 5 — the till-side price-integrity guard (req. 12, čl. 6 st. 4)
+    // ---------------------------------------------------------------------
+
+    /// A till whose outlet has published a cenovnik: the seeded product at
+    /// 1000 para, an open shift, and one snapshot rendered from the catalog as it
+    /// then stood. Returns the product id and the snapshot the guard will name.
+    fn seed_published_till(state: &AppState) -> (i64, i64) {
+        let product_id = seed_admin_shift_and_product(state);
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO settings (key, value_json, updated_at)
+                 VALUES ('company', ?1, '2026-07-31T09:00:00Z')
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                params![serde_json::json!({
+                    "shopName": "Butik Ana",
+                    "address": "Bulevar oslobođenja 1, Novi Sad",
+                    "pib": "",
+                    "registrationNumber": "",
+                    "phone": "",
+                    "logoPath": null,
+                    "currency": "RSD",
+                })
+                .to_string()],
+            )
+            .expect("company settings should save");
+
+        let snapshot_id = crate::commands::cenovnik::publish_current(
+            &connection,
+            &crate::cenovnik::NotConfigured,
+            "2026-07-31T09:30:00Z",
+        )
+        .expect("the outlet should publish")
+        .expect("an identified outlet publishes");
+
+        (product_id, snapshot_id)
+    }
+
+    /// Moves the catalog price without republishing — the state čl. 6 st. 3 calls
+    /// a stale cenovnik, and the only one in which the till can charge above what
+    /// the shop published.
+    fn move_the_shelf_price_without_republishing(state: &AppState, product_id: i64, minor: i64) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .execute(
+                "UPDATE products SET sale_price_minor = ?1 WHERE id = ?2",
+                params![minor, product_id],
+            )
+            .expect("the shelf price should move");
+    }
+
+    fn cash_sale(product_id: i64, quantity_milli: i64, cash_minor: i64) -> CompleteSaleRequest {
+        CompleteSaleRequest {
+            items: vec![SaleDraftItem {
+                product_id,
+                quantity_milli,
+                discount: None,
+            }],
+            receipt_discount: None,
+            payments: vec![PaymentDraft {
+                method: PaymentMethod::Cash,
+                amount_minor: cash_minor,
+            }],
+            allow_stock_override: None,
+            aml_ack_reason: None,
+        }
+    }
+
+    /// Req. 12. Čl. 6 st. 4 binds a trader who publishes a cenovnik to adhere to
+    /// the prices in it, so ringing an article above the published price is the
+    /// one direction the till has to say something about — and it says it, it does
+    /// not refuse: the register must be able to record what actually happened.
+    #[test]
+    fn ringing_above_the_published_price_raises_a_divergence() {
+        with_state("cenovnik_guard_above_published", |state| {
+            let (product_id, snapshot_id) = seed_published_till(state);
+            move_the_shelf_price_without_republishing(state, product_id, 1_500);
+
+            let divergences =
+                assess_draft_price_integrity(state.db(), sale_draft(product_id, 1_000))
+                    .expect("the guard should assess");
+            assert_eq!(divergences.len(), 1, "{divergences:?}");
+            assert_eq!(divergences[0].product_id, product_id);
+            assert_eq!(divergences[0].product_sku, "SPORET-1");
+            assert_eq!(divergences[0].charged_unit_price_minor, 1_500);
+            assert_eq!(divergences[0].published_unit_price_minor, 1_000);
+            assert_eq!(divergences[0].snapshot_id, snapshot_id);
+            assert_eq!(divergences[0].snapshot_generated_at, "2026-07-31T09:30:00Z");
+
+            complete_sale_transaction(state.db(), cash_sale(product_id, 1_000, 1_500), None)
+                .expect("the guard warns — it never refuses the sale");
+        });
+    }
+
+    /// A discount is not a breach: čl. 6 st. 4 binds the shop to prices it must
+    /// not exceed, not to prices it must charge. Only the above direction matters,
+    /// which is also what keeps the guard to a single comparison.
+    #[test]
+    fn ringing_below_the_published_price_is_silent() {
+        with_state("cenovnik_guard_below_published", |state| {
+            let (product_id, _) = seed_published_till(state);
+            move_the_shelf_price_without_republishing(state, product_id, 700);
+
+            assert!(
+                assess_draft_price_integrity(state.db(), sale_draft(product_id, 1_000))
+                    .expect("the guard should assess")
+                    .is_empty(),
+                "a price below the published one is a discount, not a divergence"
+            );
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                cash_sale(product_id, 1_000, 700),
+                Some(admin_id(state)),
+            )
+            .expect("the sale should complete");
+            assert_eq!(sale.total_minor, 700);
+            assert_eq!(
+                compliance_log_count(state),
+                0,
+                "nothing to record: the shop charged less than it published"
+            );
+        });
+    }
+
+    /// Charging exactly the published price is adherence, not divergence — the
+    /// comparison is strictly greater-than, and the boundary is the one place a
+    /// guard written with `>=` would accuse a shop that did everything right.
+    #[test]
+    fn ringing_exactly_the_published_price_is_silent() {
+        with_state("cenovnik_guard_at_published", |state| {
+            let (product_id, _) = seed_published_till(state);
+
+            assert!(
+                assess_draft_price_integrity(state.db(), sale_draft(product_id, 1_000))
+                    .expect("the guard should assess")
+                    .is_empty()
+            );
+        });
+    }
+
+    /// Čl. 6 st. 1 is about the article's prodajna cena, and a discount is a
+    /// reduction granted on that price rather than a different price for the
+    /// article. So the comparison stays on the offered unit price — otherwise a
+    /// discount line is the obvious way to ring above the published cenovnik
+    /// unremarked.
+    #[test]
+    fn a_line_discount_does_not_hide_a_price_above_the_published_one() {
+        with_state("cenovnik_guard_discount_does_not_hide", |state| {
+            let (product_id, _) = seed_published_till(state);
+            move_the_shelf_price_without_republishing(state, product_id, 1_500);
+
+            let discounted = SaleDraftRequest {
+                items: vec![SaleDraftItem {
+                    product_id,
+                    quantity_milli: 1_000,
+                    // Brings the line back to the published 1000 para.
+                    discount: Some(DiscountRequest::Amount { amount_minor: 500 }),
+                }],
+                receipt_discount: None,
+            };
+
+            let divergences = assess_draft_price_integrity(state.db(), discounted)
+                .expect("the guard should assess");
+            assert_eq!(divergences.len(), 1, "{divergences:?}");
+            assert_eq!(divergences[0].charged_unit_price_minor, 1_500);
+            assert_eq!(divergences[0].published_unit_price_minor, 1_000);
+        });
+    }
+
+    /// The record has to name the exhibit. An outlet's archive holds many files
+    /// and čl. 6 st. 4 binds the shop only to the one in force when the sale
+    /// happened, so the entry carries that snapshot's id, its date and its hash —
+    /// enough to pull the exact file back out of the archive and read the price
+    /// the till was measured against.
+    #[test]
+    fn the_divergence_is_logged_with_the_snapshot_it_was_compared_against() {
+        with_state("cenovnik_guard_logs_the_snapshot", |state| {
+            let (product_id, snapshot_id) = seed_published_till(state);
+            sign_in_admin(state);
+            move_the_shelf_price_without_republishing(state, product_id, 1_500);
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                cash_sale(product_id, 1_000, 1_500),
+                Some(admin_id(state)),
+            )
+            .expect("the guard never blocks the sale");
+
+            assert_eq!(compliance_log_count(state), 1, "one entry per article");
+            let connection = state.db().open().expect("db opens");
+            let (event_type, detail, user_id, created_at): (String, String, i64, String) =
+                connection
+                    .query_row(
+                        "SELECT event_type, detail_json, user_id, created_at FROM compliance_log",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .expect("the divergence entry should be readable");
+
+            assert_eq!(event_type, "cenovnik_price_divergence");
+            assert_eq!(user_id, admin_id(state), "the acting session user");
+            assert_eq!(
+                created_at, sale.created_at,
+                "the entry carries the sale's own timestamp — the two records must \
+                 not be able to disagree about when the price was charged"
+            );
+
+            let detail: serde_json::Value =
+                serde_json::from_str(&detail).expect("detail_json should parse");
+            assert_eq!(detail["sale_id"], serde_json::json!(sale.id));
+            assert_eq!(
+                detail["local_receipt_number"],
+                serde_json::json!(sale.local_receipt_number)
+            );
+            assert_eq!(detail["product_id"], serde_json::json!(product_id));
+            assert_eq!(detail["sifra"], serde_json::json!("SPORET-1"));
+            assert_eq!(detail["naplacena_cena_minor"], serde_json::json!(1_500));
+            assert_eq!(detail["objavljena_cena_minor"], serde_json::json!(1_000));
+            assert_eq!(detail["snapshot_id"], serde_json::json!(snapshot_id));
+            assert_eq!(
+                detail["snapshot_generated_at"],
+                serde_json::json!("2026-07-31T09:30:00Z")
+            );
+
+            // The hash pins WHICH bytes: an archive read back through the id alone
+            // could not tell the reader that the file it found is the file the
+            // comparison used.
+            let published_hash: String = connection
+                .query_row(
+                    "SELECT content_hash FROM cenovnik_snapshots WHERE id = ?1",
+                    params![snapshot_id],
+                    |row| row.get(0),
+                )
+                .expect("the snapshot should read");
+            assert_eq!(
+                detail["snapshot_content_hash"],
+                serde_json::json!(published_hash)
+            );
+        });
+    }
+
+    /// A shop that has published nothing has made no čl. 6 st. 4 promise to
+    /// depart from — and §2b leaves it genuinely unresolved whether it must
+    /// publish at all. So there is no guard, no entry, and above all no block.
+    #[test]
+    fn no_published_snapshot_means_no_guard_and_no_block() {
+        with_state("cenovnik_guard_without_a_snapshot", |state| {
+            let product_id = seed_admin_shift_and_product(state);
+            move_the_shelf_price_without_republishing(state, product_id, 99_900);
+
+            assert!(
+                assess_draft_price_integrity(state.db(), sale_draft(product_id, 1_000))
+                    .expect("an empty archive is not an error")
+                    .is_empty()
+            );
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                cash_sale(product_id, 1_000, 99_900),
+                Some(admin_id(state)),
+            )
+            .expect("a shop that has published nothing must still be able to sell");
+            assert_eq!(sale.total_minor, 99_900);
+            assert_eq!(compliance_log_count(state), 0);
+        });
+    }
+
+    /// An article the published file does not carry — created after the last
+    /// republish — has no published price, and a guard that treated „absent“ as
+    /// „zero“ would accuse the shop of a divergence on every sale of it.
+    #[test]
+    fn an_article_the_published_file_does_not_carry_raises_no_divergence() {
+        with_state("cenovnik_guard_unpublished_article", |state| {
+            let (_, _) = seed_published_till(state);
+            let connection = state.db().open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO products (
+                        name, sku, unit_of_measure, sale_price_minor, purchase_price_minor,
+                        tax_rate_id, minimum_stock_milli, allow_negative_stock, active,
+                        created_at, updated_at
+                     )
+                     VALUES ('Novi artikal', 'NOVI-1', 'kom', 5000, 3000,
+                             (SELECT id FROM tax_rates LIMIT 1), 0, 1, 1,
+                             '2026-08-02T09:00:00Z', '2026-08-02T09:00:00Z')",
+                    [],
+                )
+                .expect("a product created after the last republish should insert");
+            let unpublished = connection.last_insert_rowid();
+
+            assert!(
+                assess_draft_price_integrity(state.db(), sale_draft(unpublished, 1_000))
+                    .expect("the guard should assess")
+                    .is_empty(),
+                "an article with no published price cannot diverge from one"
+            );
+        });
+    }
+
+    /// One article rung twice is one divergence: the unit price comes from the
+    /// catalog, so both lines carry the same figure, and two identical entries
+    /// would be two accusations over one departure from one published price.
+    #[test]
+    fn one_article_rung_on_two_lines_is_one_divergence() {
+        with_state("cenovnik_guard_dedupes_per_article", |state| {
+            let (product_id, _) = seed_published_till(state);
+            sign_in_admin(state);
+            move_the_shelf_price_without_republishing(state, product_id, 1_500);
+
+            let two_lines = SaleDraftRequest {
+                items: vec![
+                    SaleDraftItem {
+                        product_id,
+                        quantity_milli: 1_000,
+                        discount: None,
+                    },
+                    SaleDraftItem {
+                        product_id,
+                        quantity_milli: 2_000,
+                        discount: None,
+                    },
+                ],
+                receipt_discount: None,
+            };
+            assert_eq!(
+                assess_draft_price_integrity(state.db(), two_lines.clone())
+                    .expect("the guard should assess")
+                    .len(),
+                1
+            );
+
+            complete_sale_transaction(
+                state.db(),
+                CompleteSaleRequest {
+                    items: two_lines.items,
+                    receipt_discount: None,
+                    payments: vec![PaymentDraft {
+                        method: PaymentMethod::Cash,
+                        amount_minor: 4_500,
+                    }],
+                    allow_stock_override: None,
+                    aml_ack_reason: None,
+                },
+                Some(admin_id(state)),
+            )
+            .expect("the sale should complete");
+            assert_eq!(compliance_log_count(state), 1);
+        });
+    }
+
+    /// „Warn, never block“ in its strongest form. An archive the guard cannot read
+    /// is a defect in an auxiliary table, and čl. 6 is not a reason a till cannot
+    /// sell — so the guard degrades to silence and the sale goes through.
+    #[test]
+    fn an_unreadable_archive_silences_the_guard_instead_of_stopping_the_till() {
+        with_state("cenovnik_guard_unreadable_archive", |state| {
+            let (product_id, _) = seed_published_till(state);
+            move_the_shelf_price_without_republishing(state, product_id, 1_500);
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute("DROP TABLE cenovnik_snapshots", [])
+                .expect("the archive should drop");
+
+            assert!(
+                assess_draft_price_integrity(state.db(), sale_draft(product_id, 1_000))
+                    .expect("an unreadable archive is not an error at the till")
+                    .is_empty()
+            );
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                cash_sale(product_id, 1_000, 1_500),
+                Some(admin_id(state)),
+            )
+            .expect("a broken archive must never stop the register");
+            assert_eq!(sale.total_minor, 1_500);
+            assert_eq!(compliance_log_count(state), 0);
         });
     }
 }

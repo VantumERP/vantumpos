@@ -18,6 +18,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
@@ -146,6 +147,51 @@ pub fn render_csv(rows: &[CenovnikRow]) -> String {
     out
 }
 
+/// The prodajna cena the file publishes for each šifra, in integer para.
+///
+/// The exact inverse of [`render_csv`], and the till guard's only source for
+/// „the last published price“ (req. 12): čl. 6 st. 4 binds the shop to the
+/// prices in the file it published, so the comparison has to be made against
+/// that file rather than against the catalog the file was rendered from — which
+/// is the very thing that may have moved without a republish.
+///
+/// Columns are located by **name** out of the file's own header, not by
+/// position. The guard reads whichever snapshot is currently published, and an
+/// upgrade that reorders [`COLUMNS`] leaves the outlet's current file carrying
+/// the old header until the next price write.
+///
+/// Lenient by construction: a file this cannot read yields no prices, and a row
+/// whose price cell will not parse is skipped rather than guessed at. No prices
+/// means no guard — the same answer as an outlet that has published nothing —
+/// because a till that warned against a figure nobody published would be worse
+/// than one that stayed quiet.
+pub fn published_prices(body: &str) -> BTreeMap<String, i64> {
+    let mut lines = body.strip_prefix('\u{feff}').unwrap_or(body).lines();
+    let Some(header) = lines.next().map(split_fields) else {
+        return BTreeMap::new();
+    };
+    let position_of = |name: &str| header.iter().position(|column| column == name);
+    let (Some(sifra_at), Some(cena_at)) = (position_of("sifra"), position_of("prodajna_cena"))
+    else {
+        return BTreeMap::new();
+    };
+
+    let mut prices = BTreeMap::new();
+    for line in lines {
+        let fields = split_fields(line);
+        let (Some(sifra), Some(cena)) = (fields.get(sifra_at), fields.get(cena_at)) else {
+            continue;
+        };
+        if sifra.is_empty() {
+            continue;
+        }
+        if let Some(minor) = parse_para_2dec(cena) {
+            prices.insert(sifra.clone(), minor);
+        }
+    }
+    prices
+}
+
 /// SHA-256 of the rendered body, lowercase hex — the archive's handle on „which
 /// file was published“ (čl. 6 st. 5) and the only cheap way to tell a republish
 /// that changed something from one that changed nothing.
@@ -234,6 +280,67 @@ fn format_para_2dec(minor: i64) -> String {
     let sign = if minor < 0 { "-" } else { "" };
     let abs = minor.unsigned_abs();
     format!("{sign}{}.{:02}", abs / 100, abs % 100)
+}
+
+/// One rendered line back into its fields, unescaping RFC 4180 quoting.
+///
+/// A trailing CR is dropped here rather than at each call site: `str::lines`
+/// splits on the LF of this file's CRLF and leaves the CR on the last field,
+/// which would make every price cell unparseable.
+fn split_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut characters = line.trim_end_matches('\r').chars().peekable();
+
+    while let Some(character) = characters.next() {
+        match character {
+            '"' if quoted => {
+                if characters.peek() == Some(&'"') {
+                    current.push('"');
+                    characters.next();
+                } else {
+                    quoted = false;
+                }
+            }
+            '"' => quoted = true,
+            SEPARATOR if !quoted => fields.push(std::mem::take(&mut current)),
+            other => current.push(other),
+        }
+    }
+    fields.push(current);
+    fields
+}
+
+/// The inverse of [`format_para_2dec`]: `1234.56` back into 123 456 para.
+///
+/// Integer arithmetic only, and deliberately strict — exactly two decimals, ASCII
+/// digits, a `.` decimal mark. Anything else is not a price this crate rendered,
+/// and a lenient parse would hand the till guard a number to compare against
+/// that nobody published.
+fn parse_para_2dec(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (sign, digits) = match value.strip_prefix('-') {
+        Some(rest) => (-1_i64, rest),
+        None => (1_i64, value),
+    };
+    let (whole, fraction) = digits.split_once('.')?;
+    if whole.is_empty() || fraction.len() != 2 {
+        return None;
+    }
+    if !whole
+        .chars()
+        .chain(fraction.chars())
+        .all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let whole: i64 = whole.parse().ok()?;
+    let fraction: i64 = fraction.parse().ok()?;
+    whole
+        .checked_mul(100)?
+        .checked_add(fraction)
+        .map(|minor| sign * minor)
 }
 
 /// `DD-MM-YYYY` (req. 16) from an RFC3339 stamp, in the stamp's own offset — the
@@ -535,6 +642,69 @@ mod tests {
         assert!(
             render_csv(&[row]).contains("Čarape žute, Đorđević"),
             "the diacritics must reach the file verbatim"
+        );
+    }
+
+    /// The till guard (req. 12) compares against „the last published price“, and
+    /// the only record of that is the published file itself. So the read-back has
+    /// to be the exact inverse of the render — quoting, BOM, CRLF and all — or
+    /// the guard measures the sale against a price the shop never published.
+    #[test]
+    fn the_published_prices_read_back_exactly_what_the_render_wrote() {
+        let mut awkward = row_with_unit_price();
+        awkward.sifra = "A;1\"x".to_string();
+        let csv = render_csv(&[awkward, row("B-2"), row_with_barcode("0123456789012")]);
+
+        let prices = published_prices(&csv);
+        assert_eq!(prices.get("A;1\"x"), Some(&27_900), "{prices:?}");
+        assert_eq!(prices.get("B-2"), Some(&279_900), "{prices:?}");
+        assert_eq!(prices.get("A-1"), Some(&279_900), "{prices:?}");
+        assert_eq!(prices.len(), 3, "{prices:?}");
+    }
+
+    /// Read back as integer para, never through a float: `1234.56` is 123 456
+    /// para, and a parse that round-tripped through `f64` would put the guard's
+    /// comparison one para off on figures a shop really charges.
+    #[test]
+    fn a_published_price_reads_back_as_integer_para() {
+        let csv = render_csv(&[row_priced(123_456)]);
+        assert_eq!(published_prices(&csv).get("A-1"), Some(&123_456));
+
+        for rendered in ["1234.5", "1234.567", "1234", "besplatno", "", "12,34"] {
+            assert_eq!(
+                parse_para_2dec(rendered),
+                None,
+                "a cell that is not a two-decimal price is not a price: {rendered}"
+            );
+        }
+        assert_eq!(parse_para_2dec("-1.05"), Some(-105));
+        assert_eq!(parse_para_2dec("0.00"), Some(0));
+    }
+
+    /// The guard reads whichever file is currently published, and an upgrade that
+    /// reorders [`COLUMNS`] leaves yesterday's snapshot carrying yesterday's
+    /// header until the next price write. So the columns are located by name out
+    /// of the file's own header rather than by position.
+    #[test]
+    fn the_price_column_is_located_by_the_files_own_header() {
+        let reordered = "\u{feff}naziv;prodajna_cena;sifra\r\n\
+                         Košulja;279.00;A-1\r\n";
+        assert_eq!(published_prices(reordered).get("A-1"), Some(&27_900));
+    }
+
+    /// A file the guard cannot read is not a published price, and inventing one
+    /// would have the till warn against a figure nobody published. No prices, no
+    /// guard — the same answer as an outlet that has published nothing.
+    #[test]
+    fn a_body_without_the_two_columns_yields_no_comparable_price() {
+        assert!(published_prices("").is_empty());
+        assert!(published_prices("\u{feff}sifra;naziv\r\nA-1;Košulja\r\n").is_empty());
+        assert!(published_prices("\u{feff}naziv;prodajna_cena\r\nKošulja;279.00\r\n").is_empty());
+        // A row whose price cell will not parse is skipped; the rest still read.
+        let partly = "\u{feff}sifra;prodajna_cena\r\nA-1;nema\r\nB-2;279.00\r\n";
+        assert_eq!(
+            published_prices(partly).into_iter().collect::<Vec<_>>(),
+            [("B-2".to_string(), 27_900)]
         );
     }
 
