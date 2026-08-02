@@ -4,7 +4,9 @@
 //! about what may follow what lives in `crate::popis` — the state machine, the
 //! čl. 8 st. 5 release predicate and the čl. 13 st. 2 deadline engine are pure and
 //! are not re-derived here. What lives here is the part that touches rows: the
-//! sessions, the liste, the two potpisi and the knjiženje.
+//! sessions, the liste, the two potpisi and the knjiženje — plus the one document
+//! that touches none, the **izveštaj o popisu** (req. 37), which is composed out of
+//! all of them when it is asked for and is not stored anywhere.
 //!
 //! Three properties are this module's own and none of them is a UI convention:
 //!
@@ -30,7 +32,8 @@ use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
 use crate::popis::{
-    advance, book_quantities_released, konsignacija_rok, nedostajuce_liste, PopisEvent, PopisLista,
+    advance, book_quantities_released, ensure_izvestaj_kompletan, izvestaj_due, konsignacija_rok,
+    nedostajuce_liste, vrednost_minor, IzvestajElement, IzvestajNarativ, PopisEvent, PopisLista,
     PopisStatus, PopisVrsta,
 };
 use crate::state::AppState;
@@ -76,8 +79,10 @@ pub struct OpenPopisRequest {
     /// the same business year, dated before this one, is already `posted` (see
     /// [`ensure_perpetual_shortcut`], which is the whole of what is checked). The
     /// „usvojen“ limb — the čl. 14 st. 2 odluka o usvajanju — is **not** checked
-    /// here, because nothing in the schema records that decision yet; Task 6 owns
-    /// it and owes this gate its second limb.
+    /// here: the izveštaj surfaces that odluka as a milestone with its rok (see
+    /// [`OdlukaOUsvajanjuView`]) but nothing in this schema records that it was
+    /// made, so there is no fact to check. The limb stays open and is stated as
+    /// open wherever it shows.
     #[serde(default)]
     pub perpetual_odluka_ref: Option<String>,
     /// Req. 39 / ZoRač čl. 20 st. 3.
@@ -708,8 +713,10 @@ fn ensure_datum(value: &str, polje: &str) -> Result<(), AppError> {
 ///
 /// What is checked is exactly: a `popis_sessions` row of the same calendar year,
 /// dated before this one, whose status is `posted`. The čl. 14 st. 2 odluka o
-/// usvajanju is a separate artefact that nothing records yet (Task 6), so this
-/// gate does not check it and no string here claims it did.
+/// usvajanju is a separate artefact that **nothing in this schema records** — the
+/// izveštaj surfaces it as a milestone with its rok and says so, but there is no
+/// stored fact for a gate to read — so this gate does not check it and no string
+/// here claims it did.
 fn ensure_perpetual_shortcut(connection: &Connection, datum_popisa: &str) -> Result<(), AppError> {
     let postoji: bool = connection.query_row(
         "SELECT EXISTS (SELECT 1
@@ -950,8 +957,9 @@ fn read_potpisana_stavka(
 }
 
 /// Milli-units per counted piece — the schema's own quantity unit. A banknote is
-/// one piece and never a fraction of one.
-const MILLI: i64 = 1_000;
+/// one piece and never a fraction of one. Taken from `crate::popis` rather than
+/// written out again: the same divisor turns a količina into money in the izveštaj.
+const MILLI: i64 = crate::popis::MILLI;
 
 /// What each lista must carry to be the document its own article asks for.
 ///
@@ -1469,6 +1477,413 @@ pub(crate) fn sign_phase_b(
 }
 
 // ---------------------------------------------------------------------------
+// The izveštaj o popisu (req. 37) and its rok (req. 38)
+// ---------------------------------------------------------------------------
+
+/// The `settings` key the popis module's one configured value lives under.
+pub(crate) const POPIS_SETTINGS_KEY: &str = "popis";
+
+/// What the popis module cannot compute for itself.
+///
+/// **Why the filing deadline is configuration and not a constant.** PoP čl. 13
+/// st. 2 counts the annual izveštaj's rok back from the rok za dostavljanje
+/// redovnog godišnjeg finansijskog izveštaja, and ZoRač čl. 44 st. 1 sets that at
+/// 31 March *„osim ако посебним законом није друкчије уређено“*. The date is
+/// therefore not this crate's to own: a special law, or a change to čl. 44, must
+/// be a setting the shop's accountant edits and not a release of the app. Nothing
+/// is presumed in its place — an unset deadline refuses the annual izveštaj by
+/// name rather than dating it with a guess.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopisPodesavanja {
+    /// The rok za dostavljanje redovnog godišnjeg finansijskog izveštaja, as
+    /// `gggg-MM-dd`. `None` until the shop sets it.
+    #[serde(default)]
+    pub rok_predaje_fi: Option<String>,
+}
+
+pub(crate) fn load_podesavanja(state: &AppState) -> Result<PopisPodesavanja, AppError> {
+    super::settings::load_json_setting(state, POPIS_SETTINGS_KEY, PopisPodesavanja::default())
+}
+
+/// Validated where it is written rather than where it is used: this date is handed
+/// straight to the deadline engine, and a shape it cannot read would surface as a
+/// refused izveštaj weeks later, in front of the person who did not type it.
+pub(crate) fn save_podesavanja(
+    state: &AppState,
+    podesavanja: &PopisPodesavanja,
+) -> Result<PopisPodesavanja, AppError> {
+    let rok_predaje_fi = podesavanja
+        .rok_predaje_fi
+        .as_deref()
+        .map(str::trim)
+        .filter(|rok| !rok.is_empty());
+    if let Some(rok) = rok_predaje_fi {
+        ensure_datum(
+            rok,
+            "rok za dostavljanje redovnog godišnjeg finansijskog izveštaja",
+        )?;
+    }
+
+    let sacuvano = PopisPodesavanja {
+        rok_predaje_fi: rok_predaje_fi.map(str::to_string),
+    };
+    super::settings::save_json_setting(state, POPIS_SETTINGS_KEY, &sacuvano)?;
+
+    Ok(sacuvano)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IzvestajRequest {
+    /// Req. 36 — the categories the shop declares are present, checked against the
+    /// liste by `crate::popis::ensure_liste_kompletne` before anything is composed.
+    /// A parameter for the reason Task 5 gave: presence is a fact about the shop
+    /// that no ledger in this database holds.
+    #[serde(default)]
+    pub prijavljene_liste: Vec<PopisLista>,
+    /// The five čl. 13 st. 1 elements the commission writes.
+    pub narativ: IzvestajNarativ,
+}
+
+/// One of the eight čl. 13 st. 1 elements as it appears in the izveštaj.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IzvestajElementView {
+    pub element: IzvestajElement,
+    pub naziv: String,
+    pub pravni_osnov: String,
+    pub uputstvo: String,
+    /// The text written for it, or `None` for the three the popis itself answers —
+    /// their content is the figures in `liste` and `ukupno`.
+    pub tekst: Option<String>,
+}
+
+/// The čl. 9 st. 1 t. 4 and t. 6 figures behind elements one to three, over one
+/// lista or over the whole popis.
+///
+/// **Three counts sit beside the three amounts and they are not decoration.** A
+/// stavka with no cena cannot be valued and a stavka with no knjigovodstveno
+/// stanje has no razlika; counting either as zero would report a total that is not
+/// a total and a manjak the shop does not have. So the unvalued and the unbooked
+/// are counted, `potpuno` says whether there were any, and the izveštaj carries a
+/// warning naming them.
+///
+/// No natural total is reported. Stavke on one lista can be in komadima, metrima
+/// and kilogramima at once, and a single summed količina across them would be a
+/// number with no unit — the naturalna razlika belongs per stavka, on the popisna
+/// lista, which is where čl. 9 st. 1 t. 4 puts it.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IzvestajZbir {
+    pub broj_stavki: i64,
+    pub stavke_bez_cene: i64,
+    pub stavke_bez_knjigovodstvenog_stanja: i64,
+    pub stavke_sa_viskom: i64,
+    pub stavke_sa_manjkom: i64,
+    /// Čl. 9 st. 1 t. 6 — the value of what was counted, over the stavke that carry
+    /// a cena.
+    pub vrednost_po_popisu_minor: i64,
+    /// The same, valued at the knjigovodstvena količina — over the stavke that
+    /// carry both a cena and a book quantity.
+    pub vrednost_po_knjigama_minor: i64,
+    /// The vrednosna razlika over exactly those stavke: negative is a manjak.
+    pub vrednosna_razlika_minor: i64,
+    /// True when every stavka carried both a cena and a knjigovodstveno stanje, so
+    /// the three amounts above cover the whole lista.
+    pub potpuno: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IzvestajListaPregled {
+    pub vrsta: PopisLista,
+    pub naziv: String,
+    pub pravni_osnov: String,
+    pub zbir: IzvestajZbir,
+}
+
+/// PoP čl. 14 st. 2 — the odluka o usvajanju izveštaja, surfaced **with** the
+/// izveštaj as one milestone (req. 38) because the article gives it the rok „из
+/// члана 13. став 2“: it is the same date, not a second deadline.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OdlukaOUsvajanjuView {
+    pub rok: String,
+    pub pravni_osnov: String,
+    /// Čl. 14 st. 2 names the organ upravljanja „односно предузетник“, and for this
+    /// shop čl. 4 st. 2 → ZoRač čl. 43 st. 3 makes that the owner personally.
+    pub donosilac: String,
+    /// What this application does **not** do with the decision.
+    pub napomena: String,
+}
+
+/// The izveštaj o popisu (req. 37), composed from the popis and the commission's
+/// own words.
+///
+/// **Composed, not stored.** Nothing in this schema records an izveštaj: the
+/// document is assembled when it is asked for and handed back, and the copy says
+/// so in `upozorenja` rather than letting a shop assume the app is keeping it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IzvestajView {
+    pub session_id: i64,
+    pub vrsta: PopisVrsta,
+    pub status: PopisStatus,
+    pub obveznik: String,
+    pub pib: String,
+    pub maticni_broj: String,
+    pub prodajno_mesto: String,
+    pub datum_popisa: String,
+    pub period_from: Option<String>,
+    pub period_to: Option<String>,
+    pub komisija: Vec<KomisijaClanView>,
+    pub potpisi: Vec<PopisSignatureView>,
+    /// All eight čl. 13 st. 1 elements, in the article's order.
+    pub elementi: Vec<IzvestajElementView>,
+    /// All six liste, the empty ones included.
+    pub liste: Vec<IzvestajListaPregled>,
+    pub ukupno: IzvestajZbir,
+    /// PoP čl. 13 st. 2, computed by `crate::popis::izvestaj_due`.
+    pub rok: String,
+    pub rok_pravni_osnov: String,
+    pub odluka_o_usvajanju: OdlukaOUsvajanjuView,
+    pub upozorenja: Vec<String>,
+}
+
+fn vrednost(kolicina_milli: i64, cena_minor: i64) -> Result<i64, AppError> {
+    vrednost_minor(kolicina_milli, cena_minor).ok_or_else(|| {
+        AppError::business(
+            "popis_izvestaj_vrednost_prevelika",
+            "Vrednost stavke popisne liste je prevelika za obračun — proverite količinu i cenu.",
+        )
+    })
+}
+
+fn saberi(zbir: i64, iznos: i64) -> Result<i64, AppError> {
+    zbir.checked_add(iznos).ok_or_else(|| {
+        AppError::business(
+            "popis_izvestaj_vrednost_prevelika",
+            "Zbir vrednosti u izveštaju o popisu je prevelik za obračun.",
+        )
+    })
+}
+
+/// The rollup behind čl. 13 st. 1's first three elements. Every amount is integer
+/// para throughout — `crate::popis::vrednost_minor` does the arithmetic and a
+/// figure that will not fit is refused rather than wrapped, because a wrapped
+/// value is a manjak reported as a višak.
+fn zbir_stavki<'a>(
+    linije: impl Iterator<Item = &'a PopisLineView>,
+) -> Result<IzvestajZbir, AppError> {
+    let mut zbir = IzvestajZbir::default();
+
+    for linija in linije {
+        zbir.broj_stavki += 1;
+
+        match linija.cena_minor {
+            None => zbir.stavke_bez_cene += 1,
+            Some(cena) => {
+                zbir.vrednost_po_popisu_minor = saberi(
+                    zbir.vrednost_po_popisu_minor,
+                    vrednost(linija.stvarna_kolicina_milli, cena)?,
+                )?;
+                if let Some(knjigovodstvena) = linija.knjigovodstvena_kolicina_milli {
+                    zbir.vrednost_po_knjigama_minor = saberi(
+                        zbir.vrednost_po_knjigama_minor,
+                        vrednost(knjigovodstvena, cena)?,
+                    )?;
+                }
+                if let Some(razlika) = linija.razlika_milli {
+                    zbir.vrednosna_razlika_minor =
+                        saberi(zbir.vrednosna_razlika_minor, vrednost(razlika, cena)?)?;
+                }
+            }
+        }
+
+        match linija.razlika_milli {
+            None => zbir.stavke_bez_knjigovodstvenog_stanja += 1,
+            Some(razlika) if razlika > 0 => zbir.stavke_sa_viskom += 1,
+            Some(razlika) if razlika < 0 => zbir.stavke_sa_manjkom += 1,
+            Some(_) => {}
+        }
+    }
+
+    zbir.potpuno = zbir.stavke_bez_cene == 0 && zbir.stavke_bez_knjigovodstvenog_stanja == 0;
+
+    Ok(zbir)
+}
+
+/// Req. 37 — the izveštaj o popisu, a **structured template with the eight čl. 13
+/// st. 1 elements**, never free text.
+///
+/// Four gates, in the order the duties bite:
+///
+/// 1. **Čl. 8 st. 5 (req. 29).** The izveštaj carries the knjigovodstveno stanje
+///    and the razlike, so composing one during the count would put in the
+///    commission's hands, through a document, exactly what the blind count keeps
+///    back. This is the one refusal here that is a breach to get wrong.
+/// 2. **Req. 36.** A category the shop declared present with an empty lista stops
+///    the izveštaj, through Task 5's own refusal — čl. 13 st. 1 has this document
+///    report the stvarno stanje of the popis, and a popis missing a declared lista
+///    reports a stanje that is not the shop's.
+/// 3. **Req. 37.** Every prescribed element must be answered.
+/// 4. **Req. 38.** The rok is computed by `crate::popis::izvestaj_due` from the
+///    configured filing deadline; an annual izveštaj with none configured is
+///    refused rather than dated by guesswork.
+///
+/// Read-only from end to end. The izveštaj is not a row in this database and
+/// composing one writes nothing.
+pub(crate) fn compose_izvestaj(
+    state: &AppState,
+    id: i64,
+    request: &IzvestajRequest,
+) -> Result<IzvestajView, AppError> {
+    let connection = state.db().open()?;
+    let session = load_session(&connection, id)?;
+
+    if !session.knjigovodstvo_dostupno {
+        return Err(AppError::business(
+            "popis_izvestaj_pre_potpisa",
+            "Izveštaj o popisu sadrži knjigovodstveno stanje i razlike (PoP čl. 13 st. 1), pa se \
+             ne sastavlja pre nego što se stvarno stanje unese u popisne liste i pre nego što \
+             članovi komisije potpišu te liste (PoP čl. 8 st. 5).",
+        ));
+    }
+
+    crate::popis::ensure_liste_kompletne(
+        &request.prijavljene_liste,
+        &liste_sa_stavkama(&session.liste),
+    )?;
+    ensure_izvestaj_kompletan(&request.narativ)?;
+
+    let podesavanja = load_podesavanja(state)?;
+    let rok = izvestaj_due(
+        session.vrsta,
+        &session.datum_popisa,
+        podesavanja.rok_predaje_fi.as_deref(),
+    )?;
+
+    let company = super::settings::load_company_settings(state)?;
+    let ukupno = zbir_stavki(session.linije.iter())?;
+    let mut liste = Vec::with_capacity(session.liste.len());
+    for pregled in &session.liste {
+        liste.push(IzvestajListaPregled {
+            vrsta: pregled.vrsta,
+            naziv: pregled.naziv.clone(),
+            pravni_osnov: pregled.pravni_osnov.clone(),
+            zbir: zbir_stavki(
+                session
+                    .linije
+                    .iter()
+                    .filter(|linija| linija.lista_vrsta == pregled.vrsta.as_db_str()),
+            )?,
+        });
+    }
+
+    let mut upozorenja = komisija_upozorenja(&session.komisija);
+
+    // Req. 31 / čl. 9 st. 3 — „uz štampanje pописних листа које потписују чланови
+    // комисије“. The izveštaj rests on those liste, so an izveštaj drafted before
+    // they are signed rests on a document that is not yet evidence. A warning and
+    // not a refusal: drafting the izveštaj early is not itself a breach, and this
+    // module does not invent duties the bylaw does not impose.
+    if !session.faza_b_potpisana {
+        upozorenja.push(
+            "Obračunate popisne liste još nisu potpisane (PoP čl. 9 st. 3) — izveštaj se \
+             sastavlja na osnovu potpisanih listi. Sastavljanje nije zaustavljeno."
+                .to_string(),
+        );
+    }
+
+    if ukupno.stavke_bez_cene > 0 {
+        upozorenja.push(format!(
+            "Vrednosti u izveštaju nisu potpune: {} stavki nema upisanu cenu (PoP čl. 9 st. 1 \
+             t. 5), pa te stavke ulaze u popis, ali ne i u vrednosne zbirove.",
+            ukupno.stavke_bez_cene
+        ));
+    }
+    if ukupno.stavke_bez_knjigovodstvenog_stanja > 0 {
+        upozorenja.push(format!(
+            "Razlike u izveštaju ne obuhvataju sve stavke: {} stavki nema knjigovodstveno stanje \
+             (PoP čl. 9 st. 1 t. 3), pa se za njih razlika ne utvrđuje.",
+            ukupno.stavke_bez_knjigovodstvenog_stanja
+        ));
+    }
+
+    // A rok that falls before the popis was taken is arithmetic doing what it was
+    // told with a stale setting — the filing deadline of a business year that has
+    // already closed. Detectable without reading a clock, which is why it is
+    // checked here at all; and a warning rather than a refusal, because a popis
+    // taken after its rok is still a popis whose izveštaj has to be written.
+    if rok < session.datum_popisa {
+        let podeseno = podesavanja
+            .rok_predaje_fi
+            .as_deref()
+            .map(|rok| format!(" Podešeni rok za dostavljanje finansijskog izveštaja je „{rok}“."))
+            .unwrap_or_default();
+        upozorenja.push(format!(
+            "Rok za izveštaj o popisu („{rok}“) pada pre datuma popisa („{}“).{podeseno} \
+             Proverite podešavanje — rok je verovatno zastareo.",
+            session.datum_popisa
+        ));
+    }
+
+    if liste_sa_stavkama(&session.liste).contains(&PopisLista::Konsignacija) {
+        let (_, podsetnik) = konsignacija_podsetnik(&session.datum_popisa);
+        upozorenja.push(podsetnik);
+    }
+
+    upozorenja.push(
+        "Ovaj izveštaj se sastavlja u trenutku kada se zatraži i ne čuva se u aplikaciji — \
+         odštampajte ga i čuvajte uz popisne liste."
+            .to_string(),
+    );
+
+    Ok(IzvestajView {
+        session_id: session.id,
+        vrsta: session.vrsta,
+        status: session.status,
+        obveznik: company.shop_name,
+        pib: company.pib,
+        maticni_broj: company.registration_number,
+        prodajno_mesto: session.prodajno_mesto,
+        datum_popisa: session.datum_popisa,
+        period_from: session.period_from,
+        period_to: session.period_to,
+        komisija: session.komisija,
+        potpisi: session.potpisi,
+        elementi: IzvestajElement::ALL
+            .into_iter()
+            .map(|element| IzvestajElementView {
+                element,
+                naziv: element.naziv().to_string(),
+                pravni_osnov: element.pravni_osnov().to_string(),
+                uputstvo: element.uputstvo().to_string(),
+                tekst: request
+                    .narativ
+                    .tekst(element)
+                    .map(|tekst| tekst.trim().to_string()),
+            })
+            .collect(),
+        liste,
+        ukupno,
+        odluka_o_usvajanju: OdlukaOUsvajanjuView {
+            rok: rok.clone(),
+            pravni_osnov: "PoP čl. 14 st. 2".to_string(),
+            donosilac: "preduzetnik lično (PoP čl. 4 st. 2 u vezi sa ZoRač čl. 43 st. 3)"
+                .to_string(),
+            napomena: "Aplikacija ne evidentira odluku o usvajanju izveštaja o popisu — donesite \
+                       je u istom roku i čuvajte je uz izveštaj."
+                .to_string(),
+        },
+        rok,
+        rok_pravni_osnov: "PoP čl. 13 st. 2".to_string(),
+        upozorenja,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
@@ -1580,6 +1995,33 @@ pub fn popis_post(state: State<'_, AppState>, id: i64) -> Result<PopisSessionVie
     let connection = state.db().open().map_err(CommandError::from)?;
     let now = crate::clock::utc_now()?;
     post_popis(&connection, id, &now).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn popis_podesavanja_get(state: State<'_, AppState>) -> Result<PopisPodesavanja, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    load_podesavanja(state.inner()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn popis_podesavanja_set(
+    state: State<'_, AppState>,
+    podesavanja: PopisPodesavanja,
+) -> Result<PopisPodesavanja, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    save_podesavanja(state.inner(), &podesavanja).map_err(Into::into)
+}
+
+/// Req. 37. Read-only: the izveštaj is composed from the popis and the narrative
+/// the caller supplies, and nothing about the popis changes when it is asked for.
+#[tauri::command]
+pub fn popis_izvestaj(
+    state: State<'_, AppState>,
+    id: i64,
+    request: IzvestajRequest,
+) -> Result<IzvestajView, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    compose_izvestaj(state.inner(), id, &request).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -3296,6 +3738,618 @@ mod tests {
             let error = load_session(&connection, 404).expect_err("a missing popis must not load");
 
             assert_eq!(error.code(), "not_found");
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Req. 37 — the izveštaj o popisu (PoP čl. 13 st. 1), and req. 38's rok
+    // -----------------------------------------------------------------
+
+    /// ZoRač čl. 44 st. 1's own rok for FY2026. Configured rather than assumed,
+    /// which is the whole point of req. 38: the popis module does not own this date.
+    const ROK_PREDAJE_FI: &str = "2027-03-31";
+    /// 60 days back from it — PoP čl. 13 st. 2, first limb.
+    const ROK_IZVESTAJA: &str = "2027-01-30";
+
+    /// The cena the obračun puts on the counted stavka (para). Distinct from the
+    /// article's own sale price so a valuation that read the catalog instead of the
+    /// popisna lista would show.
+    const CENA_MINOR: i64 = 249_900;
+
+    fn set_rok_predaje_fi(state: &AppState, rok: Option<&str>) {
+        sign_in_admin(state);
+        save_podesavanja(
+            state,
+            &PopisPodesavanja {
+                rok_predaje_fi: rok.map(str::to_string),
+            },
+        )
+        .expect("the filing deadline should save");
+    }
+
+    fn potpun_narativ() -> IzvestajNarativ {
+        IzvestajNarativ {
+            uzroci_neslaganja: "Manjak potiče od zamene koja nije evidentirana.".into(),
+            predlozi_za_likvidaciju_razlika: "Prebijanje manjka i viška po osnovu zamene.".into(),
+            nacin_knjizenja: "Manjak na teret troškova, višak u prihode.".into(),
+            primedbe_lica_koja_rukuju_vrednostima: "Nema primedbi.".into(),
+            ostale_primedbe_i_predlozi: "Predlaže se kontrolni popis u junu.".into(),
+        }
+    }
+
+    fn izvestaj_request() -> IzvestajRequest {
+        IzvestajRequest {
+            prijavljene_liste: vec![PopisLista::Roba],
+            narativ: potpun_narativ(),
+        }
+    }
+
+    /// A popis walked to `computed` with the čl. 8 st. 5 potpis behind it and a cena
+    /// on the counted stavka — the earliest state in which an izveštaj can carry the
+    /// knjigovodstveno stanje and the razlike at all.
+    fn seeded_izvestaj_popis(state: &AppState, sifra: &str) -> i64 {
+        let id = seeded_count(state, sifra);
+        let mut connection = state.db().open().expect("database should open");
+        sign_phase_a(
+            &mut connection,
+            id,
+            &["Miloš Đurđević".to_string()],
+            "2026-12-31T17:00:00Z",
+        )
+        .expect("the čl. 8 st. 5 potpis should record");
+        compute_differences(&connection, id, "2027-01-02T09:00:00Z")
+            .expect("the obračun should open");
+
+        let line_id: i64 = connection
+            .query_row(
+                "SELECT id FROM popis_lines WHERE session_id = ?1 ORDER BY id LIMIT 1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("the counted line should exist");
+        let mut input = line_input(sifra, 7_000);
+        input.cena_minor = Some(CENA_MINOR);
+        save_line(
+            &connection,
+            id,
+            Some(line_id),
+            &input,
+            "2027-01-02T09:30:00Z",
+        )
+        .expect("the obračun should price the stavka");
+
+        id
+    }
+
+    /// Everything a write to this popis would move: the session's own stamp, every
+    /// line with its three figures and its stamp, and the number of potpisi. Read
+    /// straight out of the tables rather than off `PopisSessionView`, which carries
+    /// no `updated_at` and would let a stray write past unnoticed.
+    fn popis_otisak(state: &AppState, id: i64) -> String {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .query_row(
+                "SELECT s.status || '|' || s.updated_at || '|' || COALESCE(s.posted_at, '-')
+                        || '|' || (SELECT COUNT(*) FROM popis_signatures WHERE session_id = s.id)
+                        || '|' || COALESCE((SELECT GROUP_CONCAT(
+                                 l.id || ':' || l.stvarna_kolicina_milli
+                                      || ':' || COALESCE(l.knjigovodstvena_kolicina_milli, '-')
+                                      || ':' || COALESCE(l.cena_minor, '-')
+                                      || ':' || l.updated_at, ';')
+                             FROM popis_lines l WHERE l.session_id = s.id), '-')
+                 FROM popis_sessions s
+                 WHERE s.id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("the session should exist")
+    }
+
+    /// Req. 37 — the izveštaj carries **all eight** čl. 13 st. 1 elements, in the
+    /// article's order, each named and attributed, and the five the commission wrote
+    /// carry the text it wrote. The three computed ones carry no text: they are read
+    /// out of the popis, and the figures below them are what answers them.
+    #[test]
+    fn the_izvestaj_carries_all_eight_prescribed_elements() {
+        with_app("popis_izvestaj_elements", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let pre = popis_otisak(state.inner(), id);
+            let izvestaj = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a complete izveštaj should compose");
+            assert_eq!(
+                pre,
+                popis_otisak(state.inner(), id),
+                "the izveštaj is composed from the popis and never writes to it"
+            );
+
+            assert_eq!(
+                izvestaj
+                    .elementi
+                    .iter()
+                    .map(|element| element.element)
+                    .collect::<Vec<_>>(),
+                IzvestajElement::ALL.to_vec(),
+                "all eight prescribed elements, in the article's order"
+            );
+            for pregled in &izvestaj.elementi {
+                assert_eq!(pregled.naziv, pregled.element.naziv());
+                assert!(pregled.pravni_osnov.contains("čl. 13 st. 1"));
+                assert!(!pregled.uputstvo.is_empty());
+                assert_eq!(
+                    pregled.tekst.is_some(),
+                    pregled.element.narativni(),
+                    "{:?} carries text exactly when the commission writes it",
+                    pregled.element
+                );
+            }
+
+            let narativ = potpun_narativ();
+            for element in IzvestajElement::ALL {
+                let pregled = izvestaj
+                    .elementi
+                    .iter()
+                    .find(|pregled| pregled.element == element)
+                    .expect("every element is present");
+                assert_eq!(
+                    pregled.tekst.as_deref(),
+                    narativ.tekst(element),
+                    "{element:?} must carry exactly what was written for it"
+                );
+            }
+        });
+    }
+
+    /// The plan's second named behaviour: **an izveštaj with any prescribed element
+    /// empty is refused.** The refusal is `crate::popis::ensure_izvestaj_kompletan`'s
+    /// so a screen and the generator cannot word it two ways, and nothing about the
+    /// popis moves — a refused izveštaj is not a half-composed one.
+    #[test]
+    fn an_izvestaj_missing_one_element_is_refused_and_writes_nothing() {
+        with_app("popis_izvestaj_incomplete", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let pre = popis_otisak(state.inner(), id);
+
+            let mut request = izvestaj_request();
+            request.narativ.nacin_knjizenja = "   ".into();
+            let error = compose_izvestaj(state.inner(), id, &request)
+                .expect_err("an unanswered element must stop the izveštaj");
+
+            assert_eq!(error.code(), "popis_izvestaj_nepotpun");
+            let poruka = error.to_string();
+            assert!(
+                poruka.contains("način knjiženja") && poruka.contains("čl. 13 st. 1"),
+                "the refusal must name the element and its article, said: {poruka}"
+            );
+
+            assert_eq!(
+                pre,
+                popis_otisak(state.inner(), id),
+                "a refused izveštaj must not write anything"
+            );
+        });
+    }
+
+    /// The plan's third named behaviour: **the rok shown is the computed one** —
+    /// `crate::popis::izvestaj_due`, not a date typed into this module. Čl. 14 st. 2
+    /// puts the odluka o usvajanju „u roku iz člana 13. stav 2“, so the milestone
+    /// carries the same date rather than a second one.
+    #[test]
+    fn the_izvestaj_shows_the_computed_rok_and_the_odluka_rides_on_it() {
+        with_app("popis_izvestaj_rok", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let izvestaj = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a complete izveštaj should compose");
+
+            assert_eq!(izvestaj.rok, ROK_IZVESTAJA);
+            assert!(izvestaj.rok_pravni_osnov.contains("čl. 13 st. 2"));
+            assert_eq!(
+                izvestaj.odluka_o_usvajanju.rok, ROK_IZVESTAJA,
+                "čl. 14 st. 2 is the same rok, not a second one"
+            );
+            assert!(izvestaj
+                .odluka_o_usvajanju
+                .pravni_osnov
+                .contains("čl. 14 st. 2"));
+            assert!(
+                izvestaj
+                    .odluka_o_usvajanju
+                    .napomena
+                    .contains("ne evidentira"),
+                "the milestone must say plainly that the app does not record the decision, \
+                 said: {}",
+                izvestaj.odluka_o_usvajanju.napomena
+            );
+
+            // The rok is read out of the configured filing deadline, not out of this
+            // module: move the configuration and the rok moves with it.
+            set_rok_predaje_fi(state.inner(), Some("2028-03-31"));
+            let pomeren = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a complete izveštaj should compose");
+            assert_eq!(pomeren.rok, "2028-01-31", "the leap-year answer, computed");
+            assert_eq!(pomeren.odluka_o_usvajanju.rok, "2028-01-31");
+        });
+    }
+
+    /// Req. 38's other half, and Task 3's open contract: the filing deadline is
+    /// **configured**, never a constant in this crate. With nothing configured the
+    /// annual izveštaj is refused by name rather than dated by guesswork — a rok
+    /// this app invents is one the owner files on, and the čl. 58 prekršaj attaches
+    /// to the popis.
+    #[test]
+    fn the_annual_izvestaj_is_refused_until_the_filing_deadline_is_configured() {
+        with_app("popis_izvestaj_rok_unconfigured", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            assert_eq!(
+                load_podesavanja(state.inner())
+                    .expect("the settings should read")
+                    .rok_predaje_fi,
+                None,
+                "nothing is presumed about a rok this module does not own"
+            );
+
+            let error = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect_err("an undated annual izveštaj must be refused");
+            assert_eq!(error.code(), "popis_rok_predaje_fi_nepoznat");
+
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+            let izvestaj = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a configured deadline should date the izveštaj");
+            assert_eq!(izvestaj.rok, ROK_IZVESTAJA);
+        });
+    }
+
+    /// The nivelacija limb (req. 33 / čl. 13 st. 2, second limb) reaches the izveštaj
+    /// too, and it does **not** read the filing deadline: an in-year popis is due 30
+    /// days after the count, and a generator that fell through to the annual rule
+    /// would give it a rok months later than the article allows.
+    #[test]
+    fn a_nivelacija_izvestaj_is_due_thirty_days_after_the_count() {
+        with_app("popis_izvestaj_nivelacija_rok", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            // The vrsta is the session's; nothing else about the popis changes.
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute(
+                    "UPDATE popis_sessions SET vrsta = 'nivelacioni' WHERE id = ?1",
+                    params![id],
+                )
+                .expect("the vrsta should update");
+
+            let izvestaj = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a nivelacija izveštaj needs no filing deadline");
+
+            assert_eq!(izvestaj.vrsta, PopisVrsta::Nivelacioni);
+            assert_eq!(izvestaj.rok, "2027-01-30", "31.12.2026 + 30 dana");
+            assert_eq!(izvestaj.odluka_o_usvajanju.rok, "2027-01-30");
+        });
+    }
+
+    /// Req. 29 at the izveštaj. The document carries the knjigovodstveno stanje and
+    /// the razlike, so composing one during the count would hand the commission
+    /// exactly what PoP čl. 8 st. 5 keeps back — and it would do it through a
+    /// document rather than a screen, which is the leak a hidden column never
+    /// closes. The seeded perpetual balance appears **nowhere** in the refusal.
+    #[test]
+    fn no_izvestaj_is_composed_before_the_cl_8_st_5_potpis() {
+        with_app("popis_izvestaj_blind", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let error = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect_err("an izveštaj during the count must be refused");
+
+            assert_eq!(error.code(), "popis_izvestaj_pre_potpisa");
+            let poruka = error.to_string();
+            assert!(
+                poruka.contains("čl. 8 st. 5"),
+                "the refusal must name the article it enforces, said: {poruka}"
+            );
+            assert!(
+                !poruka.contains(&KNJIGOVODSTVENO_STANJE_MILLI.to_string()),
+                "no book quantity may leave the query layer during Phase A, said: {poruka}"
+            );
+        });
+    }
+
+    /// Task 5's contract, honoured: a category the shop declared present whose lista
+    /// is empty stops the izveštaj, with the refusal Task 5 wrote. Čl. 13 st. 1 has
+    /// the izveštaj report the stvarno stanje of the popis, and a popis that declared
+    /// cash on hand and wrote none of it down reports a stanje that is not the shop's.
+    #[test]
+    fn a_declared_but_empty_lista_stops_the_izvestaj() {
+        with_app("popis_izvestaj_liste_gate", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let mut request = izvestaj_request();
+            request.prijavljene_liste = vec![PopisLista::Roba, PopisLista::Gotovina];
+            let error = compose_izvestaj(state.inner(), id, &request)
+                .expect_err("a declared empty lista must stop the izveštaj");
+
+            assert_eq!(error.code(), "popis_prazna_prijavljena_lista");
+            assert!(error.to_string().contains("gotovina po apoenima"));
+        });
+    }
+
+    /// Čl. 9 st. 1 t. 4 and t. 6 — the razlike, naturally and in value, computed in
+    /// integers from the popisna lista's own cena. The manjak is negative in both
+    /// dimensions and the three value figures are consistent with one another, so a
+    /// reader who subtracts the two stanja gets the razlika the document prints.
+    #[test]
+    fn the_izvestaj_values_the_count_the_books_and_the_difference() {
+        with_app("popis_izvestaj_valuation", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let izvestaj = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a complete izveštaj should compose");
+
+            let po_popisu = 7_000 * CENA_MINOR / 1_000;
+            let po_knjigama = 15_303_126;
+            let zbir = &izvestaj.ukupno;
+
+            assert_eq!(zbir.broj_stavki, 1);
+            assert_eq!(zbir.vrednost_po_popisu_minor, po_popisu);
+            assert_eq!(zbir.vrednost_po_knjigama_minor, po_knjigama);
+            assert_eq!(zbir.vrednosna_razlika_minor, po_popisu - po_knjigama);
+            assert!(
+                zbir.vrednosna_razlika_minor < 0,
+                "7 counted against 61,237 booked is a manjak"
+            );
+            assert_eq!(zbir.stavke_sa_manjkom, 1);
+            assert_eq!(zbir.stavke_sa_viskom, 0);
+            assert_eq!(zbir.stavke_bez_cene, 0);
+            assert_eq!(zbir.stavke_bez_knjigovodstvenog_stanja, 0);
+            assert!(zbir.potpuno);
+
+            let roba = izvestaj
+                .liste
+                .iter()
+                .find(|pregled| pregled.vrsta == PopisLista::Roba)
+                .expect("the roba lista is always reported");
+            assert_eq!(roba.zbir.vrednost_po_popisu_minor, po_popisu);
+            assert_eq!(roba.zbir.vrednosna_razlika_minor, po_popisu - po_knjigama);
+            assert_eq!(
+                izvestaj.liste.len(),
+                PopisLista::ALL.len(),
+                "all six liste are reported, the empty ones included"
+            );
+        });
+    }
+
+    /// The honesty rule of the whole module, applied to a number. A stavka with no
+    /// cena cannot be valued and a stavka with no knjigovodstveno stanje has no
+    /// razlika — so the izveštaj says so instead of counting either as zero, which
+    /// would report a manjak the shop does not have and a total that is not a total.
+    #[test]
+    fn an_unpriced_or_unbooked_stavka_is_reported_and_never_valued_as_zero() {
+        with_app("popis_izvestaj_incomplete_valuation", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            // Čl. 11 st. 1 — a cash stavka has an apoen but no perpetual record
+            // behind it, so it is priced and unbooked. Čl. 12 st. 2's undocumented
+            // claim is added without a cena at all.
+            let connection = state.db().open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO popis_lines (session_id, lista_vrsta, naziv,
+                                              stvarna_kolicina_milli, cena_minor,
+                                              created_at, updated_at)
+                     VALUES (?1, 'gotovina', 'Novčanica 1.000 RSD', 5000, 100000, ?2, ?2),
+                            (?1, 'potrazivanja', 'Potraživanje bez isprave', 1000, NULL, ?2, ?2)",
+                    params![id, "2027-01-02T09:40:00Z"],
+                )
+                .expect("the posebne liste should take their stavke");
+
+            let mut request = izvestaj_request();
+            request.prijavljene_liste = vec![
+                PopisLista::Roba,
+                PopisLista::Gotovina,
+                PopisLista::Potrazivanja,
+            ];
+            let izvestaj = compose_izvestaj(state.inner(), id, &request)
+                .expect("an incomplete valuation is reported, not refused");
+
+            let zbir = &izvestaj.ukupno;
+            assert_eq!(zbir.broj_stavki, 3);
+            assert_eq!(zbir.stavke_bez_cene, 1, "the potraživanje carries no cena");
+            assert_eq!(
+                zbir.stavke_bez_knjigovodstvenog_stanja, 2,
+                "neither posebna lista has a perpetual record behind it"
+            );
+            assert!(!zbir.potpuno);
+            assert_eq!(
+                zbir.stavke_sa_manjkom, 1,
+                "only the stavka with both sides can show a manjak"
+            );
+            // The cash stavka is valued (5 × 1.000,00) but contributes no razlika.
+            assert_eq!(
+                zbir.vrednost_po_popisu_minor,
+                7_000 * CENA_MINOR / 1_000 + 500_000
+            );
+            assert_eq!(zbir.vrednosna_razlika_minor, 1_749_300 - 15_303_126);
+
+            let poruke = izvestaj.upozorenja.join(" | ");
+            assert!(
+                poruke.contains("nema upisanu cenu") && poruke.contains("knjigovodstveno stanje"),
+                "the izveštaj must say which figures are incomplete, said: {poruke}"
+            );
+        });
+    }
+
+    /// Three warnings the izveštaj must carry and none of which may block it: the
+    /// req. 40 komisija warning follows the document that names the komisija; the
+    /// čl. 9 st. 3 potpis is not yet on these liste; and **the izveštaj is not kept
+    /// by this application** — it is composed when it is asked for, and a shop that
+    /// closed the screen would otherwise lose what it typed without being told.
+    #[test]
+    fn the_izvestaj_warns_without_blocking_and_says_it_is_not_stored() {
+        with_app("popis_izvestaj_warnings", |app| {
+            let state = app.state::<AppState>();
+            seed_article(state.inner(), "KOS-1");
+            let mut request = open_request();
+            request.komisija = vec![KomisijaClanInput {
+                ime: "Miloš Đurđević".into(),
+                uloga: "jedno_lice".into(),
+                rukuje_imovinom: true,
+            }];
+            let mut connection = state.db().open().expect("database should open");
+            let session = open_popis(&mut connection, &request, "2026-12-31T08:00:00Z")
+                .expect("the popis should open");
+            start_count(&connection, session.id, "2026-12-31T09:00:00Z")
+                .expect("the count should start");
+            save_line(
+                &connection,
+                session.id,
+                None,
+                &line_input("KOS-1", 7_000),
+                "2026-12-31T09:10:00Z",
+            )
+            .expect("a counted line should save");
+            sign_phase_a(
+                &mut connection,
+                session.id,
+                &["Miloš Đurđević".to_string()],
+                "2026-12-31T17:00:00Z",
+            )
+            .expect("the čl. 8 st. 5 potpis should record");
+            compute_differences(&connection, session.id, "2027-01-02T09:00:00Z")
+                .expect("the obračun should open");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let izvestaj = compose_izvestaj(state.inner(), session.id, &izvestaj_request())
+                .expect("warnings must not block the izveštaj");
+
+            let poruke = izvestaj.upozorenja.join(" | ");
+            assert!(
+                poruke.contains("Miloš Đurđević") && poruke.contains("čl. 5 st. 1"),
+                "the req. 40 warning must travel with the izveštaj, said: {poruke}"
+            );
+            assert!(
+                poruke.contains("čl. 9 st. 3"),
+                "the izveštaj rests on liste that are not yet signed, said: {poruke}"
+            );
+            assert!(
+                poruke.contains("ne čuva"),
+                "the izveštaj must say that this application does not keep it, said: {poruke}"
+            );
+        });
+    }
+
+    /// The rok is only as good as the date it is computed from, and a filing
+    /// deadline left over from last year computes a rok that fell **before** the
+    /// popis was even taken. That is a staleness signal available without a clock —
+    /// and it is a warning, not a refusal, because a genuinely late popis is still a
+    /// popis and its izveštaj still has to be written.
+    #[test]
+    fn a_rok_that_falls_before_the_count_is_flagged_as_a_stale_setting() {
+        with_app("popis_izvestaj_stale_rok", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some("2026-03-31"));
+
+            let izvestaj = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a late popis still gets its izveštaj");
+
+            assert_eq!(izvestaj.rok, "2026-01-30");
+            let poruke = izvestaj.upozorenja.join(" | ");
+            assert!(
+                poruke.contains("2026-03-31") && poruke.contains("pre datuma popisa"),
+                "the stale filing deadline must be named, said: {poruke}"
+            );
+        });
+    }
+
+    /// The configured filing deadline is a date this crate stores and hands to the
+    /// deadline engine, so it is validated where it is written rather than where it
+    /// is used — and it is admin-only, like every other popis command.
+    #[test]
+    fn the_filing_deadline_setting_round_trips_and_refuses_an_unreadable_date() {
+        with_app("popis_podesavanja", |app| {
+            let state = app.state::<AppState>();
+
+            sign_in_cashier(state.inner());
+            assert_eq!(
+                popis_podesavanja_get(app.state::<AppState>())
+                    .expect_err("a cashier must not read the popis settings")
+                    .code,
+                "forbidden"
+            );
+
+            sign_in_admin(state.inner());
+            assert_eq!(
+                popis_podesavanja_get(app.state::<AppState>())
+                    .expect("an admin should read the settings")
+                    .rok_predaje_fi,
+                None
+            );
+
+            let error = popis_podesavanja_set(
+                app.state::<AppState>(),
+                PopisPodesavanja {
+                    rok_predaje_fi: Some("31.03.2027.".into()),
+                },
+            )
+            .expect_err("an unreadable rok must not be stored");
+            assert_eq!(error.code, "popis_neispravan_datum");
+
+            let sacuvano = popis_podesavanja_set(
+                app.state::<AppState>(),
+                PopisPodesavanja {
+                    rok_predaje_fi: Some(format!("  {ROK_PREDAJE_FI}  ")),
+                },
+            )
+            .expect("a readable rok should store");
+            assert_eq!(sacuvano.rok_predaje_fi.as_deref(), Some(ROK_PREDAJE_FI));
+            assert_eq!(
+                popis_podesavanja_get(app.state::<AppState>())
+                    .expect("an admin should read the settings")
+                    .rok_predaje_fi
+                    .as_deref(),
+                Some(ROK_PREDAJE_FI)
+            );
+        });
+    }
+
+    #[test]
+    fn popis_izvestaj_is_rejected_for_a_cashier() {
+        with_app("popis_izvestaj_admin_gate", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            sign_in_cashier(state.inner());
+            let error = popis_izvestaj(app.state::<AppState>(), id, izvestaj_request())
+                .expect_err("a cashier must not compose the izveštaj");
+            assert_eq!(error.code, "forbidden");
+
+            sign_in_admin(state.inner());
+            let izvestaj = popis_izvestaj(app.state::<AppState>(), id, izvestaj_request())
+                .expect("an admin should compose the izveštaj");
+            assert_eq!(izvestaj.session_id, id);
+            assert_eq!(izvestaj.rok, ROK_IZVESTAJA);
         });
     }
 }

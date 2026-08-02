@@ -541,6 +541,271 @@ pub fn konsignacija_rok(datum_popisa: &str) -> Result<String, AppError> {
         })
 }
 
+/// Milli-units per whole unit — the quantity unit of this schema, and the divisor
+/// between a counted količina and the money it is worth.
+pub const MILLI: i64 = 1_000;
+
+/// Čl. 9 st. 1 t. 6, the vrednosno obračunavanje: what a counted količina is worth
+/// at a given cena, as integer minor units (para).
+///
+/// **Integers throughout.** `kolicina_milli × cena_minor ÷ 1000` is computed in
+/// `i128` and rounded to a whole para away from zero at the half, so no float ever
+/// touches a figure that goes into an izveštaj the owner signs. Away from zero
+/// rather than toward it because the sign here is meaningful: a razlika of −1,5
+/// pieces is a **manjak**, and rounding it toward zero would report the shop a
+/// smaller shortfall than it has.
+///
+/// `None` when the product cannot be written as an `i64` at all. A value that
+/// wrapped would be a manjak reported as a višak, which is the one arithmetic
+/// failure this document must not make quietly.
+pub fn vrednost_minor(kolicina_milli: i64, cena_minor: i64) -> Option<i64> {
+    let proizvod = i128::from(kolicina_milli).checked_mul(i128::from(cena_minor))?;
+    let delilac = i128::from(MILLI);
+    let pola = delilac / 2;
+    let zaokruzen = if proizvod >= 0 {
+        (proizvod + pola) / delilac
+    } else {
+        (proizvod - pola) / delilac
+    };
+
+    i64::try_from(zaokruzen).ok()
+}
+
+/// The eight content elements PoP čl. 13 st. 1 prescribes for the **izveštaj o
+/// popisu** (req. 37).
+///
+/// §2c settles that the popisna lista has no obrazac and its layout is ours — but
+/// it settles just as plainly that the *izveštaj* has prescribed content, so this
+/// one document is **not** free text. The list is closed for the reason every
+/// stored vocabulary in this module is closed: an element nobody modelled is an
+/// element the completeness gate cannot ask for, and the shop would file an
+/// izveštaj missing a prescribed part with every test in this repository green.
+///
+/// **Three of the eight are computed and five are written.** The stvarno stanje,
+/// the knjigovodstveno stanje and the razlike between them are what the popisne
+/// liste already hold, and asking the commission to retype them would create a
+/// second copy free to drift from the first on the next correction. The other five
+/// are judgements — why the stanja differ, what to do about it, how it will be
+/// booked, what the people who handle the values say, and anything else — and no
+/// ledger in this database holds any of them.
+///
+/// The variants carry no tačka numbers. The register records the eight elements in
+/// order but this repository has not verified the article's own numbering, and a
+/// document that cites „čl. 13 st. 1 t. 4)“ at an inspector is a citation the shop
+/// cannot stand behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IzvestajElement {
+    /// What the commission counted, valued — čl. 9 st. 1 t. 1 with t. 5–6.
+    StvarnoStanje,
+    /// What the books say, released only after the čl. 8 st. 5 potpis.
+    KnjigovodstvenoStanje,
+    /// Čl. 9 st. 1 t. 4 and t. 6 — the natural and value differences.
+    Razlike,
+    /// Why the two stanja differ.
+    UzrociNeslaganja,
+    /// What is proposed to be done with the differences.
+    PredloziZaLikvidacijuRazlika,
+    /// How the differences will be booked.
+    NacinKnjizenja,
+    /// What the people who handle the values have to say — the answer the popis
+    /// exists to put on the record beside the manjak.
+    PrimedbeLicaKojaRukujuVrednostima,
+    /// Everything else the commission wants recorded.
+    OstalePrimedbeIPredlozi,
+}
+
+impl IzvestajElement {
+    pub const ALL: [Self; 8] = [
+        Self::StvarnoStanje,
+        Self::KnjigovodstvenoStanje,
+        Self::Razlike,
+        Self::UzrociNeslaganja,
+        Self::PredloziZaLikvidacijuRazlika,
+        Self::NacinKnjizenja,
+        Self::PrimedbeLicaKojaRukujuVrednostima,
+        Self::OstalePrimedbeIPredlozi,
+    ];
+
+    /// The element's key — the same string it takes on the IPC wire, asserted
+    /// equal by test because one is hand-written and the other is derived from the
+    /// variant identifier.
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::StvarnoStanje => "stvarno_stanje",
+            Self::KnjigovodstvenoStanje => "knjigovodstveno_stanje",
+            Self::Razlike => "razlike",
+            Self::UzrociNeslaganja => "uzroci_neslaganja",
+            Self::PredloziZaLikvidacijuRazlika => "predlozi_za_likvidaciju_razlika",
+            Self::NacinKnjizenja => "nacin_knjizenja",
+            Self::PrimedbeLicaKojaRukujuVrednostima => "primedbe_lica_koja_rukuju_vrednostima",
+            Self::OstalePrimedbeIPredlozi => "ostale_primedbe_i_predlozi",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|element| element.as_db_str() == value)
+    }
+
+    /// What the element is called in the izveštaj itself. The keys above are
+    /// ASCII-folded and no operator string may quote one.
+    pub fn naziv(self) -> &'static str {
+        match self {
+            Self::StvarnoStanje => "stvarno stanje utvrđeno popisom",
+            Self::KnjigovodstvenoStanje => "knjigovodstveno stanje",
+            Self::Razlike => "razlike između stvarnog i knjigovodstvenog stanja",
+            Self::UzrociNeslaganja => "uzroci neslaganja stvarnog i knjigovodstvenog stanja",
+            Self::PredloziZaLikvidacijuRazlika => "predlozi za likvidaciju utvrđenih razlika",
+            Self::NacinKnjizenja => "način knjiženja razlika",
+            Self::PrimedbeLicaKojaRukujuVrednostima => {
+                "primedbe i objašnjenja lica koja rukuju vrednostima"
+            }
+            Self::OstalePrimedbeIPredlozi => "ostale primedbe i predlozi",
+        }
+    }
+
+    /// The one article behind all eight. Carried per element rather than written
+    /// into each refusal, so the shop is always sent to the same provision.
+    pub fn pravni_osnov(self) -> &'static str {
+        "PoP čl. 13 st. 1"
+    }
+
+    /// What the element is asking for, said to whoever has to fill it in. The
+    /// predlozi element carries the four the article spells out; the rest say
+    /// plainly what belongs there, because „predlozi za likvidaciju razlika“ on an
+    /// empty box is a heading and not a question.
+    pub fn uputstvo(self) -> &'static str {
+        match self {
+            Self::StvarnoStanje => {
+                "Popunjava se iz popisnih listi — prebrojano stanje i njegova vrednost."
+            }
+            Self::KnjigovodstvenoStanje => {
+                "Popunjava se iz knjiga, tek posle potpisa stvarnog stanja (PoP čl. 8 st. 5)."
+            }
+            Self::Razlike => "Popunjava se obračunom: viškovi i manjkovi, naturalno i vrednosno.",
+            Self::UzrociNeslaganja => {
+                "Navedite zbog čega se stvarno i knjigovodstveno stanje razlikuju."
+            }
+            Self::PredloziZaLikvidacijuRazlika => {
+                "Obuhvata prebijanje manjkova i viškova po osnovu zamena, način naknađivanja \
+                 manjkova i prihodovanja viškova, otpis zastarelih potraživanja i prihodovanje \
+                 zastarelih obaveza."
+            }
+            Self::NacinKnjizenja => "Navedite kako se utvrđene razlike knjiže.",
+            Self::PrimedbeLicaKojaRukujuVrednostima => {
+                "Unesite primedbe i objašnjenja lica koja rukuju vrednostima. Ako ih nema, upišite \
+                 i to."
+            }
+            Self::OstalePrimedbeIPredlozi => {
+                "Ostale primedbe i predlozi. Ako ih nema, upišite i to."
+            }
+        }
+    }
+
+    /// True for the five elements the commission writes. The other three are read
+    /// out of the popisne liste and never typed.
+    pub fn narativni(self) -> bool {
+        !matches!(
+            self,
+            Self::StvarnoStanje | Self::KnjigovodstvenoStanje | Self::Razlike
+        )
+    }
+}
+
+/// The five čl. 13 st. 1 elements the commission writes, one named field each.
+///
+/// Named fields rather than a map keyed by [`IzvestajElement`], for the reason
+/// req. 37 gives: the izveštaj is a **structured template with required fields**,
+/// and a map admits an izveštaj that simply omits an element — which is precisely
+/// the free text the requirement rules out. Every field defaults to the empty
+/// string so a partial payload is refused **by name** through
+/// [`ensure_izvestaj_kompletan`] rather than rejected wholesale by serde.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IzvestajNarativ {
+    #[serde(default)]
+    pub uzroci_neslaganja: String,
+    #[serde(default)]
+    pub predlozi_za_likvidaciju_razlika: String,
+    #[serde(default)]
+    pub nacin_knjizenja: String,
+    #[serde(default)]
+    pub primedbe_lica_koja_rukuju_vrednostima: String,
+    #[serde(default)]
+    pub ostale_primedbe_i_predlozi: String,
+}
+
+impl IzvestajNarativ {
+    /// The text written for one element, or `None` for the three the popis itself
+    /// answers. **This is the single mapping between the enum and the fields** —
+    /// [`IzvestajNarativ::nedostajuci_elementi`] is built on it rather than on
+    /// [`IzvestajElement::narativni`], so a computed element cannot be reported
+    /// missing even if the two ever disagreed.
+    pub fn tekst(&self, element: IzvestajElement) -> Option<&str> {
+        match element {
+            IzvestajElement::StvarnoStanje
+            | IzvestajElement::KnjigovodstvenoStanje
+            | IzvestajElement::Razlike => None,
+            IzvestajElement::UzrociNeslaganja => Some(&self.uzroci_neslaganja),
+            IzvestajElement::PredloziZaLikvidacijuRazlika => {
+                Some(&self.predlozi_za_likvidaciju_razlika)
+            }
+            IzvestajElement::NacinKnjizenja => Some(&self.nacin_knjizenja),
+            IzvestajElement::PrimedbeLicaKojaRukujuVrednostima => {
+                Some(&self.primedbe_lica_koja_rukuju_vrednostima)
+            }
+            IzvestajElement::OstalePrimedbeIPredlozi => Some(&self.ostale_primedbe_i_predlozi),
+        }
+    }
+
+    /// The prescribed elements this izveštaj has left unanswered, in the article's
+    /// own order. Whitespace counts as unanswered: a template handed back with the
+    /// tab characters still in the box is silence, not brevity.
+    pub fn nedostajuci_elementi(&self) -> Vec<IzvestajElement> {
+        IzvestajElement::ALL
+            .into_iter()
+            .filter(|element| {
+                self.tekst(*element)
+                    .is_some_and(|tekst| tekst.trim().is_empty())
+            })
+            .collect()
+    }
+}
+
+/// Req. 37 — **an izveštaj with a prescribed element left empty is not composed.**
+///
+/// Čl. 13 st. 1 prescribes the sadržina of this document, so an izveštaj that
+/// omits one of the eight is not the izveštaj the provision names — and the one
+/// the shop would then file is the one an inspector reads. The refusal names every
+/// unanswered element, because „izveštaj nije potpun“ is not something anyone can
+/// act on.
+///
+/// It refuses silence and not brevity: „Nema primedbi.“ is a complete answer to
+/// the seventh element and passes, which is why the message says so.
+pub fn ensure_izvestaj_kompletan(narativ: &IzvestajNarativ) -> Result<(), AppError> {
+    let nedostaju = narativ.nedostajuci_elementi();
+    if nedostaju.is_empty() {
+        return Ok(());
+    }
+
+    let spisak = nedostaju
+        .iter()
+        .map(|element| format!("„{}“", element.naziv()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(AppError::business(
+        "popis_izvestaj_nepotpun",
+        format!(
+            "Izveštaj o popisu ima propisanu sadržinu (PoP čl. 13 st. 1) i ne sastavlja se dok se \
+             ne popuni: {spisak}. Ako nema šta da se navede, upišite i to — prazno polje nije \
+             odgovor."
+        ),
+    ))
+}
+
 /// One date in, strictly `gggg-MM-dd` — exactly the shape every date column in
 /// the v20 schema is GLOB-checked into. Strict on purpose: '2027-3-31' and an
 /// RFC3339 stamp are both refused rather than truncated or repaired, because a
@@ -582,9 +847,9 @@ mod tests {
     use rusqlite::{params, Connection};
 
     use super::{
-        advance, book_quantities_released, book_quantities_visible, ensure_liste_kompletne,
-        izvestaj_due, konsignacija_rok, nedostajuce_liste, PopisEvent, PopisLista, PopisStatus,
-        PopisVrsta,
+        advance, book_quantities_released, book_quantities_visible, ensure_izvestaj_kompletan,
+        ensure_liste_kompletne, izvestaj_due, konsignacija_rok, nedostajuce_liste, vrednost_minor,
+        IzvestajElement, IzvestajNarativ, PopisEvent, PopisLista, PopisStatus, PopisVrsta,
     };
     use crate::app_error::AppError;
     use crate::db::{test_database_path, Db};
@@ -1384,6 +1649,275 @@ mod tests {
             !poruka.contains("roba u objektu") && !poruka.contains("konsignaciona"),
             "a lista that is not missing must not be named, said: {poruka}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // The izveštaj o popisu (req. 37, PoP čl. 13 st. 1)
+    // ---------------------------------------------------------------------
+
+    /// The five elements čl. 13 st. 1 asks the commission to write, each said the
+    /// way a shop would say it. „Nema primedbi“ is a deliberate entry: it is an
+    /// answer to element seven, and the gate must accept it — what the gate
+    /// refuses is silence, not brevity.
+    fn potpun_narativ() -> IzvestajNarativ {
+        IzvestajNarativ {
+            uzroci_neslaganja: "Manjak na šifri KOS-1 potiče od zamene koja nije evidentirana."
+                .into(),
+            predlozi_za_likvidaciju_razlika: "Prebijanje manjka i viška po osnovu zamene; manjak \
+                                              preko toga naknađuje odgovorno lice."
+                .into(),
+            nacin_knjizenja: "Manjak na teret troškova, višak u prihode.".into(),
+            primedbe_lica_koja_rukuju_vrednostima: "Nema primedbi.".into(),
+            ostale_primedbe_i_predlozi: "Predlaže se kontrolni popis štampe u junu.".into(),
+        }
+    }
+
+    /// Req. 37 / §2c: the popisna lista has no obrazac, but the **izveštaj has
+    /// prescribed content** — the eight elements of čl. 13 st. 1. They are a closed
+    /// list here for the reason every other vocabulary in this module is closed: an
+    /// element nobody modelled is an element the completeness gate cannot ask for,
+    /// and the shop would file an izveštaj missing a prescribed part with the whole
+    /// suite green.
+    #[test]
+    fn the_izvestaj_template_carries_all_eight_cl_13_st_1_elements() {
+        assert_eq!(
+            IzvestajElement::ALL.len(),
+            8,
+            "PoP čl. 13 st. 1 prescribes eight content elements"
+        );
+
+        let nazivi: Vec<&str> = IzvestajElement::ALL
+            .into_iter()
+            .map(IzvestajElement::naziv)
+            .collect();
+        for trazeno in [
+            "stvarno stanje",
+            "knjigovodstveno stanje",
+            "razlike",
+            "uzroci neslaganja",
+            "predlozi za likvidaciju",
+            "način knjiženja",
+            "primedbe i objašnjenja lica koja rukuju vrednostima",
+            "ostale primedbe",
+        ] {
+            assert!(
+                nazivi.iter().any(|naziv| naziv.contains(trazeno)),
+                "no element is named „{trazeno}“; the template carries {nazivi:?}"
+            );
+        }
+
+        let mut kljucevi: Vec<&str> = IzvestajElement::ALL
+            .into_iter()
+            .map(IzvestajElement::as_db_str)
+            .collect();
+        kljucevi.sort_unstable();
+        let broj = kljucevi.len();
+        kljucevi.dedup();
+        assert_eq!(
+            broj,
+            kljucevi.len(),
+            "two elements share one key: {kljucevi:?}"
+        );
+
+        for element in IzvestajElement::ALL {
+            assert_eq!(
+                IzvestajElement::from_db_str(element.as_db_str()),
+                Some(element),
+                "{element:?} should survive the round trip through its key"
+            );
+            assert!(
+                element.pravni_osnov().contains("čl. 13 st. 1"),
+                "{element:?} must cite the article that prescribes it"
+            );
+        }
+    }
+
+    /// One way to leave a prescribed element unanswered: the element, and the edit
+    /// that empties the field it is written into.
+    type PraznoPolje = (IzvestajElement, fn(&mut IzvestajNarativ));
+
+    /// The gate the plan names: **an izveštaj with any prescribed element left
+    /// empty is refused**, and the refusal names the element rather than saying
+    /// „nepotpuno“. Whitespace is silence — a šablon submitted with the tab
+    /// characters still in it is not an answer to čl. 13 st. 1.
+    #[test]
+    fn an_izvestaj_element_left_empty_stops_the_izvestaj() {
+        ensure_izvestaj_kompletan(&potpun_narativ())
+            .expect("an izveštaj with all eight elements answered passes");
+
+        let prazno: [PraznoPolje; 5] = [
+            (IzvestajElement::UzrociNeslaganja, |narativ| {
+                narativ.uzroci_neslaganja = String::new();
+            }),
+            (IzvestajElement::PredloziZaLikvidacijuRazlika, |narativ| {
+                narativ.predlozi_za_likvidaciju_razlika = "   ".into();
+            }),
+            (IzvestajElement::NacinKnjizenja, |narativ| {
+                narativ.nacin_knjizenja = " \t\n ".into();
+            }),
+            (
+                IzvestajElement::PrimedbeLicaKojaRukujuVrednostima,
+                |narativ| {
+                    narativ.primedbe_lica_koja_rukuju_vrednostima = String::new();
+                },
+            ),
+            (IzvestajElement::OstalePrimedbeIPredlozi, |narativ| {
+                narativ.ostale_primedbe_i_predlozi = String::new();
+            }),
+        ];
+        assert_eq!(
+            prazno
+                .iter()
+                .map(|(element, _)| *element)
+                .collect::<Vec<_>>(),
+            IzvestajElement::ALL
+                .into_iter()
+                .filter(|element| element.narativni())
+                .collect::<Vec<_>>(),
+            "every element the commission writes must be exercised here"
+        );
+
+        for (prazan, obrisi) in prazno {
+            let mut narativ = potpun_narativ();
+            obrisi(&mut narativ);
+            let error = ensure_izvestaj_kompletan(&narativ)
+                .expect_err("an unanswered element must stop the izveštaj");
+
+            assert_eq!(error.code(), "popis_izvestaj_nepotpun");
+            let poruka = error.to_string();
+            assert!(
+                poruka.contains("čl. 13 st. 1"),
+                "the refusal must cite the article, said: {poruka}"
+            );
+            for element in IzvestajElement::ALL {
+                assert_eq!(
+                    poruka.contains(element.naziv()),
+                    element == prazan,
+                    "the refusal must name „{}“ exactly when it is the unanswered one, said: \
+                     {poruka}",
+                    element.naziv()
+                );
+            }
+        }
+    }
+
+    /// The three elements the popis itself answers — stvarno stanje, knjigovodstveno
+    /// stanje and the razlike between them — are **computed, never typed**. A gate
+    /// that asked the commission to retype the stanje it had just counted would be
+    /// asking it to restate figures the liste already carry, and the two would drift
+    /// on the first correction. So they have no narrative slot at all and never
+    /// appear as missing.
+    #[test]
+    fn the_three_computed_elements_are_never_asked_of_the_commission() {
+        let prazan = IzvestajNarativ::default();
+        let nedostaju = prazan.nedostajuci_elementi();
+
+        assert_eq!(
+            nedostaju.len(),
+            5,
+            "five of the eight elements are the commission's to write, got {nedostaju:?}"
+        );
+        for element in [
+            IzvestajElement::StvarnoStanje,
+            IzvestajElement::KnjigovodstvenoStanje,
+            IzvestajElement::Razlike,
+        ] {
+            assert!(
+                !element.narativni(),
+                "{element:?} is computed from the popisne liste"
+            );
+            assert!(
+                prazan.tekst(element).is_none(),
+                "{element:?} must have no narrative slot to leave empty"
+            );
+            assert!(
+                !nedostaju.contains(&element),
+                "{element:?} must never be asked of the commission"
+            );
+        }
+        for element in nedostaju {
+            assert!(
+                element.narativni() && prazan.tekst(element) == Some(""),
+                "{element:?} is reported missing, so it must be one the commission writes"
+            );
+        }
+
+        for element in IzvestajElement::ALL {
+            assert_eq!(
+                element.narativni(),
+                potpun_narativ().tekst(element).is_some(),
+                "{element:?} must have a narrative slot exactly when it is narrative"
+            );
+        }
+    }
+
+    /// The elements cross IPC as their own keys and reach a screen that renders
+    /// eight named sections. The wire form is derived from the variant identifier
+    /// while `as_db_str` is hand-written, so a rename moves one and not the other —
+    /// the same trap `PopisStatus` is pinned against.
+    #[test]
+    fn the_izvestaj_element_wire_form_is_the_frontend_contract() {
+        for (element, wire) in [
+            (IzvestajElement::StvarnoStanje, "stvarno_stanje"),
+            (
+                IzvestajElement::KnjigovodstvenoStanje,
+                "knjigovodstveno_stanje",
+            ),
+            (IzvestajElement::Razlike, "razlike"),
+            (IzvestajElement::UzrociNeslaganja, "uzroci_neslaganja"),
+            (
+                IzvestajElement::PredloziZaLikvidacijuRazlika,
+                "predlozi_za_likvidaciju_razlika",
+            ),
+            (IzvestajElement::NacinKnjizenja, "nacin_knjizenja"),
+            (
+                IzvestajElement::PrimedbeLicaKojaRukujuVrednostima,
+                "primedbe_lica_koja_rukuju_vrednostima",
+            ),
+            (
+                IzvestajElement::OstalePrimedbeIPredlozi,
+                "ostale_primedbe_i_predlozi",
+            ),
+        ] {
+            assert_eq!(element.as_db_str(), wire);
+            assert_eq!(
+                serde_json::to_string(&element).expect("an element should serialize"),
+                format!("\"{wire}\""),
+                "{element:?} must reach the frontend as {wire}"
+            );
+            assert_eq!(
+                serde_json::from_str::<IzvestajElement>(&format!("\"{wire}\""))
+                    .expect("the frontend's own string must deserialize"),
+                element,
+            );
+        }
+    }
+
+    /// Čl. 9 st. 1 t. 6 — the vrednosno obračunavanje behind elements one to three.
+    /// Quantities are milli-units and money is para, so a value is
+    /// `količina × cena ÷ 1000` **in integers**: no float ever touches a figure that
+    /// goes into an izveštaj the owner signs.
+    #[test]
+    fn a_value_is_the_count_times_the_price_in_whole_para() {
+        // Whole pieces at a whole price — the ordinary case, exact.
+        assert_eq!(vrednost_minor(7_000, 249_900), Some(1_749_300));
+        assert_eq!(vrednost_minor(0, 249_900), Some(0));
+        assert_eq!(vrednost_minor(5_000, 100_000), Some(500_000));
+
+        // A fractional količina still lands on a whole para, rounded away from
+        // zero at the half so a manjak is never quietly made smaller than it is.
+        assert_eq!(vrednost_minor(1_500, 12_345), Some(18_518));
+        assert_eq!(vrednost_minor(-1_500, 12_345), Some(-18_518));
+        assert_eq!(vrednost_minor(1_500, -12_345), Some(-18_518));
+
+        // A manjak is a negative razlika and values negative — čl. 9 st. 1 t. 4
+        // and t. 6 both admit the sign.
+        assert_eq!(vrednost_minor(-2_000, 249_900), Some(-499_800));
+
+        // Out of the calendar's money equivalent: a figure that cannot be written
+        // is refused rather than wrapped into its own opposite.
+        assert_eq!(vrednost_minor(i64::MAX, i64::MAX), None);
+        assert_eq!(vrednost_minor(i64::MIN, i64::MAX), None);
     }
 
     /// Every spelling of „read the wall clock“ this codebase can reach. The first
