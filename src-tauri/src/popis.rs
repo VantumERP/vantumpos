@@ -324,10 +324,12 @@ pub fn izvestaj_due(
             .checked_add(Duration::days(IZVESTAJ_ROK_DANA_PO_POPISU)),
     };
 
-    // `checked_*` rather than the panicking arithmetic: the inputs are dates the
-    // shop typed or a setting holds, and a rok far enough out to leave the
-    // calendar must be a refusal the owner can read, not a crash.
-    rok.map(iso_datum).ok_or_else(|| {
+    // `checked_*` rather than the panicking arithmetic, and `iso_datum` rather
+    // than a bare `format!`: the inputs are dates the shop typed or a setting
+    // holds, and a rok far enough out to leave the calendar — in either direction
+    // — must be a refusal the owner can read, not a crash and not a string that
+    // no date column would accept handed back as an answer.
+    rok.and_then(iso_datum).ok_or_else(|| {
         AppError::business(
             "popis_rok_van_kalendara",
             format!(
@@ -354,13 +356,25 @@ fn popis_datum(value: &str, polje: &str) -> Result<Date, AppError> {
     })
 }
 
-fn iso_datum(date: Date) -> String {
-    format!(
-        "{:04}-{:02}-{:02}",
-        date.year(),
-        u8::from(date.month()),
-        date.day()
-    )
+/// The rok as `gggg-MM-dd`, or `None` when the computed date cannot be written
+/// in that shape at all.
+///
+/// The shape is a precondition and not a formatting detail. `{:04}` renders year
+/// −1 as `-001`, so an engine that formatted unconditionally would answer
+/// „-001-12-03“ — neither `gggg-MM-dd` nor anything the v20 date columns' GLOB
+/// accepts — and would answer it as a **success**, handing the caller a rok that
+/// cannot be stored with no reason to look twice. Year 0 formats cleanly but is
+/// refused alongside it: it is not a year any filing rok falls in, and „a real
+/// Gregorian year“ is one rule where „a year that happens to format“ is two.
+fn iso_datum(date: Date) -> Option<String> {
+    (date.year() >= 1).then(|| {
+        format!(
+            "{:04}-{:02}-{:02}",
+            date.year(),
+            u8::from(date.month()),
+            date.day()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -876,6 +890,51 @@ mod tests {
         );
     }
 
+    /// The third refusal code, in both directions. `checked_add` catches the
+    /// overflow, but the underflow is the one that bites: `{:04}` renders year −1
+    /// as `-001`, so an unguarded engine hands back „-001-12-03“ — not
+    /// `gggg-MM-dd`, not a value the v20 GLOB checks accept, and therefore a rok
+    /// that **cannot be stored being returned as a success**. A refusal path that
+    /// returns `Ok` is worse than no refusal path at all, because the caller has
+    /// no reason to look twice.
+    #[test]
+    fn a_rok_outside_the_calendar_is_refused_in_both_directions() {
+        for (vrsta, datum_popisa, filing) in [
+            (PopisVrsta::Nivelacioni, "9999-12-31", None),
+            (PopisVrsta::Godisnji, "0000-01-01", Some("0000-02-01")),
+        ] {
+            let error = izvestaj_due(vrsta, datum_popisa, filing)
+                .expect_err("a rok outside the calendar must not be returned as a rok");
+
+            assert_eq!(
+                error.code(),
+                "popis_rok_van_kalendara",
+                "{vrsta:?} / {datum_popisa} / {filing:?}"
+            );
+        }
+    }
+
+    /// Every rok this engine returns is `gggg-MM-dd` — the shape its own doc
+    /// promises and the only shape the v20 date columns are GLOB-checked into. A
+    /// per-answer assertion would miss this; the shape is a property of all of
+    /// them, so it is asserted over the whole reachable surface at once.
+    #[test]
+    fn every_rok_is_shaped_gggg_mm_dd() {
+        for (vrsta, datum_popisa, filing) in [
+            (PopisVrsta::Godisnji, "2026-12-31", Some("2027-03-31")),
+            (PopisVrsta::Godisnji, "0001-12-31", Some("9999-03-31")),
+            (PopisVrsta::Nivelacioni, "0001-01-01", None),
+            (PopisVrsta::Nivelacioni, "9999-11-30", None),
+        ] {
+            let rok = due(vrsta, datum_popisa, filing);
+
+            assert!(
+                holds_calendar_date(&rok) && rok.len() == 10,
+                "{vrsta:?} / {datum_popisa} / {filing:?} returned „{rok}“, which is not gggg-MM-dd"
+            );
+        }
+    }
+
     /// The vrsta enum and the v20 `popis_sessions.vrsta` CHECK are one
     /// vocabulary, and the wire form is pinned to the stored form for the reason
     /// the status test gives: `as_db_str` is a hand-written literal while serde
@@ -915,6 +974,52 @@ mod tests {
         });
     }
 
+    /// Every spelling of „read the wall clock“ this codebase can reach. The first
+    /// two are one entry apart on purpose: `crate::clock::utc_now` is this
+    /// repository's own canonical reader and **is not matched by `now_utc`** —
+    /// neither string is a substring of the other — so a guard that scans only for
+    /// the raw `time` call is blind to the way a clock would actually arrive here.
+    /// The rest are the readers a future task could reach for instead of the
+    /// wrapper.
+    const CLOCK_READS: [&str; 7] = [
+        "utc_now",
+        "now_utc",
+        "Utc::now",
+        "Local::now",
+        "now_local",
+        "SystemTime::now",
+        "datetime('now')",
+    ];
+
+    /// A hand-written list of clock spellings decays the moment `crate::clock`
+    /// grows a second reader — and that module is precisely where a future task
+    /// would go looking for the time. So the list is pinned to what the module
+    /// actually exports: adding `pub fn` anything there fails this test until the
+    /// deadline engine's guard has learned to scan for it.
+    #[test]
+    fn the_clock_guard_scans_for_every_reader_crate_clock_exports() {
+        const CLOCK_SOURCE: &str = include_str!("clock.rs");
+
+        let exported: Vec<&str> = CLOCK_SOURCE
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("pub fn "))
+            .filter_map(|rest| rest.split('(').next())
+            .collect();
+
+        assert!(
+            exported.contains(&"utc_now"),
+            "crate::clock::utc_now is this codebase's wall clock; the scan of clock.rs found \
+             {exported:?} instead, so this guard is reading the wrong file"
+        );
+        for reader in exported {
+            assert!(
+                CLOCK_READS.contains(&reader),
+                "crate::clock::{reader} is a wall clock that the deadline engine's source guard \
+                 does not scan for — add it to CLOCK_READS"
+            );
+        }
+    }
+
     /// Design §7 t. 5 („no hardcoded deadline dates“) and the standing rule that
     /// **no wall clock may reach the deadline engine**. Both are properties of
     /// the source rather than of any single answer: a behavioural test cannot
@@ -944,7 +1049,7 @@ mod tests {
                  given: {code}",
                 number + 1
             );
-            for clock in ["now_utc", "SystemTime::now", "Utc::now", "datetime('now')"] {
+            for clock in CLOCK_READS {
                 assert!(
                     !code.contains(clock),
                     "line {} reads a clock; a statutory rok is a function of the dates it is \
