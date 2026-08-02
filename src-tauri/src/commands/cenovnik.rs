@@ -8,7 +8,17 @@
 //! The trigger is the offered-price log (migration v9), not a second source of
 //! truth: `record_offered_price_change` already decides what counts as a change
 //! to what the shop offers — a new price, an article going off the shelf, one
-//! coming back — and this module republishes exactly when it recorded one.
+//! coming back — and every write path republishes exactly when it recorded one.
+//! The catalog path adds the one price that log does not watch: the jedinična
+//! cena, which is a published price under čl. 6 st. 1/st. 2 and moves with the
+//! v19 package-content pair rather than with `sale_price_minor`.
+//!
+//! **Four paths move an offered price and all four call in here** —
+//! `commands::catalog` (create/update/deactivate), `campaigns` (activation, a
+//! markdown step, an ending), `importer` (bulk create and update) and
+//! `kep_storno::post_nivelacija`. A price the till charges but the published
+//! file does not carry is the mismatch st. 3 exists for, whichever path moved
+//! it.
 //!
 //! Legal authority: `docs/REMAINING-SW-VERIFIED-RULES.md` §2b, §3 V2, §4 req. 11.
 //! Design: `docs/superpowers/specs/2026-08-01-sw12-cenovnik-design.md` §2.
@@ -16,8 +26,34 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::app_error::AppError;
-use crate::cenovnik::{content_hash, render_csv, CenovnikRow, PublishOutcome, PublishTarget};
+use crate::cenovnik::{
+    content_hash, render_csv, CenovnikRow, NotConfigured, PublishOutcome, PublishTarget,
+};
 use crate::commands::settings::{CompanySettings, COMPANY_SETTINGS_KEY};
+
+/// The frozen archive key, minted on the first publish. Its own `settings` row
+/// rather than a column on `cenovnik_snapshots`: v19 is the plan's only new
+/// schema, and `settings` is already the generic per-shop key/value store.
+const OUTLET_SETTINGS_KEY: &str = "cenovnik_prodajno_mesto";
+
+/// Republishes after a price move that has ALREADY COMMITTED.
+///
+/// Returns nothing, and that is the point: the catalog, campaign, import and
+/// nivelacija paths all publish after their own `tx.commit()`, so by the time
+/// this can fail the new price is durable. Reporting it as a failed save would
+/// tell the operator to retry a write that happened — and on a product create
+/// the retry then hits the UNIQUE constraint on the šifra. Čl. 6 is not a reason
+/// a till cannot change a price, so a publish failure is logged and the price
+/// stands; the next price write repairs the published file, exactly as it
+/// repairs a crash between the commit and the publish.
+///
+/// The single place the publish target is chosen, so Task 7's founder decision
+/// (req. 15) lands here once rather than at each of the four write paths.
+pub fn republish_after_price_move(connection: &Connection, now: &str) {
+    if let Err(error) = publish_current(connection, &NotConfigured, now) {
+        log::warn!("Cenovnik nije ponovo objavljen posle promene cene: {error}");
+    }
+}
 
 /// Renders the outlet's cenovnik from the catalog, archives it as a new
 /// immutable snapshot, and offers it to `target`. Returns the snapshot's id.
@@ -40,7 +76,7 @@ pub fn publish_current(
     target: &dyn PublishTarget,
     now: &str,
 ) -> Result<Option<i64>, AppError> {
-    let Some(prodajno_mesto) = prodajno_mesto(connection)? else {
+    let Some(prodajno_mesto) = prodajno_mesto(connection, now)? else {
         return Ok(None);
     };
 
@@ -77,11 +113,25 @@ pub fn publish_current(
     Ok(Some(snapshot_id))
 }
 
-/// The outlet the archive is keyed on, derived from the shop's own settings.
+/// The outlet the archive is keyed on: derived from the shop's own settings the
+/// first time anything is published, and frozen from then on.
 ///
 /// **Never accepted from the frontend.** `prodajno_mesto` is free text with no
 /// foreign key, so one typo starts a second archive lineage and leaves the real
 /// outlet with no published snapshot for the till guard to compare against.
+///
+/// **And never re-derived either, for the same reason.** Settings are editable:
+/// a shop that corrects an address typo, or fills the address in after
+/// publishing under its name alone, would silently start that second lineage
+/// itself — every prior snapshot orphaned under the old key, the newest-first
+/// lookup empty until the next price write, and the čl. 6 st. 5 comparison of
+/// *„prethodno objavljenih cena“* with the realtime ones broken across the
+/// boundary. The v19 trigger makes `prodajno_mesto` immutable, so a split
+/// lineage could never be re-joined afterwards. The key is therefore minted once
+/// and kept; what the shop is called today is read from the settings, which are
+/// where that question belongs. A genuine move to a different prodajni objekat
+/// is a new lineage on purpose and needs an explicit operator action, not a
+/// silent consequence of an edit.
 ///
 /// The address is the prodajni objekat — Zakon o trgovini čl. 2 t. 3, a
 /// physically and functionally unified space — and is already how `kalkulacije`
@@ -91,8 +141,49 @@ pub fn publish_current(
 ///
 /// `None` means neither is on file. The v19 CHECK refuses a blank outlet, and a
 /// placeholder lineage would be a claim about which shop published what, so
-/// nothing is generated at all.
-fn prodajno_mesto(connection: &Connection) -> Result<Option<String>, AppError> {
+/// nothing is generated at all — and nothing is frozen either, so the shop can
+/// still identify itself later.
+fn prodajno_mesto(connection: &Connection, now: &str) -> Result<Option<String>, AppError> {
+    if let Some(frozen) = frozen_outlet(connection)? {
+        return Ok(Some(frozen));
+    }
+
+    let Some(identified) = identified_outlet(connection)? else {
+        return Ok(None);
+    };
+
+    // OR IGNORE, not an upsert: two publishes racing to mint the key must
+    // converge on ONE lineage, and whichever landed first is it. Re-read rather
+    // than trust the local value, so the loser adopts the winner's key.
+    connection.execute(
+        "INSERT OR IGNORE INTO settings (key, value_json, updated_at)
+         VALUES (?1, ?2, ?3)",
+        params![
+            OUTLET_SETTINGS_KEY,
+            serde_json::json!(identified).to_string(),
+            now
+        ],
+    )?;
+    frozen_outlet(connection)
+}
+
+/// The minted key, or `None` before the first publish.
+fn frozen_outlet(connection: &Connection) -> Result<Option<String>, AppError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![OUTLET_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored
+        .and_then(|value| serde_json::from_str::<String>(&value).ok())
+        .map(|outlet| outlet.trim().to_string())
+        .filter(|outlet| !outlet.is_empty()))
+}
+
+/// What the shop's settings say the outlet is called right now.
+fn identified_outlet(connection: &Connection) -> Result<Option<String>, AppError> {
     let stored: Option<String> = connection
         .query_row(
             "SELECT value_json FROM settings WHERE key = ?1",
@@ -292,7 +383,24 @@ mod tests {
             country_of_origin: None,
             official_goods_code: None,
             barcode_kind: None,
+            // The seeded 0,75 l bottle round-trips its unit-price pair: this
+            // request is a FULL replacement of the row, exactly like every other
+            // optional column on it, so a caller that drops the pair clears it.
+            jedinicna_cena_jedinica: Some("l".to_string()),
+            jedinicna_cena_sadrzaj_milli: Some(750),
         }
+    }
+
+    /// One article's row in the outlet's newest snapshot, split into fields.
+    fn latest_fields(db: &Db, sifra: &str) -> Vec<String> {
+        let body = snapshots(db).pop().expect("a snapshot").body;
+        data_rows(&body)
+            .into_iter()
+            .find(|row| row.starts_with(&format!("{sifra};")))
+            .unwrap_or_else(|| panic!("{sifra} should be in the published file: {body:?}"))
+            .split(';')
+            .map(str::to_string)
+            .collect()
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,6 +532,100 @@ mod tests {
                 "an edit that moved no price is not a price change"
             );
         });
+    }
+
+    /// Req. 10 through the path a shop actually uses. Čl. 6 st. 2's second
+    /// sentence pulls st. 1 in, so a cenovnik carrying only prodajna cena does
+    /// not discharge the duty — and a publish path that selects a column nothing
+    /// can write publishes an empty cell for every real shop. 129,00 RSD for
+    /// 0,5 l is 258,00 RSD per litar.
+    #[test]
+    fn a_product_saved_with_a_package_content_publishes_its_unit_price() {
+        with_database(
+            "a_product_saved_with_a_package_content_publishes_its_unit_price",
+            |db| {
+                let acting = admin_id(db);
+                let request = SaveProductRequest {
+                    name: "Kefir 0,5 l".to_string(),
+                    sku: "KEFIR-05".to_string(),
+                    barcode: None,
+                    jedinicna_cena_jedinica: Some("l".to_string()),
+                    jedinicna_cena_sadrzaj_milli: Some(500),
+                    ..product_request(12_900)
+                };
+                create_product(db, request, acting).expect("product should create");
+
+                let fields = latest_fields(db, "KEFIR-05");
+                assert_eq!(fields[4], "129.00", "{fields:?}");
+                assert_eq!(fields[5], "258.00", "jedinična cena po litru: {fields:?}");
+                assert_eq!(fields[6], "l", "{fields:?}");
+            },
+        );
+    }
+
+    /// The jedinična cena IS a price under čl. 6 st. 1/st. 2, and it is derived
+    /// from the package content. Correcting a 0,75 l bottle to 1 l moves the
+    /// published unit price without moving `sale_price_minor`, so a republish
+    /// predicate that only watches the sale price would leave the file stating a
+    /// unit price the shop no longer offers (st. 3, and st. 4 binds it).
+    #[test]
+    fn changing_only_the_package_content_republishes_the_new_unit_price() {
+        with_database(
+            "changing_only_the_package_content_republishes_the_new_unit_price",
+            |db| {
+                let acting = admin_id(db);
+                let relabelled = SaveProductRequest {
+                    jedinicna_cena_sadrzaj_milli: Some(1000),
+                    ..product_request(27_900)
+                };
+                update_product(db, 1, relabelled, acting).expect("content should save");
+
+                let archived = snapshots(db);
+                assert_eq!(archived.len(), 1, "a unit price is a price: {archived:?}");
+                let fields = latest_fields(db, "SOK-075");
+                assert_eq!(
+                    fields[4], "279.00",
+                    "the sale price did not move: {fields:?}"
+                );
+                assert_eq!(fields[5], "279.00", "{fields:?}");
+            },
+        );
+    }
+
+    /// The publish runs AFTER `tx.commit()`, so by the time it can fail the
+    /// price is already durable. Reporting that as a failed save tells the
+    /// operator to retry a write that happened — and on a create the retry then
+    /// hits the UNIQUE constraint on the šifra. Čl. 6 is not a reason a till
+    /// cannot change a price.
+    #[test]
+    fn a_publish_failure_leaves_the_price_saved_and_the_command_ok() {
+        with_database(
+            "a_publish_failure_leaves_the_price_saved_and_the_command_ok",
+            |db| {
+                // Stands in for Task 7's disk-full / permission failures, which
+                // are the routine way an already-committed price change will
+                // fail to publish once a real target exists.
+                db.open()
+                    .expect("database should open")
+                    .execute("DROP TABLE cenovnik_snapshots", [])
+                    .expect("the archive should drop");
+
+                let acting = admin_id(db);
+                update_product(db, 1, product_request(31_900), acting)
+                    .expect("a committed price save must not be reported as failed");
+
+                let saved: i64 = db
+                    .open()
+                    .expect("database should open")
+                    .query_row(
+                        "SELECT sale_price_minor FROM products WHERE id = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("price should read");
+                assert_eq!(saved, 31_900);
+            },
+        );
     }
 
     #[test]
@@ -585,14 +787,59 @@ mod tests {
             let connection = db.open().expect("database should open");
             publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z").expect("publish");
             assert_eq!(snapshots(db)[0].prodajno_mesto, OUTLET);
-
-            // A shop that never filled in the address is still an outlet: its
-            // name identifies it, and `save_company_settings` refuses to leave
-            // that empty.
-            set_company(db, "   ", "Butik Ana");
-            publish_current(&connection, &NotConfigured, "2026-08-02T10:15:00Z").expect("publish");
-            assert_eq!(snapshots(db)[1].prodajno_mesto, "Butik Ana");
         });
+    }
+
+    /// A shop that never filled in the address is still an outlet: its name
+    /// identifies it, and `save_company_settings` refuses to leave that empty.
+    #[test]
+    fn a_shop_without_an_address_is_identified_by_its_name() {
+        with_database(
+            "a_shop_without_an_address_is_identified_by_its_name",
+            |db| {
+                set_company(db, "   ", "Butik Ana");
+                let connection = db.open().expect("database should open");
+                publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                    .expect("publish");
+                assert_eq!(snapshots(db)[0].prodajno_mesto, "Butik Ana");
+            },
+        );
+    }
+
+    /// The archive key is minted once and then frozen. Deriving it afresh on
+    /// every publish would let a corrected address typo — or an address filled
+    /// in after the fact — start a SECOND lineage: every prior snapshot orphaned
+    /// under the old key, the newest-first lookup empty until the next price
+    /// write, and the čl. 6 st. 5 comparison of „prethodno objavljenih cena“
+    /// with the realtime ones broken across the boundary. The v19 trigger makes
+    /// `prodajno_mesto` immutable, so a split lineage can never be re-joined.
+    #[test]
+    fn correcting_the_address_does_not_start_a_second_archive_lineage() {
+        with_database(
+            "correcting_the_address_does_not_start_a_second_archive_lineage",
+            |db| {
+                let connection = db.open().expect("database should open");
+                publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                    .expect("publish");
+
+                set_company(db, "Bulevar oslobođenja 1a, Novi Sad", "Butik Ana");
+                let second = publish_current(&connection, &NotConfigured, "2026-08-02T10:15:00Z")
+                    .expect("publish")
+                    .expect("an identified outlet publishes");
+
+                let archived = snapshots(db);
+                assert_eq!(archived.len(), 2, "{archived:?}");
+                assert_eq!(
+                    archived
+                        .iter()
+                        .map(|row| row.prodajno_mesto.as_str())
+                        .collect::<Vec<_>>(),
+                    [OUTLET, OUTLET],
+                    "one outlet, one lineage"
+                );
+                assert_eq!(current_snapshot(db, OUTLET), Some(second));
+            },
+        );
     }
 
     /// The v19 CHECK refuses a blank `prodajno_mesto`, and a placeholder lineage

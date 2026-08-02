@@ -408,16 +408,19 @@ pub fn commit_import(
     )?;
     let job_id = tx.last_insert_rowid();
 
+    let mut prices_moved = false;
     match request.import_type {
-        ImportType::Products => commit_product_rows(
-            &tx,
-            job_id,
-            &parsed,
-            &lookup,
-            &request.mapping,
-            &validation.rows,
-            acting_user_id,
-        )?,
+        ImportType::Products => {
+            prices_moved = commit_product_rows(
+                &tx,
+                job_id,
+                &parsed,
+                &lookup,
+                &request.mapping,
+                &validation.rows,
+                acting_user_id,
+            )?
+        }
         ImportType::Categories => commit_category_rows(
             &tx,
             job_id,
@@ -437,6 +440,15 @@ pub fn commit_import(
     }
 
     tx.commit()?;
+    // SW-12 req. 11 — ZZP čl. 6 st. 3: a bulk price import moves the shelf price
+    // of every article it touches, so the published cenovnik has to follow. One
+    // republish for the whole batch, after the commit — čl. 6 st. 4 binds the
+    // shop to what it published, so no target may be handed a price this import
+    // could still roll back. A publish failure never fails an import whose
+    // prices are already durable.
+    if prices_moved {
+        crate::commands::cenovnik::republish_after_price_move(&connection, &now);
+    }
 
     Ok(ImportJobSummary {
         id: job_id,
@@ -692,6 +704,11 @@ fn validate_initial_stock_rows(
     Ok(rows)
 }
 
+/// Returns whether any row moved what the shop offers — SW-12 req. 11's trigger
+/// (ZZP čl. 6 st. 3). It is the offered-price log's own answer, accumulated
+/// across the batch so the caller republishes the cenovnik ONCE: the published
+/// file is the whole catalog, so a per-row publish would archive N snapshots of
+/// which only the last is the catalog the shop actually offers.
 fn commit_product_rows(
     tx: &rusqlite::Transaction<'_>,
     job_id: i64,
@@ -700,7 +717,8 @@ fn commit_product_rows(
     mapping: &HashMap<String, String>,
     validated_rows: &[ImportRowResult],
     acting_user_id: i64,
-) -> Result<(), ImportError> {
+) -> Result<bool, ImportError> {
+    let mut prices_moved = false;
     for (index, row) in parsed.rows.iter().enumerate() {
         let sku_input = optional_value(lookup, row, mapping, "sku");
         let barcode_input = optional_value(lookup, row, mapping, "barcode");
@@ -762,7 +780,7 @@ fn commit_product_rows(
                     product_id
                 ],
             )?;
-            record_offered_price_change(
+            prices_moved |= record_offered_price_change(
                 tx,
                 product_id,
                 before,
@@ -806,7 +824,7 @@ fn commit_product_rows(
                 ],
             )?;
             let product_id = tx.last_insert_rowid();
-            record_offered_price_change(
+            prices_moved |= record_offered_price_change(
                 tx,
                 product_id,
                 None,
@@ -833,7 +851,7 @@ fn commit_product_rows(
         insert_job_row(tx, job_id, &parsed.headers, row, &validated_rows[index])?;
     }
 
-    Ok(())
+    Ok(prices_moved)
 }
 
 fn commit_category_rows(
@@ -1714,6 +1732,96 @@ mod tests {
                 assert_eq!(source, "import");
             },
         );
+    }
+
+    /// Identifies the prodajni objekat so the SW-12 publish path has an archive
+    /// lineage to key on; without it nothing is published at all.
+    fn seed_outlet(db: &Db) {
+        db.open()
+            .expect("db open")
+            .execute(
+                "INSERT INTO settings (key, value_json, updated_at)
+                 VALUES ('company', ?1, '2026-01-01T00:00:00Z')",
+                params![serde_json::json!({
+                    "shopName": "Butik Ana",
+                    "address": "Bulevar oslobođenja 1, Novi Sad",
+                    "pib": "",
+                    "registrationNumber": "",
+                    "phone": "",
+                    "logoPath": null,
+                    "currency": "RSD",
+                })
+                .to_string()],
+            )
+            .expect("company settings should seed");
+    }
+
+    fn published_bodies(db: &Db) -> Vec<String> {
+        let connection = db.open().expect("db open");
+        let mut statement = connection
+            .prepare("SELECT body FROM cenovnik_snapshots ORDER BY id")
+            .expect("snapshot query should prepare");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("snapshot query should run");
+        rows.collect::<Result<Vec<_>, _>>()
+            .expect("snapshot rows should read")
+    }
+
+    fn two_product_request(first_price: &str, second_price: &str) -> CommitImportRequest {
+        CommitImportRequest {
+            csv_text: format!(
+                "Naziv;Cena;PDV;Sifra\nHleb;{first_price};20;SKU-1\nMleko;{second_price};20;SKU-2\n"
+            ),
+            ..products_request(first_price)
+        }
+    }
+
+    /// SW-12 req. 11 — ZZP čl. 6 st. 3. A bulk price import moves the shelf
+    /// price of every article it touches, so the published cenovnik has to
+    /// follow. ONE republish for the batch, not one per row: the file is the
+    /// whole catalog, so a per-row publish would archive N snapshots of which
+    /// only the last is the catalog the shop actually offers.
+    #[test]
+    fn an_import_republishes_the_cenovnik_once_for_the_batch() {
+        with_test_database(
+            "an_import_republishes_the_cenovnik_once_for_the_batch",
+            |db| {
+                seed_tax_rate(db, "PDV 20", 2000);
+                seed_outlet(db);
+                let acting = admin_id(db);
+
+                commit_import(db, &two_product_request("4990,00", "1490,00"), acting)
+                    .expect("commit should succeed");
+
+                let published = published_bodies(db);
+                assert_eq!(published.len(), 1, "one file per batch: {published:?}");
+                assert!(published[0].contains("4990.00"), "{:?}", published[0]);
+                assert!(published[0].contains("1490.00"), "{:?}", published[0]);
+            },
+        );
+    }
+
+    /// Čl. 6 st. 3 speaks of „trenutnim cenama“: a re-import that moves no
+    /// offered price is not a price change, and republishing it would archive a
+    /// byte-identical file as if the shop had published again.
+    #[test]
+    fn an_import_that_moves_no_price_publishes_nothing() {
+        with_test_database("an_import_that_moves_no_price_publishes_nothing", |db| {
+            seed_tax_rate(db, "PDV 20", 2000);
+            seed_outlet(db);
+            let acting = admin_id(db);
+
+            commit_import(db, &products_request("4990,00"), acting).expect("first commit");
+            assert_eq!(published_bodies(db).len(), 1);
+
+            commit_import(db, &products_request("4990,00"), acting).expect("second commit");
+            assert_eq!(
+                published_bodies(db).len(),
+                1,
+                "an unchanged price is not a republish"
+            );
+        });
     }
 
     #[test]

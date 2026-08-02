@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
-use crate::cenovnik::NotConfigured;
 use crate::clock::utc_now;
-use crate::commands::cenovnik::publish_current;
+use crate::commands::cenovnik::republish_after_price_move;
 use crate::commands::settings::{ShopProfile, SHOP_PROFILE_KEY};
 use crate::db::Db;
 use crate::price_history::{
@@ -84,6 +83,23 @@ pub struct SaveProductRequest {
     /// recorded as a GTIN, so the kind is asserted rather than guessed.
     #[serde(default)]
     pub barcode_kind: Option<String>,
+    /// The measure the jedinična cena is EXPRESSED in — `kg`, `l`, `kom`
+    /// (`products.jedinicna_cena_jedinica`, v19). `unit_of_measure` above is the
+    /// measure the goods are SOLD in, and for a 0,75 l bottle sold by the piece
+    /// the two differ.
+    ///
+    /// ZZP čl. 6 st. 2's second sentence pulls st. 1 into the published
+    /// cenovnik, so this is what SW-12 req. 10 needs captured. Nullable and
+    /// `#[serde(default)]`: a product priced per piece may legitimately have
+    /// none, and an operator who has not said must still be able to save —
+    /// nothing here guesses a jedinična cena from a package size nobody entered.
+    #[serde(default)]
+    pub jedinicna_cena_jedinica: Option<String>,
+    /// The content of one selling unit in that measure, value × 1000 (the
+    /// schema-wide milli scale): a 0,75 l bottle is `750`. `None` means one
+    /// selling unit IS one of the measure, so the two prices coincide.
+    #[serde(default)]
+    pub jedinicna_cena_sadrzaj_milli: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +185,12 @@ pub struct ProductSummary {
     pub country_of_origin: Option<String>,
     pub official_goods_code: Option<String>,
     pub barcode_kind: Option<String>,
+    /// Read back so a product form can round-trip the pair. `SaveProductRequest`
+    /// is a full replacement of the row, so a caller that edits a product
+    /// without sending these clears them — exactly as it would clear a
+    /// `manufacturerName` it did not send.
+    pub jedinicna_cena_jedinica: Option<String>,
+    pub jedinicna_cena_sadrzaj_milli: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -260,7 +282,16 @@ struct NormalizedProductRequest {
     country_of_origin: Option<String>,
     official_goods_code: Option<String>,
     barcode_kind: Option<String>,
+    jedinicna_cena_jedinica: Option<String>,
+    jedinicna_cena_sadrzaj_milli: Option<i64>,
 }
+
+/// The v19 unit-price pair as it stands on a stored row.
+///
+/// The jedinična cena IS a price under čl. 6 st. 1/st. 2 and is derived from
+/// this pair, so moving it moves a published price without moving
+/// `sale_price_minor` — which is why the republish predicate has to watch it.
+type UnitPrice = (Option<String>, Option<i64>);
 
 #[tauri::command]
 pub fn catalog_search_products(
@@ -501,10 +532,12 @@ pub fn create_product(
             country_of_origin,
             official_goods_code,
             barcode_kind,
+            jedinicna_cena_jedinica,
+            jedinicna_cena_sadrzaj_milli,
             created_at,
             updated_at
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?26)",
         params![
             normalized.name,
             normalized.sku,
@@ -541,6 +574,8 @@ pub fn create_product(
             normalized.country_of_origin,
             normalized.official_goods_code,
             normalized.barcode_kind,
+            normalized.jedinicna_cena_jedinica,
+            normalized.jedinicna_cena_sadrzaj_milli,
             now,
         ],
     )?;
@@ -563,7 +598,10 @@ pub fn create_product(
         .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     tx.commit()?;
-    republish_cenovnik(&connection, offer_changed, &now)?;
+    // A new article's unit price is part of its first offering, so there is no
+    // separate move to watch for: if it is not offered at all, `offer_changed`
+    // is false and it has no published price either way.
+    republish_cenovnik(&connection, offer_changed, &now);
     Ok(product)
 }
 
@@ -587,6 +625,7 @@ pub fn update_product(
     // Read the before-state BEFORE the UPDATE: afterwards it would compare the
     // new value to itself and record nothing.
     let before = load_offering_state(&tx, id)?;
+    let unit_price_before = load_unit_price(&tx, id)?;
     ensure_category_exists(&tx, normalized.category_id)?;
     ensure_active_tax_rate_exists(&tx, normalized.tax_rate_id)?;
     ensure_unique_product(
@@ -623,8 +662,10 @@ pub fn update_product(
              country_of_origin = ?21,
              official_goods_code = ?22,
              barcode_kind = ?23,
-             updated_at = ?24
-         WHERE id = ?25",
+             jedinicna_cena_jedinica = ?24,
+             jedinicna_cena_sadrzaj_milli = ?25,
+             updated_at = ?26
+         WHERE id = ?27",
         params![
             normalized.name,
             normalized.sku,
@@ -661,6 +702,8 @@ pub fn update_product(
             normalized.country_of_origin,
             normalized.official_goods_code,
             normalized.barcode_kind,
+            normalized.jedinicna_cena_jedinica,
+            normalized.jedinicna_cena_sadrzaj_milli,
             now,
             id,
         ],
@@ -682,8 +725,19 @@ pub fn update_product(
     let product = product_by_id_for_connection(&tx, id)?
         .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
+    // The offered-price log only watches `sale_price_minor` and `active`, but
+    // the jedinična cena is a published price too (čl. 6 st. 1/st. 2) and moves
+    // with the pair below. Correcting a bottle from 0,75 l to 1 l changes the
+    // published unit price without touching the sale price, and st. 4 binds the
+    // shop to whatever the published file then says.
+    let unit_price_changed = unit_price_before
+        != (
+            normalized.jedinicna_cena_jedinica.clone(),
+            normalized.jedinicna_cena_sadrzaj_milli,
+        );
+
     tx.commit()?;
-    republish_cenovnik(&connection, offer_changed, &now)?;
+    republish_cenovnik(&connection, offer_changed || unit_price_changed, &now);
     Ok(product)
 }
 
@@ -734,33 +788,42 @@ pub fn set_product_active(
         .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     tx.commit()?;
-    republish_cenovnik(&connection, offer_changed, &now)?;
+    republish_cenovnik(&connection, offer_changed, &now);
     Ok(product)
 }
 
-/// SW-12 req. 11: a change to what the shop offers republishes the cenovnik,
+/// SW-12 req. 11: a change to a published price republishes the cenovnik,
 /// because čl. 6 st. 3 requires the published file to match the outlet's current
-/// prices *„u realnom vremenu“*. The offered-price log decides what counts as
-/// one, so an edit that only renames an article publishes nothing.
+/// prices *„u realnom vremenu“*. St. 3 speaks of *„trenutnim cenama“*, so an
+/// edit that only renames an article or raises its minimum stock publishes
+/// nothing; `prices_changed` is the caller's answer to „did a published price
+/// move“, and it covers both the offered price and the jedinična cena.
 ///
 /// After the commit, never before it — čl. 6 st. 4 binds the shop to what it
 /// published, so a publish target must not be handed a price this transaction
 /// could still roll back.
-///
-/// `NotConfigured` is the target until Task 7 lands the founder's hosting
-/// decision (req. 15): the snapshot is generated and archived, and nothing
-/// leaves the machine.
-fn republish_cenovnik(
-    connection: &Connection,
-    offer_changed: bool,
-    now: &str,
-) -> Result<(), AppError> {
-    if !offer_changed {
-        return Ok(());
+fn republish_cenovnik(connection: &Connection, prices_changed: bool, now: &str) {
+    if !prices_changed {
+        return;
     }
 
-    publish_current(connection, &NotConfigured, now)?;
-    Ok(())
+    // Returns nothing on purpose: by the time this runs the price is already
+    // durable, so a publish failure must not be reported as a failed save.
+    republish_after_price_move(connection, now);
+}
+
+/// The v19 unit-price pair as it stands before a write, so the republish
+/// predicate can tell whether the published jedinična cena is about to move.
+fn load_unit_price(connection: &Connection, id: i64) -> Result<UnitPrice, AppError> {
+    connection
+        .query_row(
+            "SELECT jedinicna_cena_jedinica, jedinicna_cena_sadrzaj_milli
+             FROM products
+             WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(Into::into)
 }
 
 pub fn save_category(db: &Db, request: SaveCategoryRequest) -> Result<CategorySummary, AppError> {
@@ -942,7 +1005,9 @@ pub fn list_products_for_connection(
              p.importer_name,
              p.country_of_origin,
              p.official_goods_code,
-             p.barcode_kind
+             p.barcode_kind,
+             p.jedinicna_cena_jedinica,
+             p.jedinicna_cena_sadrzaj_milli
          FROM products p
          JOIN tax_rates tr ON tr.id = p.tax_rate_id
          LEFT JOIN categories c ON c.id = p.category_id
@@ -1019,7 +1084,9 @@ fn product_by_id_for_connection(
                  p.importer_name,
                  p.country_of_origin,
                  p.official_goods_code,
-                 p.barcode_kind
+                 p.barcode_kind,
+                 p.jedinicna_cena_jedinica,
+                 p.jedinicna_cena_sadrzaj_milli
              FROM products p
              JOIN tax_rates tr ON tr.id = p.tax_rate_id
              LEFT JOIN categories c ON c.id = p.category_id
@@ -1220,6 +1287,8 @@ fn normalize_product_request(
     let official_goods_code = normalized_optional_text(request.official_goods_code.as_deref());
     let barcode_kind = normalized_optional_text(request.barcode_kind.as_deref())
         .map(|kind| kind.to_ascii_lowercase());
+    let jedinicna_cena_jedinica =
+        normalized_optional_text(request.jedinicna_cena_jedinica.as_deref());
 
     if name.is_empty() {
         return Err(validation_error("Naziv je obavezan.", "name"));
@@ -1284,6 +1353,26 @@ fn normalize_product_request(
         }
     }
 
+    // The v19 CHECK refuses both half-states; catching them here turns a raw
+    // constraint failure into a Serbian message pointing at the very input.
+    if let Some(sadrzaj_milli) = request.jedinicna_cena_sadrzaj_milli {
+        if sadrzaj_milli <= 0 {
+            return Err(validation_error(
+                "Sadržaj pakovanja mora biti veći od nule.",
+                "jedinicnaCenaSadrzajMilli",
+            ));
+        }
+
+        if jedinicna_cena_jedinica.is_none() {
+            // A sadržaj without its measure divides by nothing, so it can state
+            // no jedinična cena at all (čl. 6 st. 1).
+            return Err(validation_error(
+                "Uz sadržaj pakovanja izaberite i jedinicu za jediničnu cenu.",
+                "jedinicnaCenaJedinica",
+            ));
+        }
+    }
+
     Ok(NormalizedProductRequest {
         name,
         sku,
@@ -1308,6 +1397,12 @@ fn normalize_product_request(
         importer_name,
         country_of_origin,
         official_goods_code,
+        // A sadržaj is meaningless without its measure and the check above has
+        // already refused that pairing, so the two columns can never disagree.
+        jedinicna_cena_sadrzaj_milli: jedinicna_cena_jedinica
+            .as_ref()
+            .and(request.jedinicna_cena_sadrzaj_milli),
+        jedinicna_cena_jedinica,
         barcode_kind,
     })
 }
@@ -1535,6 +1630,8 @@ fn product_from_row(row: &Row<'_>) -> rusqlite::Result<ProductSummary> {
         country_of_origin: row.get(25)?,
         official_goods_code: row.get(26)?,
         barcode_kind: row.get(27)?,
+        jedinicna_cena_jedinica: row.get(28)?,
+        jedinicna_cena_sadrzaj_milli: row.get(29)?,
     })
 }
 
@@ -1819,6 +1916,8 @@ mod tests {
             country_of_origin: None,
             official_goods_code: None,
             barcode_kind: None,
+            jedinicna_cena_jedinica: None,
+            jedinicna_cena_sadrzaj_milli: None,
         }
     }
 
