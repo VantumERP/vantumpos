@@ -607,6 +607,98 @@ describe("CatalogModule", () => {
         );
       });
     });
+
+    /**
+     * The half-configured pair: „l“ typed into the measure with the package
+     * content left blank. `CenovnikRow::jedinicna_cena_minor` then publishes
+     * the sale price AS the jedinična cena — 279,00 per litre for a 0,75 l
+     * bottle whose true figure is 372,00 — and čl. 6 st. 4 makes the shop
+     * answer for that published number. The form must say so beside the input
+     * rather than let the file carry it.
+     */
+    it("refuses a measure that differs from the unit of measure with no package content", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      // „Mleko 1 l“ is sold po komadu, so „l“ here is a different measure.
+      await user.type(
+        await screen.findByLabelText("Jedinica za jediničnu cenu"),
+        "l",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      expect(
+        await screen.findByText(
+          "Jedinica za jediničnu cenu se razlikuje od jedinice mere — unesite sadržaj pakovanja. Prazan sadržaj znači da je jedna prodajna jedinica jednaka jednoj jedinici mere (na primer 1 kom = 1 l).",
+        ),
+      ).toBeInTheDocument();
+      expect(updateProduct).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The v19 convention stays expressible: goods sold by the kilogram whose
+     * jedinična cena is per kilogram need no package content at all, and the
+     * refusal above must not reach them.
+     */
+    it("saves a blank package content when the two measures agree", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      const unit = await screen.findByLabelText("Jedinica mere");
+      await user.clear(unit);
+      await user.type(unit, "kg");
+      await user.type(
+        screen.getByLabelText("Jedinica za jediničnu cenu"),
+        "kg",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({
+            unitOfMeasure: "kg",
+            jedinicnaCenaJedinica: "kg",
+            jedinicnaCenaSadrzajMilli: null,
+          }),
+        );
+      });
+    });
+
+    /**
+     * The convention that makes a blank sadržaj legitimate — one selling unit
+     * IS one unit of the measure — lived only in the v19 comment and in the
+     * tests. An operator reading „program sam deli prodajnu cenu“ beside an
+     * empty field cannot tell a deliberate blank from a forgotten one.
+     */
+    it("states the blank-content convention in the field help", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+
+      expect(
+        await screen.findByText(
+          /ostavite sadržaj prazan — jedinična cena je tada jednaka prodajnoj ceni/i,
+        ),
+      ).toBeInTheDocument();
+    });
   });
 
   // ZoT čl. 34 st. 5 — the Rust gate refuses every create/update from a

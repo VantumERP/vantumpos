@@ -97,7 +97,10 @@ pub struct SaveProductRequest {
     pub jedinicna_cena_jedinica: Option<String>,
     /// The content of one selling unit in that measure, value × 1000 (the
     /// schema-wide milli scale): a 0,75 l bottle is `750`. `None` means one
-    /// selling unit IS one of the measure, so the two prices coincide.
+    /// selling unit IS one of the measure, so the two prices coincide — and is
+    /// accepted only while `jedinicna_cena_jedinica` names that same measure,
+    /// since otherwise the convention would publish a jedinična cena the
+    /// package itself contradicts.
     #[serde(default)]
     pub jedinicna_cena_sadrzaj_milli: Option<i64>,
 }
@@ -1353,8 +1356,13 @@ fn normalize_product_request(
         }
     }
 
-    // The v19 CHECK refuses both half-states; catching them here turns a raw
-    // constraint failure into a Serbian message pointing at the very input.
+    // The v19 CHECK refuses one of the two half-states — a sadržaj carrying no
+    // jedinica — and catching it here turns a raw constraint failure into a
+    // Serbian message pointing at the very input. The mirror half-state, a
+    // jedinica with no sadržaj, the CHECK deliberately permits: a NULL sadržaj
+    // is the v19 convention for „jedna prodajna jedinica JESTE jedna jedinica
+    // mere“, and the gate after this block is what keeps that convention from
+    // quietly covering a package nobody described.
     if let Some(sadrzaj_milli) = request.jedinicna_cena_sadrzaj_milli {
         if sadrzaj_milli <= 0 {
             return Err(validation_error(
@@ -1369,6 +1377,26 @@ fn normalize_product_request(
             return Err(validation_error(
                 "Uz sadržaj pakovanja izaberite i jedinicu za jediničnu cenu.",
                 "jedinicnaCenaJedinica",
+            ));
+        }
+    }
+
+    // A jedinica with no sadržaj makes `cenovnik::CenovnikRow::jedinicna_cena_minor`
+    // publish the sale price AS the jedinična cena. That is right exactly while
+    // one selling unit IS one unit of that measure — the v19 convention — and
+    // provably wrong the moment the two measures differ: a 0,75 l bottle sold
+    // „po komadu“ at 279,00 would publish 279,00 per litre where the figure is
+    // 372,00, and čl. 6 st. 4 makes the shop answer for the published number.
+    // The comparison is case-insensitive because „L“ and „l“ are one measure to
+    // a shopper, and a shop that really sells one litre per piece still has a
+    // way to say so: a sadržaj of 1.
+    if let Some(jedinica) = jedinicna_cena_jedinica.as_deref() {
+        if request.jedinicna_cena_sadrzaj_milli.is_none()
+            && jedinica.to_lowercase() != unit_of_measure.to_lowercase()
+        {
+            return Err(validation_error(
+                "Jedinica za jediničnu cenu se razlikuje od jedinice mere — unesite sadržaj pakovanja. Prazan sadržaj znači da je jedna prodajna jedinica jednaka jednoj jedinici mere (na primer 1 kom = 1 l).",
+                "jedinicnaCenaSadrzajMilli",
             ));
         }
     }
@@ -2656,6 +2684,85 @@ mod tests {
                 }
             },
         );
+    }
+
+    /// A jedinica with no sadržaj makes
+    /// [`crate::cenovnik::CenovnikRow::jedinicna_cena_minor`] publish the sale
+    /// price AS the jedinična cena, which holds only while one selling unit IS
+    /// one unit of that measure. A 0,75 l bottle sold „po komadu“ at 279,00
+    /// would publish `279,00;l` where the true figure is `372,00;l` — a wrong
+    /// PUBLISHED jedinična cena the shop answers for under ZZP čl. 6 st. 1 and
+    /// st. 4. The half-configured pair has to be refused, not assumed.
+    #[test]
+    fn create_product_refuses_a_differing_measure_with_no_package_content() {
+        with_catalog_database(
+            "create_product_refuses_a_differing_measure_with_no_package_content",
+            |db| {
+                let mut request = product_request("JOG-1L", Some("8600000000034"));
+                request.unit_of_measure = "kom".to_string();
+                request.jedinicna_cena_jedinica = Some("l".to_string());
+                request.jedinicna_cena_sadrzaj_milli = None;
+
+                let error = create_product(db, request, admin_id(db)).expect_err(
+                    "a measure that differs from the unit of measure needs a package content",
+                );
+
+                match error {
+                    AppError::Validation { message, details } => {
+                        assert_eq!(
+                            message,
+                            "Jedinica za jediničnu cenu se razlikuje od jedinice mere — unesite sadržaj pakovanja. Prazan sadržaj znači da je jedna prodajna jedinica jednaka jednoj jedinici mere (na primer 1 kom = 1 l)."
+                        );
+                        assert_eq!(
+                            details.expect("validation error should name the field")["field"],
+                            "jedinicnaCenaSadrzajMilli"
+                        );
+                    }
+                    other => panic!("expected a validation error, got {other:?}"),
+                }
+            },
+        );
+    }
+
+    /// The v19 convention — a NULL sadržaj means one selling unit IS one unit
+    /// of the measure — stays expressible: goods sold by the kilogram whose
+    /// jedinična cena is per kilogram need no package content, and the refusal
+    /// above must not reach them.
+    #[test]
+    fn create_product_accepts_a_matching_measure_with_no_package_content() {
+        with_catalog_database(
+            "create_product_accepts_a_matching_measure_with_no_package_content",
+            |db| {
+                let mut request = product_request("JOG-1L", Some("8600000000034"));
+                request.unit_of_measure = "kg".to_string();
+                request.jedinicna_cena_jedinica = Some("kg".to_string());
+                request.jedinicna_cena_sadrzaj_milli = None;
+
+                let created = create_product(db, request, admin_id(db))
+                    .expect("goods sold by the kilogram need no package content");
+                let reread = get_product(db, created.id)
+                    .expect("product should read back")
+                    .expect("product should exist");
+
+                assert_eq!(reread.jedinicna_cena_jedinica.as_deref(), Some("kg"));
+                assert_eq!(reread.jedinicna_cena_sadrzaj_milli, None);
+            },
+        );
+    }
+
+    /// „L“ and „l“ are one measure to a shopper. A case-sensitive comparison
+    /// would refuse a correctly configured article and teach the operator that
+    /// the gate is noise.
+    #[test]
+    fn matching_measure_check_ignores_letter_case() {
+        with_catalog_database("matching_measure_check_ignores_letter_case", |db| {
+            let mut request = product_request("JOG-1L", Some("8600000000034"));
+            request.unit_of_measure = "L".to_string();
+            request.jedinicna_cena_jedinica = Some("l".to_string());
+            request.jedinicna_cena_sadrzaj_milli = None;
+
+            create_product(db, request, admin_id(db)).expect("„L“ and „l“ are the same measure");
+        });
     }
 
     /// The perishable flag describes the goods, not the offer. Flipping it

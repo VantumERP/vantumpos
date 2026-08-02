@@ -1766,8 +1766,13 @@ function ProductSheet({
                       litru ili po kilogramu. Za flašu od 0,75 l unesite „l“ i
                       „0,75“; program sam deli prodajnu cenu i objavljuje
                       rezultat u cenovniku. Sadržaj se piše bez tačke za hiljade
-                      — za kesu od 1 kg unesite „g“ i „1000“. Ostavite prazno za
-                      artikal koji se prodaje po komadu.
+                      — za kesu od 1 kg unesite „g“ i „1000“. Ako je jedinica za
+                      jediničnu cenu ista kao jedinica mere (roba se prodaje po
+                      kilogramu, a jedinična cena je po kilogramu), ostavite
+                      sadržaj prazan — jedinična cena je tada jednaka prodajnoj
+                      ceni. Ostavite oba polja prazna za artikal koji se prodaje
+                      po komadu: u cenovniku tada stoji prazna ćelija umesto
+                      izmišljene cene.
                     </FieldDescription>
                     <Field orientation="horizontal">
                       <Switch
@@ -2500,10 +2505,10 @@ function validateProductForm(form: ProductFormState): ProductFieldErrors {
       "Obrazloženje je obavezno za kvarljivu robu.";
   }
 
-  // The same two refusals `commands::catalog::normalize_product_request` makes,
-  // said here so the operator reads them beside the input rather than after a
-  // round trip. A sadržaj without its measure divides by nothing and can state
-  // no jedinična cena at all (ZZP čl. 6 st. 1).
+  // The same three refusals `commands::catalog::normalize_product_request`
+  // makes, said here so the operator reads them beside the input rather than
+  // after a round trip. A sadržaj without its measure divides by nothing and
+  // can state no jedinična cena at all (ZZP čl. 6 st. 1).
   if (form.jedinicnaCenaSadrzaj.trim()) {
     let sadrzajMilli: number | null = null;
     try {
@@ -2523,6 +2528,25 @@ function validateProductForm(form: ProductFormState): ProductFieldErrors {
       errors.jedinicnaCenaJedinica =
         "Uz sadržaj pakovanja izaberite i jedinicu za jediničnu cenu.";
     }
+  }
+
+  // The mirror half-state, which the v19 CHECK permits and nothing downstream
+  // catches: a measure with no content. `CenovnikRow::jedinicna_cena_minor`
+  // then publishes the sale price AS the jedinična cena, which holds only
+  // while one selling unit IS one unit of that measure. Once the two measures
+  // differ — a 0,75 l bottle sold po komadu — that is a wrong PUBLISHED figure
+  // the shop answers for under čl. 6 st. 4, so the content has to be stated.
+  // Case-insensitive: „L“ and „l“ are one measure to a shopper. The comparison
+  // reads the unit `productRequest` will actually send — a blank field goes up
+  // as „kom“ — so the form never refuses a pair the Rust side would accept.
+  if (
+    form.jedinicnaCenaJedinica.trim() &&
+    !form.jedinicnaCenaSadrzaj.trim() &&
+    form.jedinicnaCenaJedinica.trim().toLowerCase() !==
+      (form.unitOfMeasure.trim() || "kom").toLowerCase()
+  ) {
+    errors.jedinicnaCenaSadrzaj =
+      "Jedinica za jediničnu cenu se razlikuje od jedinice mere — unesite sadržaj pakovanja. Prazan sadržaj znači da je jedna prodajna jedinica jednaka jednoj jedinici mere (na primer 1 kom = 1 l).";
   }
 
   return errors;
