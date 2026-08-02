@@ -1450,6 +1450,7 @@ export function createMockServices(): PosServices {
       },
       async logAnswer(id, input) {
         const view = findReklamacija(reklamacije, id);
+        assertNoFeeAttested(view, input.noFeeAttested);
         view.events.push({
           eventType: "answer_given",
           eventDate: input.eventDate,
@@ -1501,8 +1502,9 @@ export function createMockServices(): PosServices {
         recomputeMockDeadlines(view);
         return view;
       },
-      async resolve(id, nacin, eventDate) {
+      async resolve(id, nacin, eventDate, noFeeAttested) {
         const view = findReklamacija(reklamacije, id);
+        assertNoFeeAttested(view, noFeeAttested);
         view.events.push({
           eventType: "resolved",
           eventDate,
@@ -1736,6 +1738,29 @@ function reklamacijaNotice(regime: ReklamacijaRegime): LegalNotice {
   };
 }
 
+/** `reklamacije.rs::NO_FEE_NOTICE` verbatim. NEW regime only. */
+const REKLAMACIJA_NO_FEE_NOTICE =
+  "Zabranjeno je naplatiti utvrđivanje nesaobraznosti (čl. 63 st. 3). " +
+  "Otklanjanje nesaobraznosti — popravka ili zamena — je bez naknade po " +
+  "posebnoj odredbi (čl. 56 st. 1), i u starom i u novom režimu.";
+
+/** Mirrors `reklamacije.rs::ensure_no_fee_attested`. A double that accepts what
+ *  the backend rejects hides the gate from every UI test that uses it. */
+function assertNoFeeAttested(view: ReklamacijaView, attested: boolean): void {
+  if (view.noFeeNotice === null || view.noFeeAttested) {
+    return;
+  }
+  if (!attested) {
+    throw {
+      code: "validation_error",
+      message:
+        "Za novu reklamaciju potvrdite da utvrđivanje nesaobraznosti nije naplaćeno (čl. 63 st. 3).",
+    };
+  }
+  view.noFeeAttested = true;
+  view.noFeeAttestedAt = now;
+}
+
 function findReklamacija(
   reklamacije: ReklamacijaView[],
   id: number,
@@ -1783,6 +1808,9 @@ function mockReklamacijaView(
     },
     purgeEligible: false,
     notice: reklamacijaNotice(regime),
+    noFeeAttested: false,
+    noFeeAttestedAt: null,
+    noFeeNotice: regime === "new" ? REKLAMACIJA_NO_FEE_NOTICE : null,
   };
   recomputeMockDeadlines(view);
   return view;

@@ -253,7 +253,12 @@ export interface ReklamacijeService {
     reason: string,
     eventDate: string,
   ): Promise<ReklamacijaView>;
-  resolve(id: number, nacin: string, eventDate: string): Promise<ReklamacijaView>;
+  resolve(
+    id: number,
+    nacin: string,
+    eventDate: string,
+    noFeeAttested: boolean,
+  ): Promise<ReklamacijaView>;
   /** Self-contained potvrda o prijemu reklamacije (čl. 55 st. 7 / čl. 63 st. 7). */
   exportPotvrda(id: number): Promise<ExportedFile>;
   /** The statutory prodajno-mesto display notice (čl. 55 st. 4 / čl. 63 st. 4). */

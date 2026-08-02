@@ -753,6 +753,8 @@ describe("local service adapter", () => {
       filedAt: "2026-06-15T00:00:00Z",
     };
     const answer: AnswerInput = {
+      // Filed 2026-06-15 → OLD regime, which čl. 63 st. 3 does not bind.
+      noFeeAttested: false,
       answerText: "Reklamacija prihvaćena.",
       warningDuty: "Dužnost izjašnjenja.",
       warningConsequences: "Posledice.",
@@ -773,7 +775,7 @@ describe("local service adapter", () => {
       "Naručen rezervni deo",
       "2026-06-22T00:00:00Z",
     );
-    await services.reklamacije.resolve(7, "zamena", "2026-06-25T00:00:00Z");
+    await services.reklamacije.resolve(7, "zamena", "2026-06-25T00:00:00Z", true);
     await services.reklamacije.exportPotvrda(7);
     await services.reklamacije.exportNotice();
 
@@ -803,6 +805,7 @@ describe("local service adapter", () => {
       id: 7,
       nacin: "zamena",
       eventDate: "2026-06-25T00:00:00Z",
+      noFeeAttested: true,
     });
     expect(invoke).toHaveBeenNthCalledWith(9, "reklamacija_export_potvrda", {
       id: 7,
@@ -1213,6 +1216,8 @@ describe("mock service adapter", () => {
       created.id,
       "zamena",
       "2026-06-25T00:00:00Z",
+      // OLD regime — the fee-ban gate never fires, so this closes unattested.
+      false,
     );
     expect(resolved.status).toBe("resolved");
     expect(resolved.deadlines.clock).toBe("resolved");
@@ -1297,6 +1302,8 @@ function reklamacijaInput(): ReklamacijaInput {
 
 function answerInput(): AnswerInput {
   return {
+    // Filed 2026-06-15 → OLD regime, which čl. 63 st. 3 does not bind.
+    noFeeAttested: false,
     answerText: "Reklamacija prihvaćena.",
     warningDuty: "Dužnost izjašnjenja.",
     warningConsequences: "Posledice.",

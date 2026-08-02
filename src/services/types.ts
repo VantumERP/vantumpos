@@ -660,6 +660,8 @@ export interface AnswerInput {
   warningDuty: string | null;
   warningConsequences: string | null;
   warningZastoj: string | null;
+  /** čl. 63 st. 3 attestation. Ignored by the backend under the OLD regime. */
+  noFeeAttested: boolean;
   eventDate: string;
 }
 
@@ -694,6 +696,17 @@ export interface ReklamacijaView {
    * figure may live outside that module — render this, never derive one.
    */
   notice: LegalNotice;
+  /**
+   * čl. 63 st. 3 attestation. Always `false` under the OLD regime, which has no
+   * fee ban — that `false` is not a compliance signal.
+   */
+  noFeeAttested: boolean;
+  noFeeAttestedAt: string | null;
+  /**
+   * The prohibition text, `null` unless this record's frozen regime is NEW.
+   * Render on presence; never re-derive the regime in a component.
+   */
+  noFeeNotice: string | null;
 }
 
 /**

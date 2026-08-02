@@ -441,6 +441,13 @@ function DetailPanel({
         />
       </dl>
 
+      {view.noFeeNotice ? (
+        // A standing duty for the whole life of a new-regime complaint, so it is
+        // NOT gated on `overdue` the way the deadline advisory is. `null` under
+        // the old regime, which carries no fee ban — the gating is the backend's.
+        <p className="text-xs text-muted-foreground">{view.noFeeNotice}</p>
+      ) : null}
+
       <Separator />
 
       <div className="flex flex-col gap-2">
@@ -630,6 +637,9 @@ function AnswerForm({
   ) => Promise<boolean>;
 }) {
   const isNew = view.regime === "new";
+  // Presence of the notice IS the regime gate — the backend decides, not us.
+  const noFeeRequired = view.noFeeNotice !== null && !view.noFeeAttested;
+  const [noFee, setNoFee] = useState(false);
   const [answerText, setAnswerText] = useState("");
   const [duty, setDuty] = useState(isNew ? WARNING_DUTY_TEMPLATE : "");
   const [consequences, setConsequences] = useState(
@@ -656,6 +666,13 @@ function AnswerForm({
       );
       return;
     }
+    // Mirrors the backend gate, which stays authoritative (čl. 63 st. 3).
+    if (noFeeRequired && !noFee) {
+      setError(
+        "Potvrdite da utvrđivanje nesaobraznosti nije naplaćeno (čl. 63 st. 3).",
+      );
+      return;
+    }
 
     setSubmitting(true);
     const ok = await runAction(
@@ -666,6 +683,7 @@ function AnswerForm({
           warningConsequences: isNew ? consequences.trim() : null,
           warningZastoj: isNew ? zastoj.trim() : null,
           eventDate: toRfc3339(datum),
+          noFeeAttested: noFee,
         }),
       "Odgovor je evidentiran.",
     );
@@ -747,6 +765,18 @@ function AnswerForm({
             onChange={(event) => setDatum(event.target.value)}
           />
         </Field>
+        {noFeeRequired ? (
+          <Field orientation="horizontal">
+            <Checkbox
+              id="reklamacija-bez-naplate"
+              checked={noFee}
+              onCheckedChange={(checked) => setNoFee(Boolean(checked))}
+            />
+            <FieldLabel htmlFor="reklamacija-bez-naplate">
+              Nije naplaćeno utvrđivanje nesaobraznosti (čl. 63 st. 3)
+            </FieldLabel>
+          </Field>
+        ) : null}
       </FieldGroup>
       <div>
         <Button type="submit" disabled={submitting}>
@@ -932,6 +962,10 @@ function ResolveForm({
     successMessage: string,
   ) => Promise<boolean>;
 }) {
+  // The backstop gate: resolve needs no prior answer, so a complaint closed on
+  // the spot would otherwise never be asked (čl. 63 st. 3).
+  const noFeeRequired = view.noFeeNotice !== null && !view.noFeeAttested;
+  const [noFee, setNoFee] = useState(false);
   const [nacin, setNacin] = useState("");
   const [datum, setDatum] = useState(() => today());
   const [error, setError] = useState<string | undefined>();
@@ -944,9 +978,15 @@ function ResolveForm({
       setError("Način rešavanja je obavezan.");
       return;
     }
+    if (noFeeRequired && !noFee) {
+      setError(
+        "Potvrdite da utvrđivanje nesaobraznosti nije naplaćeno (čl. 63 st. 3).",
+      );
+      return;
+    }
     setSubmitting(true);
     const ok = await runAction(
-      () => service.resolve(view.id, nacin.trim(), toRfc3339(datum)),
+      () => service.resolve(view.id, nacin.trim(), toRfc3339(datum), noFee),
       "Reklamacija je rešena.",
     );
     setSubmitting(false);
@@ -983,6 +1023,19 @@ function ResolveForm({
             onChange={(event) => setDatum(event.target.value)}
           />
         </Field>
+        {noFeeRequired ? (
+          // A distinct id from the answer form's — both can be on screen at once.
+          <Field orientation="horizontal">
+            <Checkbox
+              id="reklamacija-resenje-bez-naplate"
+              checked={noFee}
+              onCheckedChange={(checked) => setNoFee(Boolean(checked))}
+            />
+            <FieldLabel htmlFor="reklamacija-resenje-bez-naplate">
+              Nije naplaćeno utvrđivanje nesaobraznosti (čl. 63 st. 3)
+            </FieldLabel>
+          </Field>
+        ) : null}
       </FieldGroup>
       <div>
         <Button type="submit" disabled={submitting}>

@@ -277,8 +277,13 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
           reason,
           eventDate,
         }),
-      resolve: (id, nacin, eventDate) =>
-        invoke<ReklamacijaView>("reklamacija_resolve", { id, nacin, eventDate }),
+      resolve: (id, nacin, eventDate, noFeeAttested) =>
+        invoke<ReklamacijaView>("reklamacija_resolve", {
+          id,
+          nacin,
+          eventDate,
+          noFeeAttested,
+        }),
       exportPotvrda: (id) =>
         invoke<ExportedFile>("reklamacija_export_potvrda", { id }),
       exportNotice: () =>

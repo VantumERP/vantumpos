@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -33,6 +33,12 @@ const unsetFormaNotice: LegalNotice = {
   ...preduzetnikNewNotice,
   penalty: null,
 };
+
+// `reklamacije.rs::NO_FEE_NOTICE` verbatim — NEW regime only.
+const noFeeNotice =
+  "Zabranjeno je naplatiti utvrđivanje nesaobraznosti (čl. 63 st. 3). " +
+  "Otklanjanje nesaobraznosti — popravka ili zamena — je bez naknade po " +
+  "posebnoj odredbi (čl. 56 st. 1), i u starom i u novom režimu.";
 
 // Memo worked example (NEW/tehnička): filed 15.08. → answer 23.08., resolution
 // 14.09. Nothing is overdue yet.
@@ -93,6 +99,9 @@ const createdView: ReklamacijaView = {
   },
   purgeEligible: false,
   notice: preduzetnikNewNotice,
+  noFeeAttested: false,
+  noFeeAttestedAt: null,
+  noFeeNotice,
 };
 
 function servicesWith(rows: ReklamacijaSummary[]): PosServices {
@@ -131,6 +140,9 @@ const newRegimeOpen: ReklamacijaView = {
   },
   purgeEligible: false,
   notice: preduzetnikNewNotice,
+  noFeeAttested: false,
+  noFeeAttestedAt: null,
+  noFeeNotice,
 };
 
 // The OLD regime is NOT gated on the express warning — rejecting an old-regime
@@ -142,6 +154,8 @@ const oldRegimeOpen: ReklamacijaView = {
   regime: "old",
   filedAt: "2026-06-01T00:00:00Z",
   podnosilacImePrezime: "Marija Marić",
+  // 88/2021 čl. 55 st. 3 carries no fee ban, so the backend sends none.
+  noFeeNotice: null,
 };
 
 // Both clocks blown — the only state in which the advisory penalty context is
@@ -374,6 +388,92 @@ describe("ReklamacijeModule detail", () => {
     expect(screen.queryByText(/dinara/)).not.toBeInTheDocument();
   });
 
+  it("requires the no-fee attestation before a new-regime answer", async () => {
+    const user = userEvent.setup();
+    const services = servicesWithView(newRegimeOpen);
+    const logAnswer = vi.spyOn(services.reklamacije, "logAnswer");
+
+    render(<ReklamacijeModule services={services} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za reklamaciju #10" }),
+    );
+
+    // The standing prohibition is visible without any action.
+    expect(
+      await screen.findByText(/Zabranjeno je naplatiti utvrđivanje nesaobraznosti/),
+    ).toBeInTheDocument();
+
+    await user.type(
+      await screen.findByLabelText("Odgovor na reklamaciju"),
+      "Prihvatamo reklamaciju.",
+    );
+    await user.click(screen.getByRole("button", { name: "Unesi odgovor" }));
+
+    expect(
+      await screen.findByText(/Potvrdite da utvrđivanje nesaobraznosti nije naplaćeno/),
+    ).toBeInTheDocument();
+    expect(logAnswer).not.toHaveBeenCalled();
+
+    // Both forms carry an identically-labelled checkbox and can be on screen at
+    // once, so the query has to be scoped to the one under test.
+    await user.click(
+      within(screen.getByRole("form", { name: "Unos odgovora" })).getByRole(
+        "checkbox",
+        { name: "Nije naplaćeno utvrđivanje nesaobraznosti (čl. 63 st. 3)" },
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Unesi odgovor" }));
+
+    await waitFor(() => expect(logAnswer).toHaveBeenCalled());
+    expect(logAnswer.mock.calls[0]?.[1]).toMatchObject({ noFeeAttested: true });
+  });
+
+  it("shows no fee-ban copy or checkbox for an old-regime record", async () => {
+    const user = userEvent.setup();
+    render(<ReklamacijeModule services={servicesWithView(oldRegimeOpen)} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za reklamaciju #11" }),
+    );
+
+    // 88/2021 čl. 55 st. 3 has no fee ban — asserting one here would state a
+    // duty that does not bind this complaint.
+    expect(await screen.findByText("Stari režim")).toBeInTheDocument();
+    expect(screen.queryByText(/Zabranjeno je naplatiti/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", {
+        name: "Nije naplaćeno utvrđivanje nesaobraznosti (čl. 63 st. 3)",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("drops the checkbox once the record is already attested", async () => {
+    const user = userEvent.setup();
+    render(
+      <ReklamacijeModule
+        services={servicesWithView({
+          ...newRegimeOpen,
+          noFeeAttested: true,
+          noFeeAttestedAt: "2026-09-03T08:00:00Z",
+        })}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za reklamaciju #10" }),
+    );
+
+    // Asked once, not once per transition — but the duty stays on screen.
+    expect(
+      await screen.findByText(/Zabranjeno je naplatiti utvrđivanje nesaobraznosti/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", {
+        name: "Nije naplaćeno utvrđivanje nesaobraznosti (čl. 63 st. 3)",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("omits the express-warning fields for an old-regime answer", async () => {
     const user = userEvent.setup();
     render(<ReklamacijeModule services={servicesWithView(oldRegimeOpen)} />);
@@ -411,6 +511,13 @@ describe("ReklamacijeModule detail", () => {
     await user.type(
       await screen.findByLabelText("Odgovor na reklamaciju"),
       "Prihvatamo reklamaciju i predlažemo popravku.",
+    );
+    // A new-regime answer also carries the čl. 63 st. 3 attestation.
+    await user.click(
+      within(screen.getByRole("form", { name: "Unos odgovora" })).getByRole(
+        "checkbox",
+        { name: "Nije naplaćeno utvrđivanje nesaobraznosti (čl. 63 st. 3)" },
+      ),
     );
     await user.click(screen.getByRole("button", { name: "Unesi odgovor" }));
 
