@@ -1111,11 +1111,15 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenCalledWith("cl47_generate");
     expect(invoke).toHaveBeenCalledWith("cl47_export");
 
-    // Req. 7: there is no write verb on the evidencija pristupa to map.
-    const commands = invoke.mock.calls.map(([command]) => command as string);
-    expect(commands.some((command) => /^audit_(record|update|delete)/.test(command))).toBe(
-      false,
-    );
+    // Req. 7: there is no write verb on the evidencija pristupa to map. The
+    // assertion is over the PORT SURFACE, not over the calls this test happened
+    // to make — a fourteenth method added later is invisible to the call log but
+    // shows up here the moment it is named. The log is only the source of the
+    // instant this list is read from; the guarantee is the shape of the object.
+    const auditMethods = Object.keys(services.privacy)
+      .filter((name) => /audit/i.test(name))
+      .sort();
+    expect(auditMethods).toEqual(["exportAuditCsv", "searchAudit"]);
   });
 
   it("opens an exported document for printing through the opener plugin", async () => {

@@ -28,6 +28,7 @@ import type { PosServices } from "@/services/ports";
 import type {
   Breach,
   BreachDraft,
+  Cl53Izuzetak,
   LegalNotice,
   NotifyDecision,
   RiskOutcome,
@@ -72,10 +73,42 @@ const ODLUKA_LABELE: Record<NotifyDecision, string> = {
 };
 
 /**
- * The `datetime-local` control gives „gggg-MM-ddTčč:mm“ in the operator's own
- * zone reading; the backend wants RFC3339. Seconds and the zone marker are
- * appended rather than the value being re-parsed through `Date`, so nothing
- * silently shifts the anchor the 72 h clock runs from.
+ * The three čl. 53 st. 3 exceptions, closed — and the pin-cite beside each one
+ * is what a reader checks the paraphrase against. Kept word-for-word with
+ * `Cl53Izuzetak::label` in `commands/breaches.rs`, which is what the printed
+ * obrazac carries: the screen and the filed document must not describe the same
+ * exception in two ways.
+ */
+const IZUZETAK_LABELE: Record<Cl53Izuzetak, string> = {
+  primenjene_mere_zastite:
+    "primenjene su mere zaštite zbog kojih su podaci nerazumljivi neovlašćenim licima " +
+    "(čl. 53 st. 3 tač. 1)",
+  naknadne_mere:
+    "naknadno su preduzete mere kojima je otklonjen visok rizik (čl. 53 st. 3 tač. 2)",
+  nesrazmeran_utrosak_vremena_i_sredstava:
+    "obaveštavanje svakog lica zahtevalo bi nesrazmeran utrošak vremena i sredstava, " +
+    "pa je dato javno obaveštenje (čl. 53 st. 3 tač. 3)",
+};
+
+/**
+ * The `datetime-local` control gives „gggg-MM-ddTčč:mm“ read off the operator's
+ * OWN clock; the backend wants an RFC3339 instant.
+ *
+ * The zone marker must therefore never be appended to that string. „09:00“
+ * typed in Beograd is 07:00Z in August, and stamping it „09:00Z“ would move the
+ * anchor two hours later than the moment the operator meant — always in the
+ * direction of granting the shop more time than čl. 52 st. 1 allows, because
+ * both `rok_obavestavanja_istice_at` and the st. 2 delay test run off it. The
+ * card and the printed obrazac would then also read back two hours later than
+ * what was typed.
+ *
+ * ES parses an offset-less date-time form as **local** time, which is exactly
+ * what the control means, so the conversion goes through `Date` and comes back
+ * out in UTC. The milliseconds are trimmed so the stored instant has the same
+ * second precision as every stamp `clock::utc_now` writes. A value the control
+ * could not produce yields „“ and is refused by the caller, never a silent
+ * `Invalid Date`. The mirror-image trap — `toISOString()` on what must stay a
+ * local calendar day — is documented at `worktime/WorkTimeModule.tsx`.
  */
 function toRfc3339(local: string): string {
   const trimmed = local.trim();
@@ -83,7 +116,31 @@ function toRfc3339(local: string): string {
     return "";
   }
 
-  return trimmed.length === 16 ? `${trimmed}:00Z` : `${trimmed}Z`;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  return parsed.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+/** The inverse: a stored instant as the `datetime-local` control reads it. */
+function toLocalInput(instant: string | null): string {
+  if (!instant) {
+    return "";
+  }
+
+  const parsed = new Date(instant);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  const pad = (value: number) => String(value).padStart(2, "0");
+
+  return (
+    `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}` +
+    `T${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+  );
 }
 
 function emptyDraft(): BreachDraft {
@@ -428,9 +485,19 @@ export function BreachLogPanel({ services }: { services: PosServices }) {
 }
 
 /**
- * The open record: the assessment and the two notification blocks, filled in as
- * the investigation proceeds. The saznanje anchor is stated, never offered for
- * edit — čl. 52 st. 1 runs the clock from it.
+ * The open record: the two obrazac slots the opening form does not ask for, the
+ * assessment, and the two notification blocks — filled in as the investigation
+ * proceeds. The saznanje anchor is stated, never offered for edit — čl. 52
+ * st. 1 runs the clock from it.
+ *
+ * **Every field the backend validates is reachable here.** A column that only
+ * `validate` knows about is worse than a missing feature: `poverenik_notified_at`
+ * is the one input that discharges the čl. 52 st. 2 test, so with no control for
+ * it a shop that DID notify inside the 72 h has every later save refused until
+ * it types a delay reason that never existed — a false statement on the very
+ * document st. 7 makes the vehicle for proving compliance. The čl. 53 block is
+ * the same story one article on: the panel already tells the operator the duty
+ * is live, so it has to let the answer be recorded.
  */
 function BreachRecord({
   breach,
@@ -439,14 +506,41 @@ function BreachRecord({
   breach: Breach;
   onSave: (draft: BreachDraft) => Promise<void>;
 }) {
+  const [occurredAt, setOccurredAt] = useState(toLocalInput(breach.occurredAt));
+  const [discoveredAt, setDiscoveredAt] = useState(
+    toLocalInput(breach.discoveredAt),
+  );
+  const [kategorije, setKategorije] = useState(breach.kategorijePodataka ?? "");
   const [risk, setRisk] = useState<string>(breach.riskOutcome ?? "");
   const [decision, setDecision] = useState<string>(breach.notifyDecision ?? "");
   const [obrazlozenje, setObrazlozenje] = useState(
     breach.notifyObrazlozenje ?? "",
   );
+  const [notifiedAt, setNotifiedAt] = useState(
+    toLocalInput(breach.poverenikNotifiedAt),
+  );
   const [delayReason, setDelayReason] = useState(breach.delayReason ?? "");
+  const [licaObavestena, setLicaObavestena] = useState(
+    breach.licaObavestena === null ? "" : breach.licaObavestena ? "da" : "ne",
+  );
+  const [licaObavestenaAt, setLicaObavestenaAt] = useState(
+    toLocalInput(breach.licaObavestenaAt),
+  );
+  const [izuzetak, setIzuzetak] = useState<string>(breach.cl53Izuzetak ?? "");
+  const [izuzetakObrazlozenje, setIzuzetakObrazlozenje] = useState(
+    breach.cl53IzuzetakObrazlozenje ?? "",
+  );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Čl. 53 st. 1 attaches at visok rizik. The block opens on the live selection
+  // as well as on the backend's flag, so the assessment and the answer to it can
+  // be recorded in one pass; it also stays open on a record that already holds
+  // an answer, so nothing already written becomes unreachable.
+  const cl53Otvoren =
+    risk === "visok_rizik" ||
+    breach.obavestavanjeLicaObavezno ||
+    breach.licaObavestena !== null;
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -455,10 +549,18 @@ function BreachRecord({
     try {
       await onSave({
         ...breach,
+        occurredAt: toRfc3339(occurredAt) || null,
+        discoveredAt: toRfc3339(discoveredAt) || null,
+        kategorijePodataka: kategorije.trim() || null,
         riskOutcome: (risk || null) as RiskOutcome | null,
         notifyDecision: (decision || null) as NotifyDecision | null,
         notifyObrazlozenje: obrazlozenje.trim() || null,
+        poverenikNotifiedAt: toRfc3339(notifiedAt) || null,
         delayReason: delayReason.trim() || null,
+        licaObavestena: licaObavestena === "" ? null : licaObavestena === "da",
+        licaObavestenaAt: toRfc3339(licaObavestenaAt) || null,
+        cl53Izuzetak: (izuzetak || null) as Cl53Izuzetak | null,
+        cl53IzuzetakObrazlozenje: izuzetakObrazlozenje.trim() || null,
       });
     } catch (saveError) {
       setError(errorMessage(saveError, "Izmena nije sačuvana."));
@@ -480,6 +582,46 @@ function BreachRecord({
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         ) : null}
+        <Field>
+          <FieldLabel htmlFor={`breach-vrsta-${breach.id}`}>
+            Vrsta podataka o ličnosti
+          </FieldLabel>
+          <Textarea
+            id={`breach-vrsta-${breach.id}`}
+            value={kategorije}
+            onChange={(event) => setKategorije(event.target.value)}
+          />
+          <FieldDescription>
+            Propisani obrazac traži vrstu podataka — odeljak 2 (2), Pravilnik
+            40/2019. Upisuju se vrste, nikada sami podaci.
+          </FieldDescription>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor={`breach-povreda-${breach.id}`}>
+            Datum i vreme povrede
+          </FieldLabel>
+          <Input
+            id={`breach-povreda-${breach.id}`}
+            type="datetime-local"
+            value={occurredAt}
+            onChange={(event) => setOccurredAt(event.target.value)}
+          />
+          <FieldDescription>
+            Odeljak 2 (5) propisanog obrasca — ukoliko je poznat, ili prema
+            proceni. Rok teče od saznanja, ne odavde.
+          </FieldDescription>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor={`breach-otkrivanje-${breach.id}`}>
+            Datum otkrivanja povrede
+          </FieldLabel>
+          <Input
+            id={`breach-otkrivanje-${breach.id}`}
+            type="datetime-local"
+            value={discoveredAt}
+            onChange={(event) => setDiscoveredAt(event.target.value)}
+          />
+        </Field>
         <Field>
           <FieldLabel htmlFor={`breach-risk-${breach.id}`}>
             Procena rizika
@@ -532,6 +674,22 @@ function BreachRecord({
           </FieldDescription>
         </Field>
         <Field>
+          <FieldLabel htmlFor={`breach-notified-${breach.id}`}>
+            Obaveštenje dostavljeno Povereniku
+          </FieldLabel>
+          <Input
+            id={`breach-notified-${breach.id}`}
+            type="datetime-local"
+            value={notifiedAt}
+            onChange={(event) => setNotifiedAt(event.target.value)}
+          />
+          <FieldDescription>
+            Upisuje se kada je obrazac stvarno dostavljen. Ako je dostavljen u
+            roku od 72 časa, obrazloženje kašnjenja iz ZZPL čl. 52 st. 2 se ne
+            traži. Program ne dostavlja obaveštenje umesto rukovaoca.
+          </FieldDescription>
+        </Field>
+        <Field>
           <FieldLabel htmlFor={`breach-delay-${breach.id}`}>
             Razlozi za kašnjenje preko 72 časa
           </FieldLabel>
@@ -541,6 +699,82 @@ function BreachRecord({
             onChange={(event) => setDelayReason(event.target.value)}
           />
         </Field>
+        {cl53Otvoren ? (
+          <>
+            <FieldDescription>
+              Povreda koja može da proizvede visok rizik po prava i slobode
+              fizičkih lica saopštava se i licima na koja se podaci odnose —
+              ZZPL čl. 53 st. 1. Ako nisu obaveštena, mora da se navede na koji
+              se od tri izuzetka iz st. 3 rukovalac poziva.
+            </FieldDescription>
+            <Field>
+              <FieldLabel htmlFor={`breach-lica-${breach.id}`}>
+                Lica na koja se podaci odnose obaveštena
+              </FieldLabel>
+              <NativeSelect
+                id={`breach-lica-${breach.id}`}
+                value={licaObavestena}
+                className="w-full"
+                onChange={(event) => setLicaObavestena(event.target.value)}
+              >
+                <NativeSelectOption value="">Nije upisano</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+              </NativeSelect>
+            </Field>
+            {licaObavestena === "da" ? (
+              <Field>
+                <FieldLabel htmlFor={`breach-lica-at-${breach.id}`}>
+                  Kada su lica obaveštena
+                </FieldLabel>
+                <Input
+                  id={`breach-lica-at-${breach.id}`}
+                  type="datetime-local"
+                  value={licaObavestenaAt}
+                  onChange={(event) => setLicaObavestenaAt(event.target.value)}
+                />
+              </Field>
+            ) : null}
+            {licaObavestena === "ne" ? (
+              <>
+                <Field>
+                  <FieldLabel htmlFor={`breach-izuzetak-${breach.id}`}>
+                    Izuzetak od obaveštavanja lica
+                  </FieldLabel>
+                  <NativeSelect
+                    id={`breach-izuzetak-${breach.id}`}
+                    value={izuzetak}
+                    className="w-full"
+                    onChange={(event) => setIzuzetak(event.target.value)}
+                  >
+                    <NativeSelectOption value="">
+                      Nije izabran izuzetak
+                    </NativeSelectOption>
+                    {(Object.keys(IZUZETAK_LABELE) as Cl53Izuzetak[]).map(
+                      (value) => (
+                        <NativeSelectOption key={value} value={value}>
+                          {IZUZETAK_LABELE[value]}
+                        </NativeSelectOption>
+                      ),
+                    )}
+                  </NativeSelect>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor={`breach-izuzetak-obrazlozenje-${breach.id}`}>
+                    Obrazloženje izuzetka
+                  </FieldLabel>
+                  <Textarea
+                    id={`breach-izuzetak-obrazlozenje-${breach.id}`}
+                    value={izuzetakObrazlozenje}
+                    onChange={(event) =>
+                      setIzuzetakObrazlozenje(event.target.value)
+                    }
+                  />
+                </Field>
+              </>
+            ) : null}
+          </>
+        ) : null}
         <Field>
           <Button type="submit" size="sm" disabled={saving}>
             {saving ? <Spinner data-icon="inline-start" aria-hidden="true" /> : null}

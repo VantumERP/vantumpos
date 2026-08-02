@@ -2,6 +2,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { AuditLogPanel } from "./AuditLogPanel";
+import { BreachLogPanel } from "./BreachLogPanel";
 import { Cl47RegisterPanel } from "./Cl47RegisterPanel";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices } from "@/services/ports";
@@ -52,17 +54,30 @@ describe("Cl47RegisterPanel", () => {
    * §5 item 6: st. 7's *„čuvaju se trajno“* governs THIS register and nothing
    * else. Copying it onto the audit or breach log would put the product in
    * permanent breach of storage limitation.
+   *
+   * The prohibition is checked where it could be broken — inside the two OTHER
+   * panels, whose own rendered text is searched for the word. Asserting the
+   * absence of „evidencija pristupa … trajno“ from the register panel alone
+   * proved nothing: that string could never appear there whatever the audit
+   * panel says.
    */
   it("attaches the st. 7 trajno only to this register", async () => {
-    render(<Cl47RegisterPanel services={services()} />);
-
+    const register = render(<Cl47RegisterPanel services={services()} />);
     expect(await screen.findByText(/čl\. 47 st\. 7/i)).toBeInTheDocument();
-    expect(
-      screen.queryByText(/evidencija pristupa.*trajno/i),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/evidencija povreda.*trajno/i),
-    ).not.toBeInTheDocument();
+    register.unmount();
+
+    const audit = render(<AuditLogPanel services={createMockServices()} />);
+    await waitFor(() => {
+      expect(audit.container.textContent).not.toBe("");
+    });
+    expect(audit.container.textContent).not.toMatch(/trajno/i);
+    audit.unmount();
+
+    const breaches = render(<BreachLogPanel services={createMockServices()} />);
+    await waitFor(() => {
+      expect(breaches.container.textContent).not.toBe("");
+    });
+    expect(breaches.container.textContent).not.toMatch(/trajno/i);
   });
 
   it("regenerates the register from the app's own configuration", async () => {

@@ -189,8 +189,29 @@ pub fn update_user(
     let normalized = normalize_request(request)?;
     ensure_unique_username(state, &normalized.username, Some(user_id))?;
 
-    let existing = user_hashes(state, user_id)?
+    let existing = stored_account(state, user_id)?
         .ok_or_else(|| AppError::not_found("Korisnik nije pronađen."))?;
+
+    // ZZPL req. 24 — deaktivacija **bez ponovnog dodeljivanja imena**. The
+    // uniqueness constraint survives the deactivation, but on its own it does
+    // not deliver non-reuse: `ensure_unique_username` excludes the row being
+    // renamed, so renaming a departed employee's account would free the name for
+    // a fresh one and defeat the whole rule.
+    //
+    // A username may therefore change only while the account is active AND stays
+    // active. Both halves are load-bearing: without the second, the rename would
+    // simply ride along on the save that deactivates, which is exactly the
+    // moment somebody would reach for it. Everything else on the row stays
+    // correctable — req. 21 keeps the account so the record it anchors survives,
+    // not so it freezes.
+    if normalized.username != existing.username && !(existing.active && normalized.active) {
+        return Err(AppError::validation(
+            "Korisničko ime deaktiviranog naloga se ne menja — ostaje zauzeto da se \
+             posle deaktivacije ne dodeli ponovo.",
+            serde_json::json!({ "field": "username" }),
+        ));
+    }
+
     let pin_hash = match normalized.pin.as_deref() {
         Some(pin) => Some(hash_credential(pin)?),
         None => existing.pin_hash,
@@ -432,21 +453,28 @@ fn ensure_unique_username(
     Ok(())
 }
 
-struct UserHashes {
+/// The stored row as [`update_user`] needs to see it before it overwrites it:
+/// the credentials it may carry forward, and the two columns whose PREVIOUS
+/// value decides whether a change is allowed at all.
+struct StoredAccount {
+    username: String,
+    active: bool,
     pin_hash: Option<String>,
     password_hash: Option<String>,
 }
 
-fn user_hashes(state: &AppState, user_id: i64) -> Result<Option<UserHashes>, AppError> {
+fn stored_account(state: &AppState, user_id: i64) -> Result<Option<StoredAccount>, AppError> {
     let conn = state.db().open()?;
 
     conn.query_row(
-        "SELECT pin_hash, password_hash FROM users WHERE id = ?1",
+        "SELECT username, active, pin_hash, password_hash FROM users WHERE id = ?1",
         params![user_id],
         |row| {
-            Ok(UserHashes {
-                pin_hash: row.get(0)?,
-                password_hash: row.get(1)?,
+            Ok(StoredAccount {
+                username: row.get(0)?,
+                active: row.get::<_, i64>(1)? != 0,
+                pin_hash: row.get(2)?,
+                password_hash: row.get(3)?,
             })
         },
     )
@@ -1038,6 +1066,54 @@ mod tests {
             let error = update_user(state, created.id, rehire)
                 .expect_err("an active account must hold a credential");
             assert_eq!(error.code(), "validation_error");
+        });
+    }
+
+    /// ZZPL req. 24 — deactivate-**never-reuse**. The uniqueness constraint does
+    /// survive the deactivation, but on its own it does not deliver non-reuse:
+    /// `ensure_unique_username` excludes the row being renamed, so an admin
+    /// could rename the departed employee's account and open a fresh one on the
+    /// freed name. The Users screen states the rule to the operator; this is
+    /// what makes the statement true.
+    #[test]
+    fn the_username_of_a_deactivated_account_cannot_be_renamed_and_freed() {
+        with_state("users_deactivated_username_stays_taken", |state| {
+            sign_in(state, "admin");
+            let created = create_user(state, save_request("jelena")).expect("the hire");
+            deactivate_user(state, created.id).expect("the termination");
+
+            let mut rename = save_request("jelena.stara");
+            rename.active = false;
+            rename.pin = None;
+            let error = update_user(state, created.id, rename)
+                .expect_err("a deactivated username must stay taken");
+            assert_eq!(error.code(), "validation_error");
+
+            // Nor may the rename ride along on the save that deactivates — the
+            // one moment somebody would reach for it. Fresh account, still
+            // active, renamed and terminated in a single request.
+            let odlazi = create_user(state, save_request("milica")).expect("the hire");
+            let mut rename_and_terminate = save_request("milica.stara");
+            rename_and_terminate.active = false;
+            let error = update_user(state, odlazi.id, rename_and_terminate)
+                .expect_err("a departing username must not be freed on the way out");
+            assert_eq!(error.code(), "validation_error");
+
+            // The name is therefore still unavailable to the next hire.
+            let error = create_user(state, save_request("jelena"))
+                .expect_err("the departed employee's username is still taken");
+            assert_eq!(error.code(), "validation_error");
+
+            // Everything else on the row is still correctable — req. 21 keeps
+            // the account so the record it anchors survives, not so it freezes.
+            let mut correction = save_request("jelena");
+            correction.active = false;
+            correction.pin = None;
+            correction.display_name = "Jelena Đurić Petrović".to_string();
+            let corrected =
+                update_user(state, created.id, correction).expect("a name may still be fixed");
+            assert_eq!(corrected.username, "jelena");
+            assert_eq!(corrected.display_name, "Jelena Đurić Petrović");
         });
     }
 

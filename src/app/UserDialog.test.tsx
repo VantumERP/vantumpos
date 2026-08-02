@@ -208,6 +208,51 @@ describe("UserDialog — profil zaposlenog", () => {
     });
   });
 
+  /**
+   * ZZPL req. 24 — deaktivacija bez ponovnog dodeljivanja imena. Ograničenje
+   * jedinstvenosti preživi deaktivaciju, ali samo po sebi ne daje nedodeljivost:
+   * preimenovanje oslobađa ime otišlog zaposlenog. Ekran Korisnici to pravilo
+   * saopštava operateru, pa polje mora da bude zatvoreno i ovde, a ne samo u
+   * `update_user`.
+   */
+  it("zamrzava korisničko ime deaktiviranog naloga", () => {
+    renderDialog({ user: { ...kasirka, active: false }, profile: prazanProfil });
+
+    expect(screen.getByLabelText(/Korisničko ime/)).toBeDisabled();
+    expect(
+      within(dialog()).getByText(/ostaje zauzeto/i),
+    ).toBeInTheDocument();
+  });
+
+  it("ostavlja korisničko ime aktivnog naloga izmenljivim", () => {
+    renderDialog({ user: kasirka, profile: prazanProfil });
+
+    expect(screen.getByLabelText(/Korisničko ime/)).not.toBeDisabled();
+  });
+
+  it("ne pušta preimenovanje da prođe kroz deaktivaciju", async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderDialog({ user: kasirka, profile: prazanProfil });
+
+    // Preimenovanje pri deaktivaciji je trenutak u kojem bi ime otišlog
+    // zaposlenog bilo oslobođeno za novi nalog, pa ime pada nazad na sačuvano
+    // čim status pređe u „Neaktivan“.
+    const ime = screen.getByLabelText(/Korisničko ime/);
+    fireEvent.change(ime, { target: { value: "jelena.stara" } });
+    fireEvent.change(screen.getByLabelText(/Status/), {
+      target: { value: "inactive" },
+    });
+
+    expect(ime).toHaveValue("jelena");
+    expect(ime).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: /Sačuvaj korisnika/ }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].username).toBe("jelena");
+    expect(onSave.mock.calls[0][0].active).toBe(false);
+  });
+
   it("prikazuje sačuvani profil zaposlenog", () => {
     renderDialog({
       user: kasirka,

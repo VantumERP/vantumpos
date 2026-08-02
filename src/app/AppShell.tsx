@@ -1735,6 +1735,14 @@ export function UserDialog({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  /**
+   * ZZPL req. 24 — deaktivacija bez ponovnog dodeljivanja imena. Ime se menja
+   * samo dok je postojeći nalog aktivan i takav ostaje: preimenovanje pri
+   * deaktivaciji oslobodilo bi ime otišlog zaposlenog za novi nalog. Novi nalog
+   * nema šta da zamrzne.
+   */
+  const imeZamrznuto = user !== null && (!user.active || !active);
+
   useEffect(() => {
     if (!open) {
       return;
@@ -1842,11 +1850,25 @@ export function UserDialog({
             {error ? <FieldError>{error}</FieldError> : null}
             <Field>
               <FieldLabel htmlFor="user-username">Korisničko ime</FieldLabel>
+              {/*
+                ZZPL req. 24. Deaktivirani nalog zadržava svoje korisničko ime da
+                se ono ne bi dodelilo ponovo; preimenovanje bi ga oslobodilo i
+                poništilo pravilo koje ekran Korisnici saopštava operateru. Ime
+                se menja samo dok je nalog aktivan i takav ostaje — isto pravilo
+                odbija i `update_user`, pa ovo polje samo saopštava zašto.
+              */}
               <Input
                 id="user-username"
                 value={username}
+                disabled={imeZamrznuto}
                 onChange={(event) => setUsername(event.target.value)}
               />
+              {imeZamrznuto ? (
+                <FieldDescription>
+                  Korisničko ime deaktiviranog naloga ostaje zauzeto, pa se više
+                  ne menja.
+                </FieldDescription>
+              ) : null}
             </Field>
             <Field>
               <FieldLabel htmlFor="user-display-name">Ime za prikaz</FieldLabel>
@@ -1874,7 +1896,16 @@ export function UserDialog({
                 id="user-active"
                 value={active ? "active" : "inactive"}
                 className="w-full"
-                onChange={(event) => setActive(event.target.value === "active")}
+                onChange={(event) => {
+                  const sledeci = event.target.value === "active";
+                  setActive(sledeci);
+                  // ZZPL req. 24: preimenovanje ne prolazi kroz deaktivaciju.
+                  // Ime se vraća na sačuvano čim status pređe u „Neaktivan“, pa
+                  // se čuvanje ne odbija zbog vrednosti koja je već otkucana.
+                  if (!sledeci && user) {
+                    setUsername(user.username);
+                  }
+                }}
               >
                 <NativeSelectOption value="active">Aktivan</NativeSelectOption>
                 <NativeSelectOption value="inactive">Neaktivan</NativeSelectOption>
