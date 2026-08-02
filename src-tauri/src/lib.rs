@@ -4,6 +4,8 @@ mod audit;
 mod campaign_evidence;
 mod campaigns;
 mod cash_deposit;
+/// The ZZPL čl. 47 evidencija radnji obrade, generated from configuration.
+mod cl47;
 mod clock;
 mod commands;
 mod db;
@@ -67,6 +69,18 @@ pub fn run() {
             // at the outermost boundary, and passed in — `retention.rs` itself
             // never reads one.
             retention::seed_retention_policies(&state_for_launch, &clock::utc_now()?)?;
+
+            // Req. 28: the čl. 47 evidencija radnji obrade is generated, and it
+            // is generated HERE rather than behind a button, because a register
+            // that exists only once an administrator remembers to press
+            // something is the missing register this requirement exists to
+            // prevent — it is the cheapest inspection finding for a
+            // three-employee shop and the one issuable on the spot. It runs
+            // after the retention seed because every rok it prints is read out
+            // of that table. Best-effort, like the purge and the backup below:
+            // a shop that cannot rewrite a derived document must still be able
+            // to open its till, and the previous generation stays on file.
+            let _ = cl47::generate(&state_for_launch, &clock::utc_now()?);
 
             // SW-13 req. 23: the čl. 5 st. 1 tač. 5 purge is a proactive
             // rukovalac duty, so it is time-driven and runs here rather than
@@ -255,7 +269,13 @@ pub fn run() {
             commands::breaches::breaches_record,
             commands::breaches::breaches_update,
             commands::breaches::breaches_notice,
-            commands::breaches::breaches_export_obrazac
+            commands::breaches::breaches_export_obrazac,
+            // Req. 28. Three verbs and no delete: the register is generated from
+            // configuration, so removing a radnja means removing the processing,
+            // and čl. 47 st. 7 keeps the record trajno either way.
+            cl47::cl47_list,
+            cl47::cl47_generate,
+            cl47::cl47_export
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
