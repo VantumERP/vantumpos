@@ -352,6 +352,88 @@ batch was created to eliminate, in the one file it did not reach:
 
 ---
 
+### SW-10 + SW-13 + SW-17 — ZZPL trio (2026-08-02)
+
+The prudential evidencija pristupa and the čl. 46 remote-support nalog (**SW-10**), the three-class
+employee lifecycle with a time-driven purge (**SW-13**), the internal breach record with the
+Pravilnik 40/2019 obrazac (**SW-17**), and the generated čl. 47 evidencija radnji obrade that SW-17
+depends on, shipped as a ten-task TDD plan (`docs/superpowers/plans/2026-08-01-zzpl-trio.md`, design at
+`docs/superpowers/specs/2026-08-01-zzpl-trio-design.md`) against the verified rule set in
+`docs/REMAINING-SW-VERIFIED-RULES.md` §4. Baseline at plan time was `1216194` — cargo **558**,
+bun **359**, migration **v17**.
+
+**The headline is a reclassification, not a feature.** SW-10 was on the roadmap as a čl. 50 duty and is
+not one: čl. 48 and čl. 51 confine their logging duties to a *nadležni organ … u posebne svrhe*, and
+čl. 50 appears nowhere in čl. 95, so **no prekršaj is prescribed for not having this log at all**. It
+ships as a prudential/evidential control on čl. 5 st. 2 and čl. 41 st. 1, with čl. 48 st. 2 borrowed as
+the design template. Nothing in the app, the register or the čl. 23 notice tells the operator that the
+law requires it — and nothing says *"no consequence"* either, because the Poverenik's opomena and
+obavezujući nalog are live. The one **legal** duty in SW-10 is čl. 46, and it is the nalog, not the log.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — schema | **Migration v18**, five stores: `support_sessions` (the čl. 46 nalog); `audit_events` — closed `CHECK` on the čl. 48 st. 1 verbs, actor as an **FK to `users`** rather than a name column, closed enums for `reason_code` / `recipient` / `object_type`, `prev_hash` + `hash` NOT NULL, **no `updated_at`**, and a `BEFORE UPDATE` trigger; `personnel_records` — the 25 ZEOR čl. 5 tačke, `REFERENCES users(id)` **without `ON DELETE CASCADE`** (req. 24) plus a `BEFORE DELETE` trigger; `data_breaches` — `saznanje_at` NOT NULL with an immutability trigger, `occurred_at` / `discovered_at` separate and nullable; `processing_activities` — the čl. 47 st. 1 items with a retention column per category (t. 6) | `372ab53`, `0550654` |
+| 2 — `audit.rs` | SHA-256 `chain_hash` / `verify_chain_anchored`: tail truncation is reported rather than silently accepted, and the chain still verifies across a purge through a stored anchor. `reject_forbidden_content` is the **write-boundary** filter req. 4 asks for — the object id must match a whitelisted opaque-id grammar, so a JMBG, a card PAN, an address, a phone, a free-text note or a **search string** cannot enter the table even from a caller that means well. Pure: no clock, no connection, no state | `76fc5af`, `2a75be0` |
+| 3 — support nalog | `grant_access` (admin-gated, explicit obim and expiry, hard-bounded at **24 h**), `request_access` (gated by the **nalog** and not by a role — čl. 46 makes the nalog the condition, and the obrađivač has no account on this till), `end_session` (`ended_at` if the session was entered, `revoked_at` if it never was), `active_session` | `38e6cba`, `d2bcefc` |
+| 4 — write path + izvod | `record_audit`, the single door every feature writes through; `search`, admin-only — **reading the log is deliberately not logged**, the export is; `export_csv`, the izvod modelled on **čl. 48 st. 4** and handed over on the **čl. 49** osnov, rendering offline from the till with the period, the filter, the row count, the chain verdict and both hashes per row so the recipient can recompute the chain. Req. 7 leaves the module with three verbs and no fourth: nothing edits or removes a logged row | `a6a436a`, `ed7878b` |
+| 5 — three-class split | `commands/personnel.rs`: class A in `personnel_records`, class B as the surrogate `users.id` already on the ledger (ZoRač čl. 8 st. 4), class C as the credential hashes and `audit_events`. `purge_expired_classes` is **time-driven** (launch + a 6-hourly timer in `lib.rs`, never a command an operator presses) and takes a `PurgeableClass` with exactly two variants, **neither of which is class A** — reaching the ZEOR register is a type error, not a review catch — with the whole sweep inside one transaction fenced by `assert_never_purge_intact`. Credentials go **at deactivation** (req. 21), the access log on its 2-year class, and the purge line records *which class* was discarded, never a discarded value | `f1776c0`, `8abb945` |
+| 6 — breach record | `commands/breaches.rs`: every povreda is logged first and notifiability is a **derived flag on a row that always persists** (req. 43); beyond the three st. 6 elements the row carries the immutable `saznanje_at`, the separate occurred/discovered instants, the risk outcome, the notify decision **with reasoning**, the Poverenik-notified stamp, a st. 2 delay reason that becomes **mandatory once 72 h have elapsed**, and the čl. 53 block. `legal.rs::breach_notification_missing` is the **ninth** notice — in `all_notices`, in the duplicated inline list, with the asserted count bumped to **9** | `bdd4f37`, `421ed9c` |
+| 7 — obrazac | `breaches_export_obrazac` renders the **Pravilnik 40/2019** obrazac in its five prescribed sections, down to the mesto/datum + Ime i prezime + Potpis block and the „Prilog:“ slot. Print/scan only — **no submission API exists** — and the countdown is the flat **72 h of Pravilnik čl. 3**. The export is a disclosure and is logged as one, so a rendered obrazac never outlives its čl. 48 st. 2 line | `497c95c`, `fb3b4a7` |
+| 8 — čl. 47 register | `cl47.rs` generates the evidencija radnji obrade at every launch and on demand (`cl47_generate` / `cl47_export`). Every rok is read out of `retention_policies` **at generation time**, so the register cannot print a period the till does not apply; `trajno` is printed for this register alone (čl. 47 st. 7) and for neither log, which is a test rather than a comment | `31fa18a`, `db814ef` |
+| 9 — Privatnost | `src/app/privacy/` — four panels (Daljinska podrška, Evidencija pristupa, Povrede podataka, Radnje obrade), **admin-only in the nav and admin-gated behind every command**, with Daljinska podrška first so the module's one legal duty is its first surface. The čl. 50 copy reads „nije propisan prekršaj“ and names the opomena and the obavezujući nalog that *are* consequences | `a9ff1f7`, `546987f` |
+| 10 — docs + gates | This section; register rows 8, 9, 10, 11 and 12 re-stated; SW-10, SW-13 and SW-17 flipped to shipped with SW-10 kept labelled **prudential** and SW-17 re-worded per req. 50 (*provides the record required by* čl. 52 st. 6–7 — never *satisfies* the article); and the čl. 23 notice's new evidencija-pristupa section (req. 9) | this commit |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **400 passed** / 0 failed, 27 files (was 359 / 22) | `0` |
+| `bun run build` | tsc + vite, 2740 modules transformed | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **659 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 558) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+101 cargo / +41 bun** over the plan baseline. Latest migration: **v18**.
+
+New Rust tests: 22 in `audit.rs`, 29 in `commands/audit.rs`, 13 in `commands/personnel.rs`, 14 in
+`commands/breaches.rs`, 13 in `cl47.rs`, plus additions in `db/migrations.rs`, `retention.rs` and
+`legal.rs`; 37 frontend tests across the five `src/app/privacy/*.test.tsx` files.
+
+**Deliberately not built** (`docs/REMAINING-SW-VERIFIED-RULES.md` §5 items 1–6, 14, 15, 22, 23, 24, 30)
+— read these as decisions, not as gaps: no claim anywhere that ZZPL requires an audit log, and no
+*„nema posledice“* either; no per-cashier aggregates or productivity view on top of the log (a new
+purpose under čl. 5 st. 1 t. 2, and it walks into the SW-14 §6 W-4 *sistem za praćenje rada* gate); no
+owner-editable or owner-deletable log; no `trajno` on either log — čl. 47 st. 7 governs the register
+alone; no „Obriši zaposlenog“ affordance and no cascade at the personnel record; no employee name or
+JMBG on a transaction row; no risk gate in front of the breach record; no invented breach form and **no
+Poverenik submission API**; no fine printed for a documentation-only breach-log failure (unresolved
+under ZoP čl. 3, §6 R-2); and no headcount gate or plan-tier upsell on any of the three.
+
+**Still open after this batch:**
+
+- **Req. 47 — the processor→controller breach leg is not built.** If Actaer is ever an obrađivač, the
+  vendor→merchant notification artefact with its own timestamp — feeding the merchant's `saznanje` so the
+  72 h clock is anchored to evidence rather than memory — is a separate path. The record can hold both
+  instants today; nothing produces the vendor-side one. §6 R-3 is the question behind it.
+- **Req. 49, redaction half — expiry deletes nothing yet for the breach log.** The requirement is to
+  **redact or pseudonymise** the personal-data-bearing fields on expiry rather than drop the row, keeping
+  the čl. 52 st. 7 skeleton. No breach-log retention class and no redaction path exists; the row is kept.
+- **SW-14 req. 28 — remote-support masking** of the absence-reason column, with the unmask logged, is
+  still not built. SW-10 was its stated dependency and has now landed, so nothing blocks it.
+- **The two SW-14 defects found by the previous batch's closing audit are still open** and were not in
+  this batch's scope: `docs/compliance/obavestenje-zaposlenima.md` still prints the pravno-lice fine band
+  in its header, and its class-B retention row still promises a deletion (*„Brišu se pošto je mesec
+  zaključen“*) that no code performs — `retention::draft_purge_eligible` has no production caller, and
+  SW-13's purge sweep does not touch that class either.
+- **Backup encryption is opt-in.** `backup_crypto.rs` encrypts only once an admin sets a passphrase, so
+  the čl. 50 st. 2 tač. 1 measure is available rather than in force. Register row 8 now says so; SW-2
+  remains the action.
+- **§6 R-9 stays open** — which article of the ZZPL nadzor chapter carries the opomena and the nalog.
+  The copy is written so that only the verified half (*no prekršaj*) is asserted.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.
