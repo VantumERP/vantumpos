@@ -4,6 +4,8 @@ mod audit;
 mod campaign_evidence;
 mod campaigns;
 mod cash_deposit;
+/// The published cenovnik (ZZP čl. 6), rendered.
+mod cenovnik;
 /// The ZZPL čl. 47 evidencija radnji obrade, generated from configuration.
 mod cl47;
 mod clock;
