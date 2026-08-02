@@ -168,7 +168,12 @@ pub fn reklamacija_breach(profile: &ShopProfile, regime: ReklamacijaRegime) -> L
     };
 
     LegalNotice {
-        summary: "Nepostupanje po reklamaciji potrošača u propisanim rokovima je prekršaj."
+        // Regime-neutral on purpose: the same sentence renders on OLD-regime
+        // records, which carry no fee ban, so it names the duty set rather than
+        // any one stav. čl. 210 st. 1 tač. 24 penalises st. 3 alongside the
+        // deadline stavovi, so "u propisanim rokovima" understated it.
+        summary: "Nepostupanje po propisanim obavezama u vezi sa reklamacijom potrošača \
+                  je prekršaj."
             .to_string(),
         penalty,
         citation: citation.to_string(),
@@ -390,6 +395,28 @@ mod tests {
         let penalty = new_pravno.penalty.expect("pravno lice penalty is known");
         assert!(penalty.contains("200.000"), "čl. 210 st. 1: {penalty}");
         assert!(penalty.contains("50.000"), "čl. 210 st. 2: {penalty}");
+    }
+
+    #[test]
+    fn reklamacija_breach_summary_is_not_narrowed_to_deadlines() {
+        // čl. 210 st. 1 tač. 24 penalises breach of čl. 63 st. 3 — the fee ban —
+        // alongside the deadline stavovi, so a summary that says only "rokovi"
+        // understates what the figure beside it is the sanction for.
+        for regime in [ReklamacijaRegime::Old, ReklamacijaRegime::New] {
+            let notice = reklamacija_breach(&profile(Some(PravnaForma::Preduzetnik)), regime);
+            assert!(
+                !notice.summary.contains("rokovima"),
+                "the summary must cover the duty set, not just the clock: {}",
+                notice.summary
+            );
+            // …but it must stay regime-neutral: the same sentence renders on an
+            // OLD-regime record, which carries no fee ban at all.
+            assert!(
+                !notice.summary.contains("naplat"),
+                "the NEW-only fee ban must not be named in shared copy: {}",
+                notice.summary
+            );
+        }
     }
 
     #[test]
