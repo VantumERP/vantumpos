@@ -1113,6 +1113,264 @@ ALTER TABLE compliance_log_next RENAME TO compliance_log;
 CREATE INDEX idx_compliance_log_created_at ON compliance_log(created_at);
 "#,
     },
+    Migration {
+        version: 20,
+        name: "popis_stores_blind_count_and_posting_lock",
+        sql: r#"
+-- SW-16, the popis stores. Two scope answers shape this schema and neither is
+-- obvious from the column list alone:
+--
+--   1. Pravilnik 89/2020 runs čl. 1–16 and ends at the minister's signature — no
+--      prilog, no obrazac, no column list for the popisna lista. So the columns
+--      below are OURS, and the SW-9c KEP print-fidelity constraints must NOT be
+--      carried over. What the bylaw does prescribe is the PROCESS (čl. 8–9), the
+--      separate liste (čl. 2 st. 5, čl. 10–12) and the content of the izveštaj
+--      (čl. 13 st. 1) — which is why the two vocabularies here are closed and the
+--      free-form fields around them are not.
+--   2. Pravilnik 140/2004's prosto-knjigovodstvo column set is deliberately
+--      absent: ZPDG čl. 40 st. 2 t. 2) excludes retail from paušal and čl. 43
+--      st. 3 confines prosto knjigovodstvo to a poljoprivrednik or drugo lice, so
+--      that regime is legally unavailable to this shop and shipping its columns
+--      would invite it into a regime it cannot use.
+CREATE TABLE popis_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- ZoRač čl. 20 (the annual popis at the balance date) and čl. 21 (the popis
+    -- on a retail price change). Two modes, not one mode with a flag: they carry
+    -- different izveštaj deadlines — 60 days before the FS filing deadline vs 30
+    -- days after the count (PoP čl. 13 st. 2) — and a session whose kind is
+    -- unknown cannot be given either.
+    vrsta TEXT NOT NULL CHECK (vrsta IN ('godisnji', 'nivelacioni')),
+    -- Čl. 21 attaches the nivelacija duty to a „maloprodajni objekat“ and the
+    -- annual popis is taken per place of business, so a popis with no outlet is a
+    -- count of nothing.
+    prodajno_mesto TEXT NOT NULL CHECK (prodajno_mesto <> ''),
+    -- The count date, and the anchor of three separate deadlines: the čl. 13 st. 2
+    -- izveštaj rok, the čl. 14 st. 2 odluka o usvajanju, and the čl. 2 st. 6
+    -- ten-day consignment copy. Every ISO date column in this schema carries the
+    -- shape check for the same reason v17 gave: '2026-12-1' and '2026-12-01' are
+    -- one day to a human and two keys to SQLite, and here the difference would be
+    -- computed into a wrong statutory deadline.
+    datum_popisa TEXT NOT NULL CHECK (datum_popisa GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    period_from TEXT CHECK (period_from IS NULL OR period_from GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    period_to TEXT CHECK (period_to IS NULL OR period_to GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    -- The whole module is this state machine, and the vocabulary is the bylaw's
+    -- own sequence: counting (čl. 9 st. 1 t. 1) → counted_signed (the čl. 8 st. 5
+    -- signature, which is what releases the book data) → computed (t. 3–6) →
+    -- computed_signed (the čl. 9 st. 3 signature on the printed liste) → posted
+    -- (čl. 14 st. 3). Closed, because the blind-count guard and the posting lock
+    -- below both read this column: an unrecognised state would not be refused by
+    -- either of them, it would simply not match, and the guards would pass.
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN (
+        'draft', 'counting', 'counted_signed', 'computed', 'computed_signed', 'posted'
+    )),
+    -- PoP čl. 8 st. 1–2: a plan rada is a mandatory PRE-count artefact, approved
+    -- by the lice iz čl. 4 st. 2 — for a preduzetnik, the owner personally
+    -- (čl. 4 st. 2 → ZoRač čl. 43 st. 3).
+    plan_rada_json TEXT,
+    odluka_ref TEXT,
+    -- ZoRač čl. 20 st. 3 legislates an ORDERING: glavna knjiga↔dnevnik and
+    -- pomoćne knjige↔glavna knjiga are reconciled BEFORE the popis. RFC3339,
+    -- supplied as `now: &str` like every other decision stamp in this schema.
+    -- NULL means the gate has not been passed, which is the state a new session
+    -- starts in — the refusal itself is the command layer's (req. 39).
+    uskladjivanje_potvrdjeno_at TEXT CHECK (uskladjivanje_potvrdjeno_at IS NULL OR uskladjivanje_potvrdjeno_at <> ''),
+    -- PoP čl. 9 st. 2's perpetual-inventory shortcut is a CONDITIONAL GATE, never
+    -- a default (req. 34): it is available only where a completed, adopted and
+    -- posted in-year popis can be pointed at, and it excuses step 2) alone. This
+    -- column is that pointer; without it the shortcut is unavailable and a
+    -- physical count is forced.
+    perpetual_odluka_ref TEXT,
+    posted_at TEXT,
+    created_at TEXT NOT NULL CHECK (created_at <> ''),
+    updated_at TEXT NOT NULL CHECK (updated_at <> ''),
+    CHECK (period_from IS NULL OR period_to IS NULL OR period_to >= period_from),
+    -- The posted state and its stamp are one fact. Half of it either way round
+    -- would be a popis that claims a knjiženje it cannot date, or a knjiženje
+    -- date on a popis that was never posted.
+    CHECK ((status = 'posted') = (posted_at IS NOT NULL))
+);
+CREATE INDEX idx_popis_sessions_datum ON popis_sessions(datum_popisa);
+
+CREATE TABLE popis_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES popis_sessions(id),
+    -- Req. 36 — the posebne popisne liste are REQUIRED where the category is
+    -- present, not optional extras: konsignaciona/tuđa roba (čl. 2 st. 5, whose
+    -- signed copy must reach the owner within ten days of the count date, čl. 2
+    -- st. 6) · oštećena, zastarela i neupotrebljiva roba (čl. 10 st. 3) · roba van
+    -- objekta, uključujući na popravci i kod trećeg lica (čl. 10 st. 4) ·
+    -- gotovina po apoenima (čl. 11 st. 1) · nedokumentovana potraživanja i obaveze
+    -- (čl. 12 st. 2) — plus the ordinary roba lista. Closed, and ASCII-folded like
+    -- every other stored vocabulary in this database.
+    lista_vrsta TEXT NOT NULL CHECK (lista_vrsta IN (
+        'roba', 'ostecena', 'van_objekta', 'gotovina', 'potrazivanja', 'konsignacija'
+    )),
+    -- PoP čl. 8 st. 4: the commission is handed liste with nomenklaturni broj,
+    -- naziv, vrsta and jedinica mere BEFORE the count begins. Quantities are the
+    -- one thing čl. 8 st. 5 keeps back, so these four are free to be pre-filled.
+    -- Šifra is nullable: a gotovina or potraživanje line has no article number.
+    sifra TEXT,
+    naziv TEXT NOT NULL CHECK (naziv <> ''),
+    vrsta TEXT,
+    jedinica_mere TEXT,
+    -- Čl. 9 st. 1 t. 1 — the natural count. Milli-units, like every quantity in
+    -- this schema. No floor is needed on this one for correctness, but a count is
+    -- the result of counting something and nobody counts minus three: a negative
+    -- here is a data-entry accident, and admitting it would post a phantom višak.
+    stvarna_kolicina_milli INTEGER NOT NULL DEFAULT 0 CHECK (stvarna_kolicina_milli >= 0),
+    -- Čl. 9 st. 1 t. 1's „bliži opis“ — the condition, the location, the reason a
+    -- line sits on a posebna lista.
+    blizi_opis TEXT,
+    -- Čl. 9 st. 1 t. 3, AND THE POINT OF THE WHOLE MODULE. Nullable because it is
+    -- written at the Phase A→B transition and at no earlier moment: čl. 8 st. 5
+    -- forbids giving book quantities to the commission before the counted state is
+    -- written into the liste and signed. The trigger below is what makes that a
+    -- property of the database rather than of a screen — during a count there is
+    -- no book quantity stored for any query, report, export or backup to leak.
+    --
+    -- Deliberately NO non-negative floor, unlike the counted quantity above: an
+    -- oversold ledger genuinely reads below zero, and that reading is the manjak
+    -- the popis exists to surface.
+    knjigovodstvena_kolicina_milli INTEGER,
+    -- Čl. 9 st. 1 t. 5, integer minor units (para). Signed: a nedokumentovana
+    -- obaveza on the čl. 12 st. 2 lista is a negative value, not a second table.
+    cena_minor INTEGER,
+    created_at TEXT NOT NULL CHECK (created_at <> ''),
+    updated_at TEXT NOT NULL CHECK (updated_at <> '')
+);
+CREATE INDEX idx_popis_lines_session ON popis_lines(session_id, lista_vrsta);
+
+-- Req. 30 — TWO distinct signature events, each freezing its own snapshot with
+-- its own timestamp: čl. 8 st. 5 (faza 'a', the members sign the counted state
+-- before any book data is released) and čl. 9 st. 3 (faza 'b', the computed liste
+-- are PRINTED and signed — „uz štampanje“ is express, so print-and-sign is the
+-- default compliant path and a purely electronic signature is an unverified
+-- deviation that must never be presented in-product as compliant, §6 R-6).
+--
+-- No updated_at, by design: a potpis is an event at a moment, not a record kept
+-- up to date. A second signing is a second row.
+CREATE TABLE popis_signatures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES popis_sessions(id),
+    faza TEXT NOT NULL CHECK (faza IN ('a', 'b')),
+    potpisnik TEXT NOT NULL CHECK (potpisnik <> ''),
+    potpisano_at TEXT NOT NULL CHECK (potpisano_at <> ''),
+    -- What was signed. A signature with no snapshot behind it attests to nothing,
+    -- and the čl. 8 st. 5 one in particular is the evidence that the counted state
+    -- was fixed BEFORE the book quantities were written.
+    snapshot_hash TEXT NOT NULL CHECK (snapshot_hash <> ''),
+    created_at TEXT NOT NULL CHECK (created_at <> '')
+);
+CREATE INDEX idx_popis_signatures_session ON popis_signatures(session_id, faza);
+
+-- Req. 40. PoP čl. 5 st. 1 keeps lica koja rukuju imovinom off the commission, and
+-- čl. 6 st. 1–2 let a preduzetnik run the popis with a single person to whom the
+-- commission rules apply „shodno“. Whether that shodna primena carries the čl. 5
+-- st. 1 exclusion is UNRESOLVED (§6 R-5), so this table records the fact and the
+-- product WARNS on it — it must never block. The flag is stored per named person
+-- precisely so the warning can name who it is about.
+CREATE TABLE popis_commission (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES popis_sessions(id),
+    ime TEXT NOT NULL CHECK (ime <> ''),
+    -- Closed: 'jedno_lice' is the čl. 6 st. 1 single-person popis, which is a
+    -- distinct legal shape and not a commission of one.
+    uloga TEXT NOT NULL DEFAULT 'clan' CHECK (uloga IN ('predsednik', 'clan', 'jedno_lice')),
+    -- Defaults to 0: nobody is presumed to handle the goods being counted, and a
+    -- warning that fired on everyone would be read as noise and clicked past.
+    rukuje_imovinom INTEGER NOT NULL DEFAULT 0 CHECK (rukuje_imovinom IN (0, 1)),
+    created_at TEXT NOT NULL CHECK (created_at <> '')
+);
+CREATE INDEX idx_popis_commission_session ON popis_commission(session_id);
+
+-- PoP čl. 8 st. 5 — „Подаци из књиговодства, односно из одговарајућих евиденција о
+-- количинама, не могу се давати комисији за попис пре уписивања стварног стања у
+-- пописне листе и пре него што чланови комисије за попис потпишу те листе.“
+--
+-- This is req. 29 and the single biggest constraint in the module. A UI that
+-- merely hides a column does not discharge it: the duty is about the data
+-- REACHING the commission, and a hidden column is still in the row, the export,
+-- the backup and every ad-hoc query. So the engine refuses to store one while the
+-- session is in Phase A, and the blind count becomes a property of the database.
+--
+-- The two guards share one trigger per write event so each keeps its own message:
+-- the posting lock (req. 41) is checked first, because on a posted popis nothing
+-- may be written at all and „the popis is closed“ is the truer answer than „not
+-- yet signed“.
+CREATE TRIGGER trg_popis_lines_unos
+BEFORE INSERT ON popis_lines
+BEGIN
+    SELECT CASE
+        WHEN (SELECT status FROM popis_sessions WHERE id = NEW.session_id) = 'posted'
+            THEN RAISE(ABORT, 'Proknjižen popis se ne menja — ispravka se sprovodi novim popisom.')
+        WHEN NEW.knjigovodstvena_kolicina_milli IS NOT NULL
+             AND (SELECT status FROM popis_sessions WHERE id = NEW.session_id)
+                 IN ('draft', 'counting')
+            THEN RAISE(ABORT, 'Knjigovodstvena količina ne sme da se upiše pre nego što se stvarno stanje unese u popisne liste i potpiše (PoP čl. 8 st. 5).')
+    END;
+END;
+-- Both ends of the move are checked, not just the row's current home. An UPDATE
+-- may rewrite `session_id`, so testing OLD alone would leave one way in: a line
+-- created on an open session and then re-pointed at a posted one, which is adding
+-- a line to a posted popis by another name.
+CREATE TRIGGER trg_popis_lines_izmena
+BEFORE UPDATE ON popis_lines
+BEGIN
+    SELECT CASE
+        WHEN (SELECT status FROM popis_sessions WHERE id = OLD.session_id) = 'posted'
+             OR (SELECT status FROM popis_sessions WHERE id = NEW.session_id) = 'posted'
+            THEN RAISE(ABORT, 'Proknjižen popis se ne menja — ispravka se sprovodi novim popisom.')
+        WHEN NEW.knjigovodstvena_kolicina_milli IS NOT NULL
+             AND (SELECT status FROM popis_sessions WHERE id = NEW.session_id)
+                 IN ('draft', 'counting')
+            THEN RAISE(ABORT, 'Knjigovodstvena količina ne sme da se upiše pre nego što se stvarno stanje unese u popisne liste i potpiše (PoP čl. 8 st. 5).')
+    END;
+END;
+
+-- Req. 41 / PoP čl. 14 st. 3 with ZoRač čl. 8 st. 4: once the result is posted the
+-- liste, the commission and the izveštaj are evidence. A correction is a NEW
+-- popis, never an edit of the posted one. The lock reads OLD.status, so the
+-- transition INTO posted is the last permitted write and every one after it is
+-- refused — including walking the status back.
+CREATE TRIGGER trg_popis_sessions_zakljucan
+BEFORE UPDATE ON popis_sessions
+WHEN OLD.status = 'posted'
+BEGIN
+    SELECT RAISE(ABORT, 'Proknjižen popis se ne menja — ispravka se sprovodi novim popisom.');
+END;
+CREATE TRIGGER trg_popis_commission_unos
+BEFORE INSERT ON popis_commission
+WHEN (SELECT status FROM popis_sessions WHERE id = NEW.session_id) = 'posted'
+BEGIN
+    SELECT RAISE(ABORT, 'Sastav komisije je deo proknjiženog popisa i ne može da se dopunjuje.');
+END;
+CREATE TRIGGER trg_popis_commission_izmena
+BEFORE UPDATE ON popis_commission
+WHEN (SELECT status FROM popis_sessions WHERE id = OLD.session_id) = 'posted'
+     OR (SELECT status FROM popis_sessions WHERE id = NEW.session_id) = 'posted'
+BEGIN
+    SELECT RAISE(ABORT, 'Sastav komisije je deo proknjiženog popisa i ne može da se menja.');
+END;
+
+-- A potpis is frozen when it is taken, not when the popis is posted: restamping
+-- one would move the čl. 8 st. 5 or čl. 9 st. 3 moment the entire two-phase
+-- design turns on, and the čl. 8 st. 5 signature is the evidence that the counted
+-- state was fixed before the book quantities existed.
+CREATE TRIGGER trg_popis_signatures_nepromenljiv
+BEFORE UPDATE ON popis_signatures
+BEGIN
+    SELECT RAISE(ABORT, 'Potpis na popisnoj listi je nepromenljiv — nov potpis je nov zapis.');
+END;
+
+-- No DELETE trigger on any of the four tables, on purpose. Req. 42 gives the
+-- popisne liste and the izveštaj a five-year retention FLOOR (ZoRač čl. 28 st. 7,
+-- counted from the last day of the business year per st. 9) — a floor, not a
+-- „trajno“ duty — so the retention purge must be able to reach an expired popis.
+-- Closing DELETE here would close the purge with it and put the product in
+-- permanent breach of storage limitation, exactly as v18 reasoned for the audit
+-- log and v19 for the cenovnik archive.
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -1194,6 +1452,750 @@ mod tests {
             .map(|value| value.trim().trim_matches('\'').to_string())
             .filter(|value| !value.is_empty())
             .collect()
+    }
+
+    /// Seed one popis session in a given state. `posted_at` follows the status
+    /// because the schema binds the two: a session in any other state has not been
+    /// posted, and a posted one carries the stamp that says when.
+    fn seed_popis_session(conn: &Connection, id: i64, status: &str) {
+        let posted_at: Option<&str> = if status == "posted" {
+            Some("2027-01-15T18:00:00Z")
+        } else {
+            None
+        };
+
+        conn.execute(
+            "INSERT INTO popis_sessions (id, vrsta, prodajno_mesto, datum_popisa, period_from,
+                                         period_to, status, posted_at, created_at, updated_at)
+             VALUES (?1, 'godisnji', 'Butik Centar', '2026-12-31', '2026-01-01', '2026-12-31',
+                     ?2, ?3, '2026-12-31T08:00:00Z', '2026-12-31T08:00:00Z')",
+            params![id, status, posted_at],
+        )
+        .unwrap_or_else(|error| panic!("a popis session in {status} should insert: {error}"));
+    }
+
+    /// Append one popisna lista line to a session, optionally carrying a book
+    /// quantity — the payload PoP čl. 8 st. 5 governs.
+    fn insert_popis_line(
+        conn: &Connection,
+        session_id: i64,
+        naziv: &str,
+        knjigovodstvena: Option<i64>,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO popis_lines (session_id, lista_vrsta, sifra, naziv, vrsta, jedinica_mere,
+                                      stvarna_kolicina_milli, blizi_opis,
+                                      knjigovodstvena_kolicina_milli, created_at, updated_at)
+             VALUES (?1, 'roba', 'MAR-001', ?2, 'roba u prodavnici', 'kom', 7000,
+                     'blago oštećena ambalaža', ?3,
+                     '2026-12-31T09:00:00Z', '2026-12-31T09:00:00Z')",
+            params![session_id, naziv, knjigovodstvena],
+        )
+    }
+
+    /// SW-16 Task 1 — the four popis stores. §2c settles that Pravilnik 89/2020
+    /// prescribes NO obrazac for the popisna lista, so the column set is ours to
+    /// design. The vocabularies are not: `status` is the čl. 8 / čl. 9 / čl. 14
+    /// process itself, and `lista_vrsta` is the closed list of posebne popisne
+    /// liste the bylaw requires (čl. 2 st. 5, čl. 10 st. 3, čl. 10 st. 4, čl. 11
+    /// st. 1, čl. 12 st. 2). Both stay closed enums, because a popis read back as
+    /// evidence cannot carry a state or a list kind nobody defined.
+    #[test]
+    fn migration_v20_adds_the_popis_stores() {
+        let path = test_database_path("migration_v20_schema");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            for table in [
+                "popis_sessions",
+                "popis_lines",
+                "popis_signatures",
+                "popis_commission",
+            ] {
+                assert!(table_exists(&conn, table), "{table} should exist after v20");
+            }
+
+            for column in [
+                "id",
+                "vrsta",
+                "prodajno_mesto",
+                "datum_popisa",
+                "period_from",
+                "period_to",
+                "status",
+                "plan_rada_json",
+                "odluka_ref",
+                "uskladjivanje_potvrdjeno_at",
+                "perpetual_odluka_ref",
+                "posted_at",
+                "created_at",
+                "updated_at",
+            ] {
+                assert!(
+                    column_exists(&conn, "popis_sessions", column),
+                    "popis_sessions should carry {column}"
+                );
+            }
+
+            for column in [
+                "id",
+                "session_id",
+                "lista_vrsta",
+                "sifra",
+                "naziv",
+                "vrsta",
+                "jedinica_mere",
+                "stvarna_kolicina_milli",
+                "blizi_opis",
+                "knjigovodstvena_kolicina_milli",
+                "cena_minor",
+                "created_at",
+                "updated_at",
+            ] {
+                assert!(
+                    column_exists(&conn, "popis_lines", column),
+                    "popis_lines should carry {column}"
+                );
+            }
+
+            for column in [
+                "id",
+                "session_id",
+                "faza",
+                "potpisnik",
+                "potpisano_at",
+                "snapshot_hash",
+                "created_at",
+            ] {
+                assert!(
+                    column_exists(&conn, "popis_signatures", column),
+                    "popis_signatures should carry {column}"
+                );
+            }
+
+            for column in [
+                "id",
+                "session_id",
+                "ime",
+                "uloga",
+                "rukuje_imovinom",
+                "created_at",
+            ] {
+                assert!(
+                    column_exists(&conn, "popis_commission", column),
+                    "popis_commission should carry {column}"
+                );
+            }
+
+            // A signature is an event, not a record that is kept up to date: čl. 8
+            // st. 5 and čl. 9 st. 3 each fix a moment, and a second signing is a
+            // second row. The same holds for who was on the commission on the day.
+            assert!(
+                !column_exists(&conn, "popis_signatures", "updated_at"),
+                "a potpis is never revised, so it must not carry an updated_at"
+            );
+            assert!(
+                !column_exists(&conn, "popis_commission", "updated_at"),
+                "commission membership is recorded, not maintained"
+            );
+
+            let sessions_schema: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'popis_sessions'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("popis_sessions schema should load");
+            assert_eq!(
+                closed_enum_values(&sessions_schema, "status"),
+                vec![
+                    "draft",
+                    "counting",
+                    "counted_signed",
+                    "computed",
+                    "computed_signed",
+                    "posted"
+                ],
+                "the six-state popis machine must be a closed CHECK, in process order"
+            );
+            assert_eq!(
+                closed_enum_values(&sessions_schema, "vrsta"),
+                vec!["godisnji", "nivelacioni"],
+                "ZoRač čl. 20 (godišnji) and čl. 21 (nivelacija) are the two modes"
+            );
+
+            let lines_schema: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'popis_lines'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("popis_lines schema should load");
+            assert_eq!(
+                closed_enum_values(&lines_schema, "lista_vrsta"),
+                vec![
+                    "roba",
+                    "ostecena",
+                    "van_objekta",
+                    "gotovina",
+                    "potrazivanja",
+                    "konsignacija"
+                ],
+                "the six posebne popisne liste the bylaw names, and no seventh"
+            );
+
+            seed_popis_session(&conn, 1, "counting");
+
+            // The Phase A line: a natural count with a bliži opis and NO book
+            // quantity. That the column is nullable is the whole of čl. 9 st. 1
+            // t. 3 being a LATER step than t. 1.
+            insert_popis_line(&conn, 1, "Marama svilena", None)
+                .expect("a blind count line should insert with no book quantity");
+            let (stvarna, knjigovodstvena): (i64, Option<i64>) = conn
+                .query_row(
+                    "SELECT stvarna_kolicina_milli, knjigovodstvena_kolicina_milli
+                       FROM popis_lines WHERE session_id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the counted line should read back");
+            assert_eq!(stvarna, 7000, "quantities are milli-units, never floats");
+            assert_eq!(
+                knjigovodstvena, None,
+                "knjigovodstvena_kolicina_milli is nullable — it is written at the \
+                 Phase A→B transition and at no earlier moment"
+            );
+
+            // A counted quantity is the result of counting something; you cannot
+            // count minus three. The book quantity carries no such floor on
+            // purpose — an oversold ledger genuinely reads below zero, and that
+            // negative IS the manjak the popis exists to surface.
+            assert!(
+                conn.execute(
+                    "UPDATE popis_lines SET stvarna_kolicina_milli = -1000 WHERE session_id = 1",
+                    [],
+                )
+                .is_err(),
+                "a negative counted quantity is not a count"
+            );
+
+            for (column, value) in [
+                ("vrsta", "'kvartalni'"),
+                ("status", "'zakljucan'"),
+                ("prodajno_mesto", "''"),
+                ("datum_popisa", "'2026-12-1'"),
+            ] {
+                assert!(
+                    conn.execute(
+                        &format!("UPDATE popis_sessions SET {column} = {value} WHERE id = 1"),
+                        [],
+                    )
+                    .is_err(),
+                    "popis_sessions.{column} must refuse {value}"
+                );
+            }
+
+            assert!(
+                insert_popis_line(&conn, 1, "Marama", None).is_ok(),
+                "a second line on the same lista is ordinary"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO popis_lines (session_id, lista_vrsta, naziv, stvarna_kolicina_milli,
+                                              created_at, updated_at)
+                     VALUES (1, 'sitan_inventar', 'Nešto', 1000,
+                             '2026-12-31T09:00:00Z', '2026-12-31T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the separate-list vocabulary is closed"
+            );
+
+            // The posting stamp and the posted state are one fact, so the schema
+            // refuses to hold half of it either way round.
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions SET status = 'posted' WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "a posted popis without its posting stamp is not posted"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions SET posted_at = '2027-01-15T18:00:00Z' WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "a posting stamp on an unposted popis claims a knjiženje that never happened"
+            );
+
+            // Req. 40: the goods-handler flag is stored per named person and
+            // defaults to „ne rukuje“ — the warning is the command layer's job
+            // (warn, never block, §6 R-5), but the fact it warns on lives here.
+            conn.execute(
+                "INSERT INTO popis_commission (session_id, ime, uloga, rukuje_imovinom, created_at)
+                 VALUES (1, 'Miloš Đurđević', 'predsednik', 1, '2026-12-30T08:00:00Z')",
+                [],
+            )
+            .expect("a commission member should insert");
+            conn.execute(
+                "INSERT INTO popis_commission (session_id, ime, created_at)
+                 VALUES (1, 'Jelena Šarić', '2026-12-30T08:00:00Z')",
+                [],
+            )
+            .expect("a member with no explicit role should default");
+            let (uloga, rukuje): (String, i64) = conn
+                .query_row(
+                    "SELECT uloga, rukuje_imovinom FROM popis_commission WHERE ime = 'Jelena Šarić'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the defaulted member should read back");
+            assert_eq!(uloga, "clan");
+            assert_eq!(
+                rukuje, 0,
+                "nobody is presumed to handle the goods being counted"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO popis_commission (session_id, ime, uloga, created_at)
+                     VALUES (1, 'Neko', 'zapisnicar', '2026-12-30T08:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the role vocabulary is closed"
+            );
+
+            // Čl. 6 st. 1 lets a preduzetnik run the popis with a single person,
+            // and čl. 6 st. 2 applies the commission rules to that person shodno —
+            // so „jedno lice“ is a role this schema can express, not an absence.
+            conn.execute(
+                "INSERT INTO popis_commission (session_id, ime, uloga, created_at)
+                 VALUES (1, 'Vlasnik lično', 'jedno_lice', '2026-12-30T08:00:00Z')",
+                [],
+            )
+            .expect("the single-person popis must be expressible");
+
+            conn.execute(
+                "INSERT INTO popis_signatures (session_id, faza, potpisnik, potpisano_at,
+                                               snapshot_hash, created_at)
+                 VALUES (1, 'a', 'Miloš Đurđević', '2026-12-31T17:00:00Z', 'hash-a',
+                         '2026-12-31T17:00:00Z')",
+                [],
+            )
+            .expect("the čl. 8 st. 5 signature should record");
+            assert!(
+                conn.execute(
+                    "INSERT INTO popis_signatures (session_id, faza, potpisnik, potpisano_at,
+                                                   snapshot_hash, created_at)
+                     VALUES (1, 'c', 'Miloš Đurđević', '2026-12-31T17:00:00Z', 'hash-c',
+                             '2026-12-31T17:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "there are exactly two signature events, čl. 8 st. 5 and čl. 9 st. 3"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO popis_signatures (session_id, faza, potpisnik, potpisano_at,
+                                                   snapshot_hash, created_at)
+                     VALUES (1, 'b', 'Miloš Đurđević', '2026-12-31T17:00:00Z', '',
+                             '2026-12-31T17:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a signature over no snapshot attests to nothing"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// PoP čl. 8 st. 5 — „Подаци из књиговодства … о количинама, не могу се давати
+    /// комисији за попис пре уписивања стварног стања у пописне листе и пре него
+    /// што чланови комисије за попис потпишу те листе.“ This is the single biggest
+    /// constraint in SW-16 (req. 29), and a UI that merely hides a column does not
+    /// satisfy it. The engine refuses to STORE a book quantity while the session is
+    /// in Phase A, so during a count there is no book quantity in the database for
+    /// any query, report, export or backup to hand the commission.
+    #[test]
+    fn migration_v20_refuses_a_book_quantity_before_the_phase_a_signature() {
+        let path = test_database_path("migration_v20_blind_count");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            for (id, status) in [(1_i64, "draft"), (2, "counting")] {
+                seed_popis_session(&conn, id, status);
+
+                insert_popis_line(&conn, id, "Marama svilena", None).unwrap_or_else(|error| {
+                    panic!("the count itself must work in {status}: {error}")
+                });
+
+                assert!(
+                    insert_popis_line(&conn, id, "Marama svilena", Some(9000)).is_err(),
+                    "a line carrying a book quantity must be refused in {status}"
+                );
+                assert!(
+                    conn.execute(
+                        "UPDATE popis_lines SET knjigovodstvena_kolicina_milli = 9000
+                          WHERE session_id = ?1",
+                        params![id],
+                    )
+                    .is_err(),
+                    "nor may a book quantity be smuggled in by UPDATE in {status}"
+                );
+
+                let leaked: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM popis_lines
+                          WHERE session_id = ?1 AND knjigovodstvena_kolicina_milli IS NOT NULL",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .expect("the blind-count check should query");
+                assert_eq!(
+                    leaked, 0,
+                    "in {status} no query may find a book quantity to hand the commission"
+                );
+            }
+
+            // Once the counted state is written and signed, čl. 9 st. 1 t. 3 is the
+            // very next step and the book quantities may be entered.
+            seed_popis_session(&conn, 3, "counted_signed");
+            insert_popis_line(&conn, 3, "Marama svilena", Some(9000))
+                .expect("after the čl. 8 st. 5 signature the book quantity may be written");
+
+            // And it may be negative. An oversold ledger reads below zero, and that
+            // reading is the manjak the popis exists to find — a floor here would
+            // silently refuse the very rows the module is for.
+            insert_popis_line(&conn, 3, "Kaiš kožni", Some(-2000))
+                .expect("a negative book quantity is a real ledger state, not a typo");
+
+            let revealed: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM popis_lines
+                      WHERE session_id = 3 AND knjigovodstvena_kolicina_milli IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the phase B check should query");
+            assert_eq!(revealed, 2, "phase B is where the book quantities live");
+
+            // Reopening a signed count must not become a way back to a blind state
+            // that already saw the book data — but the guard is anchored on the
+            // CURRENT status, so a session pushed back to counting is blind again
+            // for every subsequent write.
+            conn.execute(
+                "UPDATE popis_sessions SET status = 'counting' WHERE id = 3",
+                [],
+            )
+            .expect("the state machine, not the schema, decides legal transitions");
+            assert!(
+                insert_popis_line(&conn, 3, "Torba", Some(1000)).is_err(),
+                "the guard follows the session's current state, not the row's history"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// Req. 41 / PoP čl. 14 st. 3 with ZoRač čl. 8 st. 4: once the popis result is
+    /// posted, the liste, the commission and the signatures are evidence and stop
+    /// being editable — a correction is a NEW popis, never an edit of the old one.
+    /// DELETE stays open on every one of these tables, because req. 42 gives them a
+    /// five-year retention FLOOR rather than a „trajno“ duty and the purge must be
+    /// able to reach an expired popis. That is the same boundary v18 and v19 drew,
+    /// and it is pinned here so the schema comment can never become a promise the
+    /// engine does not keep.
+    #[test]
+    fn migration_v20_write_locks_a_posted_popis_but_leaves_delete_open() {
+        let path = test_database_path("migration_v20_posting_lock");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            seed_popis_session(&conn, 1, "computed_signed");
+            insert_popis_line(&conn, 1, "Marama svilena", Some(9000))
+                .expect("a computed line should insert before posting");
+            conn.execute(
+                "INSERT INTO popis_commission (session_id, ime, uloga, rukuje_imovinom, created_at)
+                 VALUES (1, 'Miloš Đurđević', 'predsednik', 0, '2026-12-30T08:00:00Z')",
+                [],
+            )
+            .expect("a commission member should insert before posting");
+            conn.execute(
+                "INSERT INTO popis_signatures (session_id, faza, potpisnik, potpisano_at,
+                                               snapshot_hash, created_at)
+                 VALUES (1, 'b', 'Miloš Đurđević', '2027-01-10T17:00:00Z', 'hash-b',
+                         '2027-01-10T17:00:00Z')",
+                [],
+            )
+            .expect("the čl. 9 st. 3 signature should record");
+
+            // A signature is frozen the moment it is taken — before posting, not
+            // because of it. Restamping one would move the čl. 8 st. 5 / čl. 9
+            // st. 3 moment the whole two-phase design turns on.
+            for (column, value) in [
+                ("potpisano_at", "2027-02-01T09:00:00Z"),
+                ("potpisnik", "Neko Drugi"),
+                ("snapshot_hash", "hash-podmetnut"),
+                ("faza", "a"),
+            ] {
+                assert!(
+                    conn.execute(
+                        &format!("UPDATE popis_signatures SET {column} = '{value}' WHERE id = 1"),
+                        [],
+                    )
+                    .is_err(),
+                    "no path may rewrite {column} on a potpis"
+                );
+            }
+
+            conn.execute(
+                "UPDATE popis_sessions
+                    SET status = 'posted', posted_at = '2027-01-15T18:00:00Z',
+                        updated_at = '2027-01-15T18:00:00Z'
+                  WHERE id = 1",
+                [],
+            )
+            .expect("posting is the last permitted write");
+
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions SET updated_at = '2027-02-01T09:00:00Z' WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "a posted popis session is frozen, down to its updated_at"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions SET status = 'computed' , posted_at = NULL WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "posting cannot be undone by walking the status back"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE popis_lines SET stvarna_kolicina_milli = 1000 WHERE session_id = 1",
+                    [],
+                )
+                .is_err(),
+                "a counted quantity on a posted popis is evidence, not a draft"
+            );
+            assert!(
+                insert_popis_line(&conn, 1, "Naknadno nađena marama", Some(1000)).is_err(),
+                "an article remembered after posting belongs on a new popis"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE popis_commission SET ime = 'Neko Drugi' WHERE session_id = 1",
+                    [],
+                )
+                .is_err(),
+                "who counted is part of what was posted"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO popis_commission (session_id, ime, created_at)
+                     VALUES (1, 'Naknadni član', '2027-02-01T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the commission cannot be joined after the result is posted"
+            );
+
+            // A second, unposted popis is unaffected — the lock is per session, not
+            // a global freeze, and a correction goes through exactly this route.
+            seed_popis_session(&conn, 2, "counting");
+            insert_popis_line(&conn, 2, "Marama svilena", None)
+                .expect("the corrective popis is an ordinary open session");
+            conn.execute(
+                "INSERT INTO popis_commission (session_id, ime, created_at)
+                 VALUES (2, 'Jelena Šarić', '2027-02-01T09:00:00Z')",
+                [],
+            )
+            .expect("the corrective popis gets its own commission");
+
+            // The way in that testing only the row's current session would leave
+            // open: `session_id` is itself updatable, so a line or a member raised
+            // on the open corrective popis could be re-pointed at the posted one.
+            // That is adding to a posted popis under another name, and both ends of
+            // the move are checked.
+            assert!(
+                conn.execute(
+                    "UPDATE popis_lines SET session_id = 1 WHERE session_id = 2",
+                    []
+                )
+                .is_err(),
+                "a line may not be moved onto a posted popis"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE popis_commission SET session_id = 1 WHERE session_id = 2",
+                    [],
+                )
+                .is_err(),
+                "a member may not be moved onto a posted popis"
+            );
+
+            // Req. 42's five-year floor is a floor, not a „trajno“ duty: the purge
+            // must be able to reach an expired popis, so DELETE stays open — in the
+            // referential order the purge would have to use.
+            conn.execute("DELETE FROM popis_lines WHERE session_id = 1", [])
+                .expect("an expired popis lista must remain purgeable");
+            conn.execute("DELETE FROM popis_commission WHERE session_id = 1", [])
+                .expect("an expired commission record must remain purgeable");
+            conn.execute("DELETE FROM popis_signatures WHERE session_id = 1", [])
+                .expect("an expired signature must remain purgeable");
+            conn.execute("DELETE FROM popis_sessions WHERE id = 1", [])
+                .expect("an expired popis session must remain purgeable");
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// The installed-base path: a till already running v19 gets the popis stores
+    /// without losing a product, a price, a published cenovnik or an audit row.
+    /// Seeding through a raw connection at MIGRATIONS[..19] and only then opening
+    /// with `Db::new` is what makes this provable — seeding after `Db::new` would
+    /// prove a new-schema round trip and nothing about the upgrade (commit
+    /// 270796c).
+    #[test]
+    fn migration_v20_preserves_pre_existing_rows() {
+        let path = test_database_path("migration_v20_survival");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw connection");
+            conn.execute_batch(
+                "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);",
+            )
+            .expect("migrations table");
+
+            for migration in &MIGRATIONS[..19] {
+                assert!(
+                    migration.version <= 19,
+                    "the pre-v20 prefix must stop at v19, saw v{}",
+                    migration.version
+                );
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, '2026-08-01T00:00:00Z')",
+                    rusqlite::params![migration.version, migration.name],
+                )
+                .expect("record the migration");
+            }
+
+            conn.execute_batch(
+                "INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+                     VALUES (200, 'PDV 20', 2000, '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');
+                 INSERT INTO products (id, name, sku, barcode, unit_of_measure, sale_price_minor,
+                                       purchase_price_minor, tax_rate_id, minimum_stock_milli,
+                                       created_at, updated_at)
+                     VALUES (200, 'Marama svilena', 'MAR-001', '0123456789012', 'kom', 249900,
+                             120000, 200, 0, '2026-07-01T08:00:00Z', '2026-07-20T08:00:00Z');
+                 INSERT INTO price_history (id, product_id, effective_from, price_minor, source, created_at)
+                     VALUES (200, 200, '2026-07-20T08:00:00Z', 249900, 'update', '2026-07-20T08:00:00Z');
+                 INSERT INTO cenovnik_snapshots (id, prodajno_mesto, generated_at, row_count,
+                                                 content_hash, body, created_at)
+                     VALUES (200, 'Butik Centar', '2026-07-20T08:00:05Z', 1, 'h-200',
+                             'telo cenovnika', '2026-07-20T08:00:05Z');
+                 INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (200, 'stari_kasir', 'Stari Kasir', 'cashier', 1,
+                             '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');
+                 INSERT INTO compliance_log (id, event_type, detail_json, user_id, created_at)
+                     VALUES (200, 'cenovnik_price_divergence', '{\"snapshot_id\":200}', 200,
+                             '2026-07-25T11:00:00Z');",
+            )
+            .expect("seed v19-era rows");
+            drop(conn);
+
+            let db = Db::new(&path).expect("database should migrate forward");
+            let conn = db.open().expect("database should open");
+
+            let (name, barcode, price, updated): (String, String, i64, String) = conn
+                .query_row(
+                    "SELECT name, barcode, sale_price_minor, updated_at FROM products WHERE id = 200",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("the pre-v20 product must survive verbatim");
+            assert_eq!(name, "Marama svilena");
+            assert_eq!(
+                barcode, "0123456789012",
+                "the leading zero of a 13-digit barcode must survive as text"
+            );
+            assert_eq!(price, 249900);
+            assert_eq!(updated, "2026-07-20T08:00:00Z");
+
+            let (history_product, history_price): (i64, i64) = conn
+                .query_row(
+                    "SELECT product_id, price_minor FROM price_history WHERE id = 200",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the price_history row must survive with its id");
+            assert_eq!((history_product, history_price), (200, 249900));
+
+            let (outlet, body): (String, String) = conn
+                .query_row(
+                    "SELECT prodajno_mesto, body FROM cenovnik_snapshots WHERE id = 200",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the published cenovnik must survive byte for byte");
+            assert_eq!(
+                (outlet.as_str(), body.as_str()),
+                ("Butik Centar", "telo cenovnika")
+            );
+
+            let (event_type, detail): (String, String) = conn
+                .query_row(
+                    "SELECT event_type, detail_json FROM compliance_log WHERE id = 200",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the never-deleted trail must survive with its id");
+            assert_eq!(
+                (event_type.as_str(), detail.as_str()),
+                ("cenovnik_price_divergence", "{\"snapshot_id\":200}")
+            );
+
+            for table in [
+                "popis_sessions",
+                "popis_lines",
+                "popis_signatures",
+                "popis_commission",
+            ] {
+                assert!(
+                    table_exists(&conn, table),
+                    "{table} should arrive on an upgraded database"
+                );
+                let rows: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap_or_else(|error| panic!("{table} should count: {error}"));
+                assert_eq!(
+                    rows, 0,
+                    "an upgrade opens no popis on its own — a popis is an act, not a backfill"
+                );
+            }
+
+            // The upgrade must not have quietly rebuilt the v19 archive: its
+            // immutability trigger is still the thing standing between a published
+            // cenovnik and a rewritten one.
+            assert!(
+                conn.execute(
+                    "UPDATE cenovnik_snapshots SET body = 'izmenjeno' WHERE id = 200",
+                    [],
+                )
+                .is_err(),
+                "the v19 immutability trigger must survive the v20 upgrade"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
     }
 
     #[test]
