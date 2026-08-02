@@ -1,16 +1,22 @@
-//! The popis state machine and the PoP čl. 8 st. 5 blind-count property (SW-16).
+//! The popis state machine, the PoP čl. 8 st. 5 blind-count property and the
+//! čl. 13 st. 2 deadline engine (SW-16).
 //!
 //! Legal authority: `docs/REMAINING-SW-VERIFIED-RULES.md` §2c and §4 reqs. 29–42.
 //! Design: `docs/superpowers/specs/2026-08-01-sw16-popis-design.md`.
 //!
-//! The module is this state machine. Consumed by the command layer, so
-//! `dead_code` is allowed here — mirroring the other domain modules.
+//! Everything here is pure: the state machine decides on the state it is handed
+//! and the deadline engine on the dates it is handed. **No wall clock is read in
+//! this module** — a statutory rok that moves with the machine's clock is not a
+//! rok. Consumed by the command layer, so `dead_code` is allowed here — mirroring
+//! the other domain modules.
 
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
+use time::{Date, Duration};
 
 use crate::app_error::AppError;
+use crate::cash_deposit::parse_iso_date;
 
 /// The six states of a popis, in the bylaw's own sequence. The stored values are
 /// [`PopisStatus::as_db_str`] and they are the vocabulary of the v20
@@ -207,12 +213,163 @@ pub fn book_quantities_released(status: PopisStatus, phase_a_signed: bool) -> bo
     book_quantities_visible(status) && phase_a_signed
 }
 
+/// The two popis obligations, which are two modes and not one mode with a flag:
+/// the annual popis at the balance date (ZoRač čl. 20 st. 2) and the popis on a
+/// retail price change in a maloprodajni objekat (ZoRač čl. 21, PoP čl. 3). They
+/// carry **different statutory roks** — see [`izvestaj_due`] — so a session whose
+/// vrsta is unknown can be given neither.
+///
+/// The stored values are [`PopisVrsta::as_db_str`] and they are the vocabulary of
+/// the v20 `popis_sessions.vrsta` CHECK, asserted equal by test for the same
+/// reason [`PopisStatus`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PopisVrsta {
+    /// ZoRač čl. 20 st. 2 — the popis na datum bilansa, taken when the redovni
+    /// godišnji finansijski izveštaj is prepared.
+    Godisnji,
+    /// ZoRač čl. 21 — the popis on a change of retail selling prices. The most
+    /// POS-relevant trigger in the module, and an in-year popis for čl. 13 st. 2.
+    Nivelacioni,
+}
+
+impl PopisVrsta {
+    pub const ALL: [Self; 2] = [Self::Godisnji, Self::Nivelacioni];
+
+    /// The value stored in `popis_sessions.vrsta`.
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Godisnji => "godisnji",
+            Self::Nivelacioni => "nivelacioni",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|vrsta| vrsta.as_db_str() == value)
+    }
+
+    /// What the mode is called in front of the shop owner — the stored keys are
+    /// ASCII-folded column values and no operator string may quote one.
+    pub fn naziv(self) -> &'static str {
+        match self {
+            Self::Godisnji => "godišnji popis",
+            Self::Nivelacioni => "popis po nivelaciji",
+        }
+    }
+}
+
+/// PoP čl. 13 st. 2, first limb — the izveštaj about the annual popis is due
+/// „najkasnije 60 dana **pre** isteka roka za dostavljanje redovnog godišnjeg
+/// finansijskog izveštaja“.
+pub const IZVESTAJ_ROK_DANA_PRE_PREDAJE_FI: i64 = 60;
+
+/// PoP čl. 13 st. 2, second limb — for a popis taken during the year the izveštaj
+/// is due „najkasnije 30 dana **po** izvršenom popisu“.
+pub const IZVESTAJ_ROK_DANA_PO_POPISU: i64 = 30;
+
+/// The rok for the izveštaj o popisu, as `gggg-MM-dd` (req. 38).
+///
+/// **Computed, never tabulated.** PoP čl. 13 st. 2 gives two limbs and this
+/// function is both of them: an annual popis counts
+/// [`IZVESTAJ_ROK_DANA_PRE_PREDAJE_FI`] days back from the FS filing deadline, an
+/// in-year popis counts [`IZVESTAJ_ROK_DANA_PO_POPISU`] days forward from the
+/// count. Each limb reads only its own anchor, because that is all the article
+/// gives it: the annual rok does not move when the count is taken early, and the
+/// nivelacija rok does not know the filing deadline exists.
+///
+/// **Why a table is wrong and not merely inelegant.** 31 March is day 90 of a
+/// common year and day 91 of a leap one, so with the ZoRač čl. 44 st. 1 rok the
+/// answer is 30 January 2027 for FY2026, **31 January 2028** for FY2027 and 30
+/// January 2029 for FY2028. A list typed out by hand is wrong in the leap year
+/// and right on either side of it.
+///
+/// **Why the filing deadline is a parameter.** ZoRač čl. 44 st. 1 sets 31 March
+/// *„osim ako posebnim zakonom nije drukčije uređeno“* — the rok is not this
+/// module's to own, and a statutory or special-law change must be a configuration
+/// edit rather than a code change. The caller supplies it; `None` is refused for
+/// the annual limb rather than filled in with a guess.
+///
+/// **Čl. 14 st. 2 rides on this same date.** The odluka o usvajanju izveštaja is
+/// due *„u roku iz člana 13. stav 2“*, so it is not a second deadline and gets no
+/// second function: the izveštaj and the odluka are one milestone (req. 38), and
+/// they are surfaced from this one answer.
+///
+/// **No clock is read.** The rok is a function of the two dates it is given, and
+/// of nothing else — including today.
+pub fn izvestaj_due(
+    vrsta: PopisVrsta,
+    datum_popisa: &str,
+    fs_filing_deadline: Option<&str>,
+) -> Result<String, AppError> {
+    let rok = match vrsta {
+        PopisVrsta::Godisnji => {
+            let filing = fs_filing_deadline.ok_or_else(|| {
+                AppError::business(
+                    "popis_rok_predaje_fi_nepoznat",
+                    "Rok za izveštaj o godišnjem popisu se računa unazad od roka za dostavljanje \
+                     redovnog godišnjeg finansijskog izveštaja (PoP čl. 13 st. 2), a taj rok nije \
+                     podešen.",
+                )
+            })?;
+
+            popis_datum(
+                filing,
+                "rok za dostavljanje redovnog godišnjeg finansijskog izveštaja",
+            )?
+            .checked_sub(Duration::days(IZVESTAJ_ROK_DANA_PRE_PREDAJE_FI))
+        }
+        PopisVrsta::Nivelacioni => popis_datum(datum_popisa, "datum popisa")?
+            .checked_add(Duration::days(IZVESTAJ_ROK_DANA_PO_POPISU)),
+    };
+
+    // `checked_*` rather than the panicking arithmetic: the inputs are dates the
+    // shop typed or a setting holds, and a rok far enough out to leave the
+    // calendar must be a refusal the owner can read, not a crash.
+    rok.map(iso_datum).ok_or_else(|| {
+        AppError::business(
+            "popis_rok_van_kalendara",
+            format!(
+                "Rok za izveštaj o popisu („{}“) izlazi iz kalendara — proverite datum popisa i \
+                 rok za dostavljanje finansijskog izveštaja.",
+                vrsta.naziv()
+            ),
+        )
+    })
+}
+
+/// One date in, strictly `gggg-MM-dd` — exactly the shape every date column in
+/// the v20 schema is GLOB-checked into. Strict on purpose: '2027-3-31' and an
+/// RFC3339 stamp are both refused rather than truncated or repaired, because a
+/// rok this module invents from a malformed input is one the shop will file on.
+fn popis_datum(value: &str, polje: &str) -> Result<Date, AppError> {
+    parse_iso_date(value).ok_or_else(|| {
+        AppError::business(
+            "popis_rok_neispravan_datum",
+            format!(
+                "Polje „{polje}“ mora da bude datum u obliku gggg-MM-dd, a primljeno je „{value}“."
+            ),
+        )
+    })
+}
+
+fn iso_datum(date: Date) -> String {
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::{params, Connection};
 
     use super::{
-        advance, book_quantities_released, book_quantities_visible, PopisEvent, PopisStatus,
+        advance, book_quantities_released, book_quantities_visible, izvestaj_due, PopisEvent,
+        PopisStatus, PopisVrsta,
     };
     use crate::app_error::AppError;
     use crate::db::{test_database_path, Db};
@@ -232,6 +389,10 @@ mod tests {
     /// Seed one popis session directly in `status`. `posted_at` follows the
     /// status because the v20 schema binds the two.
     fn seed_session(connection: &Connection, id: i64, status: PopisStatus) {
+        seed_session_of(connection, id, PopisVrsta::Godisnji, status);
+    }
+
+    fn seed_session_of(connection: &Connection, id: i64, vrsta: PopisVrsta, status: PopisStatus) {
         let posted_at: Option<&str> =
             (status == PopisStatus::Posted).then_some("2027-01-15T18:00:00Z");
 
@@ -239,11 +400,13 @@ mod tests {
             .execute(
                 "INSERT INTO popis_sessions (id, vrsta, prodajno_mesto, datum_popisa, status,
                                              posted_at, created_at, updated_at)
-                 VALUES (?1, 'godisnji', 'Butik Centar', '2026-12-31', ?2, ?3,
+                 VALUES (?1, ?2, 'Butik Centar', '2026-12-31', ?3, ?4,
                          '2026-12-31T08:00:00Z', '2026-12-31T08:00:00Z')",
-                params![id, status.as_db_str(), posted_at],
+                params![id, vrsta.as_db_str(), status.as_db_str(), posted_at],
             )
-            .unwrap_or_else(|error| panic!("a session in {status:?} should insert: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("a {vrsta:?} session in {status:?} should insert: {error}")
+            });
     }
 
     /// Take the čl. 8 st. 5 potpis — the second limb of the release condition.
@@ -277,9 +440,9 @@ mod tests {
         }
     }
 
-    /// The `'…'` tokens of the `popis_sessions.status` CHECK, read back off the
+    /// The `'…'` tokens of a closed `popis_sessions` CHECK, read back off the
     /// live schema rather than copied out of the migration source.
-    fn status_check_vocabulary(connection: &Connection) -> Vec<String> {
+    fn check_vocabulary(connection: &Connection, column: &str) -> Vec<String> {
         let schema: String = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'popis_sessions'",
@@ -288,13 +451,13 @@ mod tests {
             )
             .expect("popis_sessions schema should load");
 
-        let opening = "CHECK (status IN (";
+        let opening = format!("CHECK ({column} IN (");
         let start = schema
-            .find(opening)
-            .expect("popis_sessions must carry a closed status CHECK")
+            .find(&opening)
+            .unwrap_or_else(|| panic!("popis_sessions must carry a closed {column} CHECK"))
             + opening.len();
         let rest = &schema[start..];
-        let end = rest.find("))").expect("the status CHECK should close");
+        let end = rest.find("))").expect("the CHECK should close");
 
         let mut values: Vec<String> = rest[..end]
             .split(',')
@@ -442,7 +605,7 @@ mod tests {
                 .collect();
             modelled.sort();
 
-            assert_eq!(status_check_vocabulary(connection), modelled);
+            assert_eq!(check_vocabulary(connection, "status"), modelled);
 
             for (index, status) in PopisStatus::ALL.into_iter().enumerate() {
                 seed_session(connection, 100 + index as i64, status);
@@ -553,5 +716,255 @@ mod tests {
                 }
             }
         });
+    }
+
+    // ---------------------------------------------------------------------
+    // The deadline engine (req. 38)
+    // ---------------------------------------------------------------------
+
+    fn due(vrsta: PopisVrsta, datum_popisa: &str, filing: Option<&str>) -> String {
+        izvestaj_due(vrsta, datum_popisa, filing).unwrap_or_else(|error| {
+            panic!("{vrsta:?} on {datum_popisa} should have a rok: {error}")
+        })
+    }
+
+    /// PoP čl. 13 st. 2, first limb: „najkasnije 60 dana pre isteka roka za
+    /// dostavljanje redovnog godišnjeg finansijskog izveštaja“. With the ZoRač
+    /// čl. 44 st. 1 rok of 31 March, three consecutive years are asserted
+    /// because **31 March is day 90 of a common year and day 91 of a leap one**:
+    /// FY2027 is filed in 2028 and its rok lands on 31 January, a day later than
+    /// the neighbours on either side. A table typed out by hand is wrong in
+    /// exactly that year and right in the other two, so one year would not have
+    /// caught it.
+    #[test]
+    fn the_annual_izvestaj_is_due_sixty_days_before_the_filing_deadline() {
+        for (fiscal_year, filing, expected) in [
+            (2026, "2027-03-31", "2027-01-30"),
+            (2027, "2028-03-31", "2028-01-31"),
+            (2028, "2029-03-31", "2029-01-30"),
+        ] {
+            let balance_date = format!("{fiscal_year}-12-31");
+            assert_eq!(
+                due(PopisVrsta::Godisnji, &balance_date, Some(filing)),
+                expected,
+                "FY{fiscal_year} filed by {filing}"
+            );
+        }
+    }
+
+    /// The annual rok counts back from the filing deadline, not forward from the
+    /// count — čl. 13 st. 2 anchors it on the rok za dostavljanje. An engine that
+    /// quietly anchored on `datum_popisa` would agree with the test above every
+    /// time the popis happened to fall on 31 December, which for the annual popis
+    /// is nearly always (ZoRač čl. 20 st. 2, „na datum bilansa“).
+    #[test]
+    fn the_annual_rok_does_not_move_with_the_count_date() {
+        let anchored = due(PopisVrsta::Godisnji, "2026-12-31", Some("2027-03-31"));
+
+        for datum_popisa in ["2026-11-02", "2026-12-31", "2027-01-08"] {
+            assert_eq!(
+                due(PopisVrsta::Godisnji, datum_popisa, Some("2027-03-31")),
+                anchored,
+                "a popis counted on {datum_popisa} must not move the čl. 13 st. 2 rok"
+            );
+        }
+    }
+
+    /// PoP čl. 13 st. 2, second limb: „najkasnije 30 dana po izvršenom popisu“ —
+    /// the in-year rule the nivelacija popis of ZoRač čl. 21 runs on. The four
+    /// cases cross a month end, a year end and a 29 February, so the 30 are real
+    /// calendar days and not „a month“: the same 5 February is 6 March in the
+    /// leap year 2028 and 7 March in 2027.
+    #[test]
+    fn the_nivelacija_izvestaj_is_due_thirty_days_after_the_count() {
+        for (datum_popisa, expected) in [
+            ("2026-11-20", "2026-12-20"),
+            ("2026-12-15", "2027-01-14"),
+            ("2028-02-05", "2028-03-06"),
+            ("2027-02-05", "2027-03-07"),
+        ] {
+            assert_eq!(
+                due(PopisVrsta::Nivelacioni, datum_popisa, None),
+                expected,
+                "a nivelacija counted on {datum_popisa}"
+            );
+        }
+    }
+
+    /// Req. 38's own words: the filing deadline is **a parameter**, so a change
+    /// to ZoRač čl. 44 st. 1 — or the „osim ako posebnim zakonom nije drukčije
+    /// uređeno“ escape in that very sentence — is a configuration edit rather
+    /// than a code change. Moving the filing deadline moves the rok by exactly
+    /// as much, across months of three different lengths.
+    #[test]
+    fn the_filing_deadline_is_a_parameter_and_not_a_table() {
+        for (filing, expected) in [
+            ("2027-03-31", "2027-01-30"),
+            ("2027-04-30", "2027-03-01"),
+            ("2027-06-30", "2027-05-01"),
+        ] {
+            assert_eq!(
+                due(PopisVrsta::Godisnji, "2026-12-31", Some(filing)),
+                expected,
+                "a filing deadline of {filing}"
+            );
+        }
+    }
+
+    /// The two limbs share one function, so each must read only its own anchor.
+    /// A fall-through in this direction is the dangerous one: it would hand an
+    /// in-year nivelacija the annual rok — months later than the 30 days čl. 13
+    /// st. 2 allows it — and the shop would file late believing the app.
+    #[test]
+    fn the_nivelacija_rok_ignores_the_filing_deadline() {
+        let bez_roka = due(PopisVrsta::Nivelacioni, "2026-11-20", None);
+
+        assert_eq!(bez_roka, "2026-12-20");
+        for filing in ["2027-03-31", "2027-06-30"] {
+            assert_eq!(
+                due(PopisVrsta::Nivelacioni, "2026-11-20", Some(filing)),
+                bez_roka,
+                "the čl. 13 st. 2 in-year limb must not read the filing deadline ({filing})"
+            );
+        }
+    }
+
+    /// A rok that is silently wrong is worse than one the shop is told cannot be
+    /// computed: the čl. 58 prekršaj attaches to the popis, and a date this
+    /// module invents is one the owner will file on. Every unreadable input is
+    /// refused, including the two near-misses — a one-digit month and an RFC3339
+    /// stamp — that a lenient parser would accept or truncate.
+    #[test]
+    fn an_unreadable_date_is_refused_rather_than_guessed() {
+        for (vrsta, datum_popisa, filing) in [
+            (PopisVrsta::Godisnji, "2026-12-31", Some("2027-3-31")),
+            (PopisVrsta::Godisnji, "2026-12-31", Some("2027-02-30")),
+            (
+                PopisVrsta::Godisnji,
+                "2026-12-31",
+                Some("2027-03-31T00:00:00Z"),
+            ),
+            (PopisVrsta::Godisnji, "2026-12-31", Some("")),
+            (PopisVrsta::Nivelacioni, "31.12.2026.", None),
+            (PopisVrsta::Nivelacioni, "2026-12-31T08:00:00Z", None),
+            (PopisVrsta::Nivelacioni, "", None),
+        ] {
+            let error = izvestaj_due(vrsta, datum_popisa, filing)
+                .expect_err("an unreadable date must not produce a rok");
+            assert_eq!(
+                error.code(),
+                "popis_rok_neispravan_datum",
+                "{vrsta:?} / {datum_popisa} / {filing:?}"
+            );
+        }
+    }
+
+    /// The annual limb has nothing to count back from until the filing rok is
+    /// configured. It refuses, and the refusal names both the missing setting
+    /// and the article — a shop that is told only „greška“ cannot act on it.
+    #[test]
+    fn the_annual_rok_refuses_when_the_filing_deadline_is_unknown() {
+        let error = izvestaj_due(PopisVrsta::Godisnji, "2026-12-31", None)
+            .expect_err("the annual rok cannot be computed without the filing deadline");
+
+        assert_eq!(error.code(), "popis_rok_predaje_fi_nepoznat");
+        let message = error.to_string();
+        assert!(
+            message.contains("čl. 13 st. 2") && message.contains("finansijskog izveštaja"),
+            "the refusal must tell the shop what is missing and under which article, said: \
+             {message}"
+        );
+    }
+
+    /// The vrsta enum and the v20 `popis_sessions.vrsta` CHECK are one
+    /// vocabulary, and the wire form is pinned to the stored form for the reason
+    /// the status test gives: `as_db_str` is a hand-written literal while serde
+    /// derives the wire form from the variant *identifier*, so a rename moves one
+    /// and not the other. Here the drift is worse than a mislabelled column — the
+    /// two vrste carry **different statutory roks**, 60 days before the filing
+    /// deadline against 30 days after the count.
+    #[test]
+    fn the_vrsta_vocabulary_is_exactly_the_schema_check() {
+        with_test_database("popis_vrsta_vocabulary", |connection| {
+            let mut modelled: Vec<String> = PopisVrsta::ALL
+                .into_iter()
+                .map(|vrsta| vrsta.as_db_str().to_string())
+                .collect();
+            modelled.sort();
+
+            assert_eq!(check_vocabulary(connection, "vrsta"), modelled);
+
+            for (index, vrsta) in PopisVrsta::ALL.into_iter().enumerate() {
+                seed_session_of(connection, 400 + index as i64, vrsta, PopisStatus::Draft);
+                assert_eq!(
+                    PopisVrsta::from_db_str(vrsta.as_db_str()),
+                    Some(vrsta),
+                    "{vrsta:?} should survive the round trip through its stored value"
+                );
+                assert_eq!(
+                    serde_json::to_string(&vrsta).expect("a vrsta should serialize"),
+                    format!("\"{}\"", vrsta.as_db_str()),
+                    "{vrsta:?} must reach the frontend as its stored value"
+                );
+            }
+
+            assert!(
+                PopisVrsta::from_db_str("nivelacija").is_none(),
+                "an unknown stored value must not resolve to a vrsta"
+            );
+        });
+    }
+
+    /// Design §7 t. 5 („no hardcoded deadline dates“) and the standing rule that
+    /// **no wall clock may reach the deadline engine**. Both are properties of
+    /// the source rather than of any single answer: a behavioural test cannot
+    /// tell a computed 30 January 2027 from a hardcoded one, and it cannot tell a
+    /// rok derived from its two arguments from one that read the system clock and
+    /// happened to agree today. So the engine's own half of this file is what is
+    /// asserted. Comment lines are skipped — the module doc cites a dated design
+    /// file, and prose is not what computes a rok.
+    #[test]
+    fn the_engine_holds_no_calendar_date_and_reads_no_clock() {
+        const SOURCE: &str = include_str!("popis.rs");
+
+        let engine = SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("this module must have a non-test half");
+
+        for (number, line) in engine.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+
+            assert!(
+                !holds_calendar_date(code),
+                "line {} hardcodes a calendar date; a rok is computed from the dates it is \
+                 given: {code}",
+                number + 1
+            );
+            for clock in ["now_utc", "SystemTime::now", "Utc::now", "datetime('now')"] {
+                assert!(
+                    !code.contains(clock),
+                    "line {} reads a clock; a statutory rok is a function of the dates it is \
+                     given and of nothing else: {code}",
+                    number + 1
+                );
+            }
+        }
+    }
+
+    /// `gggg-MM-dd` anywhere in a line, which is the shape every date in this
+    /// schema is stored and passed in.
+    fn holds_calendar_date(line: &str) -> bool {
+        let bytes = line.as_bytes();
+
+        bytes.windows(10).any(|window| {
+            window.iter().enumerate().all(|(index, byte)| match index {
+                4 | 7 => *byte == b'-',
+                _ => byte.is_ascii_digit(),
+            })
+        })
     }
 }
