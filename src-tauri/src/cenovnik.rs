@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
@@ -331,9 +332,7 @@ impl PublishTarget for LocalFolderTarget {
         // one directory is atomic, so a fetch that lands mid-publish reads the
         // previous cenovnik rather than half of the new one — and čl. 6 st. 4
         // binds the shop to whatever that fetch returns.
-        let temporary = self
-            .folder
-            .join(format!(".{}.tmp", published_file_name(prodajno_mesto)));
+        let temporary = self.folder.join(staging_file_name(prodajno_mesto));
         let written = std::fs::write(&temporary, body.as_bytes())
             .and_then(|()| std::fs::rename(&temporary, &path));
         if let Err(error) = written {
@@ -347,6 +346,40 @@ impl PublishTarget for LocalFolderTarget {
             target: path.display().to_string(),
         })
     }
+}
+
+/// The name a publish stages an outlet's body under before renaming it over
+/// [`published_file_name`].
+///
+/// **Unique per call**, which is the whole point: the published name is
+/// deterministic per outlet (req. 13, rule 6), so a staged name derived from it
+/// alone would be one path that every concurrent publish of that outlet wrote
+/// to — two windows, an import racing a price edit, two installs syncing one
+/// folder. The second write would then tear the body the first is about to
+/// rename into place, publishing exactly the half-written cenovnik the staging
+/// step exists to prevent. Process id, nanoseconds and a per-process counter,
+/// so it is unique between processes and within one.
+///
+/// A sibling of the published file, because a rename is only atomic within one
+/// directory. Dot-prefixed and `.tmp`-suffixed so a folder the shop serves does
+/// not offer a partially written file as a cenovnik in the window before the
+/// rename.
+fn staging_file_name(prodajno_mesto: &str) -> String {
+    static STAGED: AtomicU64 = AtomicU64::new(0);
+
+    // Never `expect`: this runs after the price write has committed, on a path
+    // whose contract is that it cannot panic on the sale that produced it.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    let sequence = STAGED.fetch_add(1, Ordering::Relaxed);
+
+    format!(
+        ".{}.{}-{nanos}-{sequence}.tmp",
+        published_file_name(prodajno_mesto),
+        std::process::id()
+    )
 }
 
 /// The file name an outlet's cenovnik is published under.
@@ -1084,11 +1117,11 @@ mod tests {
         });
     }
 
-    /// The file is written beside its destination and renamed over it, so a
-    /// fetch that lands mid-publish reads the previous cenovnik rather than half
-    /// of the new one — čl. 6 st. 4 binds the shop to whatever that fetch
-    /// returns. The temporary must not survive the publish either way: a folder
-    /// the shop serves would then also serve it.
+    /// The staged body must not survive a publish that succeeded: a folder the
+    /// shop points its web root at would serve the leftover too. That the body
+    /// is staged at all is
+    /// `a_failed_publish_leaves_the_previous_cenovnik_whole`'s job — this test
+    /// alone is satisfied by any write that leaves one file behind.
     #[test]
     fn a_publish_leaves_no_temporary_file_behind() {
         with_publish_folder("cenovnik-local-target-no-temp", |folder| {
@@ -1096,6 +1129,99 @@ mod tests {
                 .publish(&render_csv(&[row_priced(100)]), OUTLET, NOW)
                 .expect("publish");
             assert_eq!(entries(folder), [OUTLET_FILE]);
+        });
+    }
+
+    /// Čl. 6 st. 4 binds the shop to whatever a fetch of the published file
+    /// returns, so the served file is never opened for writing: the body is
+    /// staged in a sibling temporary and renamed over the destination, and a
+    /// publish that fails leaves the previous cenovnik whole rather than
+    /// truncated down to half a body a consumer can hold the shop to.
+    ///
+    /// Unix-only, and for the same reason as backup's
+    /// `perform_backup_records_failed_job_when_copy_fails`: a read-only folder
+    /// is the one portable way to stop a NEW file being created while an
+    /// existing file inside it stays writable — which is exactly the asymmetry
+    /// that separates a rename from a write in place.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_publish_leaves_the_previous_cenovnik_whole() {
+        use std::os::unix::fs::PermissionsExt;
+
+        with_publish_folder("cenovnik-local-target-atomic", |folder| {
+            let target = LocalFolderTarget::new(folder);
+            let published = render_csv(&[row_priced(27_900)]);
+            target
+                .publish(&published, OUTLET, NOW)
+                .expect("the first publish should land");
+
+            // The folder exists, so `create_dir_all` is a no-op success — but
+            // nothing new can be created inside it, so the body cannot stage.
+            // The published file itself stays writable: a publish that wrote
+            // the destination in place would still succeed here.
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500))
+                .expect("read-only permissions should set");
+            let result = target.publish(&render_csv(&[row_priced(31_900)]), OUTLET, NOW);
+            // Restored before asserting, so the folder can be cleaned up.
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))
+                .expect("permissions should restore");
+
+            let error = result.expect_err("a folder that cannot stage the body cannot publish");
+            assert_eq!(error.code(), "file_system_error");
+
+            let served = std::fs::read(folder.join(OUTLET_FILE)).expect("the file should read");
+            assert_eq!(
+                served.as_slice(),
+                published.as_bytes(),
+                "a fetch during a failed publish reads the previous cenovnik, byte for byte"
+            );
+            assert_eq!(entries(folder), [OUTLET_FILE]);
+        });
+    }
+
+    /// The name an outlet publishes under is deterministic, and it has to be
+    /// (req. 13, rule 6). The name its body *stages* under must not be: two
+    /// writers publishing one outlet at once — two windows, an import racing a
+    /// price edit, two installs syncing one folder — would otherwise stage into
+    /// a single path, and the second write would tear the body the first is
+    /// about to rename into place. That is the exact failure the staging step
+    /// exists to prevent.
+    #[test]
+    fn two_publishes_of_one_outlet_never_stage_into_the_same_file() {
+        let first = staging_file_name(OUTLET);
+        let second = staging_file_name(OUTLET);
+        assert_ne!(first, second, "a staged body is per call, never per outlet");
+
+        for staged in [&first, &second] {
+            // Still a sibling of the published file — a rename is only atomic
+            // within one directory — and still hidden from what a web root
+            // would list as a cenovnik.
+            assert!(!staged.contains(['/', '\\']), "{staged}");
+            assert!(staged.starts_with(&format!(".{OUTLET_FILE}")), "{staged}");
+            assert!(staged.ends_with(".tmp"), "{staged}");
+        }
+    }
+
+    /// A publish can also fail after the body has staged, and the temporary is
+    /// then a half-published cenovnik sitting in a folder the shop serves.
+    /// Nothing else would ever clean it up, so the publish itself must.
+    #[test]
+    fn a_publish_that_fails_after_staging_removes_its_temporary() {
+        with_publish_folder("cenovnik-local-target-temp-cleanup", |folder| {
+            // A directory is the one thing a rename can never replace, so the
+            // body stages and the rename over the destination is what fails.
+            std::fs::create_dir(folder.join(OUTLET_FILE)).expect("the blocker should be created");
+
+            let error = LocalFolderTarget::new(folder)
+                .publish(&render_csv(&[row_priced(27_900)]), OUTLET, NOW)
+                .expect_err("a destination that cannot be replaced cannot publish");
+            assert_eq!(error.code(), "file_system_error");
+
+            assert_eq!(
+                entries(folder),
+                [OUTLET_FILE],
+                "the staged body must not be left in the folder the shop serves"
+            );
         });
     }
 
