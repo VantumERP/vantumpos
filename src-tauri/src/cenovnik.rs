@@ -487,10 +487,17 @@ mod tests {
         );
     }
 
+    /// Spelled as the literal CRLF rather than through `LINE_ENDING` on purpose:
+    /// a test that reads the constant it is guarding is a tautology and passes
+    /// for any line ending at all.
     #[test]
     fn every_row_ends_with_crlf() {
         let csv = render_csv(&[row_priced(100)]);
-        assert_eq!(csv.matches(LINE_ENDING).count(), 2, "{csv:?}");
-        assert!(csv.ends_with(LINE_ENDING), "{csv:?}");
+        assert_eq!(csv.matches("\r\n").count(), 2, "{csv:?}");
+        assert!(csv.ends_with("\r\n"), "{csv:?}");
+        assert!(
+            !csv.replace("\r\n", "").contains(['\r', '\n']),
+            "no bare CR or LF may survive outside a CRLF pair: {csv:?}"
+        );
     }
 }
