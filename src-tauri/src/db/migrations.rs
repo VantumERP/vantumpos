@@ -997,6 +997,85 @@ CREATE TABLE processing_activities (
 );
 "#,
     },
+    Migration {
+        version: 19,
+        name: "cenovnik_snapshots_and_unit_price_fields",
+        sql: r#"
+-- SW-12, the archive half (req. 14). ZZP čl. 6 st. 5 obliges a trader who
+-- publishes a cenovnik to enable comparison of „prethodno objavljenih cena“ with
+-- „cena objavljenih u realnom vremenu“, so a publication may never be overwritten
+-- by the next one — every published file is its own row, kept verbatim.
+--
+-- There is deliberately NO `updated_at` and NO current-snapshot pointer column.
+-- „The current cenovnik for a prodajni objekat“ is DERIVED as that outlet's newest
+-- row — MAX(generated_at), ties broken by the larger id — because a stored pointer
+-- is a second source of truth that two writers can leave aimed at a snapshot which
+-- is no longer the newest, and čl. 6 st. 4 binds the shop to whatever the current
+-- one says.
+CREATE TABLE cenovnik_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Čl. 6 st. 2 „posebno za svaki prodajni objekat“: one cenovnik per outlet, so
+    -- the outlet is part of the archive's identity and a blank one is a snapshot
+    -- of nothing.
+    prodajno_mesto TEXT NOT NULL CHECK (prodajno_mesto <> ''),
+    -- RFC3339, passed in as `now: &str` by the command layer like every other
+    -- decision timestamp in this schema. Never datetime('now').
+    generated_at TEXT NOT NULL,
+    row_count INTEGER NOT NULL CHECK (row_count >= 0),
+    content_hash TEXT NOT NULL CHECK (content_hash <> ''),
+    -- The rendered file, byte for byte. An archive holding only a hash could not
+    -- answer WHAT was published, which is the one question st. 5 exists to allow.
+    body TEXT NOT NULL,
+    -- NULL until a publish target accepted the body. A generated-but-unpublished
+    -- snapshot is an honest and expected state: with no target configured (req. 15
+    -- — a founder decision, not an engineering one) generation still happens and a
+    -- price save must not fail because of it.
+    published_at TEXT,
+    published_target TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_cenovnik_snapshots_prodajno_mesto
+    ON cenovnik_snapshots(prodajno_mesto, generated_at);
+-- What was published is evidence — čl. 6 st. 4 makes the shop answerable for the
+-- prices in it — so the body, its hash and its identity are immutable in the
+-- engine rather than by convention in a command.
+CREATE TRIGGER trg_cenovnik_snapshots_telo_nepromenljivo
+BEFORE UPDATE OF prodajno_mesto, generated_at, row_count, content_hash, body, created_at
+    ON cenovnik_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'Objavljeni cenovnik je nepromenljiv — nova cena je novi snimak.');
+END;
+-- The one field written after the fact: a snapshot is generated first and only
+-- then accepted by a target. Recorded once, because restamping it would move the
+-- publication date of a file that was published on a different day.
+CREATE TRIGGER trg_cenovnik_snapshots_objava_jednom
+BEFORE UPDATE OF published_at, published_target ON cenovnik_snapshots
+WHEN OLD.published_at IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'Objava snimka cenovnika je već zabeležena i ne može da se menja.');
+END;
+-- No DELETE trigger on purpose. Čl. 213 gives the archive a two-year limitation
+-- floor, not a „trajno“ duty, so the retention purge must be able to reach an
+-- expired snapshot.
+
+-- Req. 10. Čl. 6 st. 2's second sentence pulls st. 1 into the published file, so a
+-- cenovnik carrying only the prodajna cena does not discharge the duty.
+-- `products.unit_of_measure` (v1) is the measure the goods are SOLD in; this is
+-- the measure the jedinična cena is EXPRESSED in, and for a 0,75 l bottle sold by
+-- the piece the two differ. Nullable, because a product priced per piece may
+-- legitimately have neither.
+ALTER TABLE products ADD COLUMN jedinicna_cena_jedinica TEXT;
+-- The content of one selling unit in that measure, in milli-units: 0,75 l is
+-- 750000. NULL means one selling unit IS one of the measure, so the jedinična cena
+-- equals the prodajna cena. Without this column the unit price of anything sold by
+-- package could only ever be a copy of the sale price, which is exactly the defect
+-- req. 10 names. A sadržaj without its measure divides by nothing and cannot
+-- produce a price, so the schema refuses that half-state.
+ALTER TABLE products ADD COLUMN jedinicna_cena_sadrzaj_milli INTEGER
+    CHECK (jedinicna_cena_sadrzaj_milli IS NULL
+           OR (jedinicna_cena_sadrzaj_milli > 0 AND jedinicna_cena_jedinica IS NOT NULL));
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -2545,6 +2624,325 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             // Storage limitation (req. 6) must stay reachable: this log is never trajno.
             conn.execute("DELETE FROM audit_events WHERE id = 900", [])
                 .expect("an expired audit row must remain deletable");
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// SW-12 req. 10 and 14. The published cenovnik is an archive, not a cache:
+    /// ZZP čl. 6 st. 5 obliges the trader to enable comparison of prethodno
+    /// objavljene cene against cene objavljene u realnom vremenu, which is only
+    /// possible if every publication survives the next one. And čl. 6 st. 2's
+    /// second sentence pulls st. 1 into the file, so the catalog has to be able to
+    /// express a jedinična cena — not only a prodajna cena.
+    #[test]
+    fn migration_v19_adds_the_cenovnik_archive_and_the_unit_price_fields() {
+        let path = test_database_path("migration_v19_schema");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            assert!(
+                table_exists(&conn, "cenovnik_snapshots"),
+                "cenovnik_snapshots should exist after v19"
+            );
+
+            for column in [
+                "id",
+                "prodajno_mesto",
+                "generated_at",
+                "row_count",
+                "content_hash",
+                "body",
+                "published_at",
+                "published_target",
+                "created_at",
+            ] {
+                assert!(
+                    column_exists(&conn, "cenovnik_snapshots", column),
+                    "cenovnik_snapshots should carry {column}"
+                );
+            }
+
+            // Req. 10: the unit price and the measure it is expressed in. Both are
+            // nullable — a product sold and priced per piece legitimately has none.
+            for column in ["jedinicna_cena_jedinica", "jedinicna_cena_sadrzaj_milli"] {
+                assert!(
+                    column_exists(&conn, "products", column),
+                    "products should carry {column}"
+                );
+            }
+
+            conn.execute_batch(
+                "INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+                     VALUES (190, 'PDV 20', 2000, '2026-08-02T08:00:00Z', '2026-08-02T08:00:00Z');
+                 INSERT INTO products (id, name, sku, unit_of_measure, sale_price_minor, tax_rate_id,
+                                       created_at, updated_at)
+                     VALUES (190, 'Sok od jabuke 0,75 l', 'SOK-075', 'kom', 27900, 190,
+                             '2026-08-02T08:00:00Z', '2026-08-02T08:00:00Z');",
+            )
+            .expect("seed a product");
+
+            conn.execute(
+                "UPDATE products SET jedinicna_cena_jedinica = 'l',
+                                     jedinicna_cena_sadrzaj_milli = 750000
+                 WHERE id = 190",
+                [],
+            )
+            .expect("a measure with its content should store");
+
+            // A sadržaj without the measure it is expressed in cannot produce a
+            // jedinična cena, so the schema refuses to hold that half-state.
+            assert!(
+                conn.execute(
+                    "UPDATE products SET jedinicna_cena_jedinica = NULL WHERE id = 190",
+                    [],
+                )
+                .is_err(),
+                "a content without its measure must be rejected"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE products SET jedinicna_cena_sadrzaj_milli = 0 WHERE id = 190",
+                    [],
+                )
+                .is_err(),
+                "a zero content would divide the prodajna cena by nothing"
+            );
+
+            // Čl. 6 st. 2 „posebno za svaki prodajni objekat“: the outlet is part of
+            // the archive's identity, so a blank one is not a snapshot of anything.
+            assert!(
+                conn.execute(
+                    "INSERT INTO cenovnik_snapshots (prodajno_mesto, generated_at, row_count,
+                                                     content_hash, body, created_at)
+                     VALUES ('', '2026-08-02T09:00:00Z', 1, 'h1', 'telo', '2026-08-02T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a snapshot without a prodajno mesto must be rejected"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO cenovnik_snapshots (prodajno_mesto, generated_at, row_count,
+                                                     content_hash, body, created_at)
+                     VALUES ('Radnja 1', '2026-08-02T09:00:00Z', 1, '', 'telo', '2026-08-02T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a snapshot without a content hash cannot be compared against anything"
+            );
+
+            conn.execute_batch(
+                "INSERT INTO cenovnik_snapshots (id, prodajno_mesto, generated_at, row_count,
+                                                 content_hash, body, created_at)
+                     VALUES (1, 'Radnja 1', '2026-08-02T09:00:00Z', 2, 'h-stari', 'stari cenovnik',
+                             '2026-08-02T09:00:00Z'),
+                            (2, 'Radnja 1', '2026-08-02T11:00:00Z', 2, 'h-novi', 'novi cenovnik',
+                             '2026-08-02T11:00:00Z'),
+                            (3, 'Radnja 2', '2026-08-02T10:00:00Z', 1, 'h-druga', 'druga radnja',
+                             '2026-08-02T10:00:00Z');",
+            )
+            .expect("three snapshots should insert");
+
+            // No stored current-snapshot pointer exists to go stale: „the current
+            // cenovnik for an outlet“ is derived as the newest row for that outlet.
+            let current: Vec<(String, i64)> = conn
+                .prepare(
+                    "SELECT prodajno_mesto, id FROM cenovnik_snapshots s
+                      WHERE generated_at = (SELECT MAX(generated_at) FROM cenovnik_snapshots
+                                             WHERE prodajno_mesto = s.prodajno_mesto)
+                      ORDER BY prodajno_mesto",
+                )
+                .expect("current query should prepare")
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("current query should run")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("current rows should collect");
+            assert_eq!(
+                current,
+                vec![("Radnja 1".to_string(), 2), ("Radnja 2".to_string(), 3)],
+                "each outlet's current snapshot is its newest one, and the older one survives"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// A published cenovnik is evidence of what the shop offered at a moment in
+    /// time (čl. 6 st. 4 binds the trader to the prices it published), so the body
+    /// and its hash are immutable in the engine. DELETE stays open, because the
+    /// čl. 213 two-year limitation gives the archive a retention floor rather than
+    /// a trajno duty and the purge (req. 14) must be able to reach an expired row.
+    #[test]
+    fn migration_v19_keeps_a_published_snapshot_immutable_and_purgeable() {
+        let path = test_database_path("migration_v19_immutable");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            assert!(
+                !column_exists(&conn, "cenovnik_snapshots", "updated_at"),
+                "a snapshot is never edited, so it must not carry an updated_at"
+            );
+
+            conn.execute(
+                "INSERT INTO cenovnik_snapshots (id, prodajno_mesto, generated_at, row_count,
+                                                 content_hash, body, created_at)
+                 VALUES (10, 'Radnja 1', '2026-08-02T09:00:00Z', 2, 'h-10', 'telo cenovnika',
+                         '2026-08-02T09:00:00Z')",
+                [],
+            )
+            .expect("a snapshot should insert");
+
+            for (column, value) in [
+                ("body", "izmenjeno telo"),
+                ("content_hash", "h-lazni"),
+                ("generated_at", "2026-08-02T12:00:00Z"),
+                ("prodajno_mesto", "Radnja 2"),
+                ("row_count", "9"),
+                ("created_at", "2026-08-02T12:00:00Z"),
+            ] {
+                assert!(
+                    conn.execute(
+                        &format!(
+                            "UPDATE cenovnik_snapshots SET {column} = '{value}' WHERE id = 10"
+                        ),
+                        [],
+                    )
+                    .is_err(),
+                    "no path may rewrite {column} on a snapshot"
+                );
+            }
+
+            // The publication stamp is the one thing written after the fact: a
+            // snapshot is generated first and only then accepted by a target.
+            conn.execute(
+                "UPDATE cenovnik_snapshots
+                    SET published_at = '2026-08-02T09:00:05Z', published_target = 'local_folder'
+                  WHERE id = 10",
+                [],
+            )
+            .expect("an unpublished snapshot should accept its publication stamp");
+
+            assert!(
+                conn.execute(
+                    "UPDATE cenovnik_snapshots
+                        SET published_at = '2026-08-03T09:00:00Z', published_target = 'drugo'
+                      WHERE id = 10",
+                    [],
+                )
+                .is_err(),
+                "a publication already recorded must not be restamped"
+            );
+
+            let (published_at, target): (String, String) = conn
+                .query_row(
+                    "SELECT published_at, published_target FROM cenovnik_snapshots WHERE id = 10",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the publication stamp should read back");
+            assert_eq!(published_at, "2026-08-02T09:00:05Z");
+            assert_eq!(target, "local_folder");
+
+            conn.execute("DELETE FROM cenovnik_snapshots WHERE id = 10", [])
+                .expect("an expired snapshot must remain purgeable");
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// The installed-base path: a till already running v18 gets the archive and the
+    /// unit-price columns without losing a product, a price or a price_history row.
+    #[test]
+    fn migration_v19_preserves_pre_existing_products_and_price_history() {
+        let path = test_database_path("migration_v19_survival");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw connection");
+            conn.execute_batch(
+                "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);",
+            )
+            .expect("migrations table");
+
+            for migration in &MIGRATIONS[..18] {
+                assert!(
+                    migration.version <= 18,
+                    "the pre-v19 prefix must stop at v18, saw v{}",
+                    migration.version
+                );
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, '2026-08-01T00:00:00Z')",
+                    rusqlite::params![migration.version, migration.name],
+                )
+                .expect("record the migration");
+            }
+
+            conn.execute_batch(
+                "INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+                     VALUES (191, 'PDV 20', 2000, '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');
+                 INSERT INTO products (id, name, sku, barcode, unit_of_measure, sale_price_minor,
+                                       purchase_price_minor, tax_rate_id, minimum_stock_milli,
+                                       created_at, updated_at)
+                     VALUES (191, 'Marama svilena', 'MAR-001', '0123456789012', 'kom', 249900,
+                             120000, 191, 0, '2026-07-01T08:00:00Z', '2026-07-20T08:00:00Z');
+                 INSERT INTO price_history (id, product_id, effective_from, price_minor, source, created_at)
+                     VALUES (77, 191, '2026-07-20T08:00:00Z', 249900, 'update', '2026-07-20T08:00:00Z');",
+            )
+            .expect("seed v18-era catalog rows");
+            drop(conn);
+
+            let db = Db::new(&path).expect("database should migrate forward");
+            let conn = db.open().expect("database should open");
+
+            let (name, barcode, price, updated): (String, String, i64, String) = conn
+                .query_row(
+                    "SELECT name, barcode, sale_price_minor, updated_at FROM products WHERE id = 191",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("the pre-v19 product must survive verbatim");
+            assert_eq!(name, "Marama svilena");
+            assert_eq!(
+                barcode, "0123456789012",
+                "the leading zero of a 13-digit barcode must survive as text"
+            );
+            assert_eq!(price, 249900);
+            assert_eq!(updated, "2026-07-20T08:00:00Z");
+
+            let (jedinica, sadrzaj): (Option<String>, Option<i64>) = conn
+                .query_row(
+                    "SELECT jedinicna_cena_jedinica, jedinicna_cena_sadrzaj_milli
+                     FROM products WHERE id = 191",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the new unit-price columns exist");
+            assert_eq!(
+                (jedinica, sadrzaj),
+                (None, None),
+                "the unit-price fields are nullable and deliberately not backfilled — \
+                 a guessed jedinična cena would be published as fact"
+            );
+
+            let (history_product, history_price): (i64, i64) = conn
+                .query_row(
+                    "SELECT product_id, price_minor FROM price_history WHERE id = 77",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the price_history row v19 publishes off must survive with its id");
+            assert_eq!(history_product, 191);
+            assert_eq!(history_price, 249900);
+
+            let snapshots: i64 = conn
+                .query_row("SELECT COUNT(*) FROM cenovnik_snapshots", [], |row| {
+                    row.get(0)
+                })
+                .expect("the archive should exist on an upgraded database");
+            assert_eq!(
+                snapshots, 0,
+                "an upgrade publishes nothing on its own — that is the write path's job"
+            );
         }
         std::fs::remove_file(&path).expect("test database should be removed");
     }

@@ -141,6 +141,7 @@ mod tests {
         "personnel_records",
         "data_breaches",
         "processing_activities",
+        "cenovnik_snapshots",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -176,6 +177,7 @@ mod tests {
         "idx_audit_events_at",
         "idx_audit_events_actor",
         "idx_data_breaches_saznanje_at",
+        "idx_cenovnik_snapshots_prodajno_mesto",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -806,7 +808,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 18);
+                assert_eq!(migration_count, 19);
             },
         );
     }
