@@ -749,6 +749,80 @@ statement the shop answers for under čl. 6 st. 4. No claim of breach anywhere, 
 
 ---
 
+### SW-12 fix batch — the guard's published-file filter and the half-configured jedinična cena (2026-08-02)
+
+Two review passes over the surface SW-12 had just shipped. **In both, the code was changed and not the
+sentence that described it** — which is the direction this project has got wrong five times, every one
+of them in something a shop owner actually reads.
+
+| # | Defect | Fix |
+|---|---|---|
+| Task 9 review | `current_published_cenovnik` took the outlet's newest snapshot with **no filter on `published_at`**, while the register and this section both said *„no published snapshot means no guard and no block“*. Since `PublishTargetSettings::NotConfigured` is the `#[default]` and `publish_current` archives with `published_at = NULL`, that is not a corner case but **the pilot's own expected state while F-13 is open**. The consequence was operator-facing and permanent: a destructive „Cena je iznad objavljenog cenovnika“ at the till and a never-deleted `compliance_log` row citing čl. 6 st. 4 against a trader who had published nothing — on a provision reaching only *„Trgovac koji objavi cenovnik iz stava 2“* | `7577d80` — the lookup now takes the newest snapshot whose `published_at` is set, so „current“ for the guard is deliberately **not** „current“ for the archive list and the čl. 213 purge. Three tests, each failing without the filter; `seed_published_till` now publishes through an accepting target so the existing till tests still exercise the fired path for the right reason |
+| **D2 — the mirror half-state** `[LEGAL]` | `normalize_product_request` rejected only a *sadržaj with no jedinica*. The mirror — **a jedinica with no sadržaj** — passed, and `CenovnikRow::jedinicna_cena_minor` then published the sale price **as** the jedinična cena. A 0,75 l bottle at 279,00 whose operator typed „l“ and left the package content blank published `279.00;l` where the figure is `372.00` — a wrong **published** jedinična cena the shop answers for under ZZP čl. 6 st. 1 and st. 4, with no warning at any layer | `7399559` — both layers now refuse that pair when the measure differs from the jedinica mere (case-insensitively), which is the only combination where the v19 NULL-sadržaj convention is *provably* wrong; a shop that really sells one litre per piece still says so with a sadržaj of 1. The convention itself now appears in the field help, so a deliberate blank reads as deliberate. +3 cargo, +3 bun |
+| **D1 — doc overstated the code** `[ACCURACY]` | The SW-12 clause in `docs/SERBIAN-LAW-COMPLIANCE.md` said the column mapping *„is configuration and a schema swap is a routine release“*. It is the constant `cenovnik::COLUMNS`: swapping it is a **code change and a release we ship**, not something the shop can do | `7399559` |
+| **D3 — comment overstated the schema** `[ACCURACY]` | The comment above the pair's validation claimed the v19 CHECK *„refuses both half-states“*. It refuses one — `sadrzaj_milli IS NULL OR (>0 AND jedinica IS NOT NULL)` — and the permitted one is exactly what made D2 possible | `7399559` |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **450 passed** / 0 failed, 30 files (was 447) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **784 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 781) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+3 cargo / +3 bun** over the Task 9 baseline. Latest migration: **v19**, unchanged and frozen.
+
+**Where reqs. 10–18 stand after this batch, stated as status and not as achievement.**
+
+| Req. | State |
+|---|---|
+| **10** — jedinična cena + jedinica mere in the file | **Built, with one hole found during this gate run and NOT fixed — see below.** The eight columns ship, the unconfigured article publishes an empty cell rather than a guessed one, and D2 closed the catalog-form route to a wrong figure |
+| **11** — publish rides the write | **Built.** Four paths, each threading `record_offered_price_change`'s own answer; the catalog path adds the jedinična cena, the one published price that log does not watch |
+| **12** — till guard | **Built.** Warns and never blocks, above-published direction only, names its exhibit, logs a `cenovnik_price_divergence` row; arms only off a file a target accepted |
+| **13** — anonymously fetchable endpoint | **NOT built and disclosed.** There is no endpoint. The seven fetchability rules ship as a contract in `PublishTarget`'s doc comment with a test that keeps them there; the acceptance criteria are F-13 (b) |
+| **14** — published-price archive | **Built.** Immutable dated snapshots, current derived not stored, čl. 213 two-year floor, purge that never reaches an outlet's current file |
+| **15** — hosted cenovnik endpoint | **NOT built and disclosed.** Founder decision **F-13**. A shop with a website discharges čl. 6 st. 2 today by pointing the local folder at what that site serves |
+| **16** — CSV default, mapping in configuration | **Half met and disclosed.** The shape ships; `cenovnik::COLUMNS` is a constant, so a swap is a release. D1 removed the doc sentence that said otherwise |
+| **17** — document that the čl. 6 st. 6 standard does not exist | **Done.** §6 items 4 and 12 carry the verified absence, the quarterly Sl. glasnik RS trigger through 01.05.2027, and the *practice, not law* label |
+| **18** — 100.000 preduzetnik, `200.000` unreachable | **Done.** `legal.rs::cenovnik_not_published`, and the blanket guard on the fixed-sum phrasing *„200.000 dinara“* — the bare literal cannot be the needle, because ZoR čl. 274 st. 2 legitimately fines a preduzetnik *„od 200.000 do 400.000“* elsewhere in the product |
+
+**Newly identified and still open — the import path can publish a wrong jedinična cena, and clobbers the
+jedinica mere on the way.** `[LEGAL]` D2 closed the catalog form. It did **not** close `importer.rs`,
+which writes `products` with its own `UPDATE`/`INSERT` and never calls `normalize_product_request`.
+Two things follow, and the second is the one that reaches the published file:
+
+- `unit_of_measure` is `required: false` in the mapping step (`ImportWizard.tsx:109`), and when it is
+  unmapped `optional_value` returns `""`, which `importer.rs:744` substitutes with **`"kom"`**. A
+  routine price-update import therefore **silently rewrites the jedinica mere of every article it
+  matches**, whatever the shop had configured.
+- The pair `jedinicna_cena_jedinica` / `jedinicna_cena_sadrzaj_milli` is left untouched by that UPDATE,
+  and the v19 CHECK constrains only the pair against itself, never against `unit_of_measure`. So an
+  article legitimately configured under the NULL-sadržaj convention — `unit_of_measure = 'l'`,
+  jedinica `'l'`, sadržaj blank, which is exactly what D2's new gate *accepts* — comes out of an import
+  as `unit_of_measure = 'kom'` with jedinica still `'l'`, and the batch's own republish
+  (`importer.rs:450`) then publishes the D2 figure verbatim. Reproduced against the shipped tree: the
+  archived body reads `SKU-1;;Hleb;kom;372.00;372.00;l;02-08-2026` — *372,00 RSD po litru* for goods the
+  same row says are sold **po komadu**. Same wrong published number as D2, same čl. 6 st. 1 / st. 4
+  exposure, and **no warning at any layer**, because the operator never typed the unit at all.
+
+**Also open, and smaller.** Nothing previews the computed jedinična cena at the point of entry: the
+product sheet takes the measure and the package content and shows no derived figure, so a sadržaj typed
+as `0,075` instead of `0,75` publishes 3.720,00 per litre and the only place that figure is legible is
+the archived file in Podešavanja → Cenovnik, after publication. And `unit_of_measure` is a **published
+column** (`jedinica_mere`) that no path republishes on: `republish_cenovnik` fires on
+`offer_changed || unit_price_changed`, so a catalog edit that changes only the measure leaves the
+published file carrying the old one until the next price move. That is the deliberate čl. 6 st. 3
+reading — *„trenutnim cenama“* — and it is recorded here as a consequence of it, not as a defect.
+
+Everything listed under *Still open after this batch* in the section above stands unchanged: the hosted
+endpoint (F-13), the čl. 6 st. 6 portal account, req. 16's constant, a publish failure that is visible
+only in the log, and the purge fence that can leave the guard silent rather than wrong.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.
