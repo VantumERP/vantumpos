@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
+use crate::cenovnik::NotConfigured;
 use crate::clock::utc_now;
+use crate::commands::cenovnik::publish_current;
 use crate::commands::settings::{ShopProfile, SHOP_PROFILE_KEY};
 use crate::db::Db;
 use crate::price_history::{
@@ -544,7 +546,7 @@ pub fn create_product(
     )?;
     let product_id = tx.last_insert_rowid();
 
-    record_offered_price_change(
+    let offer_changed = record_offered_price_change(
         &tx,
         product_id,
         None,
@@ -561,6 +563,7 @@ pub fn create_product(
         .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     tx.commit()?;
+    republish_cenovnik(&connection, offer_changed, &now)?;
     Ok(product)
 }
 
@@ -663,7 +666,7 @@ pub fn update_product(
         ],
     )?;
 
-    record_offered_price_change(
+    let offer_changed = record_offered_price_change(
         &tx,
         id,
         before,
@@ -680,6 +683,7 @@ pub fn update_product(
         .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     tx.commit()?;
+    republish_cenovnik(&connection, offer_changed, &now)?;
     Ok(product)
 }
 
@@ -710,8 +714,9 @@ pub fn set_product_active(
         return Err(AppError::not_found("Artikal nije pronađen."));
     }
 
+    let mut offer_changed = false;
     if let Some(before_state) = before {
-        record_offered_price_change(
+        offer_changed = record_offered_price_change(
             &tx,
             id,
             Some(before_state),
@@ -729,7 +734,33 @@ pub fn set_product_active(
         .ok_or_else(|| AppError::not_found("Artikal nije pronađen."))?;
 
     tx.commit()?;
+    republish_cenovnik(&connection, offer_changed, &now)?;
     Ok(product)
+}
+
+/// SW-12 req. 11: a change to what the shop offers republishes the cenovnik,
+/// because čl. 6 st. 3 requires the published file to match the outlet's current
+/// prices *„u realnom vremenu“*. The offered-price log decides what counts as
+/// one, so an edit that only renames an article publishes nothing.
+///
+/// After the commit, never before it — čl. 6 st. 4 binds the shop to what it
+/// published, so a publish target must not be handed a price this transaction
+/// could still roll back.
+///
+/// `NotConfigured` is the target until Task 7 lands the founder's hosting
+/// decision (req. 15): the snapshot is generated and archived, and nothing
+/// leaves the machine.
+fn republish_cenovnik(
+    connection: &Connection,
+    offer_changed: bool,
+    now: &str,
+) -> Result<(), AppError> {
+    if !offer_changed {
+        return Ok(());
+    }
+
+    publish_current(connection, &NotConfigured, now)?;
+    Ok(())
 }
 
 pub fn save_category(db: &Db, request: SaveCategoryRequest) -> Result<CategorySummary, AppError> {

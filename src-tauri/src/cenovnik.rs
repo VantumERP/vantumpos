@@ -24,6 +24,8 @@ use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+use crate::app_error::AppError;
+
 /// The published columns, in order (req. 16).
 ///
 /// ASCII on purpose: these are machine field names in a file meant to be parsed,
@@ -156,6 +158,55 @@ pub fn content_hash(body: &str) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+/// What a publish target did with a rendered cenovnik.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// The target accepted the body. The string names where it went and is what
+    /// `cenovnik_snapshots.published_target` records — a snapshot that claims a
+    /// publication has to say which one.
+    Published { target: String },
+    /// Nothing is configured to receive the file (req. 15 — a founder decision,
+    /// not an engineering one). NOT an error: the snapshot is still generated
+    /// and archived, and a price save must never fail because the hosting
+    /// question is open. A generated-but-unpublished snapshot is an honest state
+    /// the v19 schema models with a NULL `published_at`.
+    NotConfigured,
+}
+
+/// Where a rendered cenovnik goes once it exists.
+///
+/// Task 7 (reqs. 13, 15) adds the local-folder implementation and writes the
+/// čl. 6 st. 5 fetchability rules into this contract. Task 3 needs only the seam
+/// and the honest default below, so the republish-on-write path can land without
+/// pre-empting the hosting decision.
+///
+/// **The publish path calls this AFTER the price write has committed** — a
+/// target must never be handed prices the catalog then rolls back, because
+/// čl. 6 st. 4 binds the shop to what it published.
+pub trait PublishTarget {
+    fn publish(
+        &self,
+        body: &str,
+        prodajno_mesto: &str,
+        now: &str,
+    ) -> Result<PublishOutcome, AppError>;
+}
+
+/// The default target: none. Nothing leaves the machine, and nothing fails.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NotConfigured;
+
+impl PublishTarget for NotConfigured {
+    fn publish(
+        &self,
+        _body: &str,
+        _prodajno_mesto: &str,
+        _now: &str,
+    ) -> Result<PublishOutcome, AppError> {
+        Ok(PublishOutcome::NotConfigured)
+    }
 }
 
 fn line(fields: &[String]) -> String {

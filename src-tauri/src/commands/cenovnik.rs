@@ -1,0 +1,762 @@
+//! SW-12 — republish on write (req. 11).
+//!
+//! Čl. 6 st. 3 obliges the trader to keep the published cenovnik matching the
+//! outlet's current prices *„u realnom vremenu“*, so publication hangs off the
+//! write that moved a price. A nightly batch is a defect against st. 3, not a
+//! simplification.
+//!
+//! The trigger is the offered-price log (migration v9), not a second source of
+//! truth: `record_offered_price_change` already decides what counts as a change
+//! to what the shop offers — a new price, an article going off the shelf, one
+//! coming back — and this module republishes exactly when it recorded one.
+//!
+//! Legal authority: `docs/REMAINING-SW-VERIFIED-RULES.md` §2b, §3 V2, §4 req. 11.
+//! Design: `docs/superpowers/specs/2026-08-01-sw12-cenovnik-design.md` §2.
+
+use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::app_error::AppError;
+use crate::cenovnik::{content_hash, render_csv, CenovnikRow, PublishOutcome, PublishTarget};
+use crate::commands::settings::{CompanySettings, COMPANY_SETTINGS_KEY};
+
+/// Renders the outlet's cenovnik from the catalog, archives it as a new
+/// immutable snapshot, and offers it to `target`. Returns the snapshot's id.
+///
+/// `None` means the shop has not identified a prodajni objekat yet, so there was
+/// nothing to key an archive lineage on — see [`prodajno_mesto`]. That is not an
+/// error: a price save must not fail because the settings are half-filled.
+///
+/// **Call this after the price write has committed.** The archive is evidence of
+/// what the shop offered, and čl. 6 st. 4 binds it to the published prices, so a
+/// target must never be handed a price the catalog then rolled back. The cost of
+/// that ordering is that a crash between the two leaves the published file one
+/// price behind — which is what a stale cenovnik in fact is, and the next price
+/// write repairs it.
+///
+/// The target is a parameter rather than a lookup so this can land ahead of
+/// Task 7's real targets; [`crate::cenovnik::NotConfigured`] is today's default.
+pub fn publish_current(
+    connection: &Connection,
+    target: &dyn PublishTarget,
+    now: &str,
+) -> Result<Option<i64>, AppError> {
+    let Some(prodajno_mesto) = prodajno_mesto(connection)? else {
+        return Ok(None);
+    };
+
+    let rows = load_offered_rows(connection)?;
+    let body = render_csv(&rows);
+    let hash = content_hash(&body);
+    let row_count = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+
+    // A plain INSERT — never `INSERT OR REPLACE`, never `ON CONFLICT DO UPDATE`.
+    // SQLite runs REPLACE as a DELETE plus an INSERT, which no v19 immutability
+    // trigger sees, so an upsert here would silently rewrite an already
+    // published body and drop its `published_at`. Two writes in the same second
+    // are two rows; the later id wins as current.
+    connection.execute(
+        "INSERT INTO cenovnik_snapshots (
+            prodajno_mesto, generated_at, row_count, content_hash, body, created_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?2)",
+        params![prodajno_mesto, now, row_count, hash, body],
+    )?;
+    let snapshot_id = connection.last_insert_rowid();
+
+    if let PublishOutcome::Published { target } = target.publish(&body, &prodajno_mesto, now)? {
+        // The one field written after the fact, and the v19 trigger allows it
+        // once: a snapshot is generated first and only then accepted by a target.
+        connection.execute(
+            "UPDATE cenovnik_snapshots
+             SET published_at = ?1, published_target = ?2
+             WHERE id = ?3 AND published_at IS NULL",
+            params![now, target, snapshot_id],
+        )?;
+    }
+
+    Ok(Some(snapshot_id))
+}
+
+/// The outlet the archive is keyed on, derived from the shop's own settings.
+///
+/// **Never accepted from the frontend.** `prodajno_mesto` is free text with no
+/// foreign key, so one typo starts a second archive lineage and leaves the real
+/// outlet with no published snapshot for the till guard to compare against.
+///
+/// The address is the prodajni objekat — Zakon o trgovini čl. 2 t. 3, a
+/// physically and functionally unified space — and is already how `kalkulacije`
+/// records it, so the two modules name the same outlet the same way. A shop that
+/// left the address blank is still identified by its name, which
+/// `save_company_settings` refuses to leave empty.
+///
+/// `None` means neither is on file. The v19 CHECK refuses a blank outlet, and a
+/// placeholder lineage would be a claim about which shop published what, so
+/// nothing is generated at all.
+fn prodajno_mesto(connection: &Connection) -> Result<Option<String>, AppError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![COMPANY_SETTINGS_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    // A corrupt settings row must not take a price save down with it; it lands
+    // in the „no outlet identified“ branch instead, which the panel can show.
+    let Some(company) =
+        stored.and_then(|value| serde_json::from_str::<CompanySettings>(&value).ok())
+    else {
+        return Ok(None);
+    };
+
+    let identified = [company.address.as_str(), company.shop_name.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .find(|candidate| !candidate.is_empty())
+        .map(str::to_string);
+    Ok(identified)
+}
+
+/// The catalog as the published file sees it: what the outlet actually offers.
+///
+/// Inactive articles are left out — an article off the shelf is not offered, so
+/// it has no price to publish, which is the same reading `price_history` takes.
+///
+/// No ORDER BY: `render_csv` sorts by šifra so that the same catalog always
+/// renders the same bytes and therefore the same `content_hash`, whatever order
+/// this SELECT happens to return.
+fn load_offered_rows(connection: &Connection) -> Result<Vec<CenovnikRow>, AppError> {
+    let mut statement = connection.prepare(
+        "SELECT p.sku,
+                p.barcode,
+                p.name,
+                p.unit_of_measure,
+                p.sale_price_minor,
+                p.jedinicna_cena_jedinica,
+                p.jedinicna_cena_sadrzaj_milli,
+                -- datum_azuriranja is the date the published price took effect,
+                -- so it comes from the offered-price log; products.updated_at
+                -- moves on any edit. A product with no logged price falls back
+                -- to its own stamp rather than publishing an empty date.
+                COALESCE(
+                    (SELECT MAX(h.effective_from)
+                     FROM price_history h
+                     WHERE h.product_id = p.id AND h.price_minor IS NOT NULL),
+                    p.updated_at
+                )
+         FROM products p
+         WHERE p.active = 1",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(CenovnikRow {
+                sifra: row.get(0)?,
+                barkod: row.get(1)?,
+                naziv: row.get(2)?,
+                jedinica_mere: row.get(3)?,
+                prodajna_cena_minor: row.get(4)?,
+                jedinicna_cena_jedinica: row.get(5)?,
+                jedinicna_cena_sadrzaj_milli: row.get(6)?,
+                datum_azuriranja: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use rusqlite::params;
+
+    use super::publish_current;
+    use crate::app_error::AppError;
+    use crate::cenovnik::{NotConfigured, PublishOutcome, PublishTarget};
+    use crate::commands::catalog::{
+        create_product, set_product_active, update_product, SaveProductRequest,
+    };
+    use crate::db::{test_database_path, Db};
+
+    const OUTLET: &str = "Bulevar oslobođenja 1, Novi Sad";
+
+    fn with_database(test_name: &str, test: impl FnOnce(&Db)) {
+        let path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            seed(&db);
+            test(&db);
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    fn seed(db: &Db) {
+        let connection = db.open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO categories (id, name, created_at, updated_at)
+                 VALUES (1, 'Piće', '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z')",
+                [],
+            )
+            .expect("category should insert");
+        connection
+            .execute(
+                "INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+                 VALUES (1, 'PDV 20', 2000, '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z')",
+                [],
+            )
+            .expect("tax rate should insert");
+        // A 0,75 l bottle: the v19 unit-price pair is populated so the published
+        // file has a jedinična cena to carry (req. 10).
+        connection
+            .execute(
+                "INSERT INTO products (
+                    id, name, sku, barcode, category_id, unit_of_measure,
+                    sale_price_minor, purchase_price_minor, tax_rate_id,
+                    minimum_stock_milli, active,
+                    jedinicna_cena_jedinica, jedinicna_cena_sadrzaj_milli,
+                    created_at, updated_at
+                 )
+                 VALUES (1, 'Sok od jabuke 0,75 l', 'SOK-075', '8600000000010', 1, 'kom',
+                         27900, 15000, 1, 0, 1, 'l', 750,
+                         '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z')",
+                [],
+            )
+            .expect("offered product should insert");
+        connection
+            .execute(
+                "INSERT INTO products (
+                    id, name, sku, barcode, category_id, unit_of_measure,
+                    sale_price_minor, purchase_price_minor, tax_rate_id,
+                    minimum_stock_milli, active, created_at, updated_at
+                 )
+                 VALUES (2, 'Arhivirani artikal', 'ARH-1', NULL, 1, 'kom',
+                         100000, 70000, 1, 0, 0,
+                         '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z')",
+                [],
+            )
+            .expect("archived product should insert");
+        set_company(db, OUTLET, "Butik Ana");
+    }
+
+    fn set_company(db: &Db, address: &str, shop_name: &str) {
+        let connection = db.open().expect("database should open");
+        let value_json = serde_json::json!({
+            "shopName": shop_name,
+            "address": address,
+            "pib": "",
+            "registrationNumber": "",
+            "phone": "",
+            "logoPath": null,
+            "currency": "RSD",
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO settings (key, value_json, updated_at)
+                 VALUES ('company', ?1, '2026-06-18T10:00:00Z')
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                params![value_json],
+            )
+            .expect("company settings should save");
+    }
+
+    fn admin_id(db: &Db) -> i64 {
+        db.open()
+            .expect("database should open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist")
+    }
+
+    fn product_request(sale_price_minor: i64) -> SaveProductRequest {
+        SaveProductRequest {
+            name: "Sok od jabuke 0,75 l".to_string(),
+            sku: "SOK-075".to_string(),
+            barcode: Some("8600000000010".to_string()),
+            category_id: Some(1),
+            unit_of_measure: "kom".to_string(),
+            sale_price_minor,
+            purchase_price_minor: 15000,
+            tax_rate_id: 1,
+            minimum_stock_milli: 0,
+            allow_negative_stock: false,
+            active: true,
+            perishable: false,
+            perishable_justification: None,
+            external_source: None,
+            manufacturer_name: None,
+            importer_name: None,
+            country_of_origin: None,
+            official_goods_code: None,
+            barcode_kind: None,
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SnapshotRow {
+        id: i64,
+        prodajno_mesto: String,
+        generated_at: String,
+        row_count: i64,
+        content_hash: String,
+        body: String,
+        published_at: Option<String>,
+        published_target: Option<String>,
+    }
+
+    fn snapshots(db: &Db) -> Vec<SnapshotRow> {
+        let connection = db.open().expect("database should open");
+        let mut statement = connection
+            .prepare(
+                "SELECT id, prodajno_mesto, generated_at, row_count, content_hash, body,
+                        published_at, published_target
+                 FROM cenovnik_snapshots
+                 ORDER BY id",
+            )
+            .expect("snapshot query should prepare");
+        let rows = statement
+            .query_map([], |row| {
+                Ok(SnapshotRow {
+                    id: row.get(0)?,
+                    prodajno_mesto: row.get(1)?,
+                    generated_at: row.get(2)?,
+                    row_count: row.get(3)?,
+                    content_hash: row.get(4)?,
+                    body: row.get(5)?,
+                    published_at: row.get(6)?,
+                    published_target: row.get(7)?,
+                })
+            })
+            .expect("snapshot query should run");
+        rows.collect::<Result<Vec<_>, _>>()
+            .expect("snapshot rows should read")
+    }
+
+    /// The v19 reading of „the outlet's current cenovnik“: newest first, a
+    /// same-second tie broken by the larger id.
+    fn current_snapshot(db: &Db, prodajno_mesto: &str) -> Option<i64> {
+        let connection = db.open().expect("database should open");
+        connection
+            .query_row(
+                "SELECT id FROM cenovnik_snapshots
+                 WHERE prodajno_mesto = ?1
+                 ORDER BY generated_at DESC, id DESC
+                 LIMIT 1",
+                params![prodajno_mesto],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    fn data_rows(body: &str) -> Vec<String> {
+        body.lines()
+            .skip(1)
+            .map(|line| line.trim_end_matches('\r').to_string())
+            .collect()
+    }
+
+    struct RecordingTarget {
+        bodies: RefCell<Vec<String>>,
+    }
+
+    impl RecordingTarget {
+        fn new() -> Self {
+            Self {
+                bodies: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PublishTarget for RecordingTarget {
+        fn publish(
+            &self,
+            body: &str,
+            prodajno_mesto: &str,
+            _now: &str,
+        ) -> Result<PublishOutcome, AppError> {
+            self.bodies.borrow_mut().push(body.to_string());
+            Ok(PublishOutcome::Published {
+                target: format!("test://{prodajno_mesto}"),
+            })
+        }
+    }
+
+    /// Req. 11: price change → republish. Čl. 6 st. 3 wants the published file to
+    /// match the current prices „u realnom vremenu“, so the republish rides on
+    /// the write that moved them.
+    #[test]
+    fn a_price_write_publishes_a_new_snapshot() {
+        with_database("a_price_write_publishes_a_new_snapshot", |db| {
+            let acting = admin_id(db);
+            update_product(db, 1, product_request(31_900), acting).expect("price should save");
+
+            let archived = snapshots(db);
+            assert_eq!(archived.len(), 1, "{archived:?}");
+            assert_eq!(archived[0].prodajno_mesto, OUTLET);
+            assert_eq!(archived[0].row_count, 1);
+            assert!(
+                archived[0].body.contains("319.00"),
+                "the archived file must carry the price that was just saved: {:?}",
+                archived[0].body
+            );
+        });
+    }
+
+    /// „Saving a non-price field does not republish.“ Čl. 6 st. 3 is about
+    /// prices, and the price log is what decides: an edit that changes no
+    /// offered price appends nothing there and publishes nothing here.
+    #[test]
+    fn a_non_price_edit_publishes_nothing() {
+        with_database("a_non_price_edit_publishes_nothing", |db| {
+            let acting = admin_id(db);
+            let renamed = SaveProductRequest {
+                name: "Sok od jabuke, 0,75 l".to_string(),
+                minimum_stock_milli: 5_000,
+                ..product_request(27_900)
+            };
+            update_product(db, 1, renamed, acting).expect("edit should save");
+
+            assert!(
+                snapshots(db).is_empty(),
+                "an edit that moved no price is not a price change"
+            );
+        });
+    }
+
+    #[test]
+    fn creating_a_product_publishes_the_new_offer() {
+        with_database("creating_a_product_publishes_the_new_offer", |db| {
+            let acting = admin_id(db);
+            let request = SaveProductRequest {
+                name: "Kefir 0,5 l".to_string(),
+                sku: "KEFIR-05".to_string(),
+                barcode: None,
+                ..product_request(12_900)
+            };
+            create_product(db, request, acting).expect("product should create");
+
+            let archived = snapshots(db);
+            assert_eq!(archived.len(), 1, "{archived:?}");
+            assert_eq!(archived[0].row_count, 2, "both offered products");
+            assert!(
+                archived[0].body.contains("KEFIR-05"),
+                "{:?}",
+                archived[0].body
+            );
+        });
+    }
+
+    /// Taking an article off the shelf ends its offering, so the published file
+    /// must stop naming it — the same event the price log records as a gap.
+    #[test]
+    fn deactivating_a_product_republishes_the_file_without_it() {
+        with_database(
+            "deactivating_a_product_republishes_the_file_without_it",
+            |db| {
+                let acting = admin_id(db);
+                set_product_active(db, 1, false, acting).expect("product should deactivate");
+
+                let archived = snapshots(db);
+                assert_eq!(archived.len(), 1, "{archived:?}");
+                assert_eq!(archived[0].row_count, 0);
+                assert!(
+                    !archived[0].body.contains("SOK-075"),
+                    "an article that is no longer offered has no published price: {:?}",
+                    archived[0].body
+                );
+            },
+        );
+    }
+
+    /// Two writes in the same second are the case the v19 tie-break exists for.
+    /// They are two snapshots — the archive is append-only, and nothing dedupes
+    /// them into one row, because the idiomatic dedupe is an upsert.
+    #[test]
+    fn two_writes_in_the_same_second_are_two_snapshots_and_the_later_one_is_current() {
+        with_database(
+            "two_writes_in_the_same_second_are_two_snapshots_and_the_later_one_is_current",
+            |db| {
+                let connection = db.open().expect("database should open");
+                let first = publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                    .expect("first publish")
+                    .expect("an identified outlet publishes");
+                let second = publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                    .expect("second publish")
+                    .expect("an identified outlet publishes");
+
+                assert_ne!(first, second);
+                let archived = snapshots(db);
+                assert_eq!(archived.len(), 2, "{archived:?}");
+                assert_eq!(archived[0].generated_at, archived[1].generated_at);
+                assert_eq!(
+                    current_snapshot(db, OUTLET),
+                    Some(second),
+                    "on a same-second tie the larger id is the current cenovnik"
+                );
+            },
+        );
+    }
+
+    /// Čl. 6 st. 5 requires enabling comparison of „prethodno objavljenih cena“
+    /// with the real-time ones, so the file a republish replaces must remain
+    /// retrievable exactly as it was published.
+    #[test]
+    fn the_previous_snapshot_survives_the_republish_byte_for_byte() {
+        with_database(
+            "the_previous_snapshot_survives_the_republish_byte_for_byte",
+            |db| {
+                let connection = db.open().expect("database should open");
+                publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                    .expect("first publish");
+                let before = snapshots(db);
+                let first = before[0].clone();
+
+                let acting = admin_id(db);
+                update_product(db, 1, product_request(31_900), acting).expect("price should save");
+
+                let after = snapshots(db);
+                assert_eq!(after.len(), 2, "{after:?}");
+                assert_eq!(after[0], first, "the earlier publication is untouched");
+                assert!(after[0].body.contains("279.00"), "{:?}", after[0].body);
+                assert!(after[1].body.contains("319.00"), "{:?}", after[1].body);
+                assert_ne!(after[0].content_hash, after[1].content_hash);
+            },
+        );
+    }
+
+    /// SQLite runs REPLACE as a DELETE plus an INSERT, which no v19 immutability
+    /// trigger sees: an upsert here would silently rewrite an already published
+    /// body and drop its `published_at`. The engine cannot close that without
+    /// closing the čl. 213 purge, so the write path carries the constraint — and
+    /// therefore has to assert it.
+    ///
+    /// The needles are composed at run time so this assertion cannot match its
+    /// own source text.
+    #[test]
+    fn the_publish_path_never_replaces_or_upserts_a_snapshot() {
+        const THIS_MODULE: &str = include_str!("cenovnik.rs");
+        const CATALOG: &str = include_str!("catalog.rs");
+
+        // Statements only: the shipped half with every Rust and SQL comment line
+        // dropped, so the prose explaining the rule cannot trip the rule.
+        fn statements(source: &str) -> String {
+            source
+                .split_once("\n#[cfg(test)]")
+                .map_or(source, |(code, _tests)| code)
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    !trimmed.starts_with("//") && !trimmed.starts_with("--")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let replace = format!("INSERT {} REPLACE", "OR");
+        let upsert = format!("{} CONFLICT", "ON");
+        for (name, source) in [("cenovnik", THIS_MODULE), ("catalog", CATALOG)] {
+            let shipped = statements(source);
+            assert!(
+                !shipped.contains(&replace),
+                "{name} must not REPLACE a row on the publish path"
+            );
+            assert!(
+                !(shipped.contains("cenovnik_snapshots") && shipped.contains(&upsert)),
+                "{name} must not upsert cenovnik_snapshots"
+            );
+        }
+
+        assert!(
+            statements(THIS_MODULE).contains("INSERT INTO cenovnik_snapshots"),
+            "and the plain INSERT this test is guarding must actually be here"
+        );
+    }
+
+    /// `prodajno_mesto` is free text with no foreign key: one typo starts a
+    /// second archive lineage and leaves the real outlet with no published
+    /// snapshot at all. It is derived from the shop's own settings — the
+    /// function takes no outlet parameter for a caller to get wrong.
+    #[test]
+    fn the_outlet_is_derived_from_settings() {
+        with_database("the_outlet_is_derived_from_settings", |db| {
+            let connection = db.open().expect("database should open");
+            publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z").expect("publish");
+            assert_eq!(snapshots(db)[0].prodajno_mesto, OUTLET);
+
+            // A shop that never filled in the address is still an outlet: its
+            // name identifies it, and `save_company_settings` refuses to leave
+            // that empty.
+            set_company(db, "   ", "Butik Ana");
+            publish_current(&connection, &NotConfigured, "2026-08-02T10:15:00Z").expect("publish");
+            assert_eq!(snapshots(db)[1].prodajno_mesto, "Butik Ana");
+        });
+    }
+
+    /// The v19 CHECK refuses a blank `prodajno_mesto`, and a placeholder lineage
+    /// would be a lie about which outlet published what. So an unidentified shop
+    /// publishes nothing — and its price save still succeeds, because čl. 6 is
+    /// not a reason a till cannot change a price.
+    #[test]
+    fn an_unidentified_shop_publishes_nothing_and_the_price_save_still_succeeds() {
+        with_database(
+            "an_unidentified_shop_publishes_nothing_and_the_price_save_still_succeeds",
+            |db| {
+                set_company(db, "", "");
+                let connection = db.open().expect("database should open");
+                assert_eq!(
+                    publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                        .expect("an unidentified outlet is not an error"),
+                    None
+                );
+
+                let acting = admin_id(db);
+                update_product(db, 1, product_request(31_900), acting)
+                    .expect("the price save must not fail for want of an outlet");
+                assert!(snapshots(db).is_empty());
+            },
+        );
+    }
+
+    /// Req. 15 is a founder decision. Until it lands the file is generated and
+    /// archived but goes nowhere, and the v19 NULL `published_at` says exactly
+    /// that instead of claiming a publication that never happened.
+    #[test]
+    fn with_no_target_the_snapshot_is_generated_but_not_published() {
+        with_database(
+            "with_no_target_the_snapshot_is_generated_but_not_published",
+            |db| {
+                let connection = db.open().expect("database should open");
+                publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                    .expect("a missing target is not an error");
+
+                let archived = snapshots(db);
+                assert_eq!(archived.len(), 1, "{archived:?}");
+                assert_eq!(archived[0].published_at, None);
+                assert_eq!(archived[0].published_target, None);
+                assert!(!archived[0].body.is_empty());
+            },
+        );
+    }
+
+    /// What the target receives has to be what the archive keeps, byte for byte
+    /// — otherwise the archive answers a different question than „what did the
+    /// shop publish“ (čl. 6 st. 5).
+    #[test]
+    fn a_target_that_accepts_the_body_gets_the_archived_bytes_and_is_recorded() {
+        with_database(
+            "a_target_that_accepts_the_body_gets_the_archived_bytes_and_is_recorded",
+            |db| {
+                let connection = db.open().expect("database should open");
+                let target = RecordingTarget::new();
+                publish_current(&connection, &target, "2026-08-02T09:15:00Z").expect("publish");
+
+                let archived = snapshots(db);
+                assert_eq!(archived.len(), 1, "{archived:?}");
+                assert_eq!(
+                    target.bodies.borrow().as_slice(),
+                    &[archived[0].body.clone()]
+                );
+                assert_eq!(
+                    archived[0].published_at.as_deref(),
+                    Some("2026-08-02T09:15:00Z")
+                );
+                assert_eq!(
+                    archived[0].published_target.as_deref(),
+                    Some(format!("test://{OUTLET}").as_str())
+                );
+            },
+        );
+    }
+
+    /// An archived article is not offered, so it has no price to publish — the
+    /// same reading `price_history` takes of an inactive product.
+    #[test]
+    fn only_offered_products_reach_the_published_file() {
+        with_database("only_offered_products_reach_the_published_file", |db| {
+            let connection = db.open().expect("database should open");
+            publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z").expect("publish");
+
+            let archived = snapshots(db);
+            assert_eq!(archived[0].row_count, 1);
+            assert_eq!(data_rows(&archived[0].body).len(), 1);
+            assert!(
+                !archived[0].body.contains("ARH-1"),
+                "{:?}",
+                archived[0].body
+            );
+        });
+    }
+
+    /// Req. 10: the v19 unit-price pair has to reach the file, which means the
+    /// publish path has to actually select it. 279,00 RSD for 0,75 l is 372,00
+    /// RSD per litar.
+    #[test]
+    fn the_published_row_carries_the_v19_unit_price_fields() {
+        with_database(
+            "the_published_row_carries_the_v19_unit_price_fields",
+            |db| {
+                let connection = db.open().expect("database should open");
+                publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                    .expect("publish");
+
+                let body = snapshots(db).remove(0).body;
+                let fields: Vec<String> = data_rows(&body)
+                    .remove(0)
+                    .split(';')
+                    .map(str::to_string)
+                    .collect();
+                assert_eq!(fields[4], "279.00", "{fields:?}");
+                assert_eq!(fields[5], "372.00", "{fields:?}");
+                assert_eq!(fields[6], "l", "{fields:?}");
+            },
+        );
+    }
+
+    /// `datum_azuriranja` is the date the published price took effect, so it
+    /// comes from the offered-price log rather than from `products.updated_at`,
+    /// which any edit bumps. Without a logged price it falls back to the row's
+    /// own stamp rather than publishing an empty date.
+    #[test]
+    fn the_published_date_is_when_the_price_last_moved() {
+        with_database("the_published_date_is_when_the_price_last_moved", |db| {
+            let connection = db.open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                     VALUES (1, '2026-07-20T08:00:00Z', 27900, 'update', '2026-07-20T08:00:00Z')",
+                    [],
+                )
+                .expect("price history should insert");
+            connection
+                .execute(
+                    "INSERT INTO products (
+                        id, name, sku, category_id, unit_of_measure,
+                        sale_price_minor, purchase_price_minor, tax_rate_id,
+                        minimum_stock_milli, active, created_at, updated_at
+                     )
+                     VALUES (3, 'Bez istorije', 'BEZ-1', 1, 'kom', 5000, 3000, 1, 0, 1,
+                             '2026-06-18T10:00:00Z', '2026-06-18T10:00:00Z')",
+                    [],
+                )
+                .expect("product without history should insert");
+
+            publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z").expect("publish");
+
+            let body = snapshots(db).remove(0).body;
+            let dates: Vec<String> = data_rows(&body)
+                .iter()
+                .map(|row| {
+                    row.split(';')
+                        .next_back()
+                        .expect("datum_azuriranja")
+                        .to_string()
+                })
+                .collect();
+            // Rendered in sifra order: BEZ-1 then SOK-075.
+            assert_eq!(dates, ["18-06-2026", "20-07-2026"], "{body:?}");
+        });
+    }
+}
