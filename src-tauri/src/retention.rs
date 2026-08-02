@@ -38,6 +38,15 @@
 //! again: the class row and the row's own day, the second applied through
 //! [`expiry_cutoff`] where the cut is made.
 //!
+//! **`cenovnik_archive`** (SW-12 req. 14). The archive of published cenovnici,
+//! on [`CENOVNIK_ARCHIVE_RETENTION_YEARS`] — ZZP čl. 213's two-year limitation.
+//! **The one class here that holds no personal data**, which is why
+//! [`RecordClass::personal_data`] exists: this table is the app's shared
+//! retention table (req. 42), while the čl. 47 register is about obrada podataka
+//! o ličnosti and owes this class no entry. Two clocks again — the shared row,
+//! and each snapshot's own `generated_at` through [`expiry_cutoff`] — plus one
+//! rule no date can override: an outlet's current cenovnik is never removed.
+//!
 //! **The direction of the trade-off, once.** Under-retention outranks
 //! over-retention for this shop: the ZEOR čl. 50 st. 1 tač. 3 offence is *"ako
 //! ne čuva trajno"*. Every decision here therefore fails safe toward KEEPING —
@@ -84,6 +93,23 @@ pub const STANDALONE_OVERTIME_LOG_FLOOR_YEARS: i32 = 3;
 /// governs the register of processing activities, and copying it onto this log
 /// would put the product in permanent breach of storage limitation (req. 6).
 pub const ACCESS_LOG_RETENTION_YEARS: i32 = 2;
+
+/// SW-12 req. 14. How long a published cenovnik stays in the archive.
+///
+/// ZZP čl. 6 st. 5 is why the archive exists — the trader must enable a
+/// comparison of *„prethodno objavljenih cena“* with the realtime ones — and
+/// **ZZP čl. 213 is what ends it**: prekršajno gonjenje for a čl. 6 breach is
+/// barred two years from the commission, after which a file older than that
+/// answers no question anybody may still put. Two years, therefore, and the shop
+/// can push the class floor forward (never back) if it wants a longer record.
+///
+/// **Never `trajno`.** Nothing in the ZZP prescribes a period for a published
+/// cenovnik, and keeping every snapshot of every price change forever is storage
+/// for its own sake. The one row this period may never reach is the outlet's
+/// *current* cenovnik — čl. 6 st. 4 binds the shop to it and st. 5 has nothing
+/// to compare against without it — which is a rule about *which row*, not about
+/// how long, and it lives in `commands::cenovnik::purge_expired_snapshots`.
+pub const CENOVNIK_ARCHIVE_RETENTION_YEARS: i32 = 2;
 
 /// The tables no purge, reset, restore or backup-prune path may ever reduce
 /// (§4d: *"the trajno classes must be structurally unreachable"*).
@@ -176,10 +202,18 @@ pub enum RecordClass {
     /// this record and of no other — which is exactly why the audit log and the
     /// breach log must not borrow it.
     ProcessingRegister,
+    /// SW-12 req. 14 — the archive of published cenovnici.
+    /// [`CENOVNIK_ARCHIVE_RETENTION_YEARS`] on ZZP čl. 213, and the **one class
+    /// in this table that holds no personal data at all**: it carries article
+    /// prices and the outlet's name. It is here because
+    /// `retention_policies` is the app's shared retention table (SW11-SW15 §3
+    /// req. 42), not a personal-data-only one — see [`Self::personal_data`],
+    /// which is what keeps it out of the čl. 47 register.
+    CenovnikArchive,
 }
 
 impl RecordClass {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::WorktimeClassification,
         Self::WorktimeOvertimeLog,
         Self::WorktimeDraft,
@@ -187,6 +221,7 @@ impl RecordClass {
         Self::Credentials,
         Self::AccessLog,
         Self::ProcessingRegister,
+        Self::CenovnikArchive,
     ];
 
     /// The `record_class` value stored in `retention_policies`.
@@ -199,6 +234,7 @@ impl RecordClass {
             Self::Credentials => "credentials",
             Self::AccessLog => "access_log",
             Self::ProcessingRegister => "processing_register",
+            Self::CenovnikArchive => "cenovnik_archive",
         }
     }
 
@@ -222,7 +258,29 @@ impl RecordClass {
             Self::Credentials => "PIN i lozinka (heš vrednosti)",
             Self::AccessLog => "Evidencija pristupa podacima o ličnosti",
             Self::ProcessingRegister => "Evidencija o radnjama obrade",
+            Self::CenovnikArchive => "Arhiva objavljenih cenovnika",
         }
+    }
+
+    /// Does this class hold podaci o ličnosti?
+    ///
+    /// **Why the question is asked here.** `retention_policies` is the shared
+    /// retention table (SW11-SW15 §3 req. 42) and not a ZZPL artefact: it holds
+    /// whatever period this app applies to anything. The čl. 47 evidencija
+    /// radnji obrade *is* a ZZPL artefact — it records radnje obrade **podataka
+    /// o ličnosti** — so `cl47::every_configured_retention_class_reaches_the_register`
+    /// owes an entry for every class that answers `true` here, and must not
+    /// invent one for a class that answers `false`. Listing an archive of
+    /// article prices as a radnja obrade would be a misstatement to the
+    /// Poverenik in the shop's own name, which is the one thing that document
+    /// exists to avoid.
+    ///
+    /// [`Self::CenovnikArchive`] is the only `false` today: the published file
+    /// carries šifra, naziv, jedinica mere and prices, and the archive rows add
+    /// the prodajno mesto and the timestamps. No data subject appears in any of
+    /// it.
+    pub fn personal_data(self) -> bool {
+        !matches!(self, Self::CenovnikArchive)
     }
 
     /// ZEOR čl. 7 st. 2 / čl. 25 st. 3 — `trajno`. A class that answers `true`
@@ -272,6 +330,7 @@ impl RecordClass {
             Self::WorktimeOvertimeLog => retention_floor(now, STANDALONE_OVERTIME_LOG_FLOOR_YEARS),
             Self::WorktimeDraft | Self::Credentials => parse_iso_date(date_only(now)).map(iso_date),
             Self::AccessLog => retention_floor(now, ACCESS_LOG_RETENTION_YEARS),
+            Self::CenovnikArchive => retention_floor(now, CENOVNIK_ARCHIVE_RETENTION_YEARS),
         }
     }
 
@@ -303,6 +362,9 @@ impl RecordClass {
             }
             Self::ProcessingRegister => {
                 "Evidencija o radnjama obrade (ZZPL čl. 47 st. 1). Čuva se trajno (čl. 47 st. 7) i rok se ne podešava; na zahtev se stavlja na uvid Povereniku (čl. 47 st. 8). Aplikacija je izuzima iz automatskog čišćenja i iz resetovanja podataka. Vraćanje iz rezervne kopije vraća celu bazu na stanje iz te kopije, pa i ovu evidenciju — zaštita na tom putu je rezervna kopija zatečenog stanja koju aplikacija napravi pre vraćanja. Automatsko čišćenje starih rezervnih kopija ne postoji. Evidencija se iznova generiše iz podešavanja programa i iz tabele rokova čuvanja, pa ne može da navede rok koji program ne primenjuje."
+            }
+            Self::CenovnikArchive => {
+                "Arhiva objavljenih cenovnika (ZZP čl. 6 st. 5 — poređenje ranije objavljenih cena sa cenama objavljenim u realnom vremenu). Podrazumevani rok je dve godine, koliko traje zastarelost prekršajnog gonjenja iz ZZP čl. 213; rok se pomera samo unapred. Automatsko čišćenje uklanja samo snimke starije od tog roka i nikada važeći cenovnik prodajnog objekta, koji ostaje bez obzira na starost. Ova arhiva ne sadrži podatke o ličnosti — u njoj su šifre, nazivi i cene artikala i naziv prodajnog mesta."
             }
         }
     }
@@ -637,7 +699,8 @@ mod tests {
     use super::{
         draft_purge_eligible, expiry_cutoff, extend_retain_until, is_purgeable, load_policy,
         overtime_log_purge_eligible, retention_floor, seed_retention_policies, RecordClass,
-        RetentionPolicy, ACCESS_LOG_RETENTION_YEARS, STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
+        RetentionPolicy, ACCESS_LOG_RETENTION_YEARS, CENOVNIK_ARCHIVE_RETENTION_YEARS,
+        STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -939,6 +1002,59 @@ mod tests {
         );
         assert_eq!(retention_floor("2026-8-1", 3), None);
         assert_eq!(retention_floor("", 3), None);
+    }
+
+    /// SW-12 req. 14. Čl. 6 st. 5's comparison duty is what keeps the published
+    /// cenovnik on file; ZZP čl. 213 is what ends it — two years from the
+    /// commission of the prekršaj, after which no proceeding can be brought and
+    /// an older file answers nothing anybody may still ask.
+    ///
+    /// The floor lives in the shared table rather than at the cut, so a legal
+    /// hold or an extended rok reaches the cenovnik purge exactly the way it
+    /// reaches every other class (SW11-SW15 §3 req. 42).
+    #[test]
+    fn the_cenovnik_archive_carries_the_cl_213_two_year_floor() {
+        with_state("retention_cenovnik_archive_floor", |state| {
+            seed_retention_policies(state, "2026-08-01T08:00:00Z").expect("classes should seed");
+            let connection = state.db().open().expect("database should open");
+
+            assert_eq!(
+                CENOVNIK_ARCHIVE_RETENTION_YEARS, 2,
+                "ZZP čl. 213 — zastarelost je dve godine"
+            );
+
+            let policy = load_policy(&connection, RecordClass::CenovnikArchive)
+                .expect("the cenovnik archive class must be seeded");
+            assert_eq!(
+                policy.retain_until.as_deref(),
+                Some("2028-08-01"),
+                "two years from the day the class was recorded"
+            );
+            assert!(
+                !policy.never_purge,
+                "a published cenovnik is evidence with a limitation, not a trajno record"
+            );
+            assert!(!is_purgeable(&policy, "2028-07-31"));
+            assert!(is_purgeable(&policy, "2028-08-01"));
+        });
+    }
+
+    /// The archive holds article prices and the outlet's name and nothing about
+    /// any data subject, so it is a retention class without being a radnja
+    /// obrade podataka o ličnosti. `retention_policies` is the app's **shared**
+    /// retention table (SW11-SW15 §3 req. 42), not a personal-data-only one, and
+    /// `cl47::every_configured_retention_class_reaches_the_register` reads this
+    /// predicate to decide which classes the čl. 47 register owes an entry.
+    #[test]
+    fn every_class_but_the_cenovnik_archive_is_personal_data() {
+        for class in RecordClass::ALL {
+            assert_eq!(
+                class.personal_data(),
+                class != RecordClass::CenovnikArchive,
+                "{} is on the wrong side of the čl. 47 register's boundary",
+                class.key()
+            );
+        }
     }
 
     /// SW-13 req. 22 / SW-10 req. 6. The access log's period, and the direction

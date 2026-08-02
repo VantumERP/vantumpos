@@ -95,6 +95,16 @@ pub fn run() {
             let _ =
                 commands::personnel::purge_expired_classes(&state_for_launch, &clock::utc_now()?);
 
+            // SW-12 req. 14: the same shape for the archive of published
+            // cenovnici, on ZZP čl. 213's two-year limitation. Separate from the
+            // sweep above because it is a separate duty over data that is not
+            // personal at all — `PurgeableClass` names class C of SW-13 and must
+            // keep naming only that. Best-effort for the same reason, and it
+            // fails toward keeping: an outlet's current cenovnik is never
+            // reached, whatever the clock says.
+            let _ =
+                commands::cenovnik::purge_expired_snapshots(&state_for_launch, &clock::utc_now()?);
+
             // Best-effort automatic backup: a failure here is already
             // recorded as a failed backup_job and must never prevent the
             // app from opening.
@@ -116,6 +126,7 @@ pub fn run() {
                 // čl. 5 st. 1 tač. 5 review would accept.
                 if let Ok(now) = clock::utc_now() {
                     let _ = commands::personnel::purge_expired_classes(&state_for_timer, &now);
+                    let _ = commands::cenovnik::purge_expired_snapshots(&state_for_timer, &now);
                 }
             });
 
@@ -187,6 +198,8 @@ pub fn run() {
             commands::catalog::catalog_list_categories,
             commands::catalog::catalog_save_category,
             commands::catalog::catalog_prethodna_cena,
+            commands::cenovnik::cenovnik_list_snapshots,
+            commands::cenovnik::cenovnik_get_snapshot,
             commands::campaigns::campaigns_list,
             commands::campaigns::campaigns_get,
             commands::campaigns::campaigns_validate,

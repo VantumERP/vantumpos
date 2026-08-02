@@ -454,6 +454,11 @@ fn no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move() {
             AdjustableClass::WorktimeDraft => "radne verzije",
             AdjustableClass::Credentials => "pin i lozinka",
             AdjustableClass::AccessLog => "evidencija pristupa",
+            // Not an employee's data at all — the čl. 23 notice has no row about
+            // it, and this arm exists so that a class added to the shared
+            // retention table still costs a decision about what, if anything,
+            // the employee is told it is called.
+            AdjustableClass::CenovnikArchive => "arhiva objavljenih cenovnika",
         })
         .collect();
 

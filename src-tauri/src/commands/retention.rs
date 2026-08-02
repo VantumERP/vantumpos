@@ -64,14 +64,20 @@ pub enum AdjustableClass {
     /// The čl. 48 evidencija pristupa — `ACCESS_LOG_RETENTION_YEARS` by default,
     /// and the class req. 22 is written about.
     AccessLog,
+    /// The archive of published cenovnici (SW-12 req. 14) —
+    /// `CENOVNIK_ARCHIVE_RETENTION_YEARS` by default, on ZZP čl. 213's
+    /// two-year limitation. Nothing in the ZZP prescribes a period, so a shop
+    /// that wants a longer published-price record may keep one.
+    CenovnikArchive,
 }
 
 impl AdjustableClass {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::WorktimeOvertimeLog,
         Self::WorktimeDraft,
         Self::Credentials,
         Self::AccessLog,
+        Self::CenovnikArchive,
     ];
 
     /// The shared `retention_policies` row this variant moves.
@@ -81,6 +87,7 @@ impl AdjustableClass {
             Self::WorktimeDraft => RecordClass::WorktimeDraft,
             Self::Credentials => RecordClass::Credentials,
             Self::AccessLog => RecordClass::AccessLog,
+            Self::CenovnikArchive => RecordClass::CenovnikArchive,
         }
     }
 

@@ -1,4 +1,5 @@
-//! SW-12 — republish on write (req. 11).
+//! SW-12 — republish on write (req. 11), and the archive that keeps what was
+//! published (req. 14).
 //!
 //! Čl. 6 st. 3 obliges the trader to keep the published cenovnik matching the
 //! outlet's current prices *„u realnom vremenu“*, so publication hangs off the
@@ -20,16 +21,33 @@
 //! file does not carry is the mismatch st. 3 exists for, whichever path moved
 //! it.
 //!
-//! Legal authority: `docs/REMAINING-SW-VERIFIED-RULES.md` §2b, §3 V2, §4 req. 11.
-//! Design: `docs/superpowers/specs/2026-08-01-sw12-cenovnik-design.md` §2.
+//! **The archive half.** Čl. 6 st. 5 obliges the trader to enable a comparison
+//! of *„prethodno objavljenih cena“* with the realtime ones, so a publication is
+//! never overwritten by the next one: [`list_snapshots`] reads an outlet's
+//! lineage newest first and [`read_snapshot`] gives back the file byte for byte.
+//! [`purge_expired_snapshots`] is the other end of it — ZZP čl. 213 bars the
+//! prekršaj two years from commission, and after that a superseded file answers
+//! nothing. It is the **only** code in this crate allowed to delete a published
+//! cenovnik, and it never reaches an outlet's current one.
+//!
+//! Legal authority: `docs/REMAINING-SW-VERIFIED-RULES.md` §2b, §3 V2, §4 reqs.
+//! 11, 14. Design: `docs/superpowers/specs/2026-08-01-sw12-cenovnik-design.md`
+//! §2, §3.
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
+use tauri::State;
 
-use crate::app_error::AppError;
+use crate::app_error::{AppError, CommandError};
 use crate::cenovnik::{
     content_hash, render_csv, CenovnikRow, NotConfigured, PublishOutcome, PublishTarget,
 };
 use crate::commands::settings::{CompanySettings, COMPANY_SETTINGS_KEY};
+use crate::retention::{
+    assert_never_purge_intact, expiry_cutoff, is_purgeable, load_policy, never_purge_row_counts,
+    RecordClass, CENOVNIK_ARCHIVE_RETENTION_YEARS,
+};
+use crate::state::AppState;
 
 /// The frozen archive key, minted on the first publish. Its own `settings` row
 /// rather than a column on `cenovnik_snapshots`: v19 is the plan's only new
@@ -111,6 +129,204 @@ pub fn publish_current(
     }
 
     Ok(Some(snapshot_id))
+}
+
+/// „A later cenovnik exists for this row's prodajno mesto“ — a greater
+/// `generated_at`, or on a same-second tie a greater id.
+///
+/// Its negation is v19's reading of *the outlet's current cenovnik*, and it is
+/// written once here so the archive's list, its reader and its purge cannot
+/// drift apart. There is no stored pointer to compare it against: a second
+/// source of truth is exactly what two writers leave aimed at a snapshot that is
+/// no longer the newest, and čl. 6 st. 4 binds the shop to whatever the current
+/// one says.
+///
+/// The correlated subquery names the outer table explicitly, so this fragment
+/// composes into any statement whose FROM (or DELETE) target is
+/// `cenovnik_snapshots`.
+const A_LATER_SNAPSHOT_EXISTS: &str = "EXISTS (
+            SELECT 1 FROM cenovnik_snapshots later
+             WHERE later.prodajno_mesto = cenovnik_snapshots.prodajno_mesto
+               AND (later.generated_at > cenovnik_snapshots.generated_at
+                    OR (later.generated_at = cenovnik_snapshots.generated_at
+                        AND later.id > cenovnik_snapshots.id)))";
+
+/// One published cenovnik as the archive lists it — everything except the file
+/// itself, which [`read_snapshot`] fetches on demand. A shop that has published
+/// on every price move for a year has a lot of bodies, and a list screen needs
+/// none of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CenovnikSnapshotSummary {
+    pub id: i64,
+    pub prodajno_mesto: String,
+    pub generated_at: String,
+    pub row_count: i64,
+    pub content_hash: String,
+    /// `None` while the file was generated and archived but no target accepted
+    /// it — the honest state req. 15 leaves open, not a failure.
+    pub published_at: Option<String>,
+    pub published_target: Option<String>,
+    /// The outlet's newest snapshot: the file čl. 6 st. 4 binds the shop to
+    /// today. **Derived** — see [`A_LATER_SNAPSHOT_EXISTS`].
+    pub current: bool,
+}
+
+/// A published cenovnik together with the file itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CenovnikSnapshotDetail {
+    pub snapshot: CenovnikSnapshotSummary,
+    /// The rendered file, byte for byte as it was archived and as any target
+    /// received it — BOM, CRLF and diacritics included. Čl. 6 st. 5 asks the
+    /// trader to enable a comparison of the previously published prices with the
+    /// realtime ones, and a body that came back normalised would answer a
+    /// different question than „what did this shop publish“.
+    pub body: String,
+}
+
+/// The outlet's archive, newest first (req. 14).
+///
+/// Čl. 6 st. 2 publishes *„posebno za svaki prodajni objekat“*, so the
+/// comparison st. 5 asks for runs inside one outlet's lineage — and the outlet
+/// is the frozen archive key, never a parameter a caller could get wrong. A shop
+/// that has published nothing yet has no key and gets an empty list rather than
+/// an error: there is no archive to read, which is not a fault.
+///
+/// **Not admin-gated, on purpose.** Čl. 6 st. 5 is a duty to *enable* the
+/// comparison and req. 13 requires the published file to be anonymously
+/// fetchable; putting a role check in front of the shop's own copy of a document
+/// the law wants public would be theatre. The archive holds no personal data —
+/// see [`crate::retention::RecordClass::personal_data`].
+pub fn list_snapshots(state: &AppState) -> Result<Vec<CenovnikSnapshotSummary>, AppError> {
+    let connection = state.db().open()?;
+    let Some(outlet) = frozen_outlet(&connection)? else {
+        return Ok(Vec::new());
+    };
+
+    let mut statement = connection.prepare(
+        "SELECT id, prodajno_mesto, generated_at, row_count, content_hash,
+                published_at, published_target
+         FROM cenovnik_snapshots
+         WHERE prodajno_mesto = ?1
+         ORDER BY generated_at DESC, id DESC",
+    )?;
+    let mut rows = statement
+        .query_map(params![outlet], |row| {
+            Ok(CenovnikSnapshotSummary {
+                id: row.get(0)?,
+                prodajno_mesto: row.get(1)?,
+                generated_at: row.get(2)?,
+                row_count: row.get(3)?,
+                content_hash: row.get(4)?,
+                published_at: row.get(5)?,
+                published_target: row.get(6)?,
+                // Filled in below rather than per row: the ORDER BY has already
+                // decided which one it is, and asking the database again row by
+                // row would be a second answer to a question already settled.
+                current: false,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(newest) = rows.first_mut() {
+        newest.current = true;
+    }
+
+    Ok(rows)
+}
+
+/// One archived cenovnik with its file, or `None` when no such snapshot exists.
+///
+/// By id and not by outlet: a snapshot's id is what a divergence record or an
+/// inspector's question names, and an id that belongs to an older lineage is
+/// still this shop's own publication.
+pub fn read_snapshot(
+    state: &AppState,
+    snapshot_id: i64,
+) -> Result<Option<CenovnikSnapshotDetail>, AppError> {
+    let connection = state.db().open()?;
+    let found = connection
+        .query_row(
+            &format!(
+                "SELECT id, prodajno_mesto, generated_at, row_count, content_hash,
+                        published_at, published_target, body, NOT {A_LATER_SNAPSHOT_EXISTS}
+                 FROM cenovnik_snapshots
+                 WHERE id = ?1"
+            ),
+            params![snapshot_id],
+            |row| {
+                Ok(CenovnikSnapshotDetail {
+                    snapshot: CenovnikSnapshotSummary {
+                        id: row.get(0)?,
+                        prodajno_mesto: row.get(1)?,
+                        generated_at: row.get(2)?,
+                        row_count: row.get(3)?,
+                        content_hash: row.get(4)?,
+                        published_at: row.get(5)?,
+                        published_target: row.get(6)?,
+                        current: row.get::<_, i64>(8)? != 0,
+                    },
+                    body: row.get(7)?,
+                })
+            },
+        )
+        .optional()?;
+
+    Ok(found)
+}
+
+/// The time-driven cut over the archive (req. 14).
+///
+/// **This is the only code in the crate permitted to delete a published
+/// cenovnik**, and `the_retention_purge_is_the_only_code_that_deletes_a_published_cenovnik`
+/// is what keeps it that way. v19 carries no DELETE trigger on purpose — čl. 213
+/// gives the archive a two-year limitation rather than a `trajno` duty, so the
+/// purge has to be able to reach an expired snapshot — and no trigger can tell a
+/// purge from a cover-up, so the constraint is a property of the code instead.
+///
+/// **Two clocks and one absolute rule.** The shared `retention_policies` row is
+/// the first clock: a legal hold, or a rok the shop moved forward, refuses the
+/// cut for the whole class. Each snapshot's own `generated_at` is the second,
+/// through [`expiry_cutoff`] — the class floor alone would release every row in
+/// the class from its anniversary onward, which is the axis §4d says must never
+/// be inverted. The rule no date overrides is that an outlet's **current**
+/// cenovnik stays: čl. 6 st. 4 binds the shop to the file in force, and st. 5's
+/// comparison has nothing to compare against once it is gone. A shop that has
+/// not moved a price in three years still has its published cenovnik.
+///
+/// The [`never_purge_row_counts`] / [`assert_never_purge_intact`] fence wraps the
+/// whole transaction, as it does on every other purge path: a future edit that
+/// finds a way to delete a `trajno` row here aborts the cut rather than
+/// committing it.
+pub fn purge_expired_snapshots(state: &AppState, now: &str) -> Result<usize, AppError> {
+    let mut connection = state.db().open()?;
+    let tx = connection.transaction()?;
+    let never_purge_before = never_purge_row_counts(&tx)?;
+
+    let policy = load_policy(&tx, RecordClass::CenovnikArchive)?;
+    // A legal hold, a `trajno` flag or a class floor the day has not reached each
+    // refuse on their own — see `retention::is_purgeable`.
+    if !is_purgeable(&policy, now) {
+        return Ok(0);
+    }
+    // An unreadable day yields no cutoff, and no cutoff means keep.
+    let Some(cutoff) = expiry_cutoff(now, CENOVNIK_ARCHIVE_RETENTION_YEARS) else {
+        return Ok(0);
+    };
+
+    let removed = tx.execute(
+        &format!(
+            "DELETE FROM cenovnik_snapshots
+              WHERE substr(generated_at, 1, 10) < ?1
+                AND {A_LATER_SNAPSHOT_EXISTS}"
+        ),
+        params![cutoff],
+    )?;
+
+    assert_never_purge_intact(&tx, &never_purge_before)?;
+    tx.commit()?;
+
+    Ok(removed)
 }
 
 /// The outlet the archive is keyed on: derived from the shop's own settings the
@@ -254,21 +470,46 @@ fn load_offered_rows(connection: &Connection) -> Result<Vec<CenovnikRow>, AppErr
     Ok(rows)
 }
 
+#[tauri::command]
+pub fn cenovnik_list_snapshots(
+    state: State<'_, AppState>,
+) -> Result<Vec<CenovnikSnapshotSummary>, CommandError> {
+    list_snapshots(state.inner()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn cenovnik_get_snapshot(
+    state: State<'_, AppState>,
+    snapshot_id: i64,
+) -> Result<Option<CenovnikSnapshotDetail>, CommandError> {
+    read_snapshot(state.inner(), snapshot_id).map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
 
     use rusqlite::params;
 
-    use super::publish_current;
+    use super::{list_snapshots, publish_current, purge_expired_snapshots, read_snapshot};
     use crate::app_error::AppError;
     use crate::cenovnik::{NotConfigured, PublishOutcome, PublishTarget};
     use crate::commands::catalog::{
         create_product, set_product_active, update_product, SaveProductRequest,
     };
     use crate::db::{test_database_path, Db};
+    use crate::retention::{
+        extend_retain_until, seed_retention_policies, RecordClass, CENOVNIK_ARCHIVE_RETENTION_YEARS,
+    };
+    use crate::state::AppState;
 
     const OUTLET: &str = "Bulevar oslobođenja 1, Novi Sad";
+
+    /// The day the shop's retention classes were recorded. Deliberately far
+    /// behind the `now` the archive tests publish at, so the class-wide floor is
+    /// already reached and each test is exercising the **per-snapshot** čl. 213
+    /// cutoff rather than the seeding anniversary.
+    const CLASSES_SEEDED_AT: &str = "2024-01-01T08:00:00Z";
 
     fn with_database(test_name: &str, test: impl FnOnce(&Db)) {
         let path = test_database_path(test_name);
@@ -277,6 +518,22 @@ mod tests {
             let db = Db::new(&path).expect("database should initialize");
             seed(&db);
             test(&db);
+        }
+
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// The same shop, plus the shared retention table the archive resolves its
+    /// rok through.
+    fn with_archive(test_name: &str, test: impl FnOnce(&AppState)) {
+        let path = test_database_path(test_name);
+
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            seed(&db);
+            let state = AppState::new(db);
+            seed_retention_policies(&state, CLASSES_SEEDED_AT).expect("classes should seed");
+            test(&state);
         }
 
         std::fs::remove_file(&path).expect("test database should be removed");
@@ -1005,5 +1262,355 @@ mod tests {
             // Rendered in sifra order: BEZ-1 then SOK-075.
             assert_eq!(dates, ["18-06-2026", "20-07-2026"], "{body:?}");
         });
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 4 — the archive and its retention (req. 14)
+    // ---------------------------------------------------------------------
+
+    /// Čl. 6 st. 5 is a duty to enable a comparison of „prethodno objavljenih
+    /// cena“ with the realtime ones, so the archive has to read in the order a
+    /// person compares in: the file in force first, the ones it replaced behind
+    /// it. Two publishes in the same second are the tie v19 breaks by the larger
+    /// id — the later insert — and exactly one row may call itself current.
+    #[test]
+    fn the_archive_lists_the_outlets_snapshots_newest_first_and_names_the_current_one() {
+        with_archive("cenovnik_archive_lists_newest_first", |state| {
+            let connection = state.db().open().expect("database should open");
+            let oldest = publish_current(&connection, &NotConfigured, "2026-08-01T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet publishes");
+            let tie_first = publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet publishes");
+            let tie_second = publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet publishes");
+
+            let listed = list_snapshots(state).expect("the archive should list");
+            assert_eq!(
+                listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+                [tie_second, tie_first, oldest],
+                "newest first, and a same-second tie goes to the larger id"
+            );
+            assert!(listed[0].current, "the newest row is the cenovnik in force");
+            assert!(
+                listed[1..].iter().all(|row| !row.current),
+                "only one file can be the one čl. 6 st. 4 binds the shop to"
+            );
+            assert!(
+                listed.iter().all(|row| row.prodajno_mesto == OUTLET),
+                "{listed:?}"
+            );
+        });
+    }
+
+    /// Req. 14: prior publications must remain **retrievable**, not merely
+    /// undeleted. What comes back out has to be the bytes the target received —
+    /// BOM, CRLF, diacritics and all — or the archive answers a different
+    /// question than „what did this shop publish“.
+    #[test]
+    fn a_snapshot_reads_back_byte_for_byte_what_the_target_received() {
+        with_archive("cenovnik_archive_reads_back_byte_for_byte", |state| {
+            let connection = state.db().open().expect("database should open");
+            let target = RecordingTarget::new();
+            publish_current(&connection, &target, "2026-08-01T09:15:00Z").expect("first publish");
+
+            let acting = admin_id(state.db());
+            update_product(state.db(), 1, product_request(31_900), acting)
+                .expect("price should save");
+            publish_current(&connection, &target, "2026-08-03T09:15:00Z").expect("third publish");
+
+            let listed = list_snapshots(state).expect("the archive should list");
+            assert_eq!(listed.len(), 3, "{listed:?}");
+
+            let published = target.bodies.borrow().clone();
+            let oldest = read_snapshot(state, listed[2].id)
+                .expect("the archive should read")
+                .expect("the earliest publication is still there");
+            assert_eq!(oldest.body, published[0], "byte for byte");
+            assert!(oldest.body.starts_with('\u{feff}'), "{:?}", oldest.body);
+            assert!(oldest.body.contains("279.00"), "{:?}", oldest.body);
+            assert!(!oldest.snapshot.current);
+
+            let newest = read_snapshot(state, listed[0].id)
+                .expect("the archive should read")
+                .expect("the current publication is there");
+            assert_eq!(newest.body, published[1]);
+            assert!(newest.body.contains("319.00"), "{:?}", newest.body);
+            assert!(newest.snapshot.current);
+
+            assert_eq!(
+                read_snapshot(state, 9_999).expect("an unknown id is not an error"),
+                None
+            );
+        });
+    }
+
+    /// Čl. 6 st. 2 publishes „posebno za svaki prodajni objekat“, so the
+    /// comparison st. 5 asks for runs inside one outlet's lineage. A foreign
+    /// outlet's file must never appear in this one's archive, and above all must
+    /// never be reachable as this outlet's current cenovnik.
+    #[test]
+    fn the_archive_lists_only_the_outlets_own_lineage() {
+        with_archive("cenovnik_archive_is_per_outlet", |state| {
+            let connection = state.db().open().expect("database should open");
+            publish_current(&connection, &NotConfigured, "2026-08-01T09:15:00Z").expect("publish");
+            connection
+                .execute(
+                    "INSERT INTO cenovnik_snapshots (prodajno_mesto, generated_at, row_count,
+                                                     content_hash, body, created_at)
+                     VALUES ('Druga radnja', '2026-08-05T09:15:00Z', 1, 'h-druga',
+                             'telo druge radnje', '2026-08-05T09:15:00Z')",
+                    [],
+                )
+                .expect("a second outlet should insert");
+
+            let listed = list_snapshots(state).expect("the archive should list");
+            assert_eq!(listed.len(), 1, "{listed:?}");
+            assert_eq!(listed[0].prodajno_mesto, OUTLET);
+            assert!(listed[0].current);
+        });
+    }
+
+    /// Req. 14's floor is the ZZP čl. 213 two-year limitation, and it is read out
+    /// of the shared `retention_policies` table rather than hard-coded at the
+    /// cut. A file older than that answers nothing anybody may still ask; a
+    /// younger one is inside the window a proceeding could still open in.
+    #[test]
+    fn a_snapshot_past_the_cl_213_limitation_is_purged_and_a_younger_one_is_kept() {
+        with_archive("cenovnik_archive_purges_past_the_limitation", |state| {
+            let connection = state.db().open().expect("database should open");
+            let expired = publish_current(&connection, &NotConfigured, "2024-01-05T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet publishes");
+            let inside = publish_current(&connection, &NotConfigured, "2025-06-01T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet publishes");
+            let current = publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet publishes");
+            drop(connection);
+
+            // Two years back from this day is 2024-08-02: the first file is
+            // behind it, the second is not.
+            let removed = purge_expired_snapshots(state, "2026-08-02T09:15:00Z")
+                .expect("the purge should run");
+            assert_eq!(removed, 1, "only the file past the limitation goes");
+
+            let listed = list_snapshots(state).expect("the archive should list");
+            assert_eq!(
+                listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+                [current, inside],
+                "{listed:?}"
+            );
+            assert_eq!(
+                read_snapshot(state, expired).expect("the archive should read"),
+                None
+            );
+        });
+    }
+
+    /// The outlet's current cenovnik is the file čl. 6 st. 4 binds the shop to
+    /// today, and čl. 6 st. 5's comparison has nothing to compare against once it
+    /// is gone. A shop that has not moved a price in three years must still have
+    /// its published file — so the retention floor may never reach the newest row
+    /// for an outlet, whatever its date.
+    #[test]
+    fn the_purge_never_removes_an_outlets_current_cenovnik_however_old_it_is() {
+        with_archive("cenovnik_archive_keeps_the_current_file", |state| {
+            let connection = state.db().open().expect("database should open");
+            let only = publish_current(&connection, &NotConfigured, "2024-01-05T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet publishes");
+            connection
+                .execute(
+                    "INSERT INTO cenovnik_snapshots (prodajno_mesto, generated_at, row_count,
+                                                     content_hash, body, created_at)
+                     VALUES ('Druga radnja', '2024-01-05T09:15:00Z', 1, 'h-druga',
+                             'telo druge radnje', '2024-01-05T09:15:00Z')",
+                    [],
+                )
+                .expect("a second outlet should insert");
+            drop(connection);
+
+            assert_eq!(
+                purge_expired_snapshots(state, "2030-01-01T09:15:00Z")
+                    .expect("the purge should run"),
+                0,
+                "every outlet keeps the file it is currently bound to"
+            );
+
+            let listed = list_snapshots(state).expect("the archive should list");
+            assert_eq!(listed.len(), 1, "{listed:?}");
+            assert_eq!(listed[0].id, only);
+            assert!(listed[0].current);
+
+            let survivors: i64 = state
+                .db()
+                .open()
+                .expect("database should open")
+                .query_row("SELECT COUNT(*) FROM cenovnik_snapshots", [], |row| {
+                    row.get(0)
+                })
+                .expect("the archive should count");
+            assert_eq!(survivors, 2, "the second outlet keeps its current file too");
+        });
+    }
+
+    /// „Retention resolves through the shared table“ is the requirement, not
+    /// „two years are hard-coded at the cut“. A legal hold on the class stops
+    /// this purge the way it stops every other, and a rok the shop moved forward
+    /// postpones it — both without a line changing in this module.
+    #[test]
+    fn the_purge_obeys_the_shared_retention_row() {
+        with_archive("cenovnik_archive_obeys_the_shared_row", |state| {
+            let connection = state.db().open().expect("database should open");
+            publish_current(&connection, &NotConfigured, "2024-01-05T09:15:00Z").expect("publish");
+            publish_current(&connection, &NotConfigured, "2026-08-02T09:15:00Z").expect("publish");
+
+            connection
+                .execute(
+                    "UPDATE retention_policies SET legal_hold = 1 WHERE record_class = ?1",
+                    params![RecordClass::CenovnikArchive.key()],
+                )
+                .expect("a legal hold should store");
+            assert_eq!(
+                purge_expired_snapshots(state, "2026-08-02T09:15:00Z")
+                    .expect("a held class is not an error"),
+                0,
+                "a legal hold outranks the limitation"
+            );
+
+            connection
+                .execute(
+                    "UPDATE retention_policies SET legal_hold = 0 WHERE record_class = ?1",
+                    params![RecordClass::CenovnikArchive.key()],
+                )
+                .expect("the hold should lift");
+            extend_retain_until(
+                &connection,
+                RecordClass::CenovnikArchive,
+                "2027-01-01",
+                "2026-08-02T09:15:00Z",
+            )
+            .expect("the shop should be able to keep the archive longer");
+            assert_eq!(
+                purge_expired_snapshots(state, "2026-08-02T09:15:00Z")
+                    .expect("an unreached floor is not an error"),
+                0,
+                "a rok the shop moved forward postpones the cut"
+            );
+            drop(connection);
+
+            assert_eq!(
+                purge_expired_snapshots(state, "2027-01-01T09:15:00Z")
+                    .expect("the purge should run"),
+                1,
+                "and once the moved rok is reached the expired file goes"
+            );
+            assert_eq!(CENOVNIK_ARCHIVE_RETENTION_YEARS, 2);
+        });
+    }
+
+    /// v19 leaves `DELETE` open on purpose — čl. 213 gives the archive a
+    /// two-year limitation rather than a `trajno` duty, so the purge has to be
+    /// able to reach an expired snapshot, and no trigger can tell a purge from a
+    /// cover-up. The constraint therefore lives in the code: this module's
+    /// retention purge is the only thing allowed to delete a published cenovnik.
+    ///
+    /// The needle is composed at run time so this assertion cannot match its own
+    /// source text, and only shipped statements are scanned — every comment line
+    /// and every `#[cfg(test)] mod` is dropped first, so the prose explaining the
+    /// rule cannot trip it.
+    #[test]
+    fn the_retention_purge_is_the_only_code_that_deletes_a_published_cenovnik() {
+        let needle = format!("{} FROM cenovnik_snapshots", "DELETE");
+        let sources = shipped_sources();
+        assert!(
+            sources.len() > 20,
+            "the scan must actually see the crate: {}",
+            sources.len()
+        );
+
+        let offenders: Vec<&str> = sources
+            .iter()
+            .filter(|(path, source)| path != "commands/cenovnik.rs" && source.contains(&needle))
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "only the retention purge in commands/cenovnik.rs may delete a published cenovnik, \
+             and these modules do too: {offenders:?}"
+        );
+
+        let purge = sources
+            .iter()
+            .find(|(path, _)| path == "commands/cenovnik.rs")
+            .map(|(_, source)| source.as_str())
+            .expect("this module must be in the scan");
+        assert!(
+            purge.contains(&needle),
+            "and the purge this test is guarding must actually be here"
+        );
+    }
+
+    /// Every `.rs` file under `src/`, reduced to the statements the app ships:
+    /// the `#[cfg(test)] mod …` tail removed, every Rust and SQL comment line
+    /// dropped, and whitespace collapsed so a statement wrapped across lines
+    /// still reads as one.
+    fn shipped_sources() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        collect_rust_files(&root, &root, &mut found);
+        found.sort();
+        found
+    }
+
+    fn collect_rust_files(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        found: &mut Vec<(String, String)>,
+    ) {
+        let entries = std::fs::read_dir(directory).expect("the crate source should be readable");
+        for entry in entries {
+            let path = entry.expect("a directory entry should read").path();
+            if path.is_dir() {
+                collect_rust_files(root, &path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("every file is under the source root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let source = std::fs::read_to_string(&path).expect("a source file should read");
+                found.push((relative, shipped_statements(&source)));
+            }
+        }
+    }
+
+    fn shipped_statements(source: &str) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        // The tests module opens with `#[cfg(test)]` followed by a `mod … {`.
+        // A `#[cfg(test)]` on a single helper item, or on a `mod x;`
+        // declaration, is not the boundary and must not truncate the scan.
+        let end = (0..lines.len())
+            .find(|&index| {
+                lines[index].trim() == "#[cfg(test)]"
+                    && lines.get(index + 1).is_some_and(|next| {
+                        next.trim_start().starts_with("mod ") && next.trim_end().ends_with('{')
+                    })
+            })
+            .unwrap_or(lines.len());
+
+        lines[..end]
+            .iter()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//") && !trimmed.starts_with("--")
+            })
+            .flat_map(|line| line.split_whitespace())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }

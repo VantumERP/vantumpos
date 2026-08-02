@@ -1442,10 +1442,18 @@ mod tests {
         });
     }
 
-    /// The register is generated off the retention table, so a class that exists
-    /// in `retention_policies` and appears nowhere in the register is a period
-    /// the shop applies and never disclosed. This is the test that keeps the two
-    /// in step when a later feature adds a class.
+    /// The register is generated off the retention table, so a class that holds
+    /// personal data and appears nowhere in the register is a period the shop
+    /// applies and never disclosed. This is the test that keeps the two in step
+    /// when a later feature adds a class.
+    ///
+    /// **The boundary runs through `RecordClass::personal_data`, in both
+    /// directions.** `retention_policies` is the app's shared retention table
+    /// (SW11-SW15 §3 req. 42) and holds whatever period this app applies to
+    /// anything; čl. 47 st. 1 records radnje obrade **podataka o ličnosti**. A
+    /// class holding no personal data — SW-12's archive of published cenovnici
+    /// is the first — therefore owes this register nothing, and putting it here
+    /// would be a misstatement to the Poverenik in the shop's own name.
     #[test]
     fn every_configured_retention_class_reaches_the_register() {
         with_state("cl47_covers_every_retention_class", |state| {
@@ -1453,12 +1461,20 @@ mod tests {
             let register = generate(state, NOW).expect("the register should generate");
 
             for class in RecordClass::ALL {
-                assert!(
-                    register
-                        .iter()
-                        .any(|activity| activity.retention_record_class == Some(class)),
-                    "`{}` is a period the app applies and the register never mentions it",
-                    class.key()
+                let disclosed = register
+                    .iter()
+                    .any(|activity| activity.retention_record_class == Some(class));
+                assert_eq!(
+                    disclosed,
+                    class.personal_data(),
+                    "`{}` holds {} personal data, so the čl. 47 register {} name it",
+                    class.key(),
+                    if class.personal_data() { "" } else { "no" },
+                    if class.personal_data() {
+                        "must"
+                    } else {
+                        "must not"
+                    }
                 );
             }
         });
