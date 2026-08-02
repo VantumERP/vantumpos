@@ -967,12 +967,19 @@ const MILLI: i64 = 1_000;
 /// a non-negative count): nothing in čl. 10 st. 3, čl. 10 st. 4 or čl. 12 st. 2
 /// prescribes a field, and inventing one here would refuse a lawful count in the
 /// name of a duty that does not exist.
-fn ensure_stavka(lista: PopisLista, input: &PopisLineInput) -> Result<(), AppError> {
+///
+/// `apoen` is the value that will be ON the stavka after the write, not the value
+/// the payload carried — see `efektivni_apoen`.
+fn ensure_stavka(
+    lista: PopisLista,
+    input: &PopisLineInput,
+    apoen: Option<i64>,
+) -> Result<(), AppError> {
     if lista != PopisLista::Gotovina {
         return Ok(());
     }
 
-    if input.cena_minor.unwrap_or(0) <= 0 {
+    if apoen.unwrap_or(0) <= 0 {
         return Err(AppError::business(
             "popis_gotovina_bez_apoena",
             "Gotovina se popisuje po apoenima (PoP čl. 11 st. 1) — uz svaku stavku upišite apoen \
@@ -993,6 +1000,42 @@ fn ensure_stavka(lista: PopisLista, input: &PopisLineInput) -> Result<(), AppErr
     }
 
     Ok(())
+}
+
+/// The apoen that will stand on the stavka once the write lands.
+///
+/// The UPDATE coalesces `cena_minor`, so a payload that omits it does not blank
+/// the apoen — it keeps the one already on the lista. Čl. 11 st. 1 asks that the
+/// stavka NAME its apoen, and a stavka that already names one satisfies it
+/// whether or not the edit repeats the figure; judging the absent field instead
+/// would refuse a lawful correction of a bliži opis on a fully denominated cash
+/// line. It would also split the meaning of one wire shape: after the potpis,
+/// `cena_minor: None` means „leave the apoen alone“ (see `apoen_pomeren`), and it
+/// must mean the same thing before it.
+///
+/// Read from the row rather than trusted from the caller, and only where it can
+/// change the answer: a new stavka (no `line_id`) has no stored apoen to inherit,
+/// and neither does one being moved onto the gotovina lista for the first time —
+/// both still owe the figure.
+fn efektivni_apoen(
+    connection: &Connection,
+    lista: PopisLista,
+    session_id: i64,
+    line_id: Option<i64>,
+    input: &PopisLineInput,
+) -> Result<Option<i64>, AppError> {
+    let (PopisLista::Gotovina, None, Some(line_id)) = (lista, input.cena_minor, line_id) else {
+        return Ok(input.cena_minor);
+    };
+
+    Ok(connection
+        .query_row(
+            "SELECT cena_minor FROM popis_lines WHERE id = ?1 AND session_id = ?2",
+            params![line_id, session_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
 }
 
 pub(crate) fn save_line(
@@ -1052,7 +1095,11 @@ pub(crate) fn save_line(
     // record behind them — but only over lines the commission actually counted,
     // and without moving what it counted.
     match session.status {
-        PopisStatus::Draft | PopisStatus::Counting => ensure_stavka(lista, input)?,
+        PopisStatus::Draft | PopisStatus::Counting => ensure_stavka(
+            lista,
+            input,
+            efektivni_apoen(connection, lista, session_id, line_id, input)?,
+        )?,
         PopisStatus::Computed => {
             let Some(line_id) = line_id else {
                 return Err(AppError::business(
@@ -2459,6 +2506,91 @@ mod tests {
                 .expect("the cash line should be there");
             assert_eq!(gotovina.cena_minor, Some(100_000));
             assert_eq!(gotovina.stvarna_kolicina_milli, 5_000);
+        });
+    }
+
+    /// Čl. 11 st. 1 asks that a cash line NAME its apoen — it does not ask the
+    /// commission to retype it every time the bliži opis changes. An UPDATE that
+    /// omits „cena“ coalesces, so the apoen already on the lista is what survives
+    /// the write and is what the rule must be judged against. Judged against the
+    /// absent field instead, the very same payload would mean „you forgot the
+    /// apoen“ before the potpis and „leave the apoen alone“ after it, and a
+    /// lawful correction of where the money was found would be refused on a rule
+    /// that is already satisfied.
+    #[test]
+    fn an_apoen_already_on_the_lista_is_not_demanded_again_by_an_edit() {
+        with_app("popis_gotovina_apoen_edit", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+
+            let session = save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Gotovina),
+                "2026-12-31T09:20:00Z",
+            )
+            .expect("the cash line should save");
+            let gotovina_id = session
+                .linije
+                .iter()
+                .find(|linija| linija.lista_vrsta == "gotovina")
+                .expect("the cash line should be there")
+                .id;
+
+            let mut opis = lista_line(PopisLista::Gotovina);
+            opis.cena_minor = None;
+            opis.blizi_opis = Some("Fioka kase — druga smena".into());
+            save_line(
+                &connection,
+                id,
+                Some(gotovina_id),
+                &opis,
+                "2026-12-31T09:25:00Z",
+            )
+            .expect("an edit that leaves the apoen alone must go through in counting too");
+
+            let after = load_session(&connection, id).expect("the session should load");
+            let gotovina = after
+                .linije
+                .iter()
+                .find(|linija| linija.lista_vrsta == "gotovina")
+                .expect("the cash line should be there");
+            assert_eq!(
+                gotovina.cena_minor,
+                Some(100_000),
+                "the apoen on the lista is what the COALESCE keeps"
+            );
+            assert_eq!(
+                gotovina.blizi_opis.as_deref(),
+                Some("Fioka kase — druga smena"),
+                "the edit the commission actually made must land"
+            );
+
+            // The rule is judged against what SURVIVES the write, not against the
+            // line's history: moving a line onto the gotovina lista where no apoen
+            // was ever recorded still leaves a lump sum, and is still refused.
+            let roba_id = after
+                .linije
+                .iter()
+                .find(|linija| linija.lista_vrsta == "roba")
+                .expect("the seeded roba line should be there")
+                .id;
+            let mut preseljeno = lista_line(PopisLista::Gotovina);
+            preseljeno.cena_minor = None;
+            assert_eq!(
+                save_line(
+                    &connection,
+                    id,
+                    Some(roba_id),
+                    &preseljeno,
+                    "2026-12-31T09:30:00Z"
+                )
+                .expect_err("a line that never named an apoen is not denominated by one")
+                .code(),
+                "popis_gotovina_bez_apoena"
+            );
         });
     }
 
