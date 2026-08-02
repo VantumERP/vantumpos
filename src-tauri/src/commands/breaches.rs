@@ -172,20 +172,28 @@ impl Cl53Izuzetak {
         Self::ALL.into_iter().find(|value| value.as_code() == code)
     }
 
-    /// Each exception as čl. 53 st. 3 states it, with its tačka — the obrazac
-    /// has to say which one was relied on, and a code says nothing to a reader.
+    /// Each exception in one line, with its tačka — the obrazac has to say which
+    /// one was relied on, and a code says nothing to a reader.
+    ///
+    /// **These are paraphrases, not the gazette's wording**, and the pin-cite
+    /// beside each one is what a reader checks them against. St. 3 tač. 1 alone
+    /// runs *„odgovarajuće tehničke i organizacione mere zaštite … a posebno one
+    /// koje te podatke čine nerazumljivim licima koja nisu ovlašćena da im
+    /// pristupe, kao što je enkripcija“*; a row on a regulator-facing form has
+    /// no space for that, so it is compressed. A lawyer re-checks all three
+    /// against „Službeni glasnik RS“ before the form is filed.
     pub fn label(self) -> &'static str {
         match self {
             Self::PrimenjeneMereZastite => {
                 "primenjene su mere zaštite zbog kojih su podaci nerazumljivi neovlašćenim \
-                 licima (čl. 53 st. 3 t. 1)"
+                 licima (čl. 53 st. 3 tač. 1)"
             }
             Self::NaknadneMere => {
-                "naknadno su preduzete mere kojima je otklonjen visok rizik (čl. 53 st. 3 t. 2)"
+                "naknadno su preduzete mere kojima je otklonjen visok rizik (čl. 53 st. 3 tač. 2)"
             }
             Self::NesrazmeranUtrosakVremenaISredstava => {
                 "obaveštavanje svakog lica zahtevalo bi nesrazmeran utrošak vremena i sredstava, \
-                 pa je dato javno obaveštenje (čl. 53 st. 3 t. 3)"
+                 pa je dato javno obaveštenje (čl. 53 st. 3 tač. 3)"
             }
         }
     }
@@ -512,7 +520,10 @@ pub fn notice(state: &AppState) -> Result<LegalNotice, AppError> {
 /// **otkrivanje** line: reading the log is not a disclosure, and rendering the
 /// obrazac is — it is the copy that leaves the till, and the primalac is named.
 /// The line is written after the file exists, because an export that failed
-/// disclosed nothing.
+/// disclosed nothing — and if the line then fails to land, the file is removed
+/// again, because the same gap the other way round is worse: an obrazac sitting
+/// in `exports/` carries the whole incident and the shop's identity, and with no
+/// otkrivanje row behind it the log says that copy was never made.
 pub fn export_obrazac(state: &AppState, id: i64, now: &str) -> Result<ExportedFile, AppError> {
     require_admin(state)?;
 
@@ -530,7 +541,7 @@ pub fn export_obrazac(state: &AppState, id: i64, now: &str) -> Result<ExportedFi
         1,
     )?;
 
-    record_audit(
+    let disclosure = record_audit(
         state,
         AuditEntry {
             action: AuditAction::Otkrivanje,
@@ -541,7 +552,15 @@ pub fn export_obrazac(state: &AppState, id: i64, now: &str) -> Result<ExportedFi
             support_session_id: None,
         },
         now,
-    )?;
+    );
+
+    if let Err(error) = disclosure {
+        // Best effort, and deliberately so: if the removal itself fails there is
+        // nothing left to try, and reporting the disclosure failure is the more
+        // useful of the two errors.
+        let _ = std::fs::remove_file(&exported.path);
+        return Err(error);
+    }
 
     Ok(exported)
 }
@@ -750,7 +769,7 @@ pub fn render_obrazac_html(company: &CompanySettings, breach: &Breach) -> String
     // so the Prilog slot names it rather than leaving the operator to guess.
     html.push_str(
         "<p><strong>Prilog:</strong> evidencija radnji obrade koja se odnosi na podatke koji su \
-         bili predmet povrede, a koju rukovalac vodi u skladu sa članom 47 Zakona \
+         bili predmet povrede, a koju rukovalac vodi u skladu sa članom 47. Zakona \
          (Pravilnik 40/2019 čl. 4 st. 1).</p>\n",
     );
 
@@ -2218,6 +2237,100 @@ mod tests {
                 let refused = export_obrazac(state, breach.id, SAZNANJE)
                     .expect_err("a kasir may not export the obrazac");
                 assert_eq!(refused.code(), "forbidden");
+            },
+        );
+    }
+
+    /// The file and the čl. 48 st. 2 line are one act, and the order between
+    /// them is not a licence to keep one without the other. The line is written
+    /// **second** because an export that failed disclosed nothing — but the
+    /// converse gap is the same defect with the halves swapped: a rendered
+    /// obrazac carries the whole incident and the shop's identity, and if no
+    /// otkrivanje row lands behind it, the log says that copy was never made.
+    /// So a failed disclosure line takes the file with it.
+    #[test]
+    fn a_failed_otkrivanje_line_leaves_no_obrazac_behind() {
+        with_state(
+            "a_failed_otkrivanje_line_leaves_no_obrazac_behind",
+            |state| {
+                sign_in_admin(state);
+                let breach =
+                    record_breach(state, full_draft(), SAZNANJE).expect("the record should open");
+
+                let exported =
+                    export_obrazac(state, breach.id, SAZNANJE).expect("the obrazac should render");
+                let path = std::path::PathBuf::from(&exported.path);
+                assert!(path.exists(), "the export that succeeded leaves its file");
+                std::fs::remove_file(&path).expect("the export should be removable");
+
+                // The evidencija pristupa refuses the next write — a locked base, a
+                // broken chain and a failed session read all reach `export_obrazac`
+                // as this same `Err`.
+                {
+                    let connection = state.db().open().expect("database should open");
+                    connection
+                        .execute_batch(
+                            "CREATE TRIGGER fail_the_otkrivanje_line
+                         BEFORE INSERT ON audit_events
+                         BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+                        )
+                        .expect("the fault trigger should install");
+                }
+
+                export_obrazac(state, breach.id, SAZNANJE)
+                    .expect_err("without its čl. 48 st. 2 line the export must fail");
+
+                assert!(
+                    !path.exists(),
+                    "no obrazac survives a failed otkrivanje line: {}",
+                    path.display()
+                );
+                assert_eq!(
+                    audit_table_text(state).matches("|otkrivanje|").count(),
+                    1,
+                    "and the only otkrivanje line is the one the successful export wrote"
+                );
+            },
+        );
+    }
+
+    /// Pin-cite style, on a document whose whole point is fidelity to a
+    /// prescribed text. The repo writes this exception as *„čl. 53 st. 3 tač.
+    /// 1“* — `docs/compliance/runbook-povreda-podataka.md` and
+    /// `docs/SERBIAN-LAW-COMPLIANCE.md` both do — and the Prilog reproduces
+    /// Pravilnik čl. 4 st. 1, whose gazette text reads *„u skladu sa članom 47.
+    /// Zakona“* with the ordinal period. A form filed with the regulator does
+    /// not get to drop either.
+    #[test]
+    fn the_printed_citations_keep_the_repos_pin_cite_style() {
+        with_state(
+            "the_printed_citations_keep_the_repos_pin_cite_style",
+            |state| {
+                sign_in_admin(state);
+                let breach =
+                    record_breach(state, full_draft(), SAZNANJE).expect("the record should open");
+                let html = render_obrazac_html(&company(), &breach);
+
+                for (izuzetak, tacka) in Cl53Izuzetak::ALL.into_iter().zip(1..=3) {
+                    let label = izuzetak.label();
+                    assert!(
+                        label.contains(&format!("čl. 53 st. 3 tač. {tacka}")),
+                        "the exception names its tačka in the repo's style: {label}"
+                    );
+                    assert!(
+                        !label.contains(" t. "),
+                        "and not the abbreviated form: {label}"
+                    );
+                }
+                assert!(
+                    html.contains("čl. 53 st. 3 tač. 1"),
+                    "the relied-on exception reaches the printed form with its tačka"
+                );
+
+                assert!(
+                    html.contains("u skladu sa članom 47. Zakona"),
+                    "Pravilnik čl. 4 st. 1 keeps its ordinal period on the Prilog line"
+                );
             },
         );
     }
