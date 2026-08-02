@@ -226,6 +226,58 @@ pub fn preraspodela_caps_exceeded(profile: &ShopProfile) -> LegalNotice {
     }
 }
 
+/// ZZPL čl. 52 — the breach notification, and the one figure SW-17 may print.
+///
+/// **The penalised act is the failure to NOTIFY.** Čl. 95 st. 1 tač. 24
+/// describes its biće as *„ne obavesti Poverenika o povredi bezbednosti
+/// podataka“*, and a preduzetnik is reached once, by st. 4. Čl. 95 st. 5 opens
+/// with a standalone *fizičko lice* limb rather than reaching only an odgovorno
+/// lice u pravnom licu, so it is not a harmless extra sentence on the
+/// preduzetnik tier — quoting it would fine the same person twice for one act.
+///
+/// **The internal čl. 52 st. 6 record carries NO figure here** (req. 50). Not
+/// keeping it is a different act from not notifying, and under ZoP čl. 3 plus
+/// strict construction of prekršajne norme it is genuinely unsettled whether the
+/// trailing *„suprotno članu 52. ovog zakona“* reaches it; no case law and no
+/// Poverenik mišljenje resolve it. So the summary says the amount is not clearly
+/// prescribed — and stops there. It must not say there is no consequence: čl. 79
+/// st. 2 tač. 2 and tač. 4 give the Poverenik an opomena and a binding nalog
+/// regardless of any fine, the Poverenik scores st. 6 as a standalone audited
+/// item (KL-001 pitanje 6), and because st. 7 makes that documentation the
+/// vehicle for proving compliance, a missing record destroys the defence to the
+/// tač. 24 charge — which converts straight back into the figure above.
+///
+/// The deadline in the summary is the Pravilnik 40/2019 čl. 3 one: a flat 72 h
+/// od saznanja, without the statute's *„bez nepotrebnog odlaganja, ili, ako je
+/// to moguće“* softener. It is the number any countdown in this app measures.
+pub fn breach_notification_missing(profile: &ShopProfile) -> LegalNotice {
+    LegalNotice {
+        summary: "Rukovalac je dužan da o povredi podataka o ličnosti koja može da proizvede \
+                  rizik po prava i slobode fizičkih lica obavesti Poverenika bez nepotrebnog \
+                  odlaganja, a najkasnije u roku od 72 časa od saznanja za povredu. Ako ne \
+                  postupi u tom roku, dužan je da obrazloži zašto. Kazna je propisana za \
+                  izostanak obaveštavanja. Za sam izostanak interne dokumentacije o povredi \
+                  (čl. 52 st. 6) kazna nije jednoznačno propisana i ovde se ne navodi — ali \
+                  bez te dokumentacije nema se čime dokazati da je po članu 52 postupljeno, \
+                  a Poverenik može da izrekne opomenu i obavezujući nalog sa rokom."
+            .to_string(),
+        penalty: tiered(
+            profile,
+            "Prekršaj: novčana kazna od 20.000 do 500.000 dinara \
+             (čl. 95 st. 1 tač. 24 u vezi sa st. 4).",
+            "Prekršaj: novčana kazna od 50.000 do 2.000.000 dinara (čl. 95 st. 1 tač. 24), \
+             uz kaznu za odgovorno lice od 5.000 do 150.000 dinara (čl. 95 st. 5).",
+        ),
+        citation: "Zakon o zaštiti podataka o ličnosti, čl. 52 st. 1 i st. 2; interna \
+                   dokumentacija: čl. 52 st. 6 i st. 7; obaveštavanje lica: čl. 53. \
+                   Rok i obrazac: Pravilnik o obrascu obaveštavanja Poverenika o povredi \
+                   podataka o ličnosti (Sl. glasnik RS, br. 40/2019), čl. 3 i čl. 2. \
+                   Nadzor: Poverenik."
+            .to_string(),
+        is_legal_duty: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +305,7 @@ mod tests {
             overtime_record_missing(p),
             overtime_caps_exceeded(p),
             preraspodela_caps_exceeded(p),
+            breach_notification_missing(p),
         ]
     }
 
@@ -272,7 +325,7 @@ mod tests {
 
         assert_eq!(
             enumerated.len(),
-            8,
+            9,
             "adding a notice function means adding it to all_notices, to the \
              list below, AND bumping this count — an omission from both lists \
              is otherwise invisible"
@@ -287,6 +340,7 @@ mod tests {
             overtime_record_missing(&p),
             overtime_caps_exceeded(&p),
             preraspodela_caps_exceeded(&p),
+            breach_notification_missing(&p),
         ] {
             assert!(
                 enumerated.contains(&notice),
@@ -643,6 +697,112 @@ mod tests {
         assert!(
             penalty.contains("30.000 do 150.000") && penalty.contains("čl. 274 st. 3"),
             "the odgovorno-lice row belongs on the pravno-lice tier: {penalty}"
+        );
+    }
+
+    /// Req. 50 has two halves and both are copy, not arithmetic.
+    ///
+    /// **The figure that IS printed** is the notification tier: the biće in
+    /// ZZPL čl. 95 st. 1 tač. 24 is described as *„ne obavesti Poverenika o
+    /// povredi bezbednosti podataka“*, and a preduzetnik is fined once, under
+    /// st. 4. St. 5 opens with a standalone *fizičko lice* limb, so it is not
+    /// simply „the odgovorno-lice row“ — but a registered preduzetnik is
+    /// reached by st. 4 as lex specialis and quoting st. 5 at him would fine
+    /// him twice for one act.
+    ///
+    /// **The figure that must NOT be printed** is any amount for a pure čl. 52
+    /// st. 6 documentation failure. That tier is unresolved: keeping no internal
+    /// record is a different act from failing to notify, and no Serbian case law
+    /// or Poverenik mišljenje settles whether the trailing *„suprotno članu 52“*
+    /// reaches it. Silence about the amount is required — but the copy must not
+    /// swing the other way and assert the narrow construction as settled either,
+    /// because čl. 79 st. 2 corrective powers and the destroyed tač. 24 defence
+    /// are both live consequences.
+    #[test]
+    fn breach_notice_prints_the_notification_tier_and_no_documentation_only_figure() {
+        let preduzetnik = breach_notification_missing(&profile(Some(PravnaForma::Preduzetnik)));
+        let penalty = preduzetnik.penalty.expect("preduzetnik penalty is known");
+        assert!(
+            penalty.contains("20.000 do 500.000"),
+            "the preduzetnik row is čl. 95 st. 4: {penalty}"
+        );
+        assert!(
+            penalty.contains("tač. 24"),
+            "st. 4 sets the amount; the biće stays čl. 95 st. 1 tač. 24: {penalty}"
+        );
+        assert!(penalty.contains("st. 4"), "{penalty}");
+        assert!(
+            !penalty.contains("st. 5"),
+            "a preduzetnik is fined once, under st. 4; adding st. 5 fines him \
+             twice for one act: {penalty}"
+        );
+        assert!(
+            !penalty.contains("odgovorno lice"),
+            "a preduzetnik has no odgovorno lice: {penalty}"
+        );
+        assert!(
+            preduzetnik.is_legal_duty,
+            "čl. 52 is an obaveza — unlike čl. 50, it IS penalised"
+        );
+
+        let pravno = breach_notification_missing(&profile(Some(PravnaForma::PravnoLice)));
+        let penalty = pravno.penalty.expect("pravno lice penalty is known");
+        assert!(penalty.contains("50.000 do 2.000.000"), "{penalty}");
+        assert!(penalty.contains("čl. 95 st. 1 tač. 24"), "{penalty}");
+        assert!(
+            penalty.contains("5.000 do 150.000") && penalty.contains("st. 5"),
+            "the odgovorno-lice row belongs on the pravno-lice tier: {penalty}"
+        );
+
+        // The documentation-only tier, under every profile including UNSET.
+        for forma in [
+            Some(PravnaForma::Preduzetnik),
+            Some(PravnaForma::PravnoLice),
+            None,
+        ] {
+            let notice = breach_notification_missing(&profile(forma));
+            let rendered = format!(
+                "{} {} {}",
+                notice.summary,
+                notice.penalty.clone().unwrap_or_default(),
+                notice.citation
+            );
+
+            assert!(
+                notice.summary.contains("nije jednoznačno propisana"),
+                "the čl. 52 st. 6 documentation tier is unresolved and the copy \
+                 must say so rather than quote a number: {}",
+                notice.summary
+            );
+            assert!(
+                !rendered.contains("ne propisuje kaznu"),
+                "asserting that no prekršaj exists for the documentation failure \
+                 states the narrow construction as settled; it is not: {rendered}"
+            );
+            assert!(
+                !rendered.to_lowercase().contains("nema posledice"),
+                "čl. 79 st. 2 opomena and nalog are live consequences: {rendered}"
+            );
+            assert!(
+                notice.summary.contains("čl. 52 st. 6"),
+                "st. 7 makes the internal record the vehicle for proving \
+                 compliance, so it belongs in the summary the operator reads: {}",
+                notice.summary
+            );
+        }
+
+        // Pravilnik 40/2019 čl. 3 restates the deadline as a flat 72 h od
+        // saznanja, without the statute's „bez nepotrebnog odlaganja“ softener,
+        // and it is what any countdown in this app is measured against.
+        let citation = breach_notification_missing(&profile(None)).citation;
+        assert!(citation.contains("40/2019"), "{citation}");
+        assert!(
+            citation.contains("čl. 3"),
+            "the countdown article: {citation}"
+        );
+        assert!(
+            citation.contains("čl. 52 st. 1"),
+            "the duty and its 72 h deadline: {citation}"
         );
     }
 

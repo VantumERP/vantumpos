@@ -245,7 +245,16 @@ pub fn run() {
             // called from the launch and timer path above, because čl. 5 st. 1
             // tač. 5 is a proactive duty and not a request the webview makes.
             commands::personnel::personnel_get,
-            commands::personnel::personnel_save
+            commands::personnel::personnel_save,
+            // SW-17. Req. 43: there is no notifiability gate in front of the
+            // write — čl. 52 st. 6 covers „svaku povredu“ and the risk question
+            // is answered on a record that already exists. And there is no
+            // delete command: the record is what st. 7 makes the vehicle for
+            // proving compliance with the whole article.
+            commands::breaches::breaches_list,
+            commands::breaches::breaches_record,
+            commands::breaches::breaches_update,
+            commands::breaches::breaches_notice
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
