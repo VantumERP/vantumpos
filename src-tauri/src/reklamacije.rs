@@ -622,6 +622,11 @@ pub fn list_reklamacije(
 /// gated on this three-part express warning. Copy character-for-character.
 const MSG_NEW_ANSWER_WARNING: &str = "Za novu reklamaciju odgovor mora sadržati izričito obaveštenje potrošaču o obavezi izjašnjenja, posledicama i zastoju rokova (čl. 63 st. 10).";
 
+/// The NEW-regime attestation refusal (čl. 63 st. 3). Phrased as a confirmation
+/// the operator must give, not as an accusation that a fee was charged.
+const MSG_NEW_NO_FEE: &str =
+    "Za novu reklamaciju potvrdite da utvrđivanje nesaobraznosti nije naplaćeno (čl. 63 st. 3).";
+
 /// 35/2026 čl. 63 st. 3, second sentence, and the neighbouring rule it is most
 /// often confused with. The second sentence is load-bearing: fencing the ban off
 /// from the manner of resolution *without* naming what governs there invites the
@@ -641,6 +646,8 @@ pub struct AnswerInput {
     pub warning_consequences: Option<String>,
     pub warning_zastoj: Option<String>,
     pub event_date: String,
+    /// čl. 63 st. 3 attestation. Ignored under the OLD regime, which has no ban.
+    pub no_fee_attested: bool,
 }
 
 /// One event row to append. `consumer_consent` only ever carries meaning on an
@@ -661,6 +668,46 @@ fn load_regime(conn: &Connection, id: i64) -> Result<String, AppError> {
     )
     .optional()?
     .ok_or_else(|| AppError::not_found(MSG_REKLAMACIJA_NOT_FOUND))
+}
+
+/// 35/2026 čl. 63 st. 3. NEW regime only: 88/2021 čl. 55 st. 3 has no fee ban,
+/// so gating an old-regime record on it would assert a duty that does not bind.
+///
+/// Idempotent by design — the operator confirms once, and every later transition
+/// only reads the stored flag. Runs inside the caller's transaction and before
+/// any event is appended, so a refusal persists nothing.
+fn ensure_no_fee_attested(
+    tx: &Connection,
+    id: i64,
+    regime: &str,
+    attested_now: bool,
+    now: &str,
+) -> Result<(), AppError> {
+    if regime != REGIME_NEW {
+        return Ok(());
+    }
+
+    let already: i64 = tx.query_row(
+        "SELECT no_fee_attested FROM reklamacije WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+    if already != 0 {
+        return Ok(());
+    }
+
+    if !attested_now {
+        return Err(AppError::validation(
+            MSG_NEW_NO_FEE,
+            serde_json::json!({ "field": "noFeeAttested" }),
+        ));
+    }
+
+    tx.execute(
+        "UPDATE reklamacije SET no_fee_attested = 1, no_fee_attested_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
+    Ok(())
 }
 
 /// True iff at least one event of `event_type` exists for the record.
@@ -749,6 +796,10 @@ pub fn log_answer(
             ));
         }
     }
+
+    // AFTER the express-warning check, never before: a bare answer is missing
+    // both, and reversing the order would stop čl. 63 st. 10 being covered.
+    ensure_no_fee_attested(&tx, id, &regime, input.no_fee_attested, now)?;
 
     let detail = serde_json::json!({
         "answerText": input.answer_text,
@@ -900,13 +951,17 @@ pub fn resolve_reklamacija(
     id: i64,
     nacin: &str,
     event_date: &str,
+    no_fee_attested: bool,
     acting: i64,
     now: &str,
 ) -> Result<ReklamacijaView, AppError> {
     require_non_empty(nacin, "nacin")?;
     parse_rfc3339(event_date, "eventDate")?;
     let tx = conn.transaction()?;
-    load_regime(&tx, id)?;
+    let regime = load_regime(&tx, id)?;
+    // The backstop: resolve requires no prior answer (the memo §4(d) on-the-spot
+    // path), so an answer-only gate would be escapable.
+    ensure_no_fee_attested(&tx, id, &regime, no_fee_attested, now)?;
     let detail = serde_json::json!({ "nacin": nacin }).to_string();
     insert_event(
         &tx,
@@ -1240,6 +1295,177 @@ mod tests {
         });
     }
 
+    /// A NEW-regime answer that already satisfies the čl. 63 st. 10 express
+    /// warning, so the ONLY thing a rejection can be about is the čl. 63 st. 3
+    /// attestation. The bare `answer()` helper leaves the warning fields `None`
+    /// and would be refused by the older gate first, testing nothing new.
+    fn new_regime_answer(event_date: &str, no_fee_attested: bool) -> AnswerInput {
+        AnswerInput {
+            warning_duty: Some("Dužni ste da se izjasnite o predlogu.".into()),
+            warning_consequences: Some("U suprotnom se smatra da ste odustali.".into()),
+            warning_zastoj: Some("Rok za rešavanje ne teče do vašeg izjašnjenja.".into()),
+            no_fee_attested,
+            ..answer(event_date)
+        }
+    }
+
+    #[test]
+    fn new_regime_answer_requires_the_no_fee_attestation() {
+        with_reklamacija_db("rek_no_fee_answer_gate", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-09-01T00:00:00Z"),
+                1,
+                "2026-09-01T08:00:00Z",
+            )
+            .unwrap();
+
+            let unattested = new_regime_answer("2026-09-03T00:00:00Z", false);
+            let error = log_answer(conn, created.id, &unattested, 1, "2026-09-03T08:00:00Z")
+                .expect_err("an unattested new-regime answer must be refused");
+            assert_eq!(error.code(), "validation_error");
+
+            // A refused transition persists nothing.
+            let untouched = get_reklamacija(conn, created.id, "2026-09-03T00:00:00Z").unwrap();
+            assert!(untouched.events.is_empty(), "no event may be appended");
+            assert!(!untouched.no_fee_attested);
+
+            let attested = new_regime_answer("2026-09-03T00:00:00Z", true);
+            let ok = log_answer(conn, created.id, &attested, 1, "2026-09-03T08:00:00Z")
+                .expect("an attested answer is accepted");
+            assert!(ok.no_fee_attested);
+            assert_eq!(
+                ok.no_fee_attested_at.as_deref(),
+                Some("2026-09-03T08:00:00Z"),
+                "the attestation is stamped from the caller's now, never datetime('now')"
+            );
+        });
+    }
+
+    #[test]
+    fn new_regime_resolve_is_gated_even_without_an_answer() {
+        with_reklamacija_db("rek_no_fee_resolve_gate", |conn| {
+            // The memo §4(d) on-the-spot path: resolved without ever answering,
+            // so an answer-only gate would let this record close unattested.
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-09-01T00:00:00Z"),
+                1,
+                "2026-09-01T08:00:00Z",
+            )
+            .unwrap();
+
+            let error = resolve_reklamacija(
+                conn,
+                created.id,
+                "Zamena",
+                "2026-09-04T00:00:00Z",
+                false,
+                1,
+                "2026-09-04T08:00:00Z",
+            )
+            .expect_err("an unattested new-regime resolve must be refused");
+            assert_eq!(error.code(), "validation_error");
+
+            let untouched = get_reklamacija(conn, created.id, "2026-09-04T00:00:00Z").unwrap();
+            assert_eq!(
+                untouched.status, "open",
+                "a refused resolve must not close it"
+            );
+            assert!(untouched.events.is_empty());
+
+            let resolved = resolve_reklamacija(
+                conn,
+                created.id,
+                "Zamena",
+                "2026-09-04T00:00:00Z",
+                true,
+                1,
+                "2026-09-04T08:00:00Z",
+            )
+            .expect("an attested resolve is accepted");
+            assert_eq!(resolved.status, "resolved");
+            assert!(resolved.no_fee_attested);
+        });
+    }
+
+    #[test]
+    fn the_attestation_is_asked_once_and_keeps_its_first_timestamp() {
+        with_reklamacija_db("rek_no_fee_idempotent", |conn| {
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-09-01T00:00:00Z"),
+                1,
+                "2026-09-01T08:00:00Z",
+            )
+            .unwrap();
+
+            let attested = new_regime_answer("2026-09-03T00:00:00Z", true);
+            log_answer(conn, created.id, &attested, 1, "2026-09-03T08:00:00Z").unwrap();
+
+            // Already attested at the answer: resolve must not ask again.
+            let resolved = resolve_reklamacija(
+                conn,
+                created.id,
+                "Zamena",
+                "2026-09-05T00:00:00Z",
+                false,
+                1,
+                "2026-09-05T08:00:00Z",
+            )
+            .expect("an already-attested record resolves without re-attesting");
+            assert!(resolved.no_fee_attested);
+            assert_eq!(
+                resolved.no_fee_attested_at.as_deref(),
+                Some("2026-09-03T08:00:00Z"),
+                "the original attestation timestamp must survive"
+            );
+        });
+    }
+
+    #[test]
+    fn the_old_regime_is_never_gated_on_the_fee_ban() {
+        with_reklamacija_db("rek_no_fee_old_ungated", |conn| {
+            // 88/2021 čl. 55 st. 3 has no fee ban (memo §6). Gating an old-regime
+            // record on it would assert a duty that does not bind the shop.
+            let created = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+
+            // `answer()` leaves the warning fields None and attests nothing —
+            // both are lawful under 88/2021, and neither may be demanded here.
+            log_answer(
+                conn,
+                created.id,
+                &answer("2026-06-05T00:00:00Z"),
+                1,
+                "2026-06-05T08:00:00Z",
+            )
+            .expect("an old-regime answer is never gated on the fee ban");
+
+            let resolved = resolve_reklamacija(
+                conn,
+                created.id,
+                "Popravka",
+                "2026-06-10T00:00:00Z",
+                false,
+                1,
+                "2026-06-10T08:00:00Z",
+            )
+            .expect("an old-regime resolve is never gated on the fee ban");
+            assert_eq!(resolved.status, "resolved");
+            assert!(
+                !resolved.no_fee_attested,
+                "the flag must stay unset — it is not a compliance signal here"
+            );
+            assert!(resolved.no_fee_attested_at.is_none());
+        });
+    }
+
     #[test]
     fn no_fee_notice_is_new_regime_only_and_starts_unattested() {
         with_reklamacija_db("rek_no_fee_notice", |conn| {
@@ -1343,6 +1569,10 @@ mod tests {
             warning_consequences: None,
             warning_zastoj: None,
             event_date: event_date.into(),
+            // Bare in both respects: no express warning, nothing attested. Used
+            // to prove the čl. 63 st. 10 gate rejects, and to answer OLD-regime
+            // records, which are never fee-gated.
+            no_fee_attested: false,
         }
     }
 
@@ -1368,6 +1598,9 @@ mod tests {
                 warning_duty: Some("Dužni ste da se izjasnite o predlogu.".into()),
                 warning_consequences: Some("U suprotnom se smatra da ste odustali.".into()),
                 warning_zastoj: Some("Rok za rešavanje ne teče do vašeg izjašnjenja.".into()),
+                // Explicit, not inherited: `..answer(...)` would supply `false`
+                // and the čl. 63 st. 3 gate would refuse this accepted answer.
+                no_fee_attested: true,
                 ..answer("2026-09-05T00:00:00Z")
             };
             let view = log_answer(conn, created.id, &full, 1, "2026-09-05T09:00:00Z").unwrap();
@@ -1545,6 +1778,8 @@ mod tests {
                 created.id,
                 "Zamena robe",
                 "2026-06-05T00:00:00Z",
+                // OLD regime (filed 2026-06-01) — ungated, so `false` is correct.
+                false,
                 1,
                 "2026-06-05T09:00:00Z",
             )

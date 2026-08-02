@@ -129,6 +129,7 @@ pub fn reklamacija_resolve(
     id: i64,
     nacin: String,
     event_date: String,
+    no_fee_attested: bool,
 ) -> Result<ReklamacijaView, CommandError> {
     let acting = super::auth::require_admin(state.inner())?;
     let mut connection = state.db().open().map_err(CommandError::from)?;
@@ -138,6 +139,7 @@ pub fn reklamacija_resolve(
         id,
         &nacin,
         &event_date,
+        no_fee_attested,
         acting.id,
         &now,
     )
