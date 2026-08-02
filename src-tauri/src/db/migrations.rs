@@ -568,6 +568,19 @@ CREATE TABLE non_working_days (
 );
 "#,
     },
+    Migration {
+        version: 16,
+        name: "reklamacija_no_fee_attestation",
+        sql: r#"
+-- 35/2026 čl. 63 st. 3: „Zabranjeno je da trgovac naplaćuje utvrđivanje
+-- nesaobraznosti." Attested once per complaint, NEW regime only — 88/2021
+-- čl. 55 st. 3 carries no such ban, so old-regime rows stay 0 forever and that
+-- 0 must never be read as a failure to comply with a duty that never bound them.
+ALTER TABLE reklamacije ADD COLUMN no_fee_attested INTEGER NOT NULL DEFAULT 0
+    CHECK (no_fee_attested IN (0, 1));
+ALTER TABLE reklamacije ADD COLUMN no_fee_attested_at TEXT;
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -905,6 +918,49 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
     /// `sale_payments` drives Z-reports, dnevni promet and KEP. An installed till is
     /// upgraded in place, so the copy step is the whole point of the rebuild — this
     /// test seeds at v14 and upgrades, which is the only way to prove it.
+    #[test]
+    fn migration_v16_adds_the_no_fee_attestation_columns() {
+        let path = test_database_path("migration_v16_schema");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            for column in ["no_fee_attested", "no_fee_attested_at"] {
+                assert!(
+                    column_exists(&conn, "reklamacije", column),
+                    "reklamacije.{column} should exist after v16"
+                );
+            }
+
+            // A record predating the gate was never asked, so it must read as
+            // unattested rather than as silently compliant.
+            conn.execute(
+                "INSERT INTO reklamacije (
+                    register_number, regime, status, filed_at, podnosilac_ime_prezime,
+                    podaci_o_robi, opis_nesaobraznosti, zahtev, roba_kind,
+                    datum_izdavanja_potvrde, created_at, updated_at
+                 )
+                 VALUES (901, 'new', 'open', '2026-08-15T00:00:00Z', 'Petar Petrović',
+                         'Veš mašina', 'Ne centrifugira', 'Popravka', 'tehnicka',
+                         '2026-08-15T10:00:00Z', '2026-08-15T10:00:00Z', '2026-08-15T10:00:00Z')",
+                [],
+            )
+            .expect("a reklamacija row should insert under v16");
+
+            let (attested, attested_at): (i64, Option<String>) = conn
+                .query_row(
+                    "SELECT no_fee_attested, no_fee_attested_at FROM reklamacije
+                     WHERE register_number = 901",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the seeded row should read back");
+            assert_eq!(attested, 0, "the default must be UNattested");
+            assert!(attested_at.is_none());
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
     #[test]
     fn migration_v15_preserves_pre_existing_cash_movements_and_sale_payments() {
         let path = test_database_path("migration_v15_preserves_money_rows");

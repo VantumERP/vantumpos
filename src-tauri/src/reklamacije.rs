@@ -297,6 +297,14 @@ pub struct ReklamacijaView {
     /// to the shop's tier in `legal.rs`. No fine figure may live outside that
     /// module, so the UI renders this and never computes one.
     pub notice: LegalNotice,
+    /// 35/2026 čl. 63 st. 3 attestation. Meaningless under the OLD regime, which
+    /// carries no fee ban — an old-regime record stays `false` forever and that
+    /// `false` is not a compliance signal.
+    pub no_fee_attested: bool,
+    pub no_fee_attested_at: Option<String>,
+    /// `Some` iff this record's frozen regime is NEW. Renderers gate on presence,
+    /// so no surface has to re-derive the regime and none can get it wrong.
+    pub no_fee_notice: Option<String>,
 }
 
 /// Register-list row: the stored `status` plus the derived answer/resolution
@@ -448,11 +456,14 @@ pub fn get_reklamacija(
         Option<i64>,
         String,
         String,
+        i64,
+        Option<String>,
     )> = conn
         .query_row(
             "SELECT id, register_number, regime, status, filed_at, podnosilac_ime_prezime,
                     kontakt, podaci_o_robi, opis_nesaobraznosti, zahtev, roba_kind,
-                    datum_izdavanja_potvrde, created_by, created_at, updated_at
+                    datum_izdavanja_potvrde, created_by, created_at, updated_at,
+                    no_fee_attested, no_fee_attested_at
              FROM reklamacije
              WHERE id = ?1",
             params![id],
@@ -473,6 +484,8 @@ pub fn get_reklamacija(
                     row.get(12)?,
                     row.get(13)?,
                     row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
                 ))
             },
         )
@@ -493,6 +506,8 @@ pub fn get_reklamacija(
         created_by,
         created_at,
         updated_at,
+        no_fee_attested,
+        no_fee_attested_at,
     ) = base.ok_or_else(|| AppError::not_found(MSG_REKLAMACIJA_NOT_FOUND))?;
 
     let events = load_events(conn, id)?;
@@ -510,6 +525,9 @@ pub fn get_reklamacija(
     let profile =
         crate::commands::catalog::load_shop_profile_for_connection(conn).unwrap_or_default();
     let notice = reklamacija_breach(&profile, legal_regime(&regime)?);
+    // Gated on the record's OWN frozen regime, never on today's date: a complaint
+    // filed before the cutover never acquires the ban, whatever the clock says.
+    let no_fee_notice = (regime == REGIME_NEW).then(|| NO_FEE_NOTICE.to_string());
 
     Ok(ReklamacijaView {
         id,
@@ -531,6 +549,9 @@ pub fn get_reklamacija(
         deadlines,
         purge_eligible,
         notice,
+        no_fee_attested: no_fee_attested != 0,
+        no_fee_attested_at,
+        no_fee_notice,
     })
 }
 
@@ -600,6 +621,15 @@ pub fn list_reklamacije(
 /// Verbatim from the plan (memo §4a, čl. 63 st. 10): the NEW-regime answer is
 /// gated on this three-part express warning. Copy character-for-character.
 const MSG_NEW_ANSWER_WARNING: &str = "Za novu reklamaciju odgovor mora sadržati izričito obaveštenje potrošaču o obavezi izjašnjenja, posledicama i zastoju rokova (čl. 63 st. 10).";
+
+/// 35/2026 čl. 63 st. 3, second sentence, and the neighbouring rule it is most
+/// often confused with. The second sentence is load-bearing: fencing the ban off
+/// from the manner of resolution *without* naming what governs there invites the
+/// reading that the repair may be charged for. It may not, in either regime.
+pub const NO_FEE_NOTICE: &str =
+    "Zabranjeno je naplatiti utvrđivanje nesaobraznosti (čl. 63 st. 3). \
+     Otklanjanje nesaobraznosti — popravka ili zamena — je bez naknade po posebnoj odredbi \
+     (čl. 56 st. 1), i u starom i u novom režimu.";
 
 /// The answer payload. The three `warning_*` fields carry the express warning;
 /// they are mandatory only under the NEW regime (see `log_answer`).
@@ -1207,6 +1237,46 @@ mod tests {
                 "{}",
                 new.notice.citation
             );
+        });
+    }
+
+    #[test]
+    fn no_fee_notice_is_new_regime_only_and_starts_unattested() {
+        with_reklamacija_db("rek_no_fee_notice", |conn| {
+            // 88/2021 čl. 55 st. 3 has no fee ban. Showing one to a pre-cutover
+            // complaint asserts a duty that does not bind it (memo §6).
+            let old = create_reklamacija(
+                conn,
+                &intake_input("2026-06-01T00:00:00Z"),
+                1,
+                "2026-06-01T08:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(old.regime, REGIME_OLD);
+            assert!(
+                old.no_fee_notice.is_none(),
+                "the old regime must carry no fee-ban copy: {:?}",
+                old.no_fee_notice
+            );
+            assert!(!old.no_fee_attested);
+            assert!(old.no_fee_attested_at.is_none());
+
+            let new = create_reklamacija(
+                conn,
+                &intake_input("2026-09-01T00:00:00Z"),
+                1,
+                "2026-09-01T08:00:00Z",
+            )
+            .unwrap();
+            assert_eq!(new.regime, REGIME_NEW);
+            let notice = new.no_fee_notice.expect("the new regime carries the ban");
+            assert!(notice.contains("utvrđivanje nesaobraznosti"), "{notice}");
+            assert!(notice.contains("čl. 63 st. 3"), "{notice}");
+            // The neighbouring rule must be named, not merely fenced off, or the
+            // operator can read this as "the repair may be charged for".
+            assert!(notice.contains("čl. 56 st. 1"), "{notice}");
+            assert!(!new.no_fee_attested, "intake attests nothing");
+            assert!(new.no_fee_attested_at.is_none());
         });
     }
 
