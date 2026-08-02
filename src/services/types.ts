@@ -1731,7 +1731,16 @@ export interface Breach extends BreachDraft {
   obavestavanjeLicaObavezno: boolean;
 }
 
-/** `crate::retention::RecordClass`, serde snake_case. */
+/**
+ * `crate::retention::RecordClass`, serde snake_case.
+ *
+ * A hand-maintained mirror: `retention_list_policies` returns one row per Rust
+ * variant and the adapter casts that payload with no runtime check, so a
+ * variant missing here is a contract that lies while everything still renders.
+ * `retention::tests::the_typescript_record_class_union_mirrors_this_enum` is
+ * what compares the two lists — add the variant in both places or that test
+ * fails.
+ */
 export type RecordClass =
   | "worktime_classification"
   | "worktime_overtime_log"
@@ -1739,7 +1748,8 @@ export type RecordClass =
   | "personnel"
   | "credentials"
   | "access_log"
-  | "processing_register";
+  | "processing_register"
+  | "cenovnik_archive";
 
 /**
  * One row of the shared retention table — `crate::commands::retention::

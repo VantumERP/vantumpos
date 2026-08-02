@@ -1057,6 +1057,60 @@ mod tests {
         }
     }
 
+    /// The frontend's `RecordClass` union in `src/services/types.ts` is a
+    /// hand-maintained mirror of this enum, and nothing but this test compares
+    /// the two. `retention_list_policies` returns one row per [`RecordClass::ALL`]
+    /// entry and `local-adapter.ts` casts that payload with a bare `invoke`, so a
+    /// variant added here and forgotten there is a contract type that states a
+    /// set of values the backend no longer sends — while both suites stay green
+    /// and the panel keeps rendering the row at run time. The next screen that
+    /// narrows or switches exhaustively on `recordClass` is where it surfaces,
+    /// by silently dropping the class. `CenovnikArchive` shipped exactly that
+    /// way.
+    ///
+    /// Membership, not order: a union is a set, and reordering it for reading is
+    /// not a defect. The count is checked separately so a repeated member cannot
+    /// pass as a complete mirror.
+    #[test]
+    fn the_typescript_record_class_union_mirrors_this_enum() {
+        const TYPES_TS: &str = include_str!("../../src/services/types.ts");
+        const DECLARATION: &str = "export type RecordClass =";
+
+        let start = TYPES_TS
+            .find(DECLARATION)
+            .expect("src/services/types.ts must still declare the RecordClass union");
+        let tail = &TYPES_TS[start + DECLARATION.len()..];
+        let body = &tail[..tail
+            .find(';')
+            .expect("the RecordClass union must be terminated")];
+
+        // Every quoted member of the union: the odd fields of a split on `"`.
+        let mirrored: Vec<&str> = body.split('"').skip(1).step_by(2).collect();
+        let expected: Vec<&str> = RecordClass::ALL.into_iter().map(RecordClass::key).collect();
+
+        let missing: Vec<&str> = expected
+            .iter()
+            .copied()
+            .filter(|key| !mirrored.contains(key))
+            .collect();
+        let unknown: Vec<&str> = mirrored
+            .iter()
+            .copied()
+            .filter(|key| !expected.contains(key))
+            .collect();
+
+        assert!(
+            missing.is_empty() && unknown.is_empty(),
+            "src/services/types.ts RecordClass no longer mirrors crate::retention::RecordClass — \
+             missing {missing:?}, unknown {unknown:?}"
+        );
+        assert_eq!(
+            mirrored.len(),
+            expected.len(),
+            "the union lists a member twice: {mirrored:?}"
+        );
+    }
+
     /// SW-13 req. 22 / SW-10 req. 6. The access log's period, and the direction
     /// its boundary moves — which is the opposite of a floor's, because it is the
     /// same axis read from the other end.

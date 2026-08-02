@@ -663,6 +663,19 @@ export function createMockServices(): PosServices {
         "se ne podešava.",
       updatedAt: now,
     },
+    {
+      recordClass: "cenovnik_archive",
+      naziv: "Arhiva objavljenih cenovnika",
+      retainUntil: "2028-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Arhiva objavljenih cenovnika (ZZP čl. 6 st. 5). Podrazumevani rok je dve godine — " +
+        "zastarelost prekršajnog gonjenja iz ZZP čl. 213; rok se pomera samo unapred. " +
+        "Automatsko čišćenje nikada ne uklanja važeći cenovnik prodajnog objekta.",
+      updatedAt: now,
+    },
   ];
   let currentShift: ShiftSummary | null = {
     id: 1,

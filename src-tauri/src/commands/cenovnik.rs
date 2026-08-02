@@ -1522,10 +1522,12 @@ mod tests {
     /// The needle is composed at run time so this assertion cannot match its own
     /// source text, and only shipped statements are scanned — every comment line
     /// and every `#[cfg(test)] mod` is dropped first, so the prose explaining the
-    /// rule cannot trip it.
+    /// rule cannot trip it. Every spelling SQLite accepts is one statement to
+    /// [`deletes_the_archive_table`]: the crate writing its SQL uppercase and
+    /// unqualified is a house style, and a guard that leans on a house style is
+    /// a guard a lowercase `delete` walks past.
     #[test]
     fn the_retention_purge_is_the_only_code_that_deletes_a_published_cenovnik() {
-        let needle = format!("{} FROM cenovnik_snapshots", "DELETE");
         let sources = shipped_sources();
         assert!(
             sources.len() > 20,
@@ -1535,7 +1537,9 @@ mod tests {
 
         let offenders: Vec<&str> = sources
             .iter()
-            .filter(|(path, source)| path != "commands/cenovnik.rs" && source.contains(&needle))
+            .filter(|(path, source)| {
+                path != "commands/cenovnik.rs" && deletes_the_archive_table(source)
+            })
             .map(|(path, _)| path.as_str())
             .collect();
         assert!(
@@ -1550,9 +1554,89 @@ mod tests {
             .map(|(_, source)| source.as_str())
             .expect("this module must be in the scan");
         assert!(
-            purge.contains(&needle),
+            deletes_the_archive_table(purge),
             "and the purge this test is guarding must actually be here"
         );
+    }
+
+    /// What the scan above has to recognise, and what it must leave alone.
+    ///
+    /// The guard is only worth the claim its doc comment makes if it sees every
+    /// statement SQLite would execute, not the one spelling this crate happens
+    /// to write today. `delete from cenovnik_snapshots` and
+    /// `DELETE FROM main.cenovnik_snapshots` are both valid, both really remove
+    /// a published cenovnik, and an exact-literal match let both through — the
+    /// crate writing its SQL uppercase and unqualified is a convention, not a
+    /// property, and a guard that depends on a convention guards nothing.
+    ///
+    /// The near-misses matter as much: a differently named table is not this
+    /// table, and reading `cenovnik_snapshots` is not deleting from it.
+    #[test]
+    fn the_delete_scan_reads_sql_the_way_sqlite_does() {
+        for statement in [
+            "DELETE FROM cenovnik_snapshots WHERE id = ?1",
+            "delete from cenovnik_snapshots",
+            "Delete From Cenovnik_Snapshots",
+            "DELETE FROM main.cenovnik_snapshots",
+            "DELETE FROM \"cenovnik_snapshots\"",
+            "DELETE FROM \"main\".\"cenovnik_snapshots\";",
+            "DELETE FROM `cenovnik_snapshots`",
+            "DELETE FROM [cenovnik_snapshots]",
+        ] {
+            assert!(
+                deletes_the_archive_table(statement),
+                "this really deletes a published cenovnik and the guard must see it: {statement}"
+            );
+        }
+
+        for statement in [
+            "SELECT id FROM cenovnik_snapshots WHERE prodajno_mesto = ?1",
+            "INSERT INTO cenovnik_snapshots (prodajno_mesto) VALUES (?1)",
+            "DELETE FROM cenovnik_snapshots_backup",
+            "DELETE FROM stavke_cenovnik_snapshots",
+            "DELETE FROM kalkulacije",
+        ] {
+            assert!(
+                !deletes_the_archive_table(statement),
+                "this leaves the archive alone and the guard must not name it: {statement}"
+            );
+        }
+    }
+
+    /// Does this shipped source remove rows from the archive table?
+    ///
+    /// Read the way SQLite reads it, not the way this crate happens to write it.
+    /// Keywords are case-folded, and the table may carry a schema qualifier or
+    /// any of SQLite's three quotings — each is a valid spelling of the same
+    /// deletion, and matching one exact literal let every other one through.
+    /// Only the last dot-separated segment is compared, and it is compared whole,
+    /// so `stavke_cenovnik_snapshots` and `cenovnik_snapshots_backup` stay other
+    /// tables.
+    ///
+    /// The needle is composed at run time so the guard cannot match its own
+    /// source text, which is why the two halves of `DELETE FROM` are joined here
+    /// rather than written out.
+    fn deletes_the_archive_table(source: &str) -> bool {
+        const TABLE: &str = "CENOVNIK_SNAPSHOTS";
+        let opener = format!("{} {} ", "DELETE", "FROM");
+        let folded = source.to_ascii_uppercase();
+
+        folded.match_indices(&opener).any(|(index, _)| {
+            let target = folded[index + opener.len()..]
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            // `"x"`, `` `x` ``, `[x]`, a trailing `;` and the closing `"` of the
+            // Rust literal all fall away; the dots survive so the qualifier can
+            // be dropped deliberately rather than by accident.
+            let bare: String = target
+                .chars()
+                .filter(|character| {
+                    character.is_ascii_alphanumeric() || *character == '_' || *character == '.'
+                })
+                .collect();
+            bare.rsplit('.').next() == Some(TABLE)
+        })
     }
 
     /// Every `.rs` file under `src/`, reduced to the statements the app ships:
