@@ -415,25 +415,57 @@ mod tests {
         }
     }
 
+    /// Every substring a preduzetnik must never be shown, in one place.
+    ///
+    /// The blanket guard below applies it to `all_notices`, and
+    /// `the_blanket_guard_catches_a_cl_6_sibling_the_citation_filter_would_miss`
+    /// applies it to a notice `all_notices` does not contain — which is the only
+    /// way to exercise the *screen* rather than today's inventory.
+    const FORBIDDEN_TO_A_PREDUZETNIK: [&str; 4] = [
+        "privredni prestup",
+        "2.000.000",
+        "300.000,00 do 2.000.000",
+        // ZZP čl. 210 st. 1 tač. 1's fixed sum, which is a pravno-lice figure;
+        // a preduzetnik's čl. 6 exposure is the fixed 100.000 of st. 3.
+        //
+        // The needle is the fixed-sum phrasing, not the bare literal. „200.000“
+        // on its own is a **correct** preduzetnik figure elsewhere in this
+        // module — ZoR čl. 274 st. 2 fines him 200.000 do 400.000 — but those
+        // two notices read „od 200.000 do 400.000 dinara“ and so do not contain
+        // „200.000 dinara“. That is what lets this one be blanket rather than
+        // scoped to a citation a future sibling may not carry.
+        "200.000 dinara",
+    ];
+
+    fn render(notice: &LegalNotice) -> String {
+        format!(
+            "{} {} {}",
+            notice.summary,
+            notice.penalty.clone().unwrap_or_default(),
+            notice.citation
+        )
+    }
+
+    /// The first substring a preduzetnik must never see, if any.
+    fn forbidden_hit(notice: &LegalNotice) -> Option<&'static str> {
+        // Case-insensitive: the pravno-lice copy opens the sentence with
+        // "Privredni prestup", so a case-sensitive guard would wave the
+        // capitalised form straight through.
+        let haystack = render(notice).to_lowercase();
+        FORBIDDEN_TO_A_PREDUZETNIK
+            .into_iter()
+            .find(|forbidden| haystack.contains(forbidden))
+    }
+
     #[test]
     fn preduzetnik_never_sees_privredni_prestup_or_the_pravno_lice_figures() {
         let p = profile(Some(PravnaForma::Preduzetnik));
 
         for notice in all_notices(&p) {
-            let rendered = format!(
-                "{} {} {}",
-                notice.summary,
-                notice.penalty.clone().unwrap_or_default(),
-                notice.citation
-            );
-            // Case-insensitive: the pravno-lice copy opens the sentence with
-            // "Privredni prestup", so a case-sensitive guard would wave the
-            // capitalised form straight through.
-            let haystack = rendered.to_lowercase();
-            for forbidden in ["privredni prestup", "2.000.000", "300.000,00 do 2.000.000"] {
-                assert!(
-                    !haystack.contains(forbidden),
-                    "preduzetnik copy must not contain {forbidden:?}; got: {rendered}"
+            if let Some(forbidden) = forbidden_hit(&notice) {
+                panic!(
+                    "preduzetnik copy must not contain {forbidden:?}; got: {}",
+                    render(&notice)
                 );
             }
         }
@@ -1067,27 +1099,28 @@ mod tests {
         );
     }
 
-    /// Req. 18's CI guard: the pravno-lice sum must be unreachable as a
-    /// preduzetnik's čl. 6 exposure.
+    fn is_zzp_cl_6(notice: &LegalNotice) -> bool {
+        notice.citation.contains("Zakon o zaštiti potrošača") && notice.citation.contains("čl. 6")
+    }
+
+    /// Req. 18's CI guard, **second** layer: the pravno-lice sum must be
+    /// unreachable as a preduzetnik's čl. 6 exposure.
     ///
-    /// It cannot be a needle on the blanket forbidden-substring guard above,
-    /// because „200.000“ is a **correct** preduzetnik figure elsewhere in this
-    /// module — ZoR čl. 274 st. 2 fines him 200.000 do 400.000 — so forbidding
-    /// it outright would fail on two lawful notices and the guard would be
-    /// deleted rather than fixed. Req. 18 words it narrowly for the same reason:
-    /// the string must not be reachable *as a čl. 6 exposure*. So the scope is
-    /// every ZZP čl. 6 notice, which is what any future one will also be.
+    /// The bare literal „200.000“ cannot be a needle on the blanket guard above,
+    /// because it is a **correct** preduzetnik figure elsewhere in this module —
+    /// ZoR čl. 274 st. 2 fines him 200.000 do 400.000. The *fixed-sum* phrasing
+    /// „200.000 dinara“ can, and does; see the blanket list. This scoped guard
+    /// stays because it screens three needles the blanket one cannot carry at
+    /// all: „čl. 210 st. 2“ and „odgovorno lice“ are lawful copy on other
+    /// notices, and the st. 3 resolution assertion is meaningless off a ZZP
+    /// notice.
     ///
     /// The emptiness assertion is the other half: a filter that matches nothing
     /// passes every loop below it, and a renamed citation would silently turn
-    /// this guard off.
+    /// this guard off. It is why the blanket layer has to exist too — a citation
+    /// this filter does not select is exactly the case it cannot see.
     #[test]
     fn no_zzp_cl_6_notice_quotes_the_pravno_lice_sum_to_a_preduzetnik() {
-        fn is_zzp_cl_6(notice: &LegalNotice) -> bool {
-            notice.citation.contains("Zakon o zaštiti potrošača")
-                && notice.citation.contains("čl. 6")
-        }
-
         let p = profile(Some(PravnaForma::Preduzetnik));
         let guarded: Vec<LegalNotice> = all_notices(&p).into_iter().filter(is_zzp_cl_6).collect();
 
@@ -1098,12 +1131,7 @@ mod tests {
         );
 
         for notice in guarded {
-            let rendered = format!(
-                "{} {} {}",
-                notice.summary,
-                notice.penalty.clone().unwrap_or_default(),
-                notice.citation
-            );
+            let rendered = render(&notice);
 
             for forbidden in ["200.000", "čl. 210 st. 2", "odgovorno lice"] {
                 assert!(
@@ -1127,6 +1155,53 @@ mod tests {
                  amount through st. 3: {rendered}"
             );
         }
+    }
+
+    /// Req. 18's CI guard, **first** layer — the one that does not depend on how
+    /// a future notice happens to word its citation.
+    ///
+    /// `is_zzp_cl_6` selects on „Zakon o zaštiti potrošača“ **and** „čl. 6“. A
+    /// plausible sibling that cites only the offence article — a čl. 6 st. 4
+    /// „pridržavanje objavljene cene“ notice whose citation reads „…, prekršaj:
+    /// čl. 210 st. 1 tač. 1.“ — never contains „čl. 6“, slips the filter
+    /// entirely, and carries the pravno-lice fixed sum onto the preduzetnik tier
+    /// with every scoped assertion still green. Only the blanket screen catches
+    /// that, which is why „200.000 dinara“ has to be a needle there as well.
+    ///
+    /// This is asserted on a notice `all_notices` does not contain on purpose:
+    /// it tests the screen, not today's inventory, so it keeps failing for the
+    /// right reason long after the hypothetical sibling stops being hypothetical.
+    #[test]
+    fn the_blanket_guard_catches_a_cl_6_sibling_the_citation_filter_would_miss() {
+        let escapee = LegalNotice {
+            summary: "Trgovac je dužan da se pridržava objavljene cene.".to_string(),
+            penalty: Some(
+                "Prekršaj: novčana kazna u fiksnom iznosu od 200.000 dinara \
+                 (čl. 210 st. 1 tač. 1), uz kaznu za odgovorno lice u pravnom licu \
+                 u fiksnom iznosu od 50.000 dinara (čl. 210 st. 2)."
+                    .to_string(),
+            ),
+            citation: "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 35/2026), \
+                       prekršaj: čl. 210 st. 1 tač. 1."
+                .to_string(),
+            is_legal_duty: true,
+        };
+
+        assert!(
+            !is_zzp_cl_6(&escapee),
+            "premise of this test: the scoped filter does not select this notice, \
+             so it cannot be the only layer — if this ever starts matching, the \
+             fixture above is no longer the escape case and this test needs a \
+             citation that genuinely escapes"
+        );
+        assert_eq!(
+            forbidden_hit(&escapee),
+            Some("200.000 dinara"),
+            "the čl. 210 st. 1 tač. 1 fixed sum is a pravno-lice figure and must \
+             be unreachable on the preduzetnik tier however the citation is \
+             worded; a preduzetnik's čl. 6 exposure is the fixed 100.000 of \
+             čl. 210 st. 3"
+        );
     }
 
     /// Čl. 220's carve-out named čl. 4 st. 1 and čl. 6 — and **not** čl. 210, so
