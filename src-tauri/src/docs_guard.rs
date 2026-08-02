@@ -259,7 +259,9 @@ fn no_retention_row_promises_a_purge_no_job_performs() {
     const NOT_BEFORE: &str = "tek ";
 
     // How each document names the classes a job really sweeps, lowercased for
-    // the comparison. Both arms are exhaustive matches on `PurgeableClass`.
+    // the comparison. The notice arm is an exhaustive match on `PurgeableClass`;
+    // the register arm is an exhaustive match on `retention::RecordClass` — see
+    // the doc comment above for why the two lists differ.
     let swept_notice: Vec<&str> = PurgeableClass::ALL
         .iter()
         .map(|class| match class {
@@ -303,9 +305,9 @@ fn no_retention_row_promises_a_purge_no_job_performs() {
             REGISTER,
             PROMISE_EN.as_slice(),
             &swept_register,
-            "an exhaustive match on `retention::RecordClass`, naming every class a production \
-             sweep discards — `purge_expired_classes` for the credentials and the access log, \
-             `commands::cenovnik::purge_expired_snapshots` for the cenovnik archive",
+            "an exhaustive match on `retention::RecordClass` — `purge_expired_classes` for the \
+             credentials and the access log, `commands::cenovnik::purge_expired_snapshots` for \
+             the cenovnik archive",
         ),
     ] {
         for (index, line) in text.lines().enumerate() {
@@ -328,8 +330,8 @@ fn no_retention_row_promises_a_purge_no_job_performs() {
             assert!(
                 swept.iter().any(|subject| lowercase.contains(subject)),
                 "{label}:{line_no} states that a class of data is deleted. This document is \
-                 cleared against {cleared_against}, which names every class a purge job actually \
-                 sweeps — {swept:?} — and this row is none of them. \
+                 cleared against {cleared_against}: the classes a purge job actually sweeps are \
+                 {swept:?}, and this row is none of them. \
                  `retention::draft_purge_eligible` and `overtime_log_purge_eligible` are gates \
                  with no production caller, so they delete nothing. State the not-before bound \
                  the stored `napomena` states („Brišu se tek pošto…“), or write the sweep and \

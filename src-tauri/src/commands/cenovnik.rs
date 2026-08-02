@@ -465,7 +465,7 @@ impl PublishedCenovnik {
     }
 }
 
-/// Reads the outlet's current cenovnik and the prices in it.
+/// Reads the outlet's current **published** cenovnik and the prices in it.
 ///
 /// `None` means there is nothing to compare against — no prodajni objekat minted
 /// yet, or nothing published for it. **That is not an error and never a reason a
@@ -473,9 +473,23 @@ impl PublishedCenovnik {
 /// promise to depart from, and the hosting question (req. 15) is deliberately
 /// still open.
 ///
-/// „Current“ is the same reading the archive's list and its purge take — the
-/// newest `generated_at`, a same-second tie broken by the larger id — so the file
-/// the guard measures against is the file the panel calls current.
+/// **`published_at IS NOT NULL` is the whole point of this filter.** Čl. 6 st. 4
+/// reaches only *„Trgovac koji objavi cenovnik iz stava 2“*, and
+/// [`PublishTargetSettings::NotConfigured`] is the default — so a shop that has
+/// named its prodajni objekat but not its mesto objave archives a file on every
+/// price write and publishes none of them. Reading those as published would arm
+/// the till guard against a trader who has published nothing, put a destructive
+/// warning in front of the cashier and write a st. 4 citation into a
+/// never-deleted trail on the strength of it. The archive still holds the file —
+/// it is evidence of what the shop offered, and the panel lists it as
+/// „arhiviran“ — it is only this comparison it does not arm.
+///
+/// So „current“ here is **not** the reading the archive's list and its purge
+/// take. Those answer *which file did this outlet render last*; this answers
+/// *which file can the public still fetch*, and a newer body that no target
+/// accepted has not displaced the older one anywhere a consumer can look. Within
+/// the published rows the ordering is the same — the newest `generated_at`, a
+/// same-second tie broken by the larger id.
 pub fn current_published_cenovnik(
     connection: &Connection,
 ) -> Result<Option<PublishedCenovnik>, AppError> {
@@ -488,6 +502,7 @@ pub fn current_published_cenovnik(
             "SELECT id, generated_at, content_hash, body
              FROM cenovnik_snapshots
              WHERE prodajno_mesto = ?1
+               AND published_at IS NOT NULL
              ORDER BY generated_at DESC, id DESC
              LIMIT 1",
             params![outlet],
@@ -751,10 +766,12 @@ mod tests {
     use super::{
         cenovnik_notice, current_published_cenovnik, list_snapshots, outlet, publish_current,
         publish_target, purge_expired_snapshots, read_snapshot, republish_after_price_move,
-        save_publish_target, PublishTargetSettings,
+        save_publish_target, PublishTargetSettings, PUBLISH_TARGET_SETTINGS_KEY,
     };
     use crate::app_error::AppError;
-    use crate::cenovnik::{published_file_name, NotConfigured, PublishOutcome, PublishTarget};
+    use crate::cenovnik::{
+        published_file_name, LocalFolderTarget, NotConfigured, PublishOutcome, PublishTarget,
+    };
     use crate::commands::catalog::{
         create_product, set_product_active, update_product, SaveProductRequest,
     };
@@ -930,6 +947,29 @@ mod tests {
                 row.get(0)
             })
             .expect("bootstrap admin should exist")
+    }
+
+    /// Points the shop's mesto objave at `folder`, so the republish that rides a
+    /// price write goes through [`configured_target`] to a real
+    /// [`LocalFolderTarget`] instead of the `NotConfigured` default. Written as
+    /// the settings row rather than through `save_publish_target`, which is
+    /// admin-gated and wants an `AppState`.
+    fn set_local_folder_target(db: &Db, folder: &std::path::Path) {
+        db.open()
+            .expect("database should open")
+            .execute(
+                "INSERT INTO settings (key, value_json, updated_at)
+                 VALUES (?1, ?2, '2026-06-18T10:00:00Z')
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                params![
+                    PUBLISH_TARGET_SETTINGS_KEY,
+                    serde_json::to_string(&PublishTargetSettings::LocalFolder {
+                        folder: folder.display().to_string(),
+                    })
+                    .expect("the target should serialise")
+                ],
+            )
+            .expect("the publish target should save");
     }
 
     fn product_request(sale_price_minor: i64) -> SaveProductRequest {
@@ -1884,31 +1924,45 @@ mod tests {
     /// The guard measures a rung price against the file the shop actually
     /// published, not against the catalog that file was rendered from — the
     /// catalog is the very thing that may have moved without a republish. So the
-    /// lookup returns the outlet's current snapshot, its identity, and the prices
-    /// read back out of its body.
+    /// lookup returns the outlet's newest **published** snapshot, its identity,
+    /// and the prices read back out of its body.
     #[test]
     fn the_current_published_cenovnik_is_the_outlets_newest_file_and_its_prices() {
-        with_database("cenovnik_current_published_prices", |db| {
-            let connection = db.open().expect("database should open");
-            publish_current(&connection, &NotConfigured, "2026-08-01T09:15:00Z").expect("publish");
+        with_publish_folder("cenovnik_current_published_prices", |folder| {
+            with_database("cenovnik_current_published_prices", |db| {
+                // The whole shipped path: a configured mesto objave, so the
+                // republish that rides the price write actually publishes.
+                set_local_folder_target(db, folder);
+                let connection = db.open().expect("database should open");
+                publish_current(
+                    &connection,
+                    &LocalFolderTarget::new(folder),
+                    "2026-08-01T09:15:00Z",
+                )
+                .expect("publish");
 
-            let acting = admin_id(db);
-            update_product(db, 1, product_request(31_900), acting).expect("price should save");
+                let acting = admin_id(db);
+                update_product(db, 1, product_request(31_900), acting).expect("price should save");
 
-            let published = current_published_cenovnik(&connection)
-                .expect("the archive should read")
-                .expect("a shop that has published has a current cenovnik");
-            let archived = snapshots(db);
-            assert_eq!(archived.len(), 2, "{archived:?}");
-            assert_eq!(published.snapshot_id, archived[1].id, "the newest file");
-            assert_eq!(published.generated_at, archived[1].generated_at);
-            assert_eq!(published.content_hash, archived[1].content_hash);
-            assert_eq!(published.prodajna_cena("SOK-075"), Some(31_900));
-            assert_eq!(
-                published.prodajna_cena("ARH-1"),
-                None,
-                "an article that is not offered has no published price"
-            );
+                let published = current_published_cenovnik(&connection)
+                    .expect("the archive should read")
+                    .expect("a shop that has published has a current cenovnik");
+                let archived = snapshots(db);
+                assert_eq!(archived.len(), 2, "{archived:?}");
+                assert!(
+                    archived.iter().all(|row| row.published_at.is_some()),
+                    "a configured target publishes every snapshot: {archived:?}"
+                );
+                assert_eq!(published.snapshot_id, archived[1].id, "the newest file");
+                assert_eq!(published.generated_at, archived[1].generated_at);
+                assert_eq!(published.content_hash, archived[1].content_hash);
+                assert_eq!(published.prodajna_cena("SOK-075"), Some(31_900));
+                assert_eq!(
+                    published.prodajna_cena("ARH-1"),
+                    None,
+                    "an article that is not offered has no published price"
+                );
+            });
         });
     }
 
@@ -1935,6 +1989,74 @@ mod tests {
         });
     }
 
+    /// **A snapshot no target accepted is not a published price.** Čl. 6 st. 4
+    /// reaches only *„Trgovac koji objavi cenovnik iz stava 2“*, and
+    /// `PublishTargetSettings::NotConfigured` is the default — so a shop that has
+    /// named its prodajni objekat but not its mesto objave archives a file on
+    /// every price write and publishes none of them. Reading those as published
+    /// would arm the till guard against a trader who has published nothing, and
+    /// write a st. 4 citation into a never-deleted trail on the strength of it.
+    ///
+    /// The archive still holds the file — the row is evidence of what the shop
+    /// offered, and the panel lists it as „arhiviran“ — it is only the čl. 6
+    /// st. 4 comparison it does not arm.
+    #[test]
+    fn an_archived_but_unpublished_snapshot_is_not_a_published_cenovnik() {
+        with_database("cenovnik_current_published_unpublished", |db| {
+            let connection = db.open().expect("database should open");
+            publish_current(&connection, &NotConfigured, "2026-08-01T09:15:00Z")
+                .expect("publish")
+                .expect("an identified outlet archives");
+
+            let archived = snapshots(db);
+            assert_eq!(archived.len(), 1, "{archived:?}");
+            assert_eq!(
+                archived[0].published_at, None,
+                "the fixture must really be the archived-but-unpublished state"
+            );
+            assert_eq!(
+                current_published_cenovnik(&connection).expect("an archive is not an error"),
+                None,
+                "a file that went nowhere is nothing to adhere to"
+            );
+        });
+    }
+
+    /// A republish that failed — or one made while the mesto objave was
+    /// unconfigured — archives a newer file that nobody can fetch. What the
+    /// public still sees is the last file a target accepted, and čl. 6 st. 4
+    /// binds the shop to *that*, so the comparison stays on it rather than
+    /// falling silent or jumping to the newer body.
+    #[test]
+    fn the_comparison_stays_on_the_last_file_a_target_accepted() {
+        with_database("cenovnik_current_published_after_a_failed_publish", |db| {
+            let connection = db.open().expect("database should open");
+            let landed =
+                publish_current(&connection, &RecordingTarget::new(), "2026-08-01T09:15:00Z")
+                    .expect("publish")
+                    .expect("an identified outlet publishes");
+
+            let acting = admin_id(db);
+            update_product(db, 1, product_request(31_900), acting).expect("price should save");
+            let archived = snapshots(db);
+            assert_eq!(archived.len(), 2, "{archived:?}");
+            assert_eq!(
+                archived[1].published_at, None,
+                "the newer file went nowhere"
+            );
+
+            let published = current_published_cenovnik(&connection)
+                .expect("the archive should read")
+                .expect("the earlier publication still stands");
+            assert_eq!(published.snapshot_id, landed);
+            assert_eq!(
+                published.prodajna_cena("SOK-075"),
+                Some(27_900),
+                "the price the public can still fetch, not the one only the archive has"
+            );
+        });
+    }
+
     /// Čl. 6 st. 2 publishes „posebno za svaki prodajni objekat“, so a foreign
     /// outlet's newer file must never become the price this till is measured
     /// against.
@@ -1942,15 +2064,19 @@ mod tests {
     fn another_outlets_newer_file_is_never_this_tills_published_price() {
         with_database("cenovnik_current_published_per_outlet", |db| {
             let connection = db.open().expect("database should open");
-            let ours = publish_current(&connection, &NotConfigured, "2026-08-01T09:15:00Z")
-                .expect("publish")
-                .expect("an identified outlet publishes");
+            let ours =
+                publish_current(&connection, &RecordingTarget::new(), "2026-08-01T09:15:00Z")
+                    .expect("publish")
+                    .expect("an identified outlet publishes");
+            // Published too, so this test turns on the outlet and on nothing else.
             connection
                 .execute(
                     "INSERT INTO cenovnik_snapshots (prodajno_mesto, generated_at, row_count,
-                                                     content_hash, body, created_at)
+                                                     content_hash, body, created_at,
+                                                     published_at, published_target)
                      VALUES ('Druga radnja', '2026-08-05T09:15:00Z', 1, 'h-druga',
-                             ?1, '2026-08-05T09:15:00Z')",
+                             ?1, '2026-08-05T09:15:00Z', '2026-08-05T09:15:00Z',
+                             'test://Druga radnja')",
                     params!["\u{feff}sifra;prodajna_cena\r\nSOK-075;1.00\r\n"],
                 )
                 .expect("a second outlet should insert");

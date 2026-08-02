@@ -128,7 +128,9 @@ pub struct PriceDivergence {
     pub product_sku: String,
     /// What the till is about to charge for one unit, in para.
     pub charged_unit_price_minor: i64,
-    /// What the outlet's current cenovnik says for that article, in para.
+    /// What the outlet's current **published** cenovnik says for that article,
+    /// in para — the newest file a target accepted, never one that was only
+    /// archived. See [`crate::commands::cenovnik::current_published_cenovnik`].
     pub published_unit_price_minor: i64,
     /// The snapshot the comparison was made against. An outlet's archive holds
     /// many files and čl. 6 st. 4 binds the shop only to the one in force, so a
@@ -2413,10 +2415,36 @@ mod tests {
     // Task 5 — the till-side price-integrity guard (req. 12, čl. 6 st. 4)
     // ---------------------------------------------------------------------
 
-    /// A till whose outlet has published a cenovnik: the seeded product at
-    /// 1000 para, an open shift, and one snapshot rendered from the catalog as it
-    /// then stood. Returns the product id and the snapshot the guard will name.
-    fn seed_published_till(state: &AppState) -> (i64, i64) {
+    /// A publish target that accepts the body, so the snapshot it archives
+    /// carries a `published_at`.
+    ///
+    /// The till guard measures against a file the shop **published** — čl. 6
+    /// st. 4 binds *„Trgovac koji objavi cenovnik“* — so a fixture that reached
+    /// for [`crate::cenovnik::NotConfigured`] would seed an archived-but-
+    /// unpublished snapshot and prove the guard fires off a file nobody can
+    /// fetch. Nothing leaves the process: the target only says it accepted.
+    struct AcceptingTarget;
+
+    impl crate::cenovnik::PublishTarget for AcceptingTarget {
+        fn publish(
+            &self,
+            _body: &str,
+            prodajno_mesto: &str,
+            _now: &str,
+        ) -> Result<crate::cenovnik::PublishOutcome, crate::app_error::AppError> {
+            Ok(crate::cenovnik::PublishOutcome::Published {
+                target: format!("test://{prodajno_mesto}"),
+            })
+        }
+    }
+
+    /// A till whose outlet has an archive: the seeded product at 1000 para, an
+    /// open shift, and one snapshot rendered from the catalog as it then stood
+    /// and offered to `target`. Returns the product id and that snapshot.
+    fn seed_till_with_archive(
+        state: &AppState,
+        target: &dyn crate::cenovnik::PublishTarget,
+    ) -> (i64, i64) {
         let product_id = seed_admin_shift_and_product(state);
         let connection = state.db().open().expect("database should open");
         connection
@@ -2437,15 +2465,18 @@ mod tests {
             )
             .expect("company settings should save");
 
-        let snapshot_id = crate::commands::cenovnik::publish_current(
-            &connection,
-            &crate::cenovnik::NotConfigured,
-            "2026-07-31T09:30:00Z",
-        )
-        .expect("the outlet should publish")
-        .expect("an identified outlet publishes");
+        let snapshot_id =
+            crate::commands::cenovnik::publish_current(&connection, target, "2026-07-31T09:30:00Z")
+                .expect("the outlet should publish")
+                .expect("an identified outlet publishes");
 
         (product_id, snapshot_id)
+    }
+
+    /// A till whose outlet has **published** a cenovnik — a target accepted the
+    /// file — which is the only state čl. 6 st. 4 reaches.
+    fn seed_published_till(state: &AppState) -> (i64, i64) {
+        seed_till_with_archive(state, &AcceptingTarget)
     }
 
     /// Moves the catalog price without republishing — the state čl. 6 st. 3 calls
@@ -2677,6 +2708,60 @@ mod tests {
             .expect("a shop that has published nothing must still be able to sell");
             assert_eq!(sale.total_minor, 99_900);
             assert_eq!(compliance_log_count(state), 0);
+        });
+    }
+
+    /// **The pilot's own expected state, and the one the guard must stay out
+    /// of.** `PublishTargetSettings::NotConfigured` is the default, so a shop
+    /// that has identified its prodajni objekat but not chosen a mesto objave
+    /// accumulates snapshots that were rendered and archived and offered to
+    /// nobody — `published_at` is NULL on every one of them.
+    ///
+    /// Čl. 6 st. 4 reaches only *„Trgovac koji objavi cenovnik iz stava 2“*, so
+    /// there is nothing for such a shop to depart from. A guard that fired here
+    /// would put a destructive warning in front of the cashier and write a
+    /// `cenovnik_price_divergence` row citing st. 4 into a never-deleted trail —
+    /// manufacturing adverse evidence against a trader who has published
+    /// nothing, while §2b leaves it unresolved whether it must publish at all.
+    #[test]
+    fn an_archived_but_unpublished_snapshot_arms_no_guard() {
+        with_state("cenovnik_guard_archived_not_published", |state| {
+            let (product_id, snapshot_id) =
+                seed_till_with_archive(state, &crate::cenovnik::NotConfigured);
+            move_the_shelf_price_without_republishing(state, product_id, 1_500);
+
+            let connection = state.db().open().expect("database should open");
+            let published_at: Option<String> = connection
+                .query_row(
+                    "SELECT published_at FROM cenovnik_snapshots WHERE id = ?1",
+                    params![snapshot_id],
+                    |row| row.get(0),
+                )
+                .expect("the snapshot should read");
+            assert_eq!(
+                published_at, None,
+                "the fixture must really be the archived-but-unpublished state"
+            );
+
+            assert!(
+                assess_draft_price_integrity(state.db(), sale_draft(product_id, 1_000))
+                    .expect("an unpublished archive is not an error")
+                    .is_empty(),
+                "a file no target accepted is not a published price"
+            );
+
+            let sale = complete_sale_transaction(
+                state.db(),
+                cash_sale(product_id, 1_000, 1_500),
+                Some(admin_id(state)),
+            )
+            .expect("a shop that has published nothing must still be able to sell");
+            assert_eq!(sale.total_minor, 1_500);
+            assert_eq!(
+                compliance_log_count(state),
+                0,
+                "no čl. 6 st. 4 record against a trader who has published nothing"
+            );
         });
     }
 
