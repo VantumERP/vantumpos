@@ -258,7 +258,7 @@ impl RecordClass {
                 "PIN i lozinka (samo heš vrednosti). Uklanjaju se danom prestanka radnog odnosa, a ne po isteku roka (ZZPL čl. 5 st. 1 tač. 5 i čl. 42 st. 2). Automatsko čišćenje uklanja heš sa svakog deaktiviranog naloga; sam nalog i evidencija o zaposlenom ostaju."
             }
             Self::AccessLog => {
-                "Evidencija pristupa podacima o ličnosti (ZZPL čl. 48). Aplikacija ne vodi zasebnu istoriju prijavljivanja — beleži se samo poslednja prijava na nalogu, koja se prepisuje pri svakoj sledećoj. Zakon ne propisuje rok; primenjuje se podrazumevani rok od dve godine, koji nadživljava ceo rok zastarelosti iz ZoP čl. 84. Odbranjiva gornja granica je tri godine (ZoR čl. 196). Rok se pomera samo unapred. Ova evidencija se ne čuva trajno."
+                "Evidencija pristupa podacima o ličnosti, koju rukovalac vodi kao sopstvenu meru: ZZPL čl. 48 obavezuje nadležni organ koji podatke obrađuje u posebne svrhe, pa je ovde uzor za sadržaj, a ne osnov obaveze. Aplikacija ne vodi zasebnu istoriju prijavljivanja — beleži se samo poslednja prijava na nalogu, koja se prepisuje pri svakoj sledećoj. Zakon ne propisuje rok; primenjuje se podrazumevani rok od dve godine, koji nadživljava ceo rok zastarelosti iz ZoP čl. 84. Odbranjiva gornja granica je tri godine (ZoR čl. 196). Rok se pomera samo unapred. Ova evidencija se ne čuva trajno."
             }
         }
     }
@@ -924,6 +924,52 @@ mod tests {
         assert_eq!(expiry_cutoff("", 2), None);
     }
 
+    /// §2a / req. 1. Čl. 48 binds only a „nadležni organ koji obrađuje podatke u
+    /// posebne svrhe“; no Serbian provision obliges a private retail rukovalac to
+    /// record who accessed personal data, and the shop must never be told
+    /// otherwise. These notes are the sentence a person reads when they ask why a
+    /// line is still there, so a bare parenthetical „(ZZPL čl. 48)“ reads as the
+    /// osnov of a duty. `commands::audit::IZVOD_NAPOMENA` already states the
+    /// honest framing on the čl. 48 st. 4 izvod — the two must not disagree.
+    #[test]
+    fn a_note_may_cite_cl_48_only_as_the_uzor_it_is() {
+        for class in RecordClass::ALL {
+            let note = class.napomena();
+            if !note.contains("čl. 48") {
+                continue;
+            }
+
+            assert!(
+                note.contains("sopstven"),
+                "{}: the note must say the rukovalac keeps this evidencija as its own measure \
+                 before it cites čl. 48 — {note}",
+                class.key()
+            );
+            assert!(
+                note.contains("nadležni organ"),
+                "{}: …and name who čl. 48 actually binds — {note}",
+                class.key()
+            );
+            assert!(
+                note.contains("posebne svrhe"),
+                "{}: …and the purposes that confine it — {note}",
+                class.key()
+            );
+        }
+
+        // Req. 6 and req. 22 live in the same string, and a reword must not lose
+        // them: no statutory period, and this class is never trajno.
+        let access_log = RecordClass::AccessLog.napomena();
+        assert!(
+            access_log.contains("Zakon ne propisuje rok"),
+            "the access log has no statutory period and the note has to say so: {access_log}"
+        );
+        assert!(
+            access_log.contains("Ova evidencija se ne čuva trajno"),
+            "and req. 6 forbids trajno for this class: {access_log}"
+        );
+    }
+
     #[test]
     fn every_record_class_round_trips_through_its_stored_key() {
         for class in RecordClass::ALL {
@@ -982,6 +1028,89 @@ mod tests {
                 })
                 .expect("count should query");
             assert_eq!(survivors, 1, "the rolled-back transaction kept the row");
+        });
+    }
+
+    /// The same fence, on the table the test above cannot see.
+    ///
+    /// SW-13 req. 19/24 gives the ZEOR register two layers: v18's
+    /// `trg_personnel_records_trajno` refuses a row-level delete, and membership
+    /// in [`NEVER_PURGE_TABLES`] aborts any transaction that ever gets past it.
+    /// The fence test above hardcodes `work_time_entries`, so the second layer
+    /// was carried by nothing — deleting the entry from the list left the whole
+    /// suite green. Dropping the trigger inside the transaction stages exactly
+    /// the „future edit that finds a way around it“ the module claims to survive;
+    /// SQLite rolls the DDL back with everything else.
+    #[test]
+    fn the_never_purge_fence_covers_the_personnel_register_too() {
+        assert!(
+            super::NEVER_PURGE_TABLES.contains(&"personnel_records"),
+            "the ZEOR čl. 5 evidencija is trajno under čl. 7 st. 2: without this entry the \
+             transaction-level half of req. 19 does not exist"
+        );
+
+        with_state("retention_never_purge_fence_personnel", |state| {
+            let mut connection = state.db().open().expect("database should open");
+            connection
+                .execute_batch(
+                    "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                         VALUES (802, 'radnica2', 'Radnica Dva', 'cashier', 1,
+                                 '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+                     INSERT INTO personnel_records (user_id, prezime_ime, created_at, updated_at)
+                         VALUES (802, 'Radnica Dva', '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');",
+                )
+                .expect("an employee record should seed");
+
+            let transaction = connection.transaction().expect("transaction should open");
+            let before =
+                super::never_purge_row_counts(&transaction).expect("counts should snapshot");
+            assert!(
+                before.contains(&("personnel_records", 1)),
+                "the snapshot the purge and the go-live reset both take must count the \
+                 register: {before:?}"
+            );
+
+            // Layer one: the row-level trigger refuses outright.
+            let error = transaction
+                .execute("DELETE FROM personnel_records WHERE user_id = 802", [])
+                .expect_err("the trigger must refuse a row-level delete");
+            assert!(
+                error.to_string().contains("trajno"),
+                "the refusal must say why: {error}"
+            );
+
+            // Layer two: with the trigger gone the deletion is legal SQL again,
+            // and the fence is the only thing left standing.
+            transaction
+                .execute_batch(
+                    "DROP TRIGGER trg_personnel_records_trajno;
+                     DELETE FROM personnel_records;",
+                )
+                .expect("without the trigger the deletion itself is legal SQL");
+            let error = super::assert_never_purge_intact(&transaction, &before)
+                .expect_err("a dropped register row must abort the whole operation");
+            assert_eq!(error.code(), "invalid_state");
+            assert!(
+                error.to_string().contains("personnel_records"),
+                "the failure must name the table it caught: {error}"
+            );
+
+            drop(transaction);
+            let survivors: i64 = connection
+                .query_row("SELECT COUNT(*) FROM personnel_records", [], |row| {
+                    row.get(0)
+                })
+                .expect("count should query");
+            assert_eq!(survivors, 1, "the rolled-back transaction kept the record");
+            let triggers: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type = 'trigger' AND name = 'trg_personnel_records_trajno'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count should query");
+            assert_eq!(triggers, 1, "and put the trigger back with it");
         });
     }
 

@@ -1399,6 +1399,78 @@ mod tests {
         );
     }
 
+    /// The half of that contract the test above cannot see.
+    ///
+    /// `the_purge_records_the_anchor_so_the_chain_still_verifies` only ever cuts
+    /// a **prefix** — the youngest line survives, so the purge line chains onto
+    /// it whichever side of the `DELETE` it is appended on, and both orderings
+    /// produce a byte-identical chain. The ordering only becomes load-bearing
+    /// when the cut takes every surviving row: appended first, the purge line
+    /// chains onto the tail the anchor records and carries the chain across the
+    /// cut; appended after, it starts a second genesis chain that the anchor
+    /// contradicts, and the first legitimate whole-log purge reads as tampering.
+    #[test]
+    fn a_purge_that_takes_the_whole_log_still_leaves_a_verifiable_chain() {
+        with_state(
+            "a_purge_that_takes_the_whole_log_still_leaves_a_verifiable_chain",
+            |state| {
+                sign_in_admin(state);
+                seed_retention_policies(state, "2026-01-01T08:00:00Z")
+                    .expect("the classes should seed");
+                // Every line is older than the period, so nothing survives the
+                // cut and the anchor is the tail of the log itself.
+                for object_id in ["11", "12", "13"] {
+                    seed_audit_line(state, "2026-08-01T09:00:00Z", object_id);
+                }
+
+                let tail_hash: String = state
+                    .db()
+                    .open()
+                    .expect("database should open")
+                    .query_row("SELECT hash FROM audit_events WHERE id = 3", [], |row| {
+                        row.get(0)
+                    })
+                    .expect("the third line should read");
+
+                let report = purge_expired_classes(state, "2029-08-01T03:00:00Z")
+                    .expect("the purge should run");
+                assert_eq!(
+                    report.access_log_rows_removed, 3,
+                    "every seeded line had outlived the period"
+                );
+
+                let connection = state.db().open().expect("database should open");
+                let (hash, id): (String, i64) = connection
+                    .query_row(
+                        "SELECT json_extract(value_json, '$.hash'),
+                                json_extract(value_json, '$.id')
+                         FROM settings WHERE key = 'audit_chain_anchor'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("the purge records its anchor");
+                assert_eq!(hash, tail_hash, "the hash of the LAST row removed");
+                assert_eq!(id, 3);
+
+                let rows = audit_rows(state);
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "the purge line is the only survivor: {rows:?}"
+                );
+
+                let result =
+                    search(state, &AuditQuery::default()).expect("the reader should still run");
+                assert!(
+                    result.chain.intact,
+                    "the purge line must chain onto the anchor, not restart the chain \
+                     behind it — a whole-log purge is not tampering: {}",
+                    result.chain.label
+                );
+            },
+        );
+    }
+
     /// A legal hold stops the sweep like it stops every other purge in this app.
     #[test]
     fn a_legal_hold_stops_the_purge() {
@@ -1461,5 +1533,38 @@ mod tests {
             );
             assert_eq!(audit_rows(state).len(), 1, "and logs no second erasure");
         });
+    }
+
+    /// Req. 23 („the purge is not a command“) and req. 24 („no Delete employee
+    /// affordance“) are properties of the *surface*, not of any one function, so
+    /// only the registration list can hold them. Task 4 pins its own surface the
+    /// same way in `no_audit_command_can_edit_or_delete_a_logged_row`.
+    ///
+    /// The filter keeps bare identifiers only, so `lib.rs`'s two launch-path
+    /// **calls** to `purge_expired_classes` — which are the point: it runs on a
+    /// timer and not behind a button — do not read as registrations.
+    #[test]
+    fn the_personnel_surface_is_a_read_and_a_save_and_nothing_else() {
+        const LIB_RS: &str = include_str!("../lib.rs");
+
+        let registered: Vec<&str> = LIB_RS
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("commands::personnel::"))
+            .map(|name| name.trim_end_matches(','))
+            .filter(|name| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            })
+            .collect();
+
+        assert_eq!(
+            registered,
+            vec!["personnel_get", "personnel_save"],
+            "req. 23: the čl. 5 st. 1 tač. 5 purge is a proactive duty and must stay time-driven, \
+             never a command someone has to press; req. 24: the ZEOR register is trajno, so there \
+             is no delete affordance to expose in the first place"
+        );
     }
 }
