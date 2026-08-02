@@ -443,6 +443,48 @@ under ZoP čl. 3, §6 R-2); and no headcount gate or plan-tier upsell on any of 
 
 ---
 
+### SW-10 req. 6 + SW-13 req. 22 — the rok is now a setting (2026-08-02)
+
+The closing audit of the batch above found the third document in a row promising behaviour the code
+lacked, and the čl. 23 notice was again the carrier. **Four strings** said the retention period was
+adjustable and moved only forward: two rows of `docs/compliance/obavestenje-zaposlenima.md`, the
+`napomena` stored beside `RecordClass::AccessLog`, and the `rok_osnov` the čl. 47 register prints for
+the Poverenik. `retention::extend_retain_until` had the arithmetic and the upward-only rule, but every
+call site was inside a `#[cfg(test)]` module: no command, no `invoke_handler` entry, no screen.
+
+Req. 6 asks for *configurable retention with a documented default* and req. 22 for three things —
+*ship a default, expose the setting, record the chosen value in the čl. 47 register*. **The setting was
+built rather than the strings re-stated**, so all four now say what the program does.
+
+| Shipped | Where |
+|---|---|
+| `AdjustableClass` — the classes a registered command can move, exhaustively. Four variants, none of them `trajno`: the ZEOR čl. 5 evidencija, the frozen monthly classification and the čl. 47 register have no variant, so reaching them is a compile error rather than a review catch — the same shape `personnel::PurgeableClass` uses for the purge | `commands/retention.rs` |
+| `retention_list_policies` / `retention_extend_policy` — admin-gated **inside the domain function**, not in the wrapper. The list carries every class, `trajno` ones included, because *„rok se ne podešava“* is the answer to a question the operator would otherwise ask by trying. There is **no shortening verb and no clearing verb**: an earlier date is refused, never clamped, and the refusal is prose the operator can act on | `commands/retention.rs`, `lib.rs` |
+| The čl. 48 line. Moving a rok decides how long the evidencija pristupa itself survives, so it is a `menjanje` on `retention_policy` carrying the row id and nothing else (req. 4), in the same transaction as the write | `commands/retention.rs` |
+| Req. 22's third limb. The command regenerates the čl. 47 register in the same call, so the chosen value reaches st. 1 t. 6 immediately rather than at the next launch | `commands/retention.rs` → `cl47::generate` |
+| „Rokovi čuvanja“ in Podešavanja — the rok in force per class, its `napomena`, and a date field only where a command can actually move it. It sits under Podešavanja and not under Privatnost on purpose: the evidencije are records the rukovalac keeps and nothing may switch off, while ZZPL čl. 5 st. 1 tač. 5 leaves the *period* to the shop | `src/app/settings/RetentionPanel.tsx` |
+| Two `docs_guard` tests. `no_stored_retention_note_claims_a_period_no_command_can_move` is exact — the class each string belongs to is known — and covers both the stored `napomena` and the register's `rok_osnov`; `no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move` reads the čl. 23 notice by subject against an **exhaustive** match on `AdjustableClass`, so a class added without a command fails the guard | `docs_guard.rs` |
+
+**What the setting does and does not do, stated once.** `retain_until` is the earliest day on which a
+class may be discarded, not a day on which anything is discarded — the sweep is gated by it, so pushing
+it forward keeps every row of that class until at least that day. The screen and the register both say
+it in those words (*„ništa se ne briše pre …“*), and nothing anywhere offers to shorten it.
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **407 passed** / 0 failed, 28 files (was 400 / 27) | `0` |
+| `bun run build` | tsc + vite | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **670 passed**; 0 failed, 0 ignored (was 661) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+9 cargo / +7 bun**. Latest migration: **v18** — this batch adds none.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.

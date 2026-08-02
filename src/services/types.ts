@@ -1742,6 +1742,31 @@ export type RecordClass =
   | "processing_register";
 
 /**
+ * One row of the shared retention table — `crate::commands::retention::
+ * RetentionPolicyView`.
+ *
+ * **`adjustable` is not the negation of `neverPurge`.** It answers whether a
+ * registered command can actually move this class's rok
+ * (`crate::commands::retention::AdjustableClass`), which is the only sense in
+ * which a screen may offer the shop a period to change. The two can disagree
+ * only by mistake, and this is the side that has to be true.
+ *
+ * `retainUntil` is the earliest day on which the class may be discarded, not a
+ * day on which anything is discarded. `null` means trajno: the absence of an
+ * end, never „no rule“.
+ */
+export interface RetentionPolicy {
+  recordClass: RecordClass;
+  naziv: string;
+  retainUntil: string | null;
+  legalHold: boolean;
+  neverPurge: boolean;
+  adjustable: boolean;
+  napomena: string;
+  updatedAt: string;
+}
+
+/**
  * One generated radnja obrade — `crate::cl47::ProcessingActivity`.
  *
  * The register is generated from the app's own configured purposes, recipients

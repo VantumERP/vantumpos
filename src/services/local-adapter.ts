@@ -44,6 +44,7 @@ import type {
   PaymentMethodReport,
   PrethodnaCenaDto,
   ProcessingActivity,
+  RetentionPolicy,
   ProductLedger,
   ProductListResult,
   ProductLookupSuggestion,
@@ -388,6 +389,14 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       generateProcessingActivities: () =>
         invoke<ProcessingActivity[]>("cl47_generate"),
       exportProcessingActivities: () => invoke<ExportedFile>("cl47_export"),
+    },
+    retention: {
+      listPolicies: () => invoke<RetentionPolicy[]>("retention_list_policies"),
+      extendPolicy: (recordClass, retainUntil) =>
+        invoke<RetentionPolicy>("retention_extend_policy", {
+          recordClass,
+          retainUntil,
+        }),
     },
     print: {
       openForPrint: (path) => openPath(path),

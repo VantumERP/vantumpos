@@ -1122,6 +1122,37 @@ describe("local service adapter", () => {
     expect(auditMethods).toEqual(["exportAuditCsv", "searchAudit"]);
   });
 
+  it("maps the retention setting to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "retention_list_policies":
+          return Promise.resolve([]);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    await services.retention.listPolicies();
+    await services.retention.extendPolicy("access_log", "2031-03-01");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "retention_list_policies");
+    expect(invoke).toHaveBeenNthCalledWith(2, "retention_extend_policy", {
+      recordClass: "access_log",
+      retainUntil: "2031-03-01",
+    });
+
+    // Req. 6/22 give the shop one verb and it moves the rok forward. A
+    // `shortenPolicy`, a `clearPolicy` or a `setPolicy` on this surface would be
+    // the shortening path the backend refuses, arriving through the port
+    // instead — so the assertion is over the SHAPE of the object, not over the
+    // two calls this test happened to make.
+    expect(Object.keys(services.retention).sort()).toEqual([
+      "extendPolicy",
+      "listPolicies",
+    ]);
+  });
+
   it("opens an exported document for printing through the opener plugin", async () => {
     const { openPath } = await import("@tauri-apps/plugin-opener");
     const services = createLocalServices(vi.fn());

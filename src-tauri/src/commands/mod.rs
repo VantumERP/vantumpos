@@ -14,6 +14,7 @@ pub mod personnel;
 pub mod receipts;
 pub mod reklamacije;
 pub mod reports;
+pub mod retention;
 pub mod sales;
 pub mod settings;
 pub mod shifts;

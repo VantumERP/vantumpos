@@ -43,10 +43,40 @@ describe("SettingsScreen", () => {
     await user.click(screen.getByRole("tab", { name: "Korisnici" }));
     expect(screen.getByText("Korisnici panel")).toBeInTheDocument();
 
+    await user.click(screen.getByRole("tab", { name: "Rokovi čuvanja" }));
+    expect(
+      await screen.findByRole("heading", { name: "Rokovi čuvanja" }),
+    ).toBeInTheDocument();
+
     await user.click(screen.getByRole("tab", { name: "Backup" }));
     expect(
       await screen.findByRole("heading", { name: "Status backupa" }),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * Req. 6 + req. 22: the setting has to be reachable, not merely implemented.
+   * The čl. 23 notice tells the employee the rok „pomera se samo unapred“, and
+   * this is the surface that has to make that true from the shop's side.
+   */
+  it("moves a retention rok forward from the Rokovi čuvanja tab", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const extendPolicy = vi.spyOn(services.retention, "extendPolicy");
+    renderSettings(services);
+
+    await user.click(await screen.findByRole("tab", { name: "Rokovi čuvanja" }));
+
+    const field = await screen.findByLabelText(
+      "Novi rok — Evidencija pristupa podacima o ličnosti",
+    );
+    await user.clear(field);
+    await user.type(field, "2031-03-01");
+    const row = field.closest("tr") as HTMLTableRowElement;
+    await user.click(within(row).getByRole("button", { name: "Pomeri rok" }));
+
+    expect(extendPolicy).toHaveBeenCalledWith("access_log", "2031-03-01");
+    expect(await screen.findByText("Rok čuvanja je pomeren.")).toBeInTheDocument();
   });
 
   it("opens the PURS registry through the opener service", async () => {

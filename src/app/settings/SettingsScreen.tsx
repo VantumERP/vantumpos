@@ -71,6 +71,7 @@ import type {
   TaxRate,
 } from "@/services/types";
 
+import { RetentionPanel } from "./RetentionPanel";
 import { ShopProfilePanel } from "./ShopProfilePanel";
 
 interface SettingsScreenProps {
@@ -106,6 +107,7 @@ type SettingsTab =
   | "rate"
   | "calendar"
   | "users"
+  | "rokovi"
   | "backup";
 
 export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
@@ -228,6 +230,12 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           onSelect={() => setActiveTab("users")}
         >
           Korisnici
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "rokovi"}
+          onSelect={() => setActiveTab("rokovi")}
+        >
+          Rokovi čuvanja
         </SettingsTabButton>
         <SettingsTabButton
           active={activeTab === "backup"}
@@ -358,10 +366,24 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
               Nalog za pristup tehničke podrške, evidencija pristupa podacima,
               evidencija povreda podataka i evidencija radnji obrade nalaze se u
               odeljku „Privatnost“ u glavnom meniju. To su evidencije koje
-              rukovalac vodi, a ne podešavanja.
+              rukovalac vodi, a ne podešavanja. Rok čuvanja tih evidencija jeste
+              podešavanje i nalazi se na kartici „Rokovi čuvanja“.
             </AlertDescription>
           </Alert>
         </div>
+      ) : null}
+
+      {/*
+        The rok IS a podešavanje, and that is why it sits here rather than under
+        „Privatnost“ beside the evidencije. The alert on the Korisnici tab draws
+        the line: the čl. 46 nalog, the čl. 48 evidencija pristupa and the čl. 52
+        evidencija povreda are records the rukovalac keeps and nothing may turn
+        them off, while ZZPL čl. 5 st. 1 tač. 5 leaves the *period* to the shop —
+        the shortest defensible default, lengthened when the shop needs longer.
+        Req. 6 and req. 22 ask for exactly that to be exposed.
+      */}
+      {activeTab === "rokovi" ? (
+        <RetentionPanel retention={services.retention} />
       ) : null}
 
       {activeTab === "backup" ? (

@@ -260,6 +260,14 @@ pub fn run() {
             // tač. 5 is a proactive duty and not a request the webview makes.
             commands::personnel::personnel_get,
             commands::personnel::personnel_save,
+            // Req. 6 + req. 22: the rok is a setting, and this is the pair that
+            // makes it one — a reader and a mover, both admin-gated. There is
+            // deliberately no shortening verb and no verb that reaches a trajno
+            // class: `commands::retention::AdjustableClass` has no variant for
+            // one, so the ZEOR čl. 5 evidencija and the čl. 47 register are out
+            // of reach by type rather than by review.
+            commands::retention::retention_list_policies,
+            commands::retention::retention_extend_policy,
             // SW-17. Req. 43: there is no notifiability gate in front of the
             // write — čl. 52 st. 6 covers „svaku povredu“ and the risk question
             // is answered on a record that already exists. And there is no

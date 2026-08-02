@@ -60,6 +60,8 @@ import type {
   ProductSearchQuery,
   ProductSummary,
   ProcessingActivity,
+  RecordClass,
+  RetentionPolicy,
   SupportSession,
   AnswerInput,
   BasisDoc,
@@ -447,6 +449,36 @@ export interface PrivacyService {
   exportProcessingActivities(): Promise<ExportedFile>;
 }
 
+/**
+ * The shared retention table — the rok čuvanja per class of record, and the one
+ * verb that may change it (SW-10 req. 6, SW-13 req. 22).
+ *
+ * Two properties of the backend this interface must not paper over.
+ *
+ * **There is no verb that shortens a rok, and there never may be one.** The
+ * period moves only forward — that sentence is printed on the čl. 23 notice
+ * handed to the employee and on the čl. 47 register read by the Poverenik — so
+ * `extendPolicy` refuses an earlier date rather than clamping it, and the
+ * refusal comes back as prose to show the operator.
+ *
+ * **A `trajno` class is not reachable from here.** Backend-side the classes this
+ * verb accepts are an enum with no variant for the ZEOR čl. 5 evidencija, the
+ * frozen monthly classification or the čl. 47 register; `RetentionPolicy
+ * .adjustable` is that list, so a screen never offers a control it would only
+ * get refused for.
+ *
+ * Both methods are admin-gated backend-side.
+ */
+export interface RetentionService {
+  listPolicies(): Promise<RetentionPolicy[]>;
+  /**
+   * Moves one class's rok forward. `retainUntil` is `gggg-MM-dd`; the chosen
+   * value reaches the čl. 47 register in the same call, because čl. 47 st. 1
+   * t. 6 is what the shop has told the Poverenik it applies.
+   */
+  extendPolicy(recordClass: RecordClass, retainUntil: string): Promise<RetentionPolicy>;
+}
+
 export interface PrintService {
   /** Opens an exported document in the OS default handler for printing. */
   openForPrint(path: string): Promise<void>;
@@ -494,5 +526,6 @@ export interface PosServices {
   kep: KepService;
   worktime: WorkTimeService;
   privacy: PrivacyService;
+  retention: RetentionService;
   print: PrintService;
 }

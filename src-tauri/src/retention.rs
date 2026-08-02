@@ -206,6 +206,25 @@ impl RecordClass {
         Self::ALL.into_iter().find(|class| class.key() == key)
     }
 
+    /// What the class is called in front of a person — the same wording the
+    /// čl. 23 notice's retention table uses, so an employee reading the notice
+    /// and an administrator reading the rok on screen are looking at one row.
+    ///
+    /// Deliberately not the `key`: `worktime_classification` names a column
+    /// value, and a screen that offers to move „worktime_draft“ forward is a
+    /// screen nobody in the shop can use.
+    pub fn naziv(self) -> &'static str {
+        match self {
+            Self::WorktimeClassification => "Izvedena mesečna klasifikacija časova",
+            Self::WorktimeOvertimeLog => "Samostalna evidencija prekovremenog rada",
+            Self::WorktimeDraft => "Radne verzije unosa i pomoćni podaci o vremenu",
+            Self::Personnel => "Evidencija o zaposlenim licima",
+            Self::Credentials => "PIN i lozinka (heš vrednosti)",
+            Self::AccessLog => "Evidencija pristupa podacima o ličnosti",
+            Self::ProcessingRegister => "Evidencija o radnjama obrade",
+        }
+    }
+
     /// ZEOR čl. 7 st. 2 / čl. 25 st. 3 — `trajno`. A class that answers `true`
     /// here is unreachable by every purge, whatever date anything else stores.
     ///

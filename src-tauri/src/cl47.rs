@@ -335,6 +335,22 @@ const TEMPLATES: &[Template] = &[
 /// is, so a field the shop has not filled in is printed as a visible gap rather
 /// than skipped: an inspector reading „nije uneto“ knows to ask, and a reader of
 /// a silently shortened line does not.
+/// The čl. 47 st. 1 t. 6 prose of every radnja, paired with the class its
+/// applied period is read from — for `docs_guard`, which reads these the way it
+/// reads the documents.
+///
+/// This is the one register column that is a **claim about behaviour**: t. 6 is
+/// the *rok posle čijeg isteka se brišu određene vrste podataka*, and it goes to
+/// the Poverenik. `no_stored_retention_note_claims_a_period_no_command_can_move`
+/// pins each string against the class it is wired to.
+#[cfg(test)]
+pub(crate) fn retention_prose() -> Vec<(&'static str, Option<RecordClass>, &'static str)> {
+    TEMPLATES
+        .iter()
+        .map(|template| (template.kljuc, template.retention, template.rok_osnov))
+        .collect()
+}
+
 fn rukovalac_kontakt(company: &CompanySettings) -> String {
     fn ili_prazno(value: &str) -> String {
         let trimmed = value.trim();

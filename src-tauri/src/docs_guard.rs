@@ -271,6 +271,159 @@ fn the_class_b_retention_row_says_no_automatic_purge_exists_for_it() {
     );
 }
 
+/// Wording that promises the shop can move a retention period: „rok je
+/// podesiv“, „uz mogućnost produženja“, „rok se pomera samo unapred“. The first
+/// is a stem, so „podesiva“ and „podesivi rokovi“ trip the same guard.
+///
+/// The verb **„podešava se“ is deliberately absent.** It is the word the
+/// negations are built out of — „rok se ne podešava“, „nema zaseban rok koji bi
+/// se podešavao“ — and a stem that matches both halves of a contradiction
+/// classifies neither. What is left are phrases that only ever appear in a
+/// promise.
+const ADJUSTABLE_CLAIM: [&str; 4] = [
+    "podesiv",
+    "mogućnost produženja",
+    "pomera se samo unapred",
+    "pomera samo unapred",
+];
+
+/// The negation of the one stem above that can be negated in place. Without it
+/// a future „rok nije podesiv“ would read as the claim it denies.
+const NOT_ADJUSTABLE: [&str; 2] = ["nije podesiv", "nisu podesiv"];
+
+fn claims_an_adjustable_period(text: &str) -> bool {
+    let lowercase = text.to_lowercase();
+    if NOT_ADJUSTABLE
+        .iter()
+        .any(|needle| lowercase.contains(needle))
+    {
+        return false;
+    }
+
+    ADJUSTABLE_CLAIM
+        .iter()
+        .any(|needle| lowercase.contains(needle))
+}
+
+/// A period that „moves only forward“ is a **setting**, and a setting nothing
+/// can set is the same defect as a purge nothing performs — one document further
+/// on. Four strings promised it at once: two rows of the čl. 23 notice, the
+/// `napomena` stored beside the access-log class, and the `rok_osnov` the čl. 47
+/// register prints for the Poverenik.
+///
+/// `commands::retention::AdjustableClass` is the list of classes a registered
+/// command can actually move, and it is **exhaustive**: a class that reaches
+/// `retention_policies` without a variant here fails
+/// `every_class_that_is_not_trajno_is_named_by_an_adjustable_variant`, and a
+/// variant added without a command does not compile. So a note claiming an
+/// adjustable period for a class outside that list is a promise nothing keeps.
+///
+/// This half is exact rather than textual: the class each string belongs to is
+/// known, so nothing has to be inferred from the prose.
+#[test]
+fn no_stored_retention_note_claims_a_period_no_command_can_move() {
+    use crate::commands::retention::AdjustableClass;
+    use crate::retention::RecordClass;
+
+    for class in RecordClass::ALL {
+        let napomena = class.napomena();
+        if !claims_an_adjustable_period(napomena) {
+            continue;
+        }
+
+        assert!(
+            AdjustableClass::from_key(class.key()).is_some(),
+            "the note stored beside „{}“ promises an adjustable rok. \
+             `commands::retention::AdjustableClass` names every class a registered command can \
+             move, and this class is not one of them — either give it a variant (and therefore a \
+             command) or state the rok as the fixed period it is: {napomena}",
+            class.key()
+        );
+    }
+
+    // The same claim where it is read by the Poverenik rather than by the shop:
+    // čl. 47 st. 1 t. 6 is the register's own retention column.
+    for (kljuc, class, rok_osnov) in crate::cl47::retention_prose() {
+        if !claims_an_adjustable_period(rok_osnov) {
+            continue;
+        }
+
+        let movable = class
+            .map(|class| AdjustableClass::from_key(class.key()).is_some())
+            .unwrap_or(false);
+        assert!(
+            movable,
+            "the čl. 47 register tells the Poverenik that the rok for „{kljuc}“ moves forward. \
+             Only `commands::retention::AdjustableClass` classes can be moved, and this radnja \
+             is wired to {class:?} — wire it to a class the shop can actually move, or drop the \
+             claim: {rok_osnov}"
+        );
+    }
+}
+
+/// The textual half of the same guard, on the one document that is handed to a
+/// person rather than generated: the čl. 23 notice. Here the class is not
+/// carried by the line, so the subject phrase is — and the list of subjects is
+/// an **exhaustive match** on `AdjustableClass`, so a new variant costs a
+/// decision about what the employee is told it is called.
+#[test]
+fn no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move() {
+    use crate::commands::retention::AdjustableClass;
+
+    // How the čl. 23 notice names each movable class, in its own words.
+    let movable: Vec<&str> = AdjustableClass::ALL
+        .iter()
+        .map(|class| match class {
+            AdjustableClass::WorktimeOvertimeLog => "prekovremen",
+            AdjustableClass::WorktimeDraft => "radne verzije",
+            AdjustableClass::Credentials => "pin i lozinka",
+            AdjustableClass::AccessLog => "evidencija pristupa",
+        })
+        .collect();
+
+    let lines: Vec<&str> = NOTICE.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let line_no = index + 1;
+        if !claims_an_adjustable_period(line) {
+            continue;
+        }
+
+        // A table row is a self-contained per-class claim and is judged alone —
+        // otherwise a movable neighbour in the same table would vouch for it.
+        // Running prose is hard-wrapped at ~100 columns, so the subject of the
+        // sentence is routinely one line above the claim; there the context is
+        // the paragraph plus the heading the reader arrived through.
+        let context = if line.starts_with('|') {
+            line.to_lowercase()
+        } else {
+            let heading = lines[..index]
+                .iter()
+                .rev()
+                .find(|candidate| candidate.starts_with('#'))
+                .copied()
+                .unwrap_or_default();
+            let start = lines[..index]
+                .iter()
+                .rposition(|candidate| candidate.trim().is_empty())
+                .map_or(0, |blank| blank + 1);
+            let end = lines[index..]
+                .iter()
+                .position(|candidate| candidate.trim().is_empty())
+                .map_or(lines.len(), |blank| index + blank);
+            format!("{heading} {}", lines[start..end].join(" ")).to_lowercase()
+        };
+
+        assert!(
+            movable.iter().any(|subject| context.contains(subject)),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} tells an employee that a \
+             retention period is adjustable and moves only forward. \
+             `commands::retention::AdjustableClass` names every class a registered command can \
+             move — {movable:?} — and this line names none of them. Either build the setting for \
+             the class this line is about, or state the fixed period the code applies."
+        );
+    }
+}
+
 /// The register and `PROGRESS.md` both credited `worktime::check_protection`
 /// with „maloletnik 35 h/8 h“. Only the daily leg exists — see
 /// `worktime::MINOR_DAILY_CAP_MINUTES` and the doc comment on

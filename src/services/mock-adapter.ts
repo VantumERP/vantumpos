@@ -41,6 +41,7 @@ import type {
   ReklamacijaInput,
   ReklamacijaView,
   RestoreBackupRequest,
+  RetentionPolicy,
   SaleDraftRequest,
   SalePreview,
   ShiftSummary,
@@ -562,6 +563,104 @@ export function createMockServices(): PosServices {
       retentionRecordClass: "personnel",
       opisMeraZastite:
         "Evidencija je u zasebnoj tabeli, odvojenoj od naloga za prijavu.",
+      updatedAt: now,
+    },
+  ];
+  /**
+   * The shared retention table as `crate::retention::seed_retention_policies`
+   * writes it on the day this mock's clock stands at: the trajno classes with no
+   * end date, the bounded ones with the seeding day plus their documented
+   * default (three years for the standalone overtime register, two for the
+   * evidencija pristupa, the seeding day itself where the discarding event is
+   * not a calendar one).
+   *
+   * `napomena` is abridged here — the shipped strings live in `retention.rs` and
+   * are guarded there; a second copy of a legal sentence is a second thing to
+   * get wrong.
+   */
+  const retentionPolicies: RetentionPolicy[] = [
+    {
+      recordClass: "worktime_classification",
+      naziv: "Izvedena mesečna klasifikacija časova",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Izvedena mesečna klasifikacija časova. Čuva se trajno (ZEOR čl. 7 st. 2 i čl. 25 st. 3).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "worktime_overtime_log",
+      naziv: "Samostalna evidencija prekovremenog rada",
+      retainUntil: "2029-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Samostalna evidencija prekovremenog rada (ZoR čl. 55 st. 6). Zakon ne propisuje rok; " +
+        "primenjuje se odbrambeni minimum od tri godine, koji se pomera samo unapred.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "worktime_draft",
+      naziv: "Radne verzije unosa i pomoćni podaci o vremenu",
+      retainUntil: "2026-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Radne verzije unosa i pomoćni podaci o vremenu. Brišu se tek pošto je period zatvoren " +
+        "i klasifikacija izvedena (ZZPL čl. 5 st. 1 tač. 5).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "personnel",
+      naziv: "Evidencija o zaposlenim licima",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Evidencija o zaposlenim licima (ZEOR čl. 5). Čuva se trajno (ZEOR čl. 7 st. 2) i rok " +
+        "se ne podešava.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "credentials",
+      naziv: "PIN i lozinka (heš vrednosti)",
+      retainUntil: "2026-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "PIN i lozinka (samo heš vrednosti). Uklanjaju se danom prestanka radnog odnosa, a ne " +
+        "po isteku roka (ZZPL čl. 5 st. 1 tač. 5 i čl. 42 st. 2).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "access_log",
+      naziv: "Evidencija pristupa podacima o ličnosti",
+      retainUntil: "2028-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Evidencija pristupa podacima o ličnosti, koju rukovalac vodi kao sopstvenu meru. " +
+        "Zakon ne propisuje rok; primenjuje se podrazumevani rok od dve godine. Rok se pomera " +
+        "samo unapred. Ova evidencija se ne čuva trajno.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "processing_register",
+      naziv: "Evidencija o radnjama obrade",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Evidencija o radnjama obrade (ZZPL čl. 47 st. 1). Čuva se trajno (čl. 47 st. 7) i rok " +
+        "se ne podešava.",
       updatedAt: now,
     },
   ];
@@ -2246,6 +2345,50 @@ export function createMockServices(): PosServices {
           mimeType: "text/html" as const,
           rowCount: processingActivities.length,
         };
+      },
+    },
+    retention: {
+      async listPolicies() {
+        return retentionPolicies.map((policy) => ({ ...policy }));
+      },
+      async extendPolicy(recordClass, retainUntil) {
+        const policy = retentionPolicies.find(
+          (row) => row.recordClass === recordClass,
+        );
+        if (!policy) {
+          throw {
+            code: "not_found",
+            message: `Klasa čuvanja „${recordClass}“ nije upisana u tabelu rokova.`,
+          };
+        }
+        if (!policy.adjustable) {
+          throw {
+            code: "validation_error",
+            message:
+              `Rok za „${policy.naziv}“ se ne podešava: ova evidencija se čuva trajno, ` +
+              "a trajno je odsustvo roka — svaki datum bi ga skratio.",
+          };
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(retainUntil)) {
+          throw {
+            code: "validation_error",
+            message: "Rok čuvanja mora biti u obliku gggg-MM-dd.",
+          };
+        }
+        // The one direction a rok may move. Refused, never clamped — a silent
+        // max() would hide the caller that tried to shorten it.
+        if (policy.retainUntil && retainUntil < policy.retainUntil) {
+          throw {
+            code: "validation_error",
+            message:
+              `Rok čuvanja se pomera samo unapred: „${policy.retainUntil}“ ` +
+              `se ne skraćuje na „${retainUntil}“.`,
+          };
+        }
+
+        policy.retainUntil = retainUntil;
+        policy.updatedAt = now;
+        return { ...policy };
       },
     },
     print: {
