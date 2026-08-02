@@ -16,7 +16,7 @@
 4. **Vrsta primalaca** kojima su podaci otkriveni ili će biti otkriveni: nadležni državni organi po zakonu; **Actaer** kao obrađivač tokom tehničke podrške.
 5. **Prenos u drugu državu ili međunarodnu organizaciju:** `[ne / uskladiti sa AnyDesk odgovorom — §6.5]`.
 6. **Rok čuvanja** za pojedine vrste podataka: prema zakonskim rokovima (evidencije u oblasti rada i obračun zarada — **trajno**; ostalo u propisanim rokovima).
-7. **Opšti opis mera zaštite** iz [čl. 50](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html): kontrola pristupa i uloge, heširanje lozinki/PIN-ova (argon2), WAL i automatske rezervne kopije, **kriptozaštita rezervnih kopija** (SW-2), evidencija sesija podrške (SW-10).
+7. **Opšti opis mera zaštite** iz [čl. 50](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html): kontrola pristupa i uloge, heširanje lozinki/PIN-ova (argon2), WAL i automatske rezervne kopije, **kriptozaštita rezervnih kopija** (SW-2) — **dostupna, a na snazi tek kada vlasnik postavi lozinku; do tada rezervne kopije nisu šifrovane** (ispravljeno 02.08.2026: ranije je stajala bez ograde, iako generator registra i red 8 registra usklađenosti oboje navode uslovno), evidencija sesija podrške (SW-10).
 
 ## B. Evidencija OBRAĐIVAČA (Actaer) — 4 stavke (ZZPL čl. 47 st. 4)
 

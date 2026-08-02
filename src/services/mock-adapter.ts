@@ -3,9 +3,14 @@ import { nazivPerioda } from "@/lib/period";
 import type { PosServices } from "./ports";
 import type {
   AmlAssessment,
+  AuditEvent,
+  AuditQuery,
+  AuditSearchResult,
   AuthSession,
   BackupJob,
   BackupSettings,
+  Breach,
+  BreachDraft,
   CampaignInput,
   CampaignItemView,
   CampaignView,
@@ -28,6 +33,7 @@ import type {
   KepClosureView,
   KepEntryView,
   PrethodnaCenaDto,
+  ProcessingActivity,
   ProductLedgerMovement,
   ProductListQuery,
   ProductLookupSuggestion,
@@ -37,11 +43,13 @@ import type {
   ReklamacijaInput,
   ReklamacijaView,
   RestoreBackupRequest,
+  RetentionPolicy,
   SaleDraftRequest,
   SalePreview,
   ShiftSummary,
   ShopProfile,
   StockListItem,
+  SupportSession,
   TaxRate,
   UserAccount,
   TaxRateSummary,
@@ -172,6 +180,40 @@ const overtimeCapsExceededNotice: LegalNotice = {
   citation:
     "Zakon o radu, čl. 53 st. 2 i st. 3. Nadzor: inspektor rada. " +
     "Ovi članovi ne propisuju zaštitnu meru.",
+  isLegalDuty: true,
+};
+
+/** Mirrors `legal::preraspodela_caps_exceeded`. `penalty` null for the same reason. */
+const preraspodelaCapsExceededNotice: LegalNotice = {
+  summary:
+    "U slučaju preraspodele radnog vremena, radno vreme ne može da traje duže " +
+    "od 60 časova nedeljno. Časovi ostvareni u preraspodeli ne smatraju se " +
+    "prekovremenim radom (čl. 58).",
+  penalty: null,
+  citation:
+    "Zakon o radu, čl. 57 st. 5. Nadzor: inspektor rada. " +
+    "Ovi članovi ne propisuju zaštitnu meru.",
+  isLegalDuty: true,
+};
+
+/**
+ * Mirrors `legal::breach_notification_missing` at the preduzetnik tier — the
+ * **notification** exposure, never a figure for the documentation-only failure
+ * under čl. 52 st. 6 (req. 50).
+ */
+const breachNotificationNotice: LegalNotice = {
+  summary:
+    "Rukovalac je dužan da o povredi podataka o ličnosti koja može da proizvede rizik po " +
+    "prava i slobode fizičkih lica obavesti Poverenika bez nepotrebnog odlaganja, a " +
+    "najkasnije u roku od 72 časa od saznanja za povredu. Ako ne postupi u tom roku, dužan " +
+    "je da obrazloži zašto.",
+  penalty:
+    "Prekršaj: novčana kazna od 20.000 do 500.000 dinara " +
+    "(čl. 95 st. 1 tač. 24 u vezi sa st. 4).",
+  citation:
+    "Zakon o zaštiti podataka o ličnosti, čl. 52 st. 1 i st. 2; interna dokumentacija: " +
+    "čl. 52 st. 6 i st. 7. Rok i obrazac: Pravilnik 40/2019, čl. 3 i čl. 2. " +
+    "Nadzor: Poverenik.",
   isLegalDuty: true,
 };
 
@@ -479,6 +521,164 @@ export function createMockServices(): PosServices {
   // Every čl. 87–91 input starts empty: an employee nobody has profiled yet is
   // not an employee with no protections, and the guards read it that way.
   const employeeProfiles = new Map<number, EmployeeProfile>();
+  // The ZZPL trio. The double keeps the shapes and the ordering honest; the
+  // hash chain itself is the backend's business, so the fixture rows carry
+  // plausible digests rather than computed ones and the verdict is stated, not
+  // derived — exactly as the real panel receives it.
+  let supportSessions: SupportSession[] = [];
+  let auditEvents: AuditEvent[] = [
+    {
+      id: 1,
+      at: "2026-06-18T09:30:00Z",
+      actorUserId: 1,
+      actorName: "Administrator",
+      action: "uvid",
+      actionLabel: "Uvid",
+      objectType: "personnel_record",
+      objectTypeLabel: "Evidencija o zaposlenom",
+      objectId: "2",
+      reasonCode: "interni_nadzor",
+      reasonLabel: "Interni nadzor",
+      recipient: null,
+      recipientLabel: null,
+      supportSessionId: null,
+      prevHash: "0".repeat(64),
+      hash: "1".repeat(64),
+    },
+  ];
+  let breaches: Breach[] = [];
+  let processingActivities: ProcessingActivity[] = [
+    {
+      id: 1,
+      kljuc: "evidencija_zaposlenih",
+      rukovalacNaziv: "Vantum Market",
+      rukovalacKontakt: "Bulevar 1, Beograd",
+      svrhaObrade:
+        "Vođenje evidencije o zaposlenim licima i ispunjenje obaveza iz radnog zakonodavstva.",
+      vrstaLica: "Zaposleni i radno angažovana lica kod rukovaoca.",
+      vrstaPodataka: "Identitet i matični broj, radno mesto, radno vreme.",
+      vrstaPrimalaca: "Nadležni državni organi kada zakon to nalaže; knjigovođa.",
+      prenosUDrugeDrzave:
+        "Nije utvrđen prenos u druge države ni u međunarodne organizacije.",
+      mereZastitePrenosa: null,
+      rokCuvanja: "Podaci se čuvaju trajno. Rok se ne podešava.",
+      retentionRecordClass: "personnel",
+      opisMeraZastite:
+        "Evidencija je u zasebnoj tabeli, odvojenoj od naloga za prijavu.",
+      updatedAt: now,
+    },
+  ];
+  /**
+   * The shared retention table as `crate::retention::seed_retention_policies`
+   * writes it on the day this mock's clock stands at: the trajno classes with no
+   * end date, the bounded ones with the seeding day plus their documented
+   * default (three years for the standalone overtime register, two for the
+   * evidencija pristupa, the seeding day itself where the discarding event is
+   * not a calendar one).
+   *
+   * `napomena` is abridged here — the shipped strings live in `retention.rs` and
+   * are guarded there; a second copy of a legal sentence is a second thing to
+   * get wrong.
+   */
+  const retentionPolicies: RetentionPolicy[] = [
+    {
+      recordClass: "worktime_classification",
+      naziv: "Izvedena mesečna klasifikacija časova",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Izvedena mesečna klasifikacija časova. Čuva se trajno (ZEOR čl. 7 st. 2 i čl. 25 st. 3).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "worktime_overtime_log",
+      naziv: "Samostalna evidencija prekovremenog rada",
+      retainUntil: "2029-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Samostalna evidencija prekovremenog rada (ZoR čl. 55 st. 6). Zakon ne propisuje rok; " +
+        "primenjuje se odbrambeni minimum od tri godine, koji se pomera samo unapred.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "worktime_draft",
+      naziv: "Radne verzije unosa i pomoćni podaci o vremenu",
+      retainUntil: "2026-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Radne verzije unosa i pomoćni podaci o vremenu. Brišu se tek pošto je period zatvoren " +
+        "i klasifikacija izvedena (ZZPL čl. 5 st. 1 tač. 5).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "personnel",
+      naziv: "Evidencija o zaposlenim licima",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Evidencija o zaposlenim licima (ZEOR čl. 5). Čuva se trajno (ZEOR čl. 7 st. 2) i rok " +
+        "se ne podešava.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "credentials",
+      naziv: "PIN i lozinka (heš vrednosti)",
+      retainUntil: "2026-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "PIN i lozinka (samo heš vrednosti). Uklanjaju se danom prestanka radnog odnosa, a ne " +
+        "po isteku roka (ZZPL čl. 5 st. 1 tač. 5 i čl. 42 st. 2).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "access_log",
+      naziv: "Evidencija pristupa podacima o ličnosti",
+      retainUntil: "2028-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Evidencija pristupa podacima o ličnosti, koju rukovalac vodi kao sopstvenu meru. " +
+        "Zakon ne propisuje rok; primenjuje se podrazumevani rok od dve godine. Rok se pomera " +
+        "samo unapred. Ova evidencija se ne čuva trajno.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "processing_register",
+      naziv: "Evidencija o radnjama obrade",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Evidencija o radnjama obrade (ZZPL čl. 47 st. 1). Čuva se trajno (čl. 47 st. 7) i rok " +
+        "se ne podešava.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "cenovnik_archive",
+      naziv: "Arhiva objavljenih cenovnika",
+      retainUntil: "2028-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Arhiva objavljenih cenovnika (ZZP čl. 6 st. 5). Podrazumevani rok je dve godine — " +
+        "zastarelost prekršajnog gonjenja iz ZZP čl. 213; rok se pomera samo unapred. " +
+        "Automatsko čišćenje nikada ne uklanja važeći cenovnik prodajnog objekta.",
+      updatedAt: now,
+    },
+  ];
   let currentShift: ShiftSummary | null = {
     id: 1,
     userId: 1,
@@ -2000,7 +2200,210 @@ export function createMockServices(): PosServices {
         return {
           recordMissing: overtimeRecordMissingNotice,
           capsExceeded: overtimeCapsExceededNotice,
+          preraspodelaCapsExceeded: preraspodelaCapsExceededNotice,
         };
+      },
+    },
+    privacy: {
+      async grantSupportAccess(scope, durationMinutes) {
+        const obim = scope.trim();
+        if (!obim) {
+          throw {
+            code: "validation_error",
+            message:
+              "Nalog mora da navede obim pristupa koji se odobrava (ZZPL čl. 46).",
+          };
+        }
+        if (!Number.isInteger(durationMinutes) || durationMinutes <= 0) {
+          throw {
+            code: "validation_error",
+            message:
+              "Trajanje naloga mora da bude izraženo u punim minutima i veće od nule.",
+          };
+        }
+
+        const granted: SupportSession = {
+          id: supportSessions.length + 1,
+          grantedBy: session?.user.id ?? 1,
+          grantedByName: session?.user.displayName ?? "Administrator",
+          grantedAt: now,
+          scope: obim,
+          expiresAt: plusMinutes(now, durationMinutes),
+          startedAt: null,
+          endedAt: null,
+          revokedAt: null,
+        };
+        supportSessions = [...supportSessions, granted];
+        return granted;
+      },
+      async enterSupportSession() {
+        const live = liveSupportSession();
+        if (!live) {
+          throw {
+            code: "support_bez_naloga",
+            message:
+              "Pristup tehničke podrške nije odobren. Vlasnik mora prvo da izda nalog " +
+              "sa obimom i rokom (ZZPL čl. 46).",
+          };
+        }
+        live.startedAt = live.startedAt ?? now;
+        return { ...live };
+      },
+      async endSupportSession() {
+        const live = liveSupportSession();
+        if (!live) {
+          throw {
+            code: "support_nema_sesije",
+            message: "Nema otvorenog naloga za pristup tehničke podrške.",
+          };
+        }
+        // A nalog that was entered is ended; one that never was is revoked.
+        if (live.startedAt) {
+          live.endedAt = now;
+        } else {
+          live.revokedAt = now;
+        }
+        return { ...live };
+      },
+      async activeSupportSession() {
+        const live = liveSupportSession();
+        return live ? { ...live } : null;
+      },
+      async searchAudit(query) {
+        const events = filterAudit(query);
+        return {
+          events,
+          chain: {
+            verdict: "intact",
+            intact: true,
+            // The verdict covers the whole log, never the filtered slice.
+            checkedRows: auditEvents.length,
+            label: "Potvrđena — lanac otisaka je neprekinut.",
+          },
+        } satisfies AuditSearchResult;
+      },
+      async exportAuditCsv(query) {
+        const events = filterAudit(query);
+        const fileName = "izvod-evidencija-pristupa.csv";
+
+        return {
+          fileName,
+          path: `mock://exports/${fileName}`,
+          mimeType: "text/csv" as const,
+          rowCount: events.length,
+        };
+      },
+      async listBreaches() {
+        return breaches
+          .map((breach) => ({ ...breach }))
+          .sort((left, right) => right.saznanjeAt.localeCompare(left.saznanjeAt));
+      },
+      async recordBreach(draft) {
+        const recorded = derivedBreach(
+          { ...draft, id: breaches.length + 1, createdAt: now, updatedAt: now },
+        );
+        breaches = [...breaches, recorded];
+        return { ...recorded };
+      },
+      async updateBreach(id, draft) {
+        const existing = breaches.find((breach) => breach.id === id);
+        if (!existing) {
+          throw { code: "not_found", message: "Povreda nije pronađena." };
+        }
+        if (draft.saznanjeAt !== existing.saznanjeAt) {
+          throw {
+            code: "povreda_saznanje_nepromenljivo",
+            message:
+              "Vreme saznanja za povredu je nepromenljivo — od njega teče rok od 72 časa " +
+              "(ZZPL čl. 52 st. 1). Ako je uneto pogrešno, evidentirajte novu povredu.",
+          };
+        }
+
+        const updated = derivedBreach({
+          ...draft,
+          id,
+          createdAt: existing.createdAt,
+          updatedAt: now,
+        });
+        breaches = breaches.map((breach) => (breach.id === id ? updated : breach));
+        return { ...updated };
+      },
+      async breachNotice() {
+        return breachNotificationNotice;
+      },
+      async exportBreachObrazac(id) {
+        const fileName = `obrazac-povreda-podataka-${id}.html`;
+
+        return {
+          fileName,
+          path: `mock://exports/${fileName}`,
+          mimeType: "text/html" as const,
+          rowCount: 1,
+        };
+      },
+      async listProcessingActivities() {
+        return processingActivities.map((activity) => ({ ...activity }));
+      },
+      async generateProcessingActivities() {
+        processingActivities = processingActivities.map((activity) => ({
+          ...activity,
+          updatedAt: now,
+        }));
+        return processingActivities.map((activity) => ({ ...activity }));
+      },
+      async exportProcessingActivities() {
+        const fileName = "evidencija-radnji-obrade.html";
+
+        return {
+          fileName,
+          path: `mock://exports/${fileName}`,
+          mimeType: "text/html" as const,
+          rowCount: processingActivities.length,
+        };
+      },
+    },
+    retention: {
+      async listPolicies() {
+        return retentionPolicies.map((policy) => ({ ...policy }));
+      },
+      async extendPolicy(recordClass, retainUntil) {
+        const policy = retentionPolicies.find(
+          (row) => row.recordClass === recordClass,
+        );
+        if (!policy) {
+          throw {
+            code: "not_found",
+            message: `Klasa čuvanja „${recordClass}“ nije upisana u tabelu rokova.`,
+          };
+        }
+        if (!policy.adjustable) {
+          throw {
+            code: "validation_error",
+            message:
+              `Rok za „${policy.naziv}“ se ne podešava: ova evidencija se čuva trajno, ` +
+              "a trajno je odsustvo roka — svaki datum bi ga skratio.",
+          };
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(retainUntil)) {
+          throw {
+            code: "validation_error",
+            message: "Rok čuvanja mora biti u obliku gggg-MM-dd.",
+          };
+        }
+        // The one direction a rok may move. Refused, never clamped — a silent
+        // max() would hide the caller that tried to shorten it.
+        if (policy.retainUntil && retainUntil < policy.retainUntil) {
+          throw {
+            code: "validation_error",
+            message:
+              `Rok čuvanja se pomera samo unapred: „${policy.retainUntil}“ ` +
+              `se ne skraćuje na „${retainUntil}“.`,
+          };
+        }
+
+        policy.retainUntil = retainUntil;
+        policy.updatedAt = now;
+        return { ...policy };
       },
     },
     print: {
@@ -2008,6 +2411,69 @@ export function createMockServices(): PosServices {
       async openExternalUrl() {},
     },
   };
+
+  /** Integer minutes, like every other duration in this app. */
+  function plusMinutes(instant: string, minutes: number): string {
+    return `${new Date(new Date(instant).getTime() + minutes * 60_000)
+      .toISOString()
+      .slice(0, 19)}Z`;
+  }
+
+  /**
+   * The newest nalog that has neither ended nor been revoked and whose expiry
+   * has not passed. Expiry is exclusive — at `expiresAt` the nalog is spent.
+   */
+  function liveSupportSession(): SupportSession | undefined {
+    return [...supportSessions]
+      .reverse()
+      .find(
+        (candidate) =>
+          !candidate.endedAt &&
+          !candidate.revokedAt &&
+          candidate.grantedAt <= now &&
+          now < candidate.expiresAt,
+      );
+  }
+
+  function filterAudit(query: AuditQuery): AuditEvent[] {
+    return auditEvents
+      .filter((event) => !query.from || event.at.slice(0, 10) >= query.from)
+      .filter((event) => !query.to || event.at.slice(0, 10) <= query.to)
+      .filter(
+        (event) =>
+          query.actorUserId === null ||
+          query.actorUserId === undefined ||
+          event.actorUserId === query.actorUserId,
+      )
+      .map((event) => ({ ...event }));
+  }
+
+  /**
+   * The four answers computed from `now`. `notifiable` is derived from the risk
+   * assessment and is `null` until one exists — it never decided whether the
+   * record was written (req. 43).
+   */
+  function derivedBreach(
+    stored: BreachDraft & { id: number; createdAt: string; updatedAt: string },
+  ): Breach {
+    const saznanje = new Date(stored.saznanjeAt).getTime();
+    const rok = plusMinutes(stored.saznanjeAt, 72 * 60);
+    const notifiable =
+      stored.riskOutcome === null || stored.riskOutcome === undefined
+        ? null
+        : stored.riskOutcome !== "bez_rizika";
+
+    return {
+      ...stored,
+      rokObavestavanjaIsticeAt: rok,
+      notifiable,
+      delayReasonRequired:
+        notifiable === true &&
+        !stored.poverenikNotifiedAt &&
+        new Date(now).getTime() - saznanje > 72 * 60 * 60 * 1000,
+      obavestavanjeLicaObavezno: stored.riskOutcome === "visok_rizik",
+    };
+  }
 
   function buildMonth(
     userId: number,

@@ -1,8 +1,12 @@
 import type {
   AmlAssessment,
   AppHealth,
+  AuditQuery,
+  AuditSearchResult,
   AuthSession,
   BackupJob,
+  Breach,
+  BreachDraft,
   BackupSettings,
   BackupStatus,
   CampaignInput,
@@ -55,6 +59,10 @@ import type {
   ProductSalesReport,
   ProductSearchQuery,
   ProductSummary,
+  ProcessingActivity,
+  RecordClass,
+  RetentionPolicy,
+  SupportSession,
   AnswerInput,
   BasisDoc,
   KalkulacijaSummary,
@@ -375,11 +383,100 @@ export interface WorkTimeService {
   /** The employee's own read-only month (ZoR čl. 83 st. 1, ZZPL čl. 26). */
   myHours(godina: number, mesec: number): Promise<WorkTimeMonth>;
   /**
-   * The two ZoR notices with their penalty already resolved against the stored
+   * The ZoR notices with their penalty already resolved against the stored
    * legal form. Read-only: the frontend decides whether to show a duty, never
    * what it costs.
    */
   notices(): Promise<WorkTimeNotices>;
+}
+
+/**
+ * The ZZPL trio: the čl. 46 remote-support nalog, the čl. 48 evidencija
+ * pristupa, the čl. 52 internal breach record and the čl. 47 register of
+ * processing activities. Every method maps 1:1 onto a Tauri command name.
+ *
+ * Three properties of the backend this interface must not paper over.
+ *
+ * **The evidencija pristupa has no write verb here and never may have one.**
+ * Req. 7 puts tamper-evidence above completeness: nothing edits or removes a
+ * logged row, and v18's trigger refuses the edit even if something tried. Every
+ * line is written server-side by the feature that performed the radnja, so
+ * there is no `recordAudit` on this surface — a frontend that could assert an
+ * access happened could assert one that did not.
+ *
+ * **`recordBreach` is never gated on notifiability** (req. 43). Čl. 52 st. 6
+ * documents *„svaku povredu“*; the risk test lives in st. 1 and governs only
+ * whether the Poverenik is told. `Breach.notifiable` is a derived flag on a row
+ * that always exists.
+ *
+ * **`exportBreachObrazac` produces a document, not a filing.** Pravilnik
+ * 40/2019 čl. 5 is the whole route — in writing, in person or by post — and
+ * there is no submission API to build.
+ *
+ * Every method here is admin-gated backend-side except `breachNotice`, which is
+ * read-only and must be able to state the exposure before anything is recorded.
+ */
+export interface PrivacyService {
+  /**
+   * Issues the čl. 46 nalog. `durationMinutes` is integer minutes, like every
+   * other duration in this app, and is bounded backend-side — a nalog measured
+   * in weeks is an open-ended one with a date printed on it.
+   */
+  grantSupportAccess(scope: string, durationMinutes: number): Promise<SupportSession>;
+  /**
+   * The support side entering under a live nalog. Gated by the **nalog** and
+   * nothing else: čl. 46 makes the nalog the condition, and the obrađivač holds
+   * no account on this till.
+   */
+  enterSupportSession(): Promise<SupportSession>;
+  /** The vlasnik closing the nalog — ended if it was entered, revoked if not. */
+  endSupportSession(): Promise<SupportSession>;
+  activeSupportSession(): Promise<SupportSession | null>;
+  /** Req. 8's two axes; the chain verdict covers the whole log, not the slice. */
+  searchAudit(query: AuditQuery): Promise<AuditSearchResult>;
+  /** The čl. 48 st. 4 izvod, rendered offline from the till. */
+  exportAuditCsv(query: AuditQuery): Promise<ExportedFile>;
+  listBreaches(): Promise<Breach[]>;
+  recordBreach(draft: BreachDraft): Promise<Breach>;
+  updateBreach(id: number, draft: BreachDraft): Promise<Breach>;
+  /** The čl. 52 exposure with its penalty already tier-resolved. Read-only. */
+  breachNotice(): Promise<LegalNotice>;
+  /** The Pravilnik 40/2019 obrazac for one record — print, sign and file. */
+  exportBreachObrazac(id: number): Promise<ExportedFile>;
+  listProcessingActivities(): Promise<ProcessingActivity[]>;
+  /** Regenerates the register from the app's own configuration (req. 28). */
+  generateProcessingActivities(): Promise<ProcessingActivity[]>;
+  exportProcessingActivities(): Promise<ExportedFile>;
+}
+
+/**
+ * The shared retention table — the rok čuvanja per class of record, and the one
+ * verb that may change it (SW-10 req. 6, SW-13 req. 22).
+ *
+ * Two properties of the backend this interface must not paper over.
+ *
+ * **There is no verb that shortens a rok, and there never may be one.** The
+ * period moves only forward — that sentence is printed on the čl. 23 notice
+ * handed to the employee and on the čl. 47 register read by the Poverenik — so
+ * `extendPolicy` refuses an earlier date rather than clamping it, and the
+ * refusal comes back as prose to show the operator.
+ *
+ * **A `trajno` class is not reachable from here.** Backend-side the classes this
+ * verb accepts are an enum with no variant for the ZEOR čl. 5 evidencija, the
+ * frozen monthly classification or the čl. 47 register; `RetentionPolicy
+ * .adjustable` is that list, so a screen never offers a control it would only
+ * get refused for.
+ *
+ * Both methods are admin-gated backend-side.
+ */
+export interface RetentionService {
+  listPolicies(): Promise<RetentionPolicy[]>;
+  /**
+   * Moves one class's rok forward. `retainUntil` is `gggg-MM-dd`; the chosen
+   * value reaches the čl. 47 register in the same call, because čl. 47 st. 1
+   * t. 6 is what the shop has told the Poverenik it applies.
+   */
+  extendPolicy(recordClass: RecordClass, retainUntil: string): Promise<RetentionPolicy>;
 }
 
 export interface PrintService {
@@ -428,5 +525,7 @@ export interface PosServices {
   reklamacije: ReklamacijeService;
   kep: KepService;
   worktime: WorkTimeService;
+  privacy: PrivacyService;
+  retention: RetentionService;
   print: PrintService;
 }

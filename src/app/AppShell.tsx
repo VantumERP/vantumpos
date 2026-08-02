@@ -26,6 +26,7 @@ import {
   navigationItems,
   type NavigationItemId,
 } from "@/app/navigation";
+import { PrivacyModule } from "@/app/privacy/PrivacyModule";
 import { ReklamacijeModule } from "@/app/reklamacije/ReklamacijeModule";
 import { MyHoursScreen } from "@/app/worktime/MyHoursPanel";
 import { WorkTimeModule } from "@/app/worktime/WorkTimeModule";
@@ -501,6 +502,10 @@ function renderModule({
 
   if (activeId === "moji-sati") {
     return <MyHoursScreen services={services} />;
+  }
+
+  if (activeId === "privatnost") {
+    return <PrivacyModule services={services} />;
   }
 
   if (activeId === "campaigns") {
@@ -1512,6 +1517,20 @@ export function UsersScreen({
           <p className="text-xs text-muted-foreground">
             Lokalni nalozi za administratore i kasire.
           </p>
+          {/*
+            ZZPL req. 24. The lifecycle here ends at deactivation and there is
+            no delete affordance anywhere — not in this table, not in the
+            employee dialog, not behind a menu. The ZEOR čl. 5 register is a
+            physically separate store kept trajno under čl. 7 st. 2, its foreign
+            key carries no cascade, and this line says so out loud so nobody
+            goes looking for the button that is missing on purpose.
+          */}
+          <p className="text-xs text-muted-foreground">
+            Deaktivacija ne briše evidenciju o zaposlenom: ta evidencija se vodi
+            odvojeno od naloga i čuva se trajno po posebnom propisu (ZEOR čl. 7
+            st. 2), pa program nema radnju koja briše zaposlenog. Korisničko ime
+            se posle deaktivacije ne dodeljuje ponovo.
+          </p>
         </div>
         <Button
           type="button"
@@ -1716,6 +1735,14 @@ export function UserDialog({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  /**
+   * ZZPL req. 24 — deaktivacija bez ponovnog dodeljivanja imena. Ime se menja
+   * samo dok je postojeći nalog aktivan i takav ostaje: preimenovanje pri
+   * deaktivaciji oslobodilo bi ime otišlog zaposlenog za novi nalog. Novi nalog
+   * nema šta da zamrzne.
+   */
+  const imeZamrznuto = user !== null && (!user.active || !active);
+
   useEffect(() => {
     if (!open) {
       return;
@@ -1823,11 +1850,25 @@ export function UserDialog({
             {error ? <FieldError>{error}</FieldError> : null}
             <Field>
               <FieldLabel htmlFor="user-username">Korisničko ime</FieldLabel>
+              {/*
+                ZZPL req. 24. Deaktivirani nalog zadržava svoje korisničko ime da
+                se ono ne bi dodelilo ponovo; preimenovanje bi ga oslobodilo i
+                poništilo pravilo koje ekran Korisnici saopštava operateru. Ime
+                se menja samo dok je nalog aktivan i takav ostaje — isto pravilo
+                odbija i `update_user`, pa ovo polje samo saopštava zašto.
+              */}
               <Input
                 id="user-username"
                 value={username}
+                disabled={imeZamrznuto}
                 onChange={(event) => setUsername(event.target.value)}
               />
+              {imeZamrznuto ? (
+                <FieldDescription>
+                  Korisničko ime deaktiviranog naloga ostaje zauzeto, pa se više
+                  ne menja.
+                </FieldDescription>
+              ) : null}
             </Field>
             <Field>
               <FieldLabel htmlFor="user-display-name">Ime za prikaz</FieldLabel>
@@ -1855,7 +1896,16 @@ export function UserDialog({
                 id="user-active"
                 value={active ? "active" : "inactive"}
                 className="w-full"
-                onChange={(event) => setActive(event.target.value === "active")}
+                onChange={(event) => {
+                  const sledeci = event.target.value === "active";
+                  setActive(sledeci);
+                  // ZZPL req. 24: preimenovanje ne prolazi kroz deaktivaciju.
+                  // Ime se vraća na sačuvano čim status pređe u „Neaktivan“, pa
+                  // se čuvanje ne odbija zbog vrednosti koja je već otkucana.
+                  if (!sledeci && user) {
+                    setUsername(user.username);
+                  }
+                }}
               >
                 <NativeSelectOption value="active">Aktivan</NativeSelectOption>
                 <NativeSelectOption value="inactive">Neaktivan</NativeSelectOption>

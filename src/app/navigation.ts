@@ -10,6 +10,7 @@ import {
   PackageIcon,
   ReceiptTextIcon,
   SettingsIcon,
+  ShieldCheckIcon,
   ShoppingCartIcon,
   TagIcon,
   UploadIcon,
@@ -81,6 +82,17 @@ export const navigationItems = [
     id: "reports",
     label: "Izveštaji",
     icon: BarChart3Icon,
+    adminOnly: true,
+  },
+  // Admin-only, and every command behind it is admin-gated backend-side as
+  // well. ZZPL čl. 48 st. 4 puts the evidencija pristupa in the rukovalac's
+  // hands, the breach file very often describes a colleague in a shop this
+  // size, and the čl. 46 nalog is the rukovalac's to issue — none of the three
+  // is a kasir's to read, let alone to sign.
+  {
+    id: "privatnost",
+    label: "Privatnost",
+    icon: ShieldCheckIcon,
     adminOnly: true,
   },
   {

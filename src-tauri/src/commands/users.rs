@@ -3,12 +3,14 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
+use crate::audit::AuditReason;
 use crate::cash_deposit::parse_iso_date;
 use crate::clock::utc_now;
 use crate::security::hash_credential;
 use crate::state::AppState;
 
 use super::auth::{require_admin, user_account_from_row, UserAccount};
+use super::personnel::clear_credentials;
 
 /// ZoR čl. 51 st. 1 — „Puno radno vreme iznosi 40 časova nedeljno.“ Hours beyond
 /// it are prekovremeni rad on a day's row, never a bigger contract figure.
@@ -187,8 +189,29 @@ pub fn update_user(
     let normalized = normalize_request(request)?;
     ensure_unique_username(state, &normalized.username, Some(user_id))?;
 
-    let existing = user_hashes(state, user_id)?
+    let existing = stored_account(state, user_id)?
         .ok_or_else(|| AppError::not_found("Korisnik nije pronađen."))?;
+
+    // ZZPL req. 24 — deaktivacija **bez ponovnog dodeljivanja imena**. The
+    // uniqueness constraint survives the deactivation, but on its own it does
+    // not deliver non-reuse: `ensure_unique_username` excludes the row being
+    // renamed, so renaming a departed employee's account would free the name for
+    // a fresh one and defeat the whole rule.
+    //
+    // A username may therefore change only while the account is active AND stays
+    // active. Both halves are load-bearing: without the second, the rename would
+    // simply ride along on the save that deactivates, which is exactly the
+    // moment somebody would reach for it. Everything else on the row stays
+    // correctable — req. 21 keeps the account so the record it anchors survives,
+    // not so it freezes.
+    if normalized.username != existing.username && !(existing.active && normalized.active) {
+        return Err(AppError::validation(
+            "Korisničko ime deaktiviranog naloga se ne menja — ostaje zauzeto da se \
+             posle deaktivacije ne dodeli ponovo.",
+            serde_json::json!({ "field": "username" }),
+        ));
+    }
+
     let pin_hash = match normalized.pin.as_deref() {
         Some(pin) => Some(hash_credential(pin)?),
         None => existing.pin_hash,
@@ -198,7 +221,12 @@ pub fn update_user(
         None => existing.password_hash,
     };
 
-    if pin_hash.is_none() && password_hash.is_none() {
+    // Only an ACTIVE account must hold a credential. A terminated one holds none
+    // by design — req. 21 removes the hash at the termination — so demanding one
+    // here would make every later correction to a departed employee's row (a
+    // spelling fix, a role change) impossible without re-issuing a PIN to
+    // somebody who no longer works here.
+    if normalized.active && pin_hash.is_none() && password_hash.is_none() {
         return Err(AppError::validation(
             "Korisnik mora imati PIN ili lozinku.",
             serde_json::json!({ "field": "pin" }),
@@ -240,6 +268,20 @@ pub fn update_user(
 
     if let Some(profile) = normalized.profile.as_ref() {
         write_profile(&tx, user_id, profile)?;
+    }
+
+    // The Users screen can also end an employment by clearing „aktivan“, and
+    // req. 21 does not care which control was used: the hash goes with the
+    // termination either way. Runs after the UPDATE above, which has just
+    // rewritten the very columns it clears.
+    if !normalized.active {
+        clear_credentials(
+            &tx,
+            user_id,
+            state.session_user_id()?,
+            AuditReason::ZakonskaObaveza,
+            &now,
+        )?;
     }
     tx.commit()?;
 
@@ -332,10 +374,27 @@ fn write_profile(
     Ok(())
 }
 
+/// Ends an employee's access — SW-13's termination, and the **only** thing this
+/// screen does to a departing employee.
+///
+/// There is no delete (req. 24). The account row stays so that every accounting
+/// document still resolves its class-B surrogate, `users.username` stays taken
+/// so the name can never be reused, and the ZEOR čl. 5 register beside it is
+/// untouched: it is class A and `trajno` under čl. 7 st. 2.
+///
+/// The credential hashes go **now**, with the termination, not after a window
+/// (req. 21). A short grace period measured in days would be defensible; a
+/// retention window would not, so this path reads no policy row at all — there
+/// is no date it could be waiting for.
 pub fn deactivate_user(state: &AppState, user_id: i64) -> Result<(), AppError> {
     let now = utc_now()?;
-    let conn = state.db().open()?;
-    let changed = conn.execute(
+    let actor_user_id = state.session_user_id()?;
+    let mut conn = state.db().open()?;
+    // The deactivation and the erasure it triggers are one fact: an account left
+    // active with its hash gone, or inactive with its hash intact, is a state
+    // neither req. 21 nor req. 24 would recognise.
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
         "UPDATE users SET active = 0, updated_at = ?1 WHERE id = ?2",
         params![now, user_id],
     )?;
@@ -343,6 +402,17 @@ pub fn deactivate_user(state: &AppState, user_id: i64) -> Result<(), AppError> {
     if changed == 0 {
         return Err(AppError::not_found("Korisnik nije pronađen."));
     }
+
+    clear_credentials(
+        &tx,
+        user_id,
+        actor_user_id,
+        // ZZPL čl. 5 st. 1 tač. 5 and čl. 42 st. 2 are the rukovalac's own
+        // duties; the termination is what makes them bite here.
+        AuditReason::ZakonskaObaveza,
+        &now,
+    )?;
+    tx.commit()?;
 
     Ok(())
 }
@@ -383,21 +453,28 @@ fn ensure_unique_username(
     Ok(())
 }
 
-struct UserHashes {
+/// The stored row as [`update_user`] needs to see it before it overwrites it:
+/// the credentials it may carry forward, and the two columns whose PREVIOUS
+/// value decides whether a change is allowed at all.
+struct StoredAccount {
+    username: String,
+    active: bool,
     pin_hash: Option<String>,
     password_hash: Option<String>,
 }
 
-fn user_hashes(state: &AppState, user_id: i64) -> Result<Option<UserHashes>, AppError> {
+fn stored_account(state: &AppState, user_id: i64) -> Result<Option<StoredAccount>, AppError> {
     let conn = state.db().open()?;
 
     conn.query_row(
-        "SELECT pin_hash, password_hash FROM users WHERE id = ?1",
+        "SELECT username, active, pin_hash, password_hash FROM users WHERE id = ?1",
         params![user_id],
         |row| {
-            Ok(UserHashes {
-                pin_hash: row.get(0)?,
-                password_hash: row.get(1)?,
+            Ok(StoredAccount {
+                username: row.get(0)?,
+                active: row.get::<_, i64>(1)? != 0,
+                pin_hash: row.get(2)?,
+                password_hash: row.get(3)?,
             })
         },
     )
@@ -596,8 +673,8 @@ mod tests {
     use tauri::Manager;
 
     use super::{
-        create_user, employee_profile, update_user, users_employee_profile, EmployeeProfile,
-        SaveUserRequest,
+        create_user, deactivate_user, employee_profile, update_user, users_employee_profile,
+        EmployeeProfile, SaveUserRequest,
     };
     use crate::app_error::AppError;
     use crate::db::{test_database_path, Db};
@@ -959,5 +1036,110 @@ mod tests {
         }
 
         std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// SW-13 req. 21 removes the credential at the termination, which means a
+    /// terminated account legitimately has none. The „must have a PIN or
+    /// password“ rule therefore binds only an ACTIVE account — otherwise the
+    /// first correction to a departed employee's row would demand that a new PIN
+    /// be issued to somebody who no longer works here.
+    #[test]
+    fn a_terminated_account_can_still_be_corrected_without_a_new_credential() {
+        with_state("users_terminated_account_correction", |state| {
+            sign_in(state, "admin");
+            let created = create_user(state, save_request("jelena")).expect("the hire");
+            deactivate_user(state, created.id).expect("the termination");
+
+            let mut correction = save_request("jelena");
+            correction.active = false;
+            correction.pin = None;
+            correction.display_name = "Jelena Đurić Petrović".to_string();
+
+            let corrected =
+                update_user(state, created.id, correction).expect("a name may still be fixed");
+            assert_eq!(corrected.display_name, "Jelena Đurić Petrović");
+            assert!(!corrected.active);
+
+            // Bringing the account back, however, needs a credential again.
+            let mut rehire = save_request("jelena");
+            rehire.pin = None;
+            let error = update_user(state, created.id, rehire)
+                .expect_err("an active account must hold a credential");
+            assert_eq!(error.code(), "validation_error");
+        });
+    }
+
+    /// ZZPL req. 24 — deactivate-**never-reuse**. The uniqueness constraint does
+    /// survive the deactivation, but on its own it does not deliver non-reuse:
+    /// `ensure_unique_username` excludes the row being renamed, so an admin
+    /// could rename the departed employee's account and open a fresh one on the
+    /// freed name. The Users screen states the rule to the operator; this is
+    /// what makes the statement true.
+    #[test]
+    fn the_username_of_a_deactivated_account_cannot_be_renamed_and_freed() {
+        with_state("users_deactivated_username_stays_taken", |state| {
+            sign_in(state, "admin");
+            let created = create_user(state, save_request("jelena")).expect("the hire");
+            deactivate_user(state, created.id).expect("the termination");
+
+            let mut rename = save_request("jelena.stara");
+            rename.active = false;
+            rename.pin = None;
+            let error = update_user(state, created.id, rename)
+                .expect_err("a deactivated username must stay taken");
+            assert_eq!(error.code(), "validation_error");
+
+            // Nor may the rename ride along on the save that deactivates — the
+            // one moment somebody would reach for it. Fresh account, still
+            // active, renamed and terminated in a single request.
+            let odlazi = create_user(state, save_request("milica")).expect("the hire");
+            let mut rename_and_terminate = save_request("milica.stara");
+            rename_and_terminate.active = false;
+            let error = update_user(state, odlazi.id, rename_and_terminate)
+                .expect_err("a departing username must not be freed on the way out");
+            assert_eq!(error.code(), "validation_error");
+
+            // The name is therefore still unavailable to the next hire.
+            let error = create_user(state, save_request("jelena"))
+                .expect_err("the departed employee's username is still taken");
+            assert_eq!(error.code(), "validation_error");
+
+            // Everything else on the row is still correctable — req. 21 keeps
+            // the account so the record it anchors survives, not so it freezes.
+            let mut correction = save_request("jelena");
+            correction.active = false;
+            correction.pin = None;
+            correction.display_name = "Jelena Đurić Petrović".to_string();
+            let corrected =
+                update_user(state, created.id, correction).expect("a name may still be fixed");
+            assert_eq!(corrected.username, "jelena");
+            assert_eq!(corrected.display_name, "Jelena Đurić Petrović");
+        });
+    }
+
+    /// Req. 21 does not care which control ended the employment: clearing
+    /// „aktivan“ on the Users screen is a termination too.
+    #[test]
+    fn clearing_the_active_flag_removes_the_credential_like_a_deactivation() {
+        with_state("users_clearing_active_removes_credential", |state| {
+            sign_in(state, "admin");
+            let created = create_user(state, save_request("dragana")).expect("the hire");
+
+            let mut termination = save_request("dragana");
+            termination.active = false;
+            update_user(state, created.id, termination).expect("the termination");
+
+            let (pin, password): (Option<String>, Option<String>) = state
+                .db()
+                .open()
+                .expect("database should open")
+                .query_row(
+                    "SELECT pin_hash, password_hash FROM users WHERE id = ?1",
+                    params![created.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the account survives the termination");
+            assert_eq!((pin, password), (None, None));
+        });
     }
 }

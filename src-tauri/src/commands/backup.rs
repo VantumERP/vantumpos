@@ -1161,8 +1161,10 @@ INSERT INTO work_time_periods (user_id, godina, mesec, status, closed_at, closed
 
             let classes_before = count(state, "retention_policies");
             assert_eq!(
-                classes_before, 3,
-                "the shared retention table carries the SW-14 classes"
+                classes_before,
+                crate::retention::RecordClass::ALL.len() as i64,
+                "the shared retention table carries every declared class — SW-14's \
+                 three and SW-13's three"
             );
 
             reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");

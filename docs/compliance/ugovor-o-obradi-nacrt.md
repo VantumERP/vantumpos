@@ -16,9 +16,9 @@
 
 1. **Predmet obrade:** pružanje daljinske tehničke podrške i održavanja informacionog sistema VantumPOS.
 2. **Trajanje obrade:** za vreme trajanja ugovora o podršci/održavanju, odnosno do prestanka ugovora; posle prestanka postupa se po članu 9 ovog ugovora.
-3. **Priroda i svrha obrade:** „daljinska tehnička podrška i održavanje VantumPOS-a" — pristup se vrši isključivo radi otklanjanja smetnji, dijagnostike i konfiguracije, po dokumentovanom nalogu rukovaoca.
+3. **Priroda i svrha obrade:** „daljinska tehnička podrška i održavanje VantumPOS-a“ — pristup se vrši isključivo radi otklanjanja smetnji, dijagnostike i konfiguracije, po dokumentovanom nalogu rukovaoca.
 4. **Vrsta podataka o ličnosti:** identitet zaposlenih (ime i korisničko ime), metapodaci o pristupnim podacima (npr. heš PIN-a, evidencija prijava — ne i sam PIN u čitljivom obliku) i pripisivost smena/prodaja pojedinom zaposlenom.
-5. **Vrsta lica** (zakonski termin je „vrsta lica", ne „kategorije lica"): **zaposleni prodavnice**.
+5. **Vrsta lica** (zakonski termin je „vrsta lica“, ne „kategorije lica“): **zaposleni prodavnice**.
 6. **Prava i obaveze rukovaoca:** rukovalac utvrđuje svrhu i način obrade, daje dokumentovane naloge i odgovoran je za zakonitost osnova obrade.
 
 ## Član 2 — Obaveze obrađivača (ZZPL čl. 45 st. 4 tač. 1–8)
@@ -47,7 +47,7 @@ Obrađivač je dužan da **bez odlaganja obavesti rukovaoca** ako smatra da je n
 ## Član 5 — Kontrola i evidentiranje pristupa (audit)
 
 1. Obrađivač vodi evidenciju o sesijama daljinske podrške (početak/kraj sesije i operater) i o pristupu podacima o ličnosti, čime dokazuje pristup **isključivo po nalogu** rukovaoca ([ZZPL čl. 50 st. 5](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)).
-2. Ova klauzula se oslanja na budući modul evidencije (audit log) u VantumPOS-u (SW-10); do njegovog uvođenja obrađivač vodi ručnu evidenciju sesija.
+2. Ova klauzula se oslanja na modul evidencije pristupa u VantumPOS-u (SW-10), **isporučen 02.08.2026**. Svaka sesija daljinske podrške ulazi pod nalogom koji vlasnik izdaje sa izričitim obimom i trajanjem (ZZPL čl. 46) i beleži se u lančanoj evidenciji pristupa. **Napomena o pravnoj prirodi: ZZPL ne propisuje vođenje evidencije pristupa privatnom rukovaocu** — čl. 50 je nema među merama, a izričite obaveze beleženja (čl. 48, čl. 51) vezuju samo nadležni organ u posebne svrhe. Evidencija je dokazno sredstvo uz čl. 41 st. 1, ne zakonska obaveza.
 
 ## Član 6 — Pretvaranje obrađivača u rukovaoca (ZZPL čl. 45 st. 8)
 

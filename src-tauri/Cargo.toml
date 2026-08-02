@@ -33,6 +33,10 @@ password-hash = { version = "0.5", features = ["rand_core"] }
 chacha20poly1305 = "0.10"
 getrandom = "0.2"
 ureq = { version = "2", features = ["json"] }
+# The audit log's tamper-evidence (SW-10 req. 7) is a SHA-256 hash chain. Already
+# present transitively via the password/crypto stack; declared here because
+# `audit.rs` depends on it directly.
+sha2 = "0.10"
 
 [dev-dependencies]
 # Enables `tauri::test` (mock_builder/mock_context) so command wrappers that take

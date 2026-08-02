@@ -43,6 +43,11 @@ pub fn load_offering_state(
 /// means the product is being created. Call inside the same transaction as the
 /// product write: a price change recorded non-atomically can diverge from the
 /// catalog, which is worse than not recording it.
+///
+/// Returns whether a row was appended — i.e. whether what the shop offers
+/// actually moved. SW-12 republishes the cenovnik on that answer (req. 11), and
+/// it is returned rather than recomputed by the caller so there is one decision
+/// about what counts as a price change instead of two that can drift apart.
 pub fn record_offered_price_change(
     conn: &Connection,
     product_id: i64,
@@ -51,7 +56,7 @@ pub fn record_offered_price_change(
     source: &str,
     acting_user_id: Option<i64>,
     now_rfc3339: &str,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let was_offered = before.map(|state| state.active).unwrap_or(false);
 
     // Some(x) => append a row carrying x; None => nothing to record.
@@ -72,7 +77,7 @@ pub fn record_offered_price_change(
     };
 
     let Some(price_minor) = price_to_log else {
-        return Ok(());
+        return Ok(false);
     };
 
     conn.execute(
@@ -83,7 +88,7 @@ pub fn record_offered_price_change(
         params![product_id, now_rfc3339, price_minor, source, acting_user_id],
     )?;
 
-    Ok(())
+    Ok(true)
 }
 
 /// A prethodna cena computed under ZoT čl. 37 st. 3–4.
@@ -356,7 +361,7 @@ mod tests {
     #[test]
     fn changing_the_price_while_active_records_it() {
         let (conn, id) = conn_with_product(true, 499000);
-        record_offered_price_change(
+        let recorded = record_offered_price_change(
             &conn,
             id,
             Some(OfferingState {
@@ -373,12 +378,16 @@ mod tests {
         )
         .expect("record");
         assert_eq!(rows(&conn), vec![(Some(429000), "update".to_string())]);
+        assert!(
+            recorded,
+            "the caller is told the offer moved — SW-12 republishes on it"
+        );
     }
 
     #[test]
     fn an_unchanged_price_records_nothing() {
         let (conn, id) = conn_with_product(true, 499000);
-        record_offered_price_change(
+        let recorded = record_offered_price_change(
             &conn,
             id,
             Some(OfferingState {
@@ -397,6 +406,10 @@ mod tests {
         assert!(
             rows(&conn).is_empty(),
             "editing name/SKU must not pollute the price timeline"
+        );
+        assert!(
+            !recorded,
+            "and the caller is told nothing moved, so nothing republishes"
         );
     }
 

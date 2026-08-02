@@ -285,16 +285,25 @@ pub struct CorrectEntryRequest {
     pub korekcija_razlog: String,
 }
 
-/// The two ZoR notices this register surfaces, already tier-resolved.
+/// The ZoR notices this register surfaces, already tier-resolved.
 ///
-/// They travel together because they are the two halves of the same exposure:
-/// not keeping the register at all (čl. 276 st. 1 tač. 1a) and keeping one that
-/// records a breach of the čl. 53 caps (čl. 274 st. 1 tač. 3, the larger fine).
+/// They travel together because they are facets of one exposure: not keeping the
+/// register at all (čl. 276 st. 1 tač. 1a) and keeping one that records a breach
+/// of a working-time ceiling (čl. 274, the larger fine).
+///
+/// The two ceiling notices are **not** interchangeable. [`assess_caps_for_employee`]
+/// refuses an ordinary day on čl. 53 and a preraspodela day on čl. 57 st. 5, and
+/// those are different rule sets under different tačke — tač. 3 and tač. 4. čl. 58
+/// makes the čl. 53 caps inapplicable to an employee in preraspodela, so rendering
+/// `caps_exceeded` beside a čl. 57 refusal states a rule that does not bind him
+/// and cites the wrong article. The amount is identical either way, which is what
+/// makes the substitution invisible to any guard that only watches figures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkTimeNotices {
     pub record_missing: crate::legal::LegalNotice,
     pub caps_exceeded: crate::legal::LegalNotice,
+    pub preraspodela_caps_exceeded: crate::legal::LegalNotice,
 }
 
 /// What a write returns: the stored row, the čl. 53 assessment it was measured
@@ -353,8 +362,8 @@ pub fn worktime_export_csv(
     export_month_csv(state.inner(), user_id, godina, mesec).map_err(Into::into)
 }
 
-/// The two ZoR notices the register surfaces, resolved against the stored
-/// legal form.
+/// The ZoR notices the register surfaces, resolved against the stored legal
+/// form.
 ///
 /// Read-only and not admin-gated, mirroring `settings_lpfr_notice`: it states a
 /// duty and its tier, and holds no employee data of any kind.
@@ -383,7 +392,7 @@ pub fn list_month(
     load_month(state, user_id, godina, mesec)
 }
 
-/// Resolves both ZoR notices against the shop's stored legal form.
+/// Resolves every ZoR notice against the shop's stored legal form.
 ///
 /// The register's surfaces render this and never compose a figure of their own —
 /// `legal.rs` is the only place a fine amount is decided, and its enumerated
@@ -394,6 +403,7 @@ pub fn notices(state: &AppState) -> Result<WorkTimeNotices, AppError> {
     Ok(WorkTimeNotices {
         record_missing: crate::legal::overtime_record_missing(&profile),
         caps_exceeded: crate::legal::overtime_caps_exceeded(&profile),
+        preraspodela_caps_exceeded: crate::legal::preraspodela_caps_exceeded(&profile),
     })
 }
 
@@ -2403,6 +2413,73 @@ mod tests {
                     );
                 }
             }
+        });
+    }
+
+    /// The preraspodela breach has its own notice, and it travels with the
+    /// other two.
+    ///
+    /// [`assess_caps_for_employee`] refuses a preraspodela day on čl. 57 st. 5,
+    /// not on čl. 53 — so a surface that has only `caps_exceeded` to render
+    /// quotes the 8 h/12 h rules čl. 58 makes inapplicable and cites čl. 274
+    /// st. 1 tač. 3, when čl. 57 and čl. 60 are tač. 4. The notice has to exist
+    /// here for the surface to have anything else to reach for.
+    #[test]
+    fn notices_carry_the_preraspodela_ceiling_as_its_own_tacka_4_notice() {
+        with_state("worktime_notices_preraspodela", |state| {
+            sign_in_admin(state);
+
+            let unset = notices(state).expect("notices should resolve");
+            assert!(
+                unset.preraspodela_caps_exceeded.penalty.is_none(),
+                "no legal form is stored yet, so no figure may be quoted"
+            );
+            assert!(
+                unset
+                    .preraspodela_caps_exceeded
+                    .citation
+                    .contains("čl. 57 st. 5"),
+                "the duty is čl. 57 st. 5: {}",
+                unset.preraspodela_caps_exceeded.citation
+            );
+            assert!(
+                !unset.preraspodela_caps_exceeded.citation.contains("čl. 53"),
+                "čl. 53 is not the provision breached here: {}",
+                unset.preraspodela_caps_exceeded.citation
+            );
+
+            crate::commands::settings::save_shop_profile(
+                state,
+                crate::commands::settings::ShopProfileRequest {
+                    pravna_forma: Some(crate::commands::settings::PravnaForma::Preduzetnik),
+                    pdv_obveznik: Some(false),
+                    distance_selling: Some(false),
+                    lpfr_in_premises: Some(false),
+                    lpfr_carve_out_internet_only: Some(false),
+                    lpfr_carve_out_own_used_assets: Some(false),
+                    esir_elements: Vec::new(),
+                },
+            )
+            .expect("admin should save the profile");
+
+            let resolved = notices(state).expect("notices should resolve");
+            let penalty = resolved
+                .preraspodela_caps_exceeded
+                .penalty
+                .expect("the stored tier is known");
+
+            assert!(
+                penalty.contains("čl. 274 st. 1 tač. 4"),
+                "čl. 57 and čl. 60 are tač. 4: {penalty}"
+            );
+            assert!(
+                !penalty.contains("tač. 3"),
+                "tač. 3 is the čl. 53 offence: {penalty}"
+            );
+            assert!(
+                penalty.contains("200.000 do 400.000"),
+                "the preduzetnik row is čl. 274 st. 2: {penalty}"
+            );
         });
     }
 }

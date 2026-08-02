@@ -12,14 +12,14 @@ Povreda = povreda bezbednosti koja dovodi do slučajnog ili nezakonitog uništen
    Čim utvrdi povredu, Actaer bez nepotrebnog odlaganja, a najkasnije u **24 časa** (ugovorni rok, `ugovor-o-obradi-nacrt.md` čl. 4; zakonski osnov [čl. 52 st. 3](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)), obaveštava rukovaoca sa sadržinom iz čl. 52 st. 4 (priroda povrede; vrsta i približan broj lica/podataka; kontakt tačka; moguće posledice; preduzete/predložene mere).
 
 2. **Rukovalac (prodavnica) → Poverenik: ≤ 72 časa.**
-   Rukovalac obaveštava Poverenika bez nepotrebnog odlaganja, a najkasnije u **72 časa** od saznanja ([čl. 53 st. 1](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)), na **obrascu iz Pravilnika 40/2019**, skeniran primerak na **povredapodataka@poverenik.rs**. Ako se obaveštava posle 72 časa, navode se razlozi kašnjenja.
+   Rukovalac obaveštava Poverenika bez nepotrebnog odlaganja, a najkasnije u **72 časa** od saznanja ([čl. 52 st. 1](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html) — **ispravljeno 02.08.2026: ranije je stajalo „čl. 53 st. 1“, a čl. 53 uređuje obaveštavanje lica na koje se podaci odnose, ne Poverenika**), na **obrascu iz Pravilnika 40/2019**, skeniran primerak na **povredapodataka@poverenik.rs**. Ako se obaveštava posle 72 časa, navode se razlozi kašnjenja.
 
 3. **Rukovalac → lica na koje se podaci odnose: samo kod visokog rizika.**
    Neposredno obaveštavanje zaposlenih (jasnim jezikom) samo ako povreda **verovatno predstavlja visok rizik** za prava i slobode lica ([čl. 53](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)).
 
 ## Interna dokumentacija (uvek)
 
-Rukovalac **dokumentuje svaku povredu** — činjenice, posledice i preduzete mere — nezavisno od toga da li se obaveštava Poverenik; dokumentacija omogućava Povereniku proveru postupanja ([čl. 52 st. 6–7](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)). (Budući ekran za evidenciju incidenata: SW-17.)
+Rukovalac **dokumentuje svaku povredu** — činjenice, posledice i preduzete mere — nezavisno od toga da li se obaveštava Poverenik; dokumentacija omogućava Povereniku proveru postupanja ([čl. 52 st. 6–7](https://www.paragraf.rs/propisi/zakon_o_zastiti_podataka_o_licnosti.html)). (Ekran za evidenciju incidenata: **Privatnost → Evidencija povreda**, isporučen 02.08.2026 (SW-17). Obrazac iz Pravilnika 40/2019 se generiše iz zapisa; podnošenje je i dalje ručno — API za podnošenje ne postoji.)
 
 ## Izuzetak: šifrovane rezervne kopije (safe-harbor)
 

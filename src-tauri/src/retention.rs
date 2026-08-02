@@ -24,15 +24,38 @@
 //! takes two clocks — the shared row, and the recorded day's own three years,
 //! because that floor binds each row rather than the class.
 //!
+//! **`personnel`** (SW-13 class A). The ZEOR čl. 5 evidencija o zaposlenim
+//! licima. `trajno` on čl. 7 st. 2, `never_purge = 1`, and req. 26 gives the
+//! category **no configurable period at all** — `extend_retain_until` refuses
+//! it, and `commands::personnel::PurgeableClass` has no variant that names it.
+//!
+//! **`credentials`** (SW-13 class C). The PIN and password hashes. Discarded at
+//! the termination itself and not after a window (req. 21), so the class row is
+//! here to let a legal hold stop the sweep — not to time it.
+//!
+//! **`access_log`** (SW-13 class C). The čl. 48 evidencija pristupa, on
+//! [`ACCESS_LOG_RETENTION_YEARS`] and never `trajno` (req. 6, 22). Two clocks
+//! again: the class row and the row's own day, the second applied through
+//! [`expiry_cutoff`] where the cut is made.
+//!
+//! **`cenovnik_archive`** (SW-12 req. 14). The archive of published cenovnici,
+//! on [`CENOVNIK_ARCHIVE_RETENTION_YEARS`] — ZZP čl. 213's two-year limitation.
+//! **The one class here that holds no personal data**, which is why
+//! [`RecordClass::personal_data`] exists: this table is the app's shared
+//! retention table (req. 42), while the čl. 47 register is about obrada podataka
+//! o ličnosti and owes this class no entry. Two clocks again — the shared row,
+//! and each snapshot's own `generated_at` through [`expiry_cutoff`] — plus one
+//! rule no date can override: an outlet's current cenovnik is never removed.
+//!
 //! **The direction of the trade-off, once.** Under-retention outranks
 //! over-retention for this shop: the ZEOR čl. 50 st. 1 tač. 3 offence is *"ako
 //! ne čuva trajno"*. Every decision here therefore fails safe toward KEEPING —
 //! an unreadable date, a missing floor and an absent policy row all refuse the
 //! purge rather than allow it.
 //!
-//! The purge job itself is SW-13's, a later cycle; this module ships the table,
-//! the classes and the guard the go-live reset already needs, so several items
-//! here have no non-test caller yet.
+//! The purge job that reads these rows is `commands::personnel`; this module
+//! ships the table, the classes, the date arithmetic and the transaction fence,
+//! and some of it (the worktime gates) still has no non-test caller.
 
 #![allow(dead_code)]
 
@@ -52,6 +75,41 @@ use crate::state::AppState;
 /// „6 godina“ is Croatian law; neither may ever be surfaced, and neither is a
 /// figure this constant may be lowered to.
 pub const STANDALONE_OVERTIME_LOG_FLOOR_YEARS: i32 = 3;
+
+/// SW-13 req. 22 + SW-10 req. 6. How long a line in the access evidencija is
+/// kept before the time-driven purge may discard it.
+///
+/// **Two requirements meet on this number and the higher one wins.** Req. 22
+/// calls a one-year default defensible on ZoP čl. 84 st. 1 (relativna
+/// zastarelost) and names three years (ZoR čl. 196) as the defensible outer
+/// bound. Req. 6 is stricter: the floor must sit above the whole ZoP čl. 84
+/// window, whose *apsolutna* leg is two years — a log discarded at one year
+/// cannot serve the čl. 48 st. 3 purpose *ocena zakonitosti obrade* during the
+/// second year of a prekršaj proceeding that is still running.
+///
+/// Two years, therefore, and not three: ZZPL čl. 5 st. 1 t. 5 makes the shortest
+/// defensible period the right *default*, and the shop can push the class floor
+/// forward (never back) if it needs longer. **Never `trajno`** — čl. 47 st. 7
+/// governs the register of processing activities, and copying it onto this log
+/// would put the product in permanent breach of storage limitation (req. 6).
+pub const ACCESS_LOG_RETENTION_YEARS: i32 = 2;
+
+/// SW-12 req. 14. How long a published cenovnik stays in the archive.
+///
+/// ZZP čl. 6 st. 5 is why the archive exists — the trader must enable a
+/// comparison of *„prethodno objavljenih cena“* with the realtime ones — and
+/// **ZZP čl. 213 is what ends it**: prekršajno gonjenje for a čl. 6 breach is
+/// barred two years from the commission, after which a file older than that
+/// answers no question anybody may still put. Two years, therefore, and the shop
+/// can push the class floor forward (never back) if it wants a longer record.
+///
+/// **Never `trajno`.** Nothing in the ZZP prescribes a period for a published
+/// cenovnik, and keeping every snapshot of every price change forever is storage
+/// for its own sake. The one row this period may never reach is the outlet's
+/// *current* cenovnik — čl. 6 st. 4 binds the shop to it and st. 5 has nothing
+/// to compare against without it — which is a rule about *which row*, not about
+/// how long, and it lives in `commands::cenovnik::purge_expired_snapshots`.
+pub const CENOVNIK_ARCHIVE_RETENTION_YEARS: i32 = 2;
 
 /// The tables no purge, reset, restore or backup-prune path may ever reduce
 /// (§4d: *"the trajno classes must be structurally unreachable"*).
@@ -84,10 +142,26 @@ pub const STANDALONE_OVERTIME_LOG_FLOOR_YEARS: i32 = 3;
 /// SW-13 comes to discard superseded versions it must **narrow what is counted**
 /// — to the live `MAX(verzija)` rows, or to the trajno subset — and never
 /// weaken or remove the fence to get there.
+///
+/// `personnel_records` joins the list with SW-13 (req. 19, 24): the ZEOR čl. 5
+/// evidencija is class A, it is kept `trajno` under čl. 7 st. 2, and no purge,
+/// reset or deactivation may reduce it. v18's `BEFORE DELETE` trigger already
+/// refuses a row-level delete; this entry is the transaction-level half, so a
+/// future edit that finds a way around the trigger still aborts the whole
+/// transaction instead of committing a shortened register.
+///
+/// `processing_activities` joins it with the čl. 47 evidencija radnji obrade
+/// (req. 28). St. 7 says the record is kept `trajno` in as many words, and
+/// unlike `personnel_records` this table carries no `BEFORE DELETE` trigger —
+/// it is regenerated by [`crate::cl47`] on every launch, and a trigger would
+/// refuse the upsert that keeps it current. The fence is therefore the only
+/// structural protection it has.
 pub const NEVER_PURGE_TABLES: &[&str] = &[
     "work_time_entries",
     "work_time_periods",
     "retention_policies",
+    "personnel_records",
+    "processing_activities",
 ];
 
 /// A record class as the shared table stores it.
@@ -98,12 +172,10 @@ pub const NEVER_PURGE_TABLES: &[&str] = &[
 ///
 /// [`key`]: RecordClass::key
 /// [`from_key`]: RecordClass::from_key
-// Every class this cycle ships belongs to the working-time feature, which is the
-// only reason the variants share a prefix. It is not noise: this is the shared
-// table SW11-SW15 §3 req. 42 mandates, SW-3 and SW-13 add their own classes to
-// the same enum, and a bare `RecordClass::Classification` would then say nothing
-// about which record it classifies.
-#[allow(clippy::enum_variant_names)]
+// The three working-time variants share a prefix because a bare
+// `RecordClass::Classification` would say nothing about which record it
+// classifies; this is the shared table SW11-SW15 §3 req. 42 mandates and every
+// feature adds its classes to it. SW-13's three follow below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordClass {
@@ -113,13 +185,43 @@ pub enum RecordClass {
     WorktimeOvertimeLog,
     /// Class B — entry drafts and advisory clock data, bounded by the close.
     WorktimeDraft,
+    /// SW-13 class A — the ZEOR čl. 5 evidencija o zaposlenim licima. `trajno`
+    /// under čl. 7 st. 2, and req. 26 gives it **no configurable period at all**:
+    /// `retain_until` stays `NULL` and [`extend_retain_until`] refuses it.
+    Personnel,
+    /// SW-13 class C, the credential half — the PIN and password hashes.
+    /// Discarded **at termination**, not after a window (req. 21).
+    Credentials,
+    /// SW-13 class C, the access half — the čl. 48 evidencija pristupa.
+    /// [`ACCESS_LOG_RETENTION_YEARS`], never `trajno` (req. 6, 22). This app
+    /// keeps no separate login history: `users.last_login_at` is one current
+    /// value overwritten on each sign-in, not a stream a purge could shorten.
+    AccessLog,
+    /// The čl. 47 evidencija radnji obrade (req. 28). **The one class in the
+    /// ZZPL trio where `trajno` is the right answer**, because st. 7 says so of
+    /// this record and of no other — which is exactly why the audit log and the
+    /// breach log must not borrow it.
+    ProcessingRegister,
+    /// SW-12 req. 14 — the archive of published cenovnici.
+    /// [`CENOVNIK_ARCHIVE_RETENTION_YEARS`] on ZZP čl. 213, and the **one class
+    /// in this table that holds no personal data at all**: it carries article
+    /// prices and the outlet's name. It is here because
+    /// `retention_policies` is the app's shared retention table (SW11-SW15 §3
+    /// req. 42), not a personal-data-only one — see [`Self::personal_data`],
+    /// which is what keeps it out of the čl. 47 register.
+    CenovnikArchive,
 }
 
 impl RecordClass {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 8] = [
         Self::WorktimeClassification,
         Self::WorktimeOvertimeLog,
         Self::WorktimeDraft,
+        Self::Personnel,
+        Self::Credentials,
+        Self::AccessLog,
+        Self::ProcessingRegister,
+        Self::CenovnikArchive,
     ];
 
     /// The `record_class` value stored in `retention_policies`.
@@ -128,6 +230,11 @@ impl RecordClass {
             Self::WorktimeClassification => "worktime_classification",
             Self::WorktimeOvertimeLog => "worktime_overtime_log",
             Self::WorktimeDraft => "worktime_draft",
+            Self::Personnel => "personnel",
+            Self::Credentials => "credentials",
+            Self::AccessLog => "access_log",
+            Self::ProcessingRegister => "processing_register",
+            Self::CenovnikArchive => "cenovnik_archive",
         }
     }
 
@@ -135,10 +242,62 @@ impl RecordClass {
         Self::ALL.into_iter().find(|class| class.key() == key)
     }
 
+    /// What the class is called in front of a person — the same wording the
+    /// čl. 23 notice's retention table uses, so an employee reading the notice
+    /// and an administrator reading the rok on screen are looking at one row.
+    ///
+    /// Deliberately not the `key`: `worktime_classification` names a column
+    /// value, and a screen that offers to move „worktime_draft“ forward is a
+    /// screen nobody in the shop can use.
+    pub fn naziv(self) -> &'static str {
+        match self {
+            Self::WorktimeClassification => "Izvedena mesečna klasifikacija časova",
+            Self::WorktimeOvertimeLog => "Samostalna evidencija prekovremenog rada",
+            Self::WorktimeDraft => "Radne verzije unosa i pomoćni podaci o vremenu",
+            Self::Personnel => "Evidencija o zaposlenim licima",
+            Self::Credentials => "PIN i lozinka (heš vrednosti)",
+            Self::AccessLog => "Evidencija pristupa podacima o ličnosti",
+            Self::ProcessingRegister => "Evidencija o radnjama obrade",
+            Self::CenovnikArchive => "Arhiva objavljenih cenovnika",
+        }
+    }
+
+    /// Does this class hold podaci o ličnosti?
+    ///
+    /// **Why the question is asked here.** `retention_policies` is the shared
+    /// retention table (SW11-SW15 §3 req. 42) and not a ZZPL artefact: it holds
+    /// whatever period this app applies to anything. The čl. 47 evidencija
+    /// radnji obrade *is* a ZZPL artefact — it records radnje obrade **podataka
+    /// o ličnosti** — so `cl47::every_configured_retention_class_reaches_the_register`
+    /// owes an entry for every class that answers `true` here, and must not
+    /// invent one for a class that answers `false`. Listing an archive of
+    /// article prices as a radnja obrade would be a misstatement to the
+    /// Poverenik in the shop's own name, which is the one thing that document
+    /// exists to avoid.
+    ///
+    /// [`Self::CenovnikArchive`] is the only `false` today: the published file
+    /// carries šifra, naziv, jedinica mere and prices, and the archive rows add
+    /// the prodajno mesto and the timestamps. No data subject appears in any of
+    /// it.
+    pub fn personal_data(self) -> bool {
+        !matches!(self, Self::CenovnikArchive)
+    }
+
     /// ZEOR čl. 7 st. 2 / čl. 25 st. 3 — `trajno`. A class that answers `true`
     /// here is unreachable by every purge, whatever date anything else stores.
+    ///
+    /// [`Self::Personnel`] answers `true` on the same article: čl. 7 st. 2 is
+    /// the retention rule for the evidencija o zaposlenim licima itself, and
+    /// req. 26 forbids a configurable period for the category outright.
+    ///
+    /// [`Self::ProcessingRegister`] answers `true` on a different statute —
+    /// ZZPL čl. 47 st. 7, which is the only ZZPL provision in this trio that
+    /// prescribes `trajno`, and prescribes it for the register alone.
     pub fn never_purge(self) -> bool {
-        matches!(self, Self::WorktimeClassification)
+        matches!(
+            self,
+            Self::WorktimeClassification | Self::Personnel | Self::ProcessingRegister
+        )
     }
 
     /// The floor the class is seeded with.
@@ -155,11 +314,23 @@ impl RecordClass {
     /// floor is a per-record obligation, and [`overtime_log_purge_eligible`] is
     /// the gate that applies `retention_floor(record_day, …)` to the row's own
     /// `dan`. SW-13 must call that, not this stored value alone.
+    /// SW-13's three follow the same two shapes. `Personnel` gets `NULL` for the
+    /// same reason Class A does, and req. 26 additionally bars any date from ever
+    /// being written there. `Credentials` gets the seeding day, because the thing
+    /// that discards a credential is the *termination event* and not a calendar
+    /// window (req. 21) — the class row exists so a legal hold can still stop the
+    /// sweep, not to time it. `AccessLog` gets the seeding day plus
+    /// [`ACCESS_LOG_RETENTION_YEARS`], and — exactly like the overtime log — that
+    /// class-wide floor is necessary but never sufficient: the per-row gate is
+    /// [`expiry_cutoff`] applied to each row's own day by
+    /// `commands::personnel::expire_access_log`, which is where the cut is made.
     fn seed_retain_until(self, now: &str) -> Option<String> {
         match self {
-            Self::WorktimeClassification => None,
+            Self::WorktimeClassification | Self::Personnel | Self::ProcessingRegister => None,
             Self::WorktimeOvertimeLog => retention_floor(now, STANDALONE_OVERTIME_LOG_FLOOR_YEARS),
-            Self::WorktimeDraft => parse_iso_date(date_only(now)).map(iso_date),
+            Self::WorktimeDraft | Self::Credentials => parse_iso_date(date_only(now)).map(iso_date),
+            Self::AccessLog => retention_floor(now, ACCESS_LOG_RETENTION_YEARS),
+            Self::CenovnikArchive => retention_floor(now, CENOVNIK_ARCHIVE_RETENTION_YEARS),
         }
     }
 
@@ -179,6 +350,21 @@ impl RecordClass {
             }
             Self::WorktimeDraft => {
                 "Radne verzije unosa i pomoćni podaci o vremenu. Brišu se tek pošto je period zatvoren i klasifikacija izvedena (ZZPL čl. 5 st. 1 tač. 5)."
+            }
+            Self::Personnel => {
+                "Evidencija o zaposlenim licima (ZEOR čl. 5). Čuva se trajno (ZEOR čl. 7 st. 2) i rok se ne podešava. Aplikacija je izuzima iz automatskog čišćenja, iz deaktivacije naloga i iz resetovanja podataka. Vraćanje iz rezervne kopije vraća celu bazu na stanje iz te kopije, pa i ovu evidenciju — zaštita na tom putu je rezervna kopija zatečenog stanja koju aplikacija napravi pre vraćanja. Automatsko čišćenje starih rezervnih kopija ne postoji."
+            }
+            Self::Credentials => {
+                "PIN i lozinka (samo heš vrednosti). Uklanjaju se danom prestanka radnog odnosa, a ne po isteku roka (ZZPL čl. 5 st. 1 tač. 5 i čl. 42 st. 2). Automatsko čišćenje uklanja heš sa svakog deaktiviranog naloga; sam nalog i evidencija o zaposlenom ostaju."
+            }
+            Self::AccessLog => {
+                "Evidencija pristupa podacima o ličnosti, koju rukovalac vodi kao sopstvenu meru: ZZPL čl. 48 obavezuje nadležni organ koji podatke obrađuje u posebne svrhe, pa je ovde uzor za sadržaj, a ne osnov obaveze. Aplikacija ne vodi zasebnu istoriju prijavljivanja — beleži se samo poslednja prijava na nalogu, koja se prepisuje pri svakoj sledećoj. Zakon ne propisuje rok; primenjuje se podrazumevani rok od dve godine, koji nadživljava ceo rok zastarelosti iz ZoP čl. 84. Odbranjiva gornja granica je tri godine (ZoR čl. 196). Rok se pomera samo unapred. Ova evidencija se ne čuva trajno."
+            }
+            Self::ProcessingRegister => {
+                "Evidencija o radnjama obrade (ZZPL čl. 47 st. 1). Čuva se trajno (čl. 47 st. 7) i rok se ne podešava; na zahtev se stavlja na uvid Povereniku (čl. 47 st. 8). Aplikacija je izuzima iz automatskog čišćenja i iz resetovanja podataka. Vraćanje iz rezervne kopije vraća celu bazu na stanje iz te kopije, pa i ovu evidenciju — zaštita na tom putu je rezervna kopija zatečenog stanja koju aplikacija napravi pre vraćanja. Automatsko čišćenje starih rezervnih kopija ne postoji. Evidencija se iznova generiše iz podešavanja programa i iz tabele rokova čuvanja, pa ne može da navede rok koji program ne primenjuje."
+            }
+            Self::CenovnikArchive => {
+                "Arhiva objavljenih cenovnika (ZZP čl. 6 st. 5 — poređenje ranije objavljenih cena sa cenama objavljenim u realnom vremenu). Podrazumevani rok je dve godine, koliko traje zastarelost prekršajnog gonjenja iz ZZP čl. 213; rok se pomera samo unapred. Automatsko čišćenje uklanja samo snimke starije od tog roka i nikada važeći cenovnik prodajnog objekta, koji ostaje bez obzira na starost. Ova arhiva ne sadrži podatke o ličnosti — u njoj su šifre, nazivi i cene artikala i naziv prodajnog mesta."
             }
         }
     }
@@ -484,14 +670,37 @@ pub fn retention_floor(day: &str, years: i32) -> Option<String> {
         .map(iso_date)
 }
 
+/// `day` shifted **backwards** by `years`, as `gggg-MM-dd` — the oldest day a
+/// bounded class may still keep. A record whose own day is strictly earlier than
+/// the cutoff has outlived its period.
+///
+/// This is [`retention_floor`] read from the other end, and the leap-day
+/// fallback therefore goes the other way: a 29 February cutoff falls back to
+/// **28 February**, the EARLIER day, so the boundary moves toward keeping one
+/// more day rather than discarding one day early. That is the same direction the
+/// module note fixes for every decision here.
+///
+/// `None` when `day` is not a readable calendar day — the caller then has no
+/// cutoff, and no cutoff means keep.
+pub fn expiry_cutoff(day: &str, years: i32) -> Option<String> {
+    let date = parse_iso_date(date_only(day))?;
+    let godina = date.year().checked_sub(years)?;
+
+    Date::from_calendar_date(godina, date.month(), date.day())
+        .or_else(|_| Date::from_calendar_date(godina, Month::February, 28))
+        .ok()
+        .map(iso_date)
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::params;
 
     use super::{
-        draft_purge_eligible, extend_retain_until, is_purgeable, load_policy,
+        draft_purge_eligible, expiry_cutoff, extend_retain_until, is_purgeable, load_policy,
         overtime_log_purge_eligible, retention_floor, seed_retention_policies, RecordClass,
-        RetentionPolicy, STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
+        RetentionPolicy, ACCESS_LOG_RETENTION_YEARS, CENOVNIK_ARCHIVE_RETENTION_YEARS,
+        STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
     };
     use crate::db::{test_database_path, Db};
     use crate::state::AppState;
@@ -795,6 +1004,186 @@ mod tests {
         assert_eq!(retention_floor("", 3), None);
     }
 
+    /// SW-12 req. 14. Čl. 6 st. 5's comparison duty is what keeps the published
+    /// cenovnik on file; ZZP čl. 213 is what ends it — two years from the
+    /// commission of the prekršaj, after which no proceeding can be brought and
+    /// an older file answers nothing anybody may still ask.
+    ///
+    /// The floor lives in the shared table rather than at the cut, so a legal
+    /// hold or an extended rok reaches the cenovnik purge exactly the way it
+    /// reaches every other class (SW11-SW15 §3 req. 42).
+    #[test]
+    fn the_cenovnik_archive_carries_the_cl_213_two_year_floor() {
+        with_state("retention_cenovnik_archive_floor", |state| {
+            seed_retention_policies(state, "2026-08-01T08:00:00Z").expect("classes should seed");
+            let connection = state.db().open().expect("database should open");
+
+            assert_eq!(
+                CENOVNIK_ARCHIVE_RETENTION_YEARS, 2,
+                "ZZP čl. 213 — zastarelost je dve godine"
+            );
+
+            let policy = load_policy(&connection, RecordClass::CenovnikArchive)
+                .expect("the cenovnik archive class must be seeded");
+            assert_eq!(
+                policy.retain_until.as_deref(),
+                Some("2028-08-01"),
+                "two years from the day the class was recorded"
+            );
+            assert!(
+                !policy.never_purge,
+                "a published cenovnik is evidence with a limitation, not a trajno record"
+            );
+            assert!(!is_purgeable(&policy, "2028-07-31"));
+            assert!(is_purgeable(&policy, "2028-08-01"));
+        });
+    }
+
+    /// The archive holds article prices and the outlet's name and nothing about
+    /// any data subject, so it is a retention class without being a radnja
+    /// obrade podataka o ličnosti. `retention_policies` is the app's **shared**
+    /// retention table (SW11-SW15 §3 req. 42), not a personal-data-only one, and
+    /// `cl47::every_configured_retention_class_reaches_the_register` reads this
+    /// predicate to decide which classes the čl. 47 register owes an entry.
+    #[test]
+    fn every_class_but_the_cenovnik_archive_is_personal_data() {
+        for class in RecordClass::ALL {
+            assert_eq!(
+                class.personal_data(),
+                class != RecordClass::CenovnikArchive,
+                "{} is on the wrong side of the čl. 47 register's boundary",
+                class.key()
+            );
+        }
+    }
+
+    /// The frontend's `RecordClass` union in `src/services/types.ts` is a
+    /// hand-maintained mirror of this enum, and nothing but this test compares
+    /// the two. `retention_list_policies` returns one row per [`RecordClass::ALL`]
+    /// entry and `local-adapter.ts` casts that payload with a bare `invoke`, so a
+    /// variant added here and forgotten there is a contract type that states a
+    /// set of values the backend no longer sends — while both suites stay green
+    /// and the panel keeps rendering the row at run time. The next screen that
+    /// narrows or switches exhaustively on `recordClass` is where it surfaces,
+    /// by silently dropping the class. `CenovnikArchive` shipped exactly that
+    /// way.
+    ///
+    /// Membership, not order: a union is a set, and reordering it for reading is
+    /// not a defect. The count is checked separately so a repeated member cannot
+    /// pass as a complete mirror.
+    #[test]
+    fn the_typescript_record_class_union_mirrors_this_enum() {
+        const TYPES_TS: &str = include_str!("../../src/services/types.ts");
+        const DECLARATION: &str = "export type RecordClass =";
+
+        let start = TYPES_TS
+            .find(DECLARATION)
+            .expect("src/services/types.ts must still declare the RecordClass union");
+        let tail = &TYPES_TS[start + DECLARATION.len()..];
+        let body = &tail[..tail
+            .find(';')
+            .expect("the RecordClass union must be terminated")];
+
+        // Every quoted member of the union: the odd fields of a split on `"`.
+        let mirrored: Vec<&str> = body.split('"').skip(1).step_by(2).collect();
+        let expected: Vec<&str> = RecordClass::ALL.into_iter().map(RecordClass::key).collect();
+
+        let missing: Vec<&str> = expected
+            .iter()
+            .copied()
+            .filter(|key| !mirrored.contains(key))
+            .collect();
+        let unknown: Vec<&str> = mirrored
+            .iter()
+            .copied()
+            .filter(|key| !expected.contains(key))
+            .collect();
+
+        assert!(
+            missing.is_empty() && unknown.is_empty(),
+            "src/services/types.ts RecordClass no longer mirrors crate::retention::RecordClass — \
+             missing {missing:?}, unknown {unknown:?}"
+        );
+        assert_eq!(
+            mirrored.len(),
+            expected.len(),
+            "the union lists a member twice: {mirrored:?}"
+        );
+    }
+
+    /// SW-13 req. 22 / SW-10 req. 6. The access log's period, and the direction
+    /// its boundary moves — which is the opposite of a floor's, because it is the
+    /// same axis read from the other end.
+    #[test]
+    fn the_access_log_cutoff_is_two_years_and_leans_toward_keeping() {
+        assert_eq!(ACCESS_LOG_RETENTION_YEARS, 2);
+        assert_eq!(
+            expiry_cutoff("2029-08-01", ACCESS_LOG_RETENTION_YEARS).as_deref(),
+            Some("2027-08-01"),
+            "a line stamped before this day has outlived the period"
+        );
+        assert_eq!(
+            expiry_cutoff("2029-08-01T03:00:00Z", ACCESS_LOG_RETENTION_YEARS).as_deref(),
+            Some("2027-08-01"),
+            "an RFC3339 stamp reduces to its calendar day"
+        );
+        // 29 February has no counterpart two common years back. It falls to 28
+        // February — the EARLIER day, which keeps one more day of the log rather
+        // than discarding one day early.
+        assert_eq!(
+            expiry_cutoff("2028-02-29", ACCESS_LOG_RETENTION_YEARS).as_deref(),
+            Some("2026-02-28")
+        );
+        assert_eq!(expiry_cutoff("2029-8-1", 2), None);
+        assert_eq!(expiry_cutoff("", 2), None);
+    }
+
+    /// §2a / req. 1. Čl. 48 binds only a „nadležni organ koji obrađuje podatke u
+    /// posebne svrhe“; no Serbian provision obliges a private retail rukovalac to
+    /// record who accessed personal data, and the shop must never be told
+    /// otherwise. These notes are the sentence a person reads when they ask why a
+    /// line is still there, so a bare parenthetical „(ZZPL čl. 48)“ reads as the
+    /// osnov of a duty. `commands::audit::IZVOD_NAPOMENA` already states the
+    /// honest framing on the čl. 48 st. 4 izvod — the two must not disagree.
+    #[test]
+    fn a_note_may_cite_cl_48_only_as_the_uzor_it_is() {
+        for class in RecordClass::ALL {
+            let note = class.napomena();
+            if !note.contains("čl. 48") {
+                continue;
+            }
+
+            assert!(
+                note.contains("sopstven"),
+                "{}: the note must say the rukovalac keeps this evidencija as its own measure \
+                 before it cites čl. 48 — {note}",
+                class.key()
+            );
+            assert!(
+                note.contains("nadležni organ"),
+                "{}: …and name who čl. 48 actually binds — {note}",
+                class.key()
+            );
+            assert!(
+                note.contains("posebne svrhe"),
+                "{}: …and the purposes that confine it — {note}",
+                class.key()
+            );
+        }
+
+        // Req. 6 and req. 22 live in the same string, and a reword must not lose
+        // them: no statutory period, and this class is never trajno.
+        let access_log = RecordClass::AccessLog.napomena();
+        assert!(
+            access_log.contains("Zakon ne propisuje rok"),
+            "the access log has no statutory period and the note has to say so: {access_log}"
+        );
+        assert!(
+            access_log.contains("Ova evidencija se ne čuva trajno"),
+            "and req. 6 forbids trajno for this class: {access_log}"
+        );
+    }
+
     #[test]
     fn every_record_class_round_trips_through_its_stored_key() {
         for class in RecordClass::ALL {
@@ -853,6 +1242,89 @@ mod tests {
                 })
                 .expect("count should query");
             assert_eq!(survivors, 1, "the rolled-back transaction kept the row");
+        });
+    }
+
+    /// The same fence, on the table the test above cannot see.
+    ///
+    /// SW-13 req. 19/24 gives the ZEOR register two layers: v18's
+    /// `trg_personnel_records_trajno` refuses a row-level delete, and membership
+    /// in [`NEVER_PURGE_TABLES`] aborts any transaction that ever gets past it.
+    /// The fence test above hardcodes `work_time_entries`, so the second layer
+    /// was carried by nothing — deleting the entry from the list left the whole
+    /// suite green. Dropping the trigger inside the transaction stages exactly
+    /// the „future edit that finds a way around it“ the module claims to survive;
+    /// SQLite rolls the DDL back with everything else.
+    #[test]
+    fn the_never_purge_fence_covers_the_personnel_register_too() {
+        assert!(
+            super::NEVER_PURGE_TABLES.contains(&"personnel_records"),
+            "the ZEOR čl. 5 evidencija is trajno under čl. 7 st. 2: without this entry the \
+             transaction-level half of req. 19 does not exist"
+        );
+
+        with_state("retention_never_purge_fence_personnel", |state| {
+            let mut connection = state.db().open().expect("database should open");
+            connection
+                .execute_batch(
+                    "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                         VALUES (802, 'radnica2', 'Radnica Dva', 'cashier', 1,
+                                 '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+                     INSERT INTO personnel_records (user_id, prezime_ime, created_at, updated_at)
+                         VALUES (802, 'Radnica Dva', '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');",
+                )
+                .expect("an employee record should seed");
+
+            let transaction = connection.transaction().expect("transaction should open");
+            let before =
+                super::never_purge_row_counts(&transaction).expect("counts should snapshot");
+            assert!(
+                before.contains(&("personnel_records", 1)),
+                "the snapshot the purge and the go-live reset both take must count the \
+                 register: {before:?}"
+            );
+
+            // Layer one: the row-level trigger refuses outright.
+            let error = transaction
+                .execute("DELETE FROM personnel_records WHERE user_id = 802", [])
+                .expect_err("the trigger must refuse a row-level delete");
+            assert!(
+                error.to_string().contains("trajno"),
+                "the refusal must say why: {error}"
+            );
+
+            // Layer two: with the trigger gone the deletion is legal SQL again,
+            // and the fence is the only thing left standing.
+            transaction
+                .execute_batch(
+                    "DROP TRIGGER trg_personnel_records_trajno;
+                     DELETE FROM personnel_records;",
+                )
+                .expect("without the trigger the deletion itself is legal SQL");
+            let error = super::assert_never_purge_intact(&transaction, &before)
+                .expect_err("a dropped register row must abort the whole operation");
+            assert_eq!(error.code(), "invalid_state");
+            assert!(
+                error.to_string().contains("personnel_records"),
+                "the failure must name the table it caught: {error}"
+            );
+
+            drop(transaction);
+            let survivors: i64 = connection
+                .query_row("SELECT COUNT(*) FROM personnel_records", [], |row| {
+                    row.get(0)
+                })
+                .expect("count should query");
+            assert_eq!(survivors, 1, "the rolled-back transaction kept the record");
+            let triggers: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type = 'trigger' AND name = 'trg_personnel_records_trajno'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count should query");
+            assert_eq!(triggers, 1, "and put the trigger back with it");
         });
     }
 
@@ -948,7 +1420,11 @@ mod tests {
                     row.get(0)
                 })
                 .expect("count should query");
-            assert_eq!(count, 3, "seeding is idempotent, never duplicating a class");
+            assert_eq!(
+                count,
+                RecordClass::ALL.len() as i64,
+                "seeding is idempotent, never duplicating a class"
+            );
 
             let log = load_policy(&connection, RecordClass::WorktimeOvertimeLog)
                 .expect("the class must load");

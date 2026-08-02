@@ -1,8 +1,13 @@
 mod aml;
 mod app_error;
+mod audit;
 mod campaign_evidence;
 mod campaigns;
 mod cash_deposit;
+/// The published cenovnik (ZZP čl. 6), rendered.
+mod cenovnik;
+/// The ZZPL čl. 47 evidencija radnji obrade, generated from configuration.
+mod cl47;
 mod clock;
 mod commands;
 mod db;
@@ -67,6 +72,39 @@ pub fn run() {
             // never reads one.
             retention::seed_retention_policies(&state_for_launch, &clock::utc_now()?)?;
 
+            // Req. 28: the čl. 47 evidencija radnji obrade is generated, and it
+            // is generated HERE rather than behind a button, because a register
+            // that exists only once an administrator remembers to press
+            // something is the missing register this requirement exists to
+            // prevent — it is the cheapest inspection finding for a
+            // three-employee shop and the one issuable on the spot. It runs
+            // after the retention seed because every rok it prints is read out
+            // of that table. Best-effort, like the purge and the backup below:
+            // a shop that cannot rewrite a derived document must still be able
+            // to open its till, and the previous generation stays on file.
+            let _ = cl47::generate(&state_for_launch, &clock::utc_now()?);
+
+            // SW-13 req. 23: the čl. 5 st. 1 tač. 5 purge is a proactive
+            // rukovalac duty, so it is time-driven and runs here rather than
+            // behind a command a person has to remember to press. Best-effort
+            // for the same reason the backup below is: a shop that cannot tidy
+            // its expired credentials must still be able to open its till, and
+            // the failure direction is toward KEEPING records, never toward
+            // losing them. Class A is unreachable from it by construction —
+            // `PurgeableClass` has no variant for the ZEOR register.
+            let _ =
+                commands::personnel::purge_expired_classes(&state_for_launch, &clock::utc_now()?);
+
+            // SW-12 req. 14: the same shape for the archive of published
+            // cenovnici, on ZZP čl. 213's two-year limitation. Separate from the
+            // sweep above because it is a separate duty over data that is not
+            // personal at all — `PurgeableClass` names class C of SW-13 and must
+            // keep naming only that. Best-effort for the same reason, and it
+            // fails toward keeping: an outlet's current cenovnik is never
+            // reached, whatever the clock says.
+            let _ =
+                commands::cenovnik::purge_expired_snapshots(&state_for_launch, &clock::utc_now()?);
+
             // Best-effort automatic backup: a failure here is already
             // recorded as a failed backup_job and must never prevent the
             // app from opening.
@@ -83,6 +121,13 @@ pub fn run() {
             std::thread::spawn(move || loop {
                 std::thread::sleep(commands::backup::AUTO_BACKUP_INTERVAL);
                 let _ = commands::backup::auto_backup_if_due(&state_for_timer);
+                // A till that stays open for weeks would otherwise only purge on
+                // the next restart, which is not „time-driven“ in any sense a
+                // čl. 5 st. 1 tač. 5 review would accept.
+                if let Ok(now) = clock::utc_now() {
+                    let _ = commands::personnel::purge_expired_classes(&state_for_timer, &now);
+                    let _ = commands::cenovnik::purge_expired_snapshots(&state_for_timer, &now);
+                }
             });
 
             Ok(())
@@ -153,6 +198,8 @@ pub fn run() {
             commands::catalog::catalog_list_categories,
             commands::catalog::catalog_save_category,
             commands::catalog::catalog_prethodna_cena,
+            commands::cenovnik::cenovnik_list_snapshots,
+            commands::cenovnik::cenovnik_get_snapshot,
             commands::campaigns::campaigns_list,
             commands::campaigns::campaigns_get,
             commands::campaigns::campaigns_validate,
@@ -198,6 +245,7 @@ pub fn run() {
             commands::sales::sales_preview,
             commands::sales::sales_complete,
             commands::sales::sales_assess_cash_payment,
+            commands::sales::sales_assess_price_integrity,
             commands::backup::backup_get_status,
             commands::backup::backup_update_settings,
             commands::backup::backup_create,
@@ -211,7 +259,47 @@ pub fn run() {
             commands::worktime::worktime_close_period,
             commands::worktime::worktime_export_csv,
             commands::worktime::worktime_my_hours,
-            commands::worktime::worktime_notices
+            commands::worktime::worktime_notices,
+            commands::audit::support_grant_access,
+            commands::audit::support_request_access,
+            commands::audit::support_end_session,
+            commands::audit::support_active_session,
+            // Req. 7: a read path and nothing else. There is deliberately no
+            // command here that edits or removes a logged row — an
+            // owner-editable audit log proves nothing, and proving something is
+            // the entire reason it exists.
+            commands::audit::audit_search,
+            commands::audit::audit_export_csv,
+            // SW-13 class A. Req. 24: there is deliberately no delete command
+            // here, and the time-driven purge is not a command at all — it is
+            // called from the launch and timer path above, because čl. 5 st. 1
+            // tač. 5 is a proactive duty and not a request the webview makes.
+            commands::personnel::personnel_get,
+            commands::personnel::personnel_save,
+            // Req. 6 + req. 22: the rok is a setting, and this is the pair that
+            // makes it one — a reader and a mover, both admin-gated. There is
+            // deliberately no shortening verb and no verb that reaches a trajno
+            // class: `commands::retention::AdjustableClass` has no variant for
+            // one, so the ZEOR čl. 5 evidencija and the čl. 47 register are out
+            // of reach by type rather than by review.
+            commands::retention::retention_list_policies,
+            commands::retention::retention_extend_policy,
+            // SW-17. Req. 43: there is no notifiability gate in front of the
+            // write — čl. 52 st. 6 covers „svaku povredu“ and the risk question
+            // is answered on a record that already exists. And there is no
+            // delete command: the record is what st. 7 makes the vehicle for
+            // proving compliance with the whole article.
+            commands::breaches::breaches_list,
+            commands::breaches::breaches_record,
+            commands::breaches::breaches_update,
+            commands::breaches::breaches_notice,
+            commands::breaches::breaches_export_obrazac,
+            // Req. 28. Three verbs and no delete: the register is generated from
+            // configuration, so removing a radnja means removing the processing,
+            // and čl. 47 st. 7 keeps the record trajno either way.
+            cl47::cl47_list,
+            cl47::cl47_generate,
+            cl47::cl47_export
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -62,6 +62,46 @@ fn prose_sources() -> Vec<(String, String)> {
     sources
 }
 
+/// House rule: a Serbian quotation opens „ and closes “ — never with the ASCII
+/// `"`. The 01.08.2026 sweep (`eb49dbb`) closed 17 of them by hand across five
+/// templates and stopped at the templates, so the register kept every one of
+/// its own — including the čl. 55 st. 6 label the worktime module prints on
+/// every rendering, which was then rewritten twice without anyone noticing. A
+/// hand sweep is not a rule; this is.
+///
+/// Only a quotation **opened with „** is judged. English prose in the register
+/// quotes with a plain pair of ASCII marks and is left alone — the defect is the
+/// mismatched pair, where the reader sees a Serbian opening and a typewriter
+/// closing and cannot tell whether the quotation ended there or ran on.
+#[test]
+fn no_compliance_prose_closes_a_serbian_quotation_with_an_ascii_quote() {
+    for (label, text) in prose_sources() {
+        // The line the open quotation mark is on, while one is open. Quotations
+        // wrap across lines in `PROGRESS.md`, so this is tracked over the whole
+        // document rather than per line.
+        let mut opened_at: Option<usize> = None;
+        let mut line_no = 1usize;
+
+        for character in text.chars() {
+            match character {
+                '\n' => line_no += 1,
+                '„' => opened_at = opened_at.or(Some(line_no)),
+                '“' => opened_at = None,
+                '"' => {
+                    assert!(
+                        opened_at.is_none(),
+                        "{label}:{line_no} closes with an ASCII \" a quotation opened with „ on \
+                         line {}. The house rule is „…“ — an ASCII closing quote leaves the reader \
+                         unable to tell where the quoted statute or operator string ends.",
+                        opened_at.unwrap_or(line_no)
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// `retention::assert_never_purge_intact` is the fence behind every „ne briše
 /// se“ claim about the `trajno` classification, and it runs in exactly one
 /// place: inside the `reset_trading_data` transaction. It cannot run on the
@@ -163,6 +203,308 @@ fn the_trajno_retention_row_names_what_actually_protects_it_on_a_restore() {
     );
 }
 
+/// A retention row that tells an employee something *is deleted* is a promise,
+/// and the only thing that can keep it is a sweep that names the class.
+/// `commands::personnel::PurgeableClass` is that list in full — two variants,
+/// `Credentials` and `AccessLog` — and a class absent from it is discarded by
+/// nothing. `retention::draft_purge_eligible` and `overtime_log_purge_eligible`
+/// are **gates, not sweeps**: they answer *may this go yet*, and every call site
+/// is inside `retention.rs`'s own `#[cfg(test)]` module.
+///
+/// So the Class B row that told an employee their drafts *„Brišu se pošto je
+/// mesec zaključen“* promised a deletion nothing performs — while the `napomena`
+/// stored beside that same class was written correctly as a not-before bound
+/// (*„Brišu se **tek** pošto je period zatvoren“*). The notice contradicted the
+/// machine-readable text it mirrors, and this is the second time this document
+/// promised the employee something the code never had (see `66636a3`).
+///
+/// The whitelist below is an **exhaustive** match on `PurgeableClass`, so a new
+/// promise costs a new variant, and a new variant costs a sweep.
+///
+/// **The register is read here too**, and it is the second document to have made
+/// the same promise: the SW-14 row said the raw punch events are *„bounded and
+/// purged on period close“* while the notice was being corrected one file over.
+/// That is the document counsel and an inspector actually read, so a guard that
+/// stops at the employee notice stops one reader short.
+#[test]
+fn no_retention_row_promises_a_purge_no_job_performs() {
+    use crate::commands::personnel::PurgeableClass;
+
+    // A sweep stated as something that happens, in the notice's Serbian:
+    // „brišu se“, „briše se“, „uklanjaju se“, „uklanja se“.
+    const PROMISE_SR: [&str; 4] = ["brišu se", "briše se", "uklanjaju se", "uklanja se"];
+    // …and in the register's English. The bare stem „purge“ is deliberately
+    // absent: the register uses it for the sweep that exists
+    // (`purge_expired_classes`), for the gates that are not sweeps, and for the
+    // type name that fences them. What asserts an event is the finished form.
+    const PROMISE_EN: [&str; 4] = ["purged", "purges", "is deleted", "are deleted"];
+    // The one word that turns the promise back into what it really is — the
+    // earliest permitted day, not an event: „Brišu se **tek** pošto…“.
+    const NOT_BEFORE: &str = "tek ";
+
+    // How each document names the classes a job really sweeps, lowercased for
+    // the comparison. Both arms are exhaustive matches on `PurgeableClass`.
+    let swept_notice: Vec<&str> = PurgeableClass::ALL
+        .iter()
+        .map(|class| match class {
+            PurgeableClass::Credentials => "pin i lozinka",
+            PurgeableClass::AccessLog => "evidencija pristupa",
+        })
+        .collect();
+    let swept_register: Vec<&str> = PurgeableClass::ALL
+        .iter()
+        .map(|class| match class {
+            PurgeableClass::Credentials => "credential",
+            PurgeableClass::AccessLog => "access log",
+        })
+        .collect();
+
+    for (label, text, promises, swept) in [
+        (
+            "docs/compliance/obavestenje-zaposlenima.md",
+            NOTICE,
+            PROMISE_SR.as_slice(),
+            &swept_notice,
+        ),
+        (
+            "docs/SERBIAN-LAW-COMPLIANCE.md",
+            REGISTER,
+            PROMISE_EN.as_slice(),
+            &swept_register,
+        ),
+    ] {
+        for (index, line) in text.lines().enumerate() {
+            let line_no = index + 1;
+            // The retention table is where the per-class claim is made; §2's
+            // prose narrates the same sweeps and is answerable to the rows it
+            // summarises. The register is a table throughout.
+            if !line.starts_with('|') {
+                continue;
+            }
+
+            let lowercase = line.to_lowercase();
+            if !promises.iter().any(|needle| lowercase.contains(needle)) {
+                continue;
+            }
+            if lowercase.contains(NOT_BEFORE) {
+                continue;
+            }
+
+            assert!(
+                swept.iter().any(|subject| lowercase.contains(subject)),
+                "{label}:{line_no} states that a class of data is deleted. \
+                 `commands::personnel::PurgeableClass` names every class a purge job actually \
+                 sweeps — {swept:?} — and this row is none of them. \
+                 `retention::draft_purge_eligible` and `overtime_log_purge_eligible` are gates \
+                 with no production caller, so they delete nothing. State the not-before bound \
+                 the stored `napomena` states („Brišu se tek pošto…“), or write the sweep and \
+                 give the class a `PurgeableClass` variant."
+            );
+        }
+    }
+}
+
+/// The other half of the same defect, and the reason the pair exists: the guard
+/// above fires only on a promise, so softening the row to a bound satisfies it
+/// while leaving the employee unable to tell that **nothing sweeps this class at
+/// all**. A bound with no sweep behind it reads as a schedule.
+///
+/// Class B (`retention::RecordClass::WorktimeDraft`) is that class, so the row
+/// has to carry both facts — the not-before bound, and that no automatic
+/// deletion exists — and the stored `napomena` has to keep the bound it already
+/// states, because the two are read as one claim.
+#[test]
+fn the_class_b_retention_row_says_no_automatic_purge_exists_for_it() {
+    let rows = lines_with(NOTICE, "Radne verzije unosa");
+    assert!(
+        !rows.is_empty(),
+        "docs/compliance/obavestenje-zaposlenima.md must keep the Class B \
+         (`retention::RecordClass::WorktimeDraft`) retention row"
+    );
+
+    for (line_no, line) in rows {
+        assert!(
+            line.contains("tek pošto"),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} states the Class B retention as \
+             an event rather than as the not-before bound it is. Nothing purges this class; \
+             `draft_purge_eligible` only answers whether it *may* go. Mirror the stored `napomena`: \
+             „Brišu se tek pošto je mesec zaključen i klasifikacija izvedena“."
+        );
+        assert!(
+            line.contains("Automatsko brisanje") && line.contains("ne postoji"),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} gives the employee a bound with \
+             no sweep behind it, which reads as a schedule. No purge job names this class — say so \
+             on the same line („Automatsko brisanje … ne postoji“), the way the trajno rows say \
+             that automatic cleanup of old backups „ne postoji“."
+        );
+    }
+
+    let napomena = crate::retention::RecordClass::WorktimeDraft.napomena();
+    assert!(
+        napomena.contains("tek pošto"),
+        "the note stored beside Class B must keep the not-before bound the čl. 23 notice mirrors — \
+         it is the machine-readable half of the same sentence: {napomena}"
+    );
+}
+
+/// Wording that promises the shop can move a retention period: „rok je
+/// podesiv“, „uz mogućnost produženja“, „rok se pomera samo unapred“. The first
+/// is a stem, so „podesiva“ and „podesivi rokovi“ trip the same guard.
+///
+/// The verb **„podešava se“ is deliberately absent.** It is the word the
+/// negations are built out of — „rok se ne podešava“, „nema zaseban rok koji bi
+/// se podešavao“ — and a stem that matches both halves of a contradiction
+/// classifies neither. What is left are phrases that only ever appear in a
+/// promise.
+const ADJUSTABLE_CLAIM: [&str; 4] = [
+    "podesiv",
+    "mogućnost produženja",
+    "pomera se samo unapred",
+    "pomera samo unapred",
+];
+
+/// The negation of the one stem above that can be negated in place. Without it
+/// a future „rok nije podesiv“ would read as the claim it denies.
+const NOT_ADJUSTABLE: [&str; 2] = ["nije podesiv", "nisu podesiv"];
+
+fn claims_an_adjustable_period(text: &str) -> bool {
+    let lowercase = text.to_lowercase();
+    if NOT_ADJUSTABLE
+        .iter()
+        .any(|needle| lowercase.contains(needle))
+    {
+        return false;
+    }
+
+    ADJUSTABLE_CLAIM
+        .iter()
+        .any(|needle| lowercase.contains(needle))
+}
+
+/// A period that „moves only forward“ is a **setting**, and a setting nothing
+/// can set is the same defect as a purge nothing performs — one document further
+/// on. Four strings promised it at once: two rows of the čl. 23 notice, the
+/// `napomena` stored beside the access-log class, and the `rok_osnov` the čl. 47
+/// register prints for the Poverenik.
+///
+/// `commands::retention::AdjustableClass` is the list of classes a registered
+/// command can actually move, and it is **exhaustive**: a class that reaches
+/// `retention_policies` without a variant here fails
+/// `every_class_that_is_not_trajno_is_named_by_an_adjustable_variant`, and a
+/// variant added without a command does not compile. So a note claiming an
+/// adjustable period for a class outside that list is a promise nothing keeps.
+///
+/// This half is exact rather than textual: the class each string belongs to is
+/// known, so nothing has to be inferred from the prose.
+#[test]
+fn no_stored_retention_note_claims_a_period_no_command_can_move() {
+    use crate::commands::retention::AdjustableClass;
+    use crate::retention::RecordClass;
+
+    for class in RecordClass::ALL {
+        let napomena = class.napomena();
+        if !claims_an_adjustable_period(napomena) {
+            continue;
+        }
+
+        assert!(
+            AdjustableClass::from_key(class.key()).is_some(),
+            "the note stored beside „{}“ promises an adjustable rok. \
+             `commands::retention::AdjustableClass` names every class a registered command can \
+             move, and this class is not one of them — either give it a variant (and therefore a \
+             command) or state the rok as the fixed period it is: {napomena}",
+            class.key()
+        );
+    }
+
+    // The same claim where it is read by the Poverenik rather than by the shop:
+    // čl. 47 st. 1 t. 6 is the register's own retention column.
+    for (kljuc, class, rok_osnov) in crate::cl47::retention_prose() {
+        if !claims_an_adjustable_period(rok_osnov) {
+            continue;
+        }
+
+        let movable = class
+            .map(|class| AdjustableClass::from_key(class.key()).is_some())
+            .unwrap_or(false);
+        assert!(
+            movable,
+            "the čl. 47 register tells the Poverenik that the rok for „{kljuc}“ moves forward. \
+             Only `commands::retention::AdjustableClass` classes can be moved, and this radnja \
+             is wired to {class:?} — wire it to a class the shop can actually move, or drop the \
+             claim: {rok_osnov}"
+        );
+    }
+}
+
+/// The textual half of the same guard, on the one document that is handed to a
+/// person rather than generated: the čl. 23 notice. Here the class is not
+/// carried by the line, so the subject phrase is — and the list of subjects is
+/// an **exhaustive match** on `AdjustableClass`, so a new variant costs a
+/// decision about what the employee is told it is called.
+#[test]
+fn no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move() {
+    use crate::commands::retention::AdjustableClass;
+
+    // How the čl. 23 notice names each movable class, in its own words.
+    let movable: Vec<&str> = AdjustableClass::ALL
+        .iter()
+        .map(|class| match class {
+            AdjustableClass::WorktimeOvertimeLog => "prekovremen",
+            AdjustableClass::WorktimeDraft => "radne verzije",
+            AdjustableClass::Credentials => "pin i lozinka",
+            AdjustableClass::AccessLog => "evidencija pristupa",
+            // Not an employee's data at all — the čl. 23 notice has no row about
+            // it, and this arm exists so that a class added to the shared
+            // retention table still costs a decision about what, if anything,
+            // the employee is told it is called.
+            AdjustableClass::CenovnikArchive => "arhiva objavljenih cenovnika",
+        })
+        .collect();
+
+    let lines: Vec<&str> = NOTICE.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let line_no = index + 1;
+        if !claims_an_adjustable_period(line) {
+            continue;
+        }
+
+        // A table row is a self-contained per-class claim and is judged alone —
+        // otherwise a movable neighbour in the same table would vouch for it.
+        // Running prose is hard-wrapped at ~100 columns, so the subject of the
+        // sentence is routinely one line above the claim; there the context is
+        // the paragraph plus the heading the reader arrived through.
+        let context = if line.starts_with('|') {
+            line.to_lowercase()
+        } else {
+            let heading = lines[..index]
+                .iter()
+                .rev()
+                .find(|candidate| candidate.starts_with('#'))
+                .copied()
+                .unwrap_or_default();
+            let start = lines[..index]
+                .iter()
+                .rposition(|candidate| candidate.trim().is_empty())
+                .map_or(0, |blank| blank + 1);
+            let end = lines[index..]
+                .iter()
+                .position(|candidate| candidate.trim().is_empty())
+                .map_or(lines.len(), |blank| index + blank);
+            format!("{heading} {}", lines[start..end].join(" ")).to_lowercase()
+        };
+
+        assert!(
+            movable.iter().any(|subject| context.contains(subject)),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} tells an employee that a \
+             retention period is adjustable and moves only forward. \
+             `commands::retention::AdjustableClass` names every class a registered command can \
+             move — {movable:?} — and this line names none of them. Either build the setting for \
+             the class this line is about, or state the fixed period the code applies."
+        );
+    }
+}
+
 /// The register and `PROGRESS.md` both credited `worktime::check_protection`
 /// with „maloletnik 35 h/8 h“. Only the daily leg exists — see
 /// `worktime::MINOR_DAILY_CAP_MINUTES` and the doc comment on
@@ -209,6 +551,60 @@ fn the_cl_57_st_5_ceiling_is_attributed_to_its_caller() {
              `assess_caps`, which always leaves that leg false. The branch is taken in \
              commands/worktime.rs::assess_caps_for_employee — name it on the same line."
         );
+    }
+}
+
+/// The offence tačka of the preraspodela breach, where a reader outside the
+/// crate meets it. `legal::preraspodela_caps_exceeded` prints **čl. 274 st. 1
+/// tač. 4** and `legal`'s own test pins that its penalty never says „tač. 3“
+/// (`1216194`) — tač. 3 is the čl. 53 offence, and čl. 57/čl. 60 sit in tač. 4.
+///
+/// Nothing read the same attribution in the register, and the register lost it:
+/// the preraspodela clause was inserted **before** the citation belonging to
+/// `overtime_caps_exceeded`, stranding „(čl. 274 st. 1 tač. 3)“ behind the new
+/// clause where it reads as preraspodela's own tačka. The amount is identical
+/// under the preduzetnik tier, so no figure guard can see it — what is wrong is
+/// the article, in the one document counsel and an inspector read.
+///
+/// Judged window: from the function name to the next clause separator — an em
+/// dash, or the next `legal.rs::` reference. The tač. 3 that legitimately
+/// belongs to `overtime_caps_exceeded` earlier on the same row is not this
+/// function's citation and is not judged here.
+#[test]
+fn the_preraspodela_citation_is_tacka_4_and_never_tacka_3() {
+    const MARKER: &str = "preraspodela_caps_exceeded";
+
+    let rows = lines_with(REGISTER, MARKER);
+    assert!(
+        !rows.is_empty(),
+        "docs/SERBIAN-LAW-COMPLIANCE.md must keep naming `legal.rs::{MARKER}` — it is the only \
+         place the register reports that the čl. 57 st. 5 ceiling has penalty copy at all"
+    );
+
+    for (line_no, line) in rows {
+        for (start, _) in line.match_indices(MARKER) {
+            let tail = &line[start + MARKER.len()..];
+            let end = [tail.find('—'), tail.find("legal.rs::")]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(tail.len());
+            let citation = &tail[..end];
+
+            assert!(
+                citation.contains("čl. 274 st. 1 tač. 4"),
+                "docs/SERBIAN-LAW-COMPLIANCE.md:{line_no} names `legal.rs::{MARKER}` without its \
+                 offence tačka. It prints čl. 274 st. 1 tač. 4 — čl. 57 and čl. 60 sit in tač. 4 \
+                 — and the register is where that attribution is read: {citation}"
+            );
+            assert!(
+                !citation.contains("tač. 3"),
+                "docs/SERBIAN-LAW-COMPLIANCE.md:{line_no} attaches čl. 274 st. 1 tač. 3 to \
+                 `legal.rs::{MARKER}`. tač. 3 is the čl. 53 offence and belongs to \
+                 `overtime_caps_exceeded`; the preduzetnik amount is the same either way, so \
+                 nothing but this guard can see the wrong article: {citation}"
+            );
+        }
     }
 }
 

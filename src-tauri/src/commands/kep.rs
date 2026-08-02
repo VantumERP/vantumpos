@@ -102,7 +102,7 @@ pub fn kep_nivelacija(
     let mut connection = state.db().open().map_err(CommandError::from)?;
     let now = crate::clock::utc_now()?;
     let tx = connection.transaction().map_err(AppError::from)?;
-    crate::kep_storno::post_nivelacija(
+    let prices_moved = crate::kep_storno::post_nivelacija(
         &tx,
         product_id,
         new_sale_price_minor,
@@ -111,6 +111,13 @@ pub fn kep_nivelacija(
         &now,
     )?;
     tx.commit().map_err(AppError::from)?;
+    // SW-12 req. 11 — ZZP čl. 6 st. 3: a nivelacija revalues the catalog price,
+    // so the published cenovnik must follow it. After the commit, never before
+    // it (čl. 6 st. 4), and a publish failure never fails a nivelacija whose
+    // price and KEP Δ are already durable.
+    if prices_moved {
+        super::cenovnik::republish_after_price_move(&connection, &now);
+    }
     Ok(())
 }
 
@@ -510,6 +517,58 @@ mod tests {
                 .expect_err("cashier should not post a nivelacija");
 
             assert_eq!(error.code, "forbidden");
+        });
+    }
+
+    /// Identifies the prodajni objekat so the SW-12 publish path has an archive
+    /// lineage to key on; without it nothing is published at all.
+    fn seed_outlet(state: &AppState) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .execute(
+                "INSERT INTO settings (key, value_json, updated_at)
+                 VALUES ('company', ?1, '2026-01-01T00:00:00Z')",
+                params![serde_json::json!({
+                    "shopName": "Butik Ana",
+                    "address": "Bulevar oslobođenja 1, Novi Sad",
+                    "pib": "",
+                    "registrationNumber": "",
+                    "phone": "",
+                    "logoPath": null,
+                    "currency": "RSD",
+                })
+                .to_string()],
+            )
+            .expect("company settings should seed");
+    }
+
+    /// SW-12 req. 11 — ZZP čl. 6 st. 3. A nivelacija is a revaluation of the
+    /// catalog price, so the published cenovnik must follow it just as a catalog
+    /// edit does; the KEP Δ it books is not a substitute for republishing.
+    #[test]
+    fn a_nivelacija_republishes_the_cenovnik() {
+        with_app("a_nivelacija_republishes_the_cenovnik", |app| {
+            let state = app.state::<AppState>();
+            sign_in_admin(state.inner());
+            seed_product(state.inner(), 1, "Mleko 1l", 15600);
+            seed_outlet(state.inner());
+
+            kep_nivelacija(app.state::<AppState>(), 1, 17600, basis())
+                .expect("admin should post the nivelacija");
+
+            let body: String = state
+                .db()
+                .open()
+                .expect("database should open")
+                .query_row(
+                    "SELECT body FROM cenovnik_snapshots ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the nivelacija must republish the cenovnik");
+            assert!(body.contains("176.00"), "{body:?}");
         });
     }
 

@@ -5,10 +5,38 @@ import { createMockServices } from "./mock-adapter";
 import type {
   AnswerInput,
   BasisDoc,
+  BreachDraft,
   CampaignInput,
   ReklamacijaInput,
   ShopProfile,
 } from "./types";
+
+/**
+ * The three ZZPL čl. 52 st. 6 elements plus the immutable saznanje anchor, and
+ * every optional column left unanswered — the shape `breaches_record` is called
+ * with when a povreda is logged before anyone has assessed its risk (req. 43).
+ */
+const draft: BreachDraft = {
+  saznanjeAt: "2026-08-01T09:00:00Z",
+  occurredAt: null,
+  discoveredAt: null,
+  obradjivacSaznanjeAt: null,
+  rukovalacObavestenAt: null,
+  opis: "Nestao je papirni spisak zaposlenih iz kancelarije.",
+  posledice: "Podaci o troje zaposlenih su mogli da budu pročitani.",
+  mere: "Brava je zamenjena, spisak se više ne štampa.",
+  brojLica: 3,
+  kategorijePodataka: null,
+  riskOutcome: null,
+  notifyDecision: null,
+  notifyObrazlozenje: null,
+  poverenikNotifiedAt: null,
+  delayReason: null,
+  licaObavestena: null,
+  licaObavestenaAt: null,
+  cl53Izuzetak: null,
+  cl53IzuzetakObrazlozenje: null,
+};
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
@@ -1010,6 +1038,119 @@ describe("local service adapter", () => {
       correctAmountMinor: 780000,
       basis,
     });
+  });
+
+  it("maps the ZZPL privacy surface to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "audit_search":
+          return Promise.resolve({
+            events: [],
+            chain: {
+              verdict: "intact",
+              intact: true,
+              checkedRows: 0,
+              label: "Potvrđena — lanac otisaka je neprekinut.",
+            },
+          });
+        case "breaches_list":
+        case "cl47_list":
+        case "cl47_generate":
+          return Promise.resolve([]);
+        case "support_active_session":
+          return Promise.resolve(null);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    await services.privacy.grantSupportAccess("Pregled greške na štampi", 60);
+    await services.privacy.enterSupportSession();
+    await services.privacy.endSupportSession();
+    await services.privacy.activeSupportSession();
+    await services.privacy.searchAudit({
+      from: "2026-08-01",
+      to: "2026-08-31",
+      actorUserId: 3,
+    });
+    await services.privacy.exportAuditCsv({
+      from: null,
+      to: null,
+      actorUserId: null,
+    });
+    await services.privacy.listBreaches();
+    await services.privacy.recordBreach(draft);
+    await services.privacy.updateBreach(4, draft);
+    await services.privacy.breachNotice();
+    await services.privacy.exportBreachObrazac(4);
+    await services.privacy.listProcessingActivities();
+    await services.privacy.generateProcessingActivities();
+    await services.privacy.exportProcessingActivities();
+
+    // The nalog travels as one request object, so its obim and its trajanje
+    // cannot be sent apart from each other.
+    expect(invoke).toHaveBeenNthCalledWith(1, "support_grant_access", {
+      request: { scope: "Pregled greške na štampi", durationMinutes: 60 },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "support_request_access");
+    expect(invoke).toHaveBeenNthCalledWith(3, "support_end_session");
+    expect(invoke).toHaveBeenNthCalledWith(4, "support_active_session");
+    expect(invoke).toHaveBeenCalledWith("audit_search", {
+      query: { from: "2026-08-01", to: "2026-08-31", actorUserId: 3 },
+    });
+    expect(invoke).toHaveBeenCalledWith("audit_export_csv", {
+      query: { from: null, to: null, actorUserId: null },
+    });
+    expect(invoke).toHaveBeenCalledWith("breaches_list");
+    expect(invoke).toHaveBeenCalledWith("breaches_record", { draft });
+    expect(invoke).toHaveBeenCalledWith("breaches_update", { id: 4, draft });
+    expect(invoke).toHaveBeenCalledWith("breaches_notice");
+    expect(invoke).toHaveBeenCalledWith("breaches_export_obrazac", { id: 4 });
+    expect(invoke).toHaveBeenCalledWith("cl47_list");
+    expect(invoke).toHaveBeenCalledWith("cl47_generate");
+    expect(invoke).toHaveBeenCalledWith("cl47_export");
+
+    // Req. 7: there is no write verb on the evidencija pristupa to map. The
+    // assertion is over the PORT SURFACE, not over the calls this test happened
+    // to make — a fourteenth method added later is invisible to the call log but
+    // shows up here the moment it is named. The log is only the source of the
+    // instant this list is read from; the guarantee is the shape of the object.
+    const auditMethods = Object.keys(services.privacy)
+      .filter((name) => /audit/i.test(name))
+      .sort();
+    expect(auditMethods).toEqual(["exportAuditCsv", "searchAudit"]);
+  });
+
+  it("maps the retention setting to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "retention_list_policies":
+          return Promise.resolve([]);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    await services.retention.listPolicies();
+    await services.retention.extendPolicy("access_log", "2031-03-01");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "retention_list_policies");
+    expect(invoke).toHaveBeenNthCalledWith(2, "retention_extend_policy", {
+      recordClass: "access_log",
+      retainUntil: "2031-03-01",
+    });
+
+    // Req. 6/22 give the shop one verb and it moves the rok forward. A
+    // `shortenPolicy`, a `clearPolicy` or a `setPolicy` on this surface would be
+    // the shortening path the backend refuses, arriving through the port
+    // instead — so the assertion is over the SHAPE of the object, not over the
+    // two calls this test happened to make.
+    expect(Object.keys(services.retention).sort()).toEqual([
+      "extendPolicy",
+      "listPolicies",
+    ]);
   });
 
   it("opens an exported document for printing through the opener plugin", async () => {

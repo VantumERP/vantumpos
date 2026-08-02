@@ -136,6 +136,12 @@ mod tests {
         "work_time_entries",
         "work_time_periods",
         "retention_policies",
+        "support_sessions",
+        "audit_events",
+        "personnel_records",
+        "data_breaches",
+        "processing_activities",
+        "cenovnik_snapshots",
     ];
 
     const EXPLICIT_INDEXES: &[&str] = &[
@@ -167,6 +173,11 @@ mod tests {
         "idx_work_time_entries_user_day",
         "idx_work_time_entries_dan",
         "idx_work_time_periods_user_month",
+        "idx_support_sessions_granted_at",
+        "idx_audit_events_at",
+        "idx_audit_events_actor",
+        "idx_data_breaches_saznanje_at",
+        "idx_cenovnik_snapshots_prodajno_mesto",
     ];
 
     fn schema_object_exists(connection: &Connection, object_type: &str, name: &str) -> bool {
@@ -417,12 +428,15 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("compliance_log schema should load");
-            // v16 rebuilt the table to widen this CHECK; the v8 pair must still be
-            // admitted alongside the AML event, and nothing beyond the three.
+            // v16 and then v19 each rebuilt the table to widen this CHECK. The v8
+            // pair must still be admitted alongside the AML event and the SW-12
+            // till-guard one, and nothing beyond the four: the trail is read back
+            // as evidence, so its vocabulary is closed on purpose.
             assert!(
                 schema.contains("trading_data_reset")
                     && schema.contains("backup_restored")
-                    && schema.contains("aml_cash_threshold"),
+                    && schema.contains("aml_cash_threshold")
+                    && schema.contains("cenovnik_price_divergence"),
                 "expected event_type CHECK, schema was: {schema}"
             );
         });
@@ -797,7 +811,7 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 17);
+                assert_eq!(migration_count, 19);
             },
         );
     }
