@@ -81,8 +81,13 @@ pub struct OpenPopisRequest {
     pub plan_rada_json: Option<String>,
     #[serde(default)]
     pub odluka_ref: Option<String>,
-    /// Req. 34 — the čl. 9 st. 2 perpetual-inventory shortcut's pointer at the
-    /// completed, adopted and posted in-year popis it rests on.
+    /// Req. 34 / PoP čl. 9 st. 2 — the odluka behind the perpetual-inventory
+    /// shortcut. **Not free text:** a non-empty value is refused unless a popis of
+    /// the same business year, dated before this one, is already `posted` (see
+    /// [`ensure_perpetual_shortcut`], which is the whole of what is checked). The
+    /// „usvojen“ limb — the čl. 14 st. 2 odluka o usvajanju — is **not** checked
+    /// here, because nothing in the schema records that decision yet; Task 6 owns
+    /// it and owes this gate its second limb.
     #[serde(default)]
     pub perpetual_odluka_ref: Option<String>,
     /// Req. 39 / ZoRač čl. 20 st. 3.
@@ -525,6 +530,49 @@ fn ensure_datum(value: &str, polje: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Req. 34 / design §4 — the čl. 9 st. 2 shortcut is a **conditional gate, not a
+/// default**.
+///
+/// „Изузетно од става 1. тачка 2) … као стање по попису на датум биланса може
+/// уписати њено књиговодствено стање на тај дан, под условом да је у току године
+/// извршен попис имовине и да су вишкови и мањкови утврђени тим пописом
+/// прокњижени…“ — so the exception rests on a popis that actually happened and
+/// whose result was posted. A reference stored without that behind it is a claim
+/// about a document that does not exist, and it would let the shop skip step 2)
+/// on the strength of it. The exception excuses **step 2) alone**; the natural
+/// count of t. 1 is untouched by it, which is why this refuses the reference
+/// rather than the count.
+///
+/// What is checked is exactly: a `popis_sessions` row of the same calendar year,
+/// dated before this one, whose status is `posted`. The čl. 14 st. 2 odluka o
+/// usvajanju is a separate artefact that nothing records yet (Task 6), so this
+/// gate does not check it and no string here claims it did.
+fn ensure_perpetual_shortcut(connection: &Connection, datum_popisa: &str) -> Result<(), AppError> {
+    let postoji: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1
+                          FROM popis_sessions
+                         WHERE status = 'posted'
+                           AND substr(datum_popisa, 1, 4) = substr(?1, 1, 4)
+                           AND datum_popisa < ?1)",
+        params![datum_popisa],
+        |row| row.get(0),
+    )?;
+
+    if !postoji {
+        return Err(AppError::business(
+            "popis_nema_popisa_u_toku_godine",
+            format!(
+                "Knjigovodstveno stanje se upisuje kao stanje po popisu samo ako je u toku iste \
+                 godine, pre datuma „{datum_popisa}“, već izvršen popis čiji su viškovi i manjkovi \
+                 proknjiženi (PoP čl. 9 st. 2). Takav popis nije evidentiran — sprovedite popis \
+                 brojanjem ili izostavite odluku o stalnoj evidenciji."
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn open_popis(
     connection: &mut Connection,
     request: &OpenPopisRequest,
@@ -566,6 +614,18 @@ pub(crate) fn open_popis(
         }
     }
 
+    // Req. 34. Only a reference that says something is gated: an empty string is
+    // no reference at all, and treating it as one would refuse an open that never
+    // claimed the exception.
+    let perpetual_odluka_ref = request
+        .perpetual_odluka_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|reference| !reference.is_empty());
+    if perpetual_odluka_ref.is_some() {
+        ensure_perpetual_shortcut(connection, &request.datum_popisa)?;
+    }
+
     for clan in &request.komisija {
         if clan.ime.trim().is_empty() {
             return Err(AppError::business(
@@ -597,7 +657,7 @@ pub(crate) fn open_popis(
             request.plan_rada_json,
             request.odluka_ref,
             now,
-            request.perpetual_odluka_ref,
+            perpetual_odluka_ref,
         ],
     )?;
     let id = transaction.last_insert_rowid();
@@ -620,6 +680,78 @@ pub(crate) fn open_popis(
     transaction.commit()?;
 
     Ok(view)
+}
+
+/// The part of a popisna lista the čl. 8 st. 5 potpis fixes: what čl. 8 st. 4
+/// handed the commission before it counted (nomenklaturni broj, naziv, vrsta,
+/// jedinica mere), which lista the stavka sits on, and the čl. 9 st. 1 t. 1 count
+/// with its bliži opis. Read back so a Phase B write can be compared against what
+/// was actually signed rather than trusted.
+struct PotpisanaStavka {
+    lista_vrsta: String,
+    sifra: Option<String>,
+    naziv: String,
+    vrsta: Option<String>,
+    jedinica_mere: Option<String>,
+    stvarna_kolicina_milli: i64,
+    blizi_opis: Option<String>,
+}
+
+impl PotpisanaStavka {
+    /// The identity fields a Phase B payload would move, named so the refusal can
+    /// say which one it was. Compared exactly as the UPDATE would have written
+    /// them — `naziv` trimmed, the rest as given — so the check and the write
+    /// cannot disagree about what „unchanged“ means.
+    fn pomerena_polja(&self, input: &PopisLineInput) -> Vec<&'static str> {
+        let mut polja = Vec::new();
+        if self.lista_vrsta != input.lista_vrsta {
+            polja.push("vrsta popisne liste");
+        }
+        if self.sifra.as_deref() != input.sifra.as_deref() {
+            polja.push("šifra");
+        }
+        if self.naziv != input.naziv.trim() {
+            polja.push("naziv");
+        }
+        if self.vrsta.as_deref() != input.vrsta.as_deref() {
+            polja.push("vrsta");
+        }
+        if self.jedinica_mere.as_deref() != input.jedinica_mere.as_deref() {
+            polja.push("jedinica mere");
+        }
+        if self.blizi_opis.as_deref() != input.blizi_opis.as_deref() {
+            polja.push("bliži opis");
+        }
+        polja
+    }
+}
+
+fn read_potpisana_stavka(
+    connection: &Connection,
+    session_id: i64,
+    line_id: i64,
+) -> Result<PotpisanaStavka, AppError> {
+    connection
+        .query_row(
+            "SELECT lista_vrsta, sifra, naziv, vrsta, jedinica_mere,
+                    stvarna_kolicina_milli, blizi_opis
+             FROM popis_lines
+             WHERE id = ?1 AND session_id = ?2",
+            params![line_id, session_id],
+            |row| {
+                Ok(PotpisanaStavka {
+                    lista_vrsta: row.get(0)?,
+                    sifra: row.get(1)?,
+                    naziv: row.get(2)?,
+                    vrsta: row.get(3)?,
+                    jedinica_mere: row.get(4)?,
+                    stvarna_kolicina_milli: row.get(5)?,
+                    blizi_opis: row.get(6)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("Stavka popisne liste nije pronađena."))
 }
 
 pub(crate) fn save_line(
@@ -688,20 +820,39 @@ pub(crate) fn save_line(
                      prebrojao (PoP čl. 8 st. 5).",
                 ));
             };
-            let counted: Option<i64> = connection
-                .query_row(
-                    "SELECT stvarna_kolicina_milli FROM popis_lines WHERE id = ?1 AND session_id = ?2",
-                    params![line_id, session_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let counted = counted
-                .ok_or_else(|| AppError::not_found("Stavka popisne liste nije pronađena."))?;
-            if counted != input.stvarna_kolicina_milli {
+            let potpisana = read_potpisana_stavka(connection, session_id, line_id)?;
+            if potpisana.stvarna_kolicina_milli != input.stvarna_kolicina_milli {
                 return Err(AppError::business(
                     "popis_stvarno_stanje_potpisano",
                     "Stvarna količina je potpisana i više se ne menja (PoP čl. 8 st. 5) — \
                      ispravka se sprovodi novim popisom.",
+                ));
+            }
+            // The potpis fixes a DOCUMENT, not a number. Čl. 8 st. 4 hands the
+            // commission the nomenklaturni broj, the naziv, the vrsta and the
+            // jedinica mere, and čl. 9 st. 1 t. 1 has it sign the count together
+            // with the bliži opis; čl. 8 st. 5 releases the book data BECAUSE
+            // those liste were signed. A šifra or a naziv still rewritable in the
+            // obračun would leave the potpis attesting to a stavka nobody counted
+            // — the same breach as moving the količina, wearing a different hat.
+            // Refused rather than ignored, for the reason the book-quantity write
+            // is refused: a caller whose fields were silently dropped would
+            // believe the change landed.
+            let pomerena = potpisana.pomerena_polja(input);
+            if !pomerena.is_empty() {
+                let polja = pomerena
+                    .iter()
+                    .map(|polje| format!("„{polje}“"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(AppError::business(
+                    "popis_stvarno_stanje_potpisano",
+                    format!(
+                        "Potpisana stavka popisne liste se više ne menja (PoP čl. 8 st. 5, čl. 9 \
+                         st. 1 t. 1), a razlikuje se: {polja}. U obračunu se popunjavaju samo \
+                         cena i knjigovodstvena količina — ispravka same stavke sprovodi se novim \
+                         popisom."
+                    ),
                 ));
             }
         }
@@ -886,6 +1037,10 @@ fn snapshot_hash(faza: &str, session: &PopisSessionView) -> String {
         absorb(&mut hasher, &line.lista_vrsta);
         absorb(&mut hasher, line.sifra.as_deref().unwrap_or(""));
         absorb(&mut hasher, &line.naziv);
+        // Čl. 8 st. 4's other two — the same set `PotpisanaStavka` pins, so what
+        // the hash attests to and what the obračun may not move are one list.
+        absorb(&mut hasher, line.vrsta.as_deref().unwrap_or(""));
+        absorb(&mut hasher, line.jedinica_mere.as_deref().unwrap_or(""));
         absorb(&mut hasher, &line.stvarna_kolicina_milli.to_string());
         absorb(&mut hasher, line.blizi_opis.as_deref().unwrap_or(""));
         absorb(
@@ -1231,9 +1386,15 @@ mod tests {
     /// Opens a session, records one counted line for `sifra`, and leaves it in
     /// `counting` — the state every čl. 8 st. 5 assertion is about.
     fn seeded_count(state: &AppState, sifra: &str) -> i64 {
+        seeded_count_on(state, sifra, "2026-12-31")
+    }
+
+    fn seeded_count_on(state: &AppState, sifra: &str, datum_popisa: &str) -> i64 {
         seed_article(state, sifra);
+        let mut request = open_request();
+        request.datum_popisa = datum_popisa.into();
         let mut connection = state.db().open().expect("database should open");
-        let session = open_popis(&mut connection, &open_request(), "2026-12-31T08:00:00Z")
+        let session = open_popis(&mut connection, &request, "2026-12-31T08:00:00Z")
             .expect("the popis should open");
         start_count(&connection, session.id, "2026-12-31T09:00:00Z")
             .expect("the count should start");
@@ -1299,7 +1460,11 @@ mod tests {
 
     /// Walks a seeded count all the way to `posted`.
     fn walk_to_posted(state: &AppState, sifra: &str) -> i64 {
-        let id = seeded_count(state, sifra);
+        walk_to_posted_on(state, sifra, "2026-12-31")
+    }
+
+    fn walk_to_posted_on(state: &AppState, sifra: &str, datum_popisa: &str) -> i64 {
+        let id = seeded_count_on(state, sifra, datum_popisa);
         let mut connection = state.db().open().expect("database should open");
         sign_phase_a(
             &mut connection,
@@ -1577,6 +1742,94 @@ mod tests {
         }
     }
 
+    /// One named single-field change, so every assertion below is about exactly
+    /// one field and a case that stops failing says which one stopped.
+    type IzmenaLinije = (&'static str, fn(&mut PopisLineView));
+    type IzmenaUnosa = (&'static str, fn(&mut PopisLineInput));
+
+    fn potpisana_linija() -> PopisLineView {
+        PopisLineView {
+            id: 1,
+            lista_vrsta: "roba".into(),
+            sifra: Some("KOS-1".into()),
+            naziv: "Košulja".into(),
+            vrsta: Some("Ženska konfekcija".into()),
+            jedinica_mere: Some("kom".into()),
+            stvarna_kolicina_milli: 7_000,
+            blizi_opis: Some("Polica A2".into()),
+            knjigovodstvena_kolicina_milli: None,
+            razlika_milli: None,
+            cena_minor: None,
+        }
+    }
+
+    fn view_of(linija: PopisLineView) -> PopisSessionView {
+        PopisSessionView {
+            id: 1,
+            vrsta: PopisVrsta::Godisnji,
+            prodajno_mesto: "Butik Centar".into(),
+            datum_popisa: "2026-12-31".into(),
+            period_from: None,
+            period_to: None,
+            status: PopisStatus::Counting,
+            plan_rada_json: None,
+            odluka_ref: None,
+            perpetual_odluka_ref: None,
+            uskladjivanje_potvrdjeno_at: None,
+            posted_at: None,
+            faza_a_potpisana: false,
+            faza_b_potpisana: false,
+            knjigovodstvo_dostupno: false,
+            komisija: Vec::new(),
+            potpisi: Vec::new(),
+            linije: vec![linija],
+            upozorenja: Vec::new(),
+        }
+    }
+
+    /// A potpis attests to what it hashed, and `save_line` refuses to move what
+    /// the potpis froze — so the two lists have to be the same list. The čl. 8
+    /// st. 4 identity (lista, šifra, naziv, vrsta, jedinica mere) and the čl. 9
+    /// st. 1 t. 1 count with its bliži opis are pinned by `PotpisanaStavka`, and
+    /// each of them is asserted here to change the snapshot. A field pinned but
+    /// unhashed would be guarded only by the command layer; a field hashed but
+    /// unpinned would let the stored hash quietly stop describing the row.
+    #[test]
+    fn the_snapshot_hash_covers_every_field_the_potpis_freezes() {
+        let osnovni = snapshot_hash("a", &view_of(potpisana_linija()));
+
+        let izmene: [IzmenaLinije; 7] = [
+            ("lista_vrsta", |linija| {
+                linija.lista_vrsta = "gotovina".into()
+            }),
+            ("šifra", |linija| linija.sifra = Some("KOS-2".into())),
+            ("naziv", |linija| linija.naziv = "Nešto sasvim drugo".into()),
+            ("vrsta", |linija| {
+                linija.vrsta = Some("Muška konfekcija".into())
+            }),
+            ("jedinica mere", |linija| {
+                linija.jedinica_mere = Some("kg".into())
+            }),
+            ("stvarna količina", |linija| {
+                linija.stvarna_kolicina_milli = 7_001
+            }),
+            ("bliži opis", |linija| {
+                linija.blizi_opis = Some("Drugo mesto".into())
+            }),
+        ];
+
+        for (polje, izmeni) in izmene {
+            let mut linija = potpisana_linija();
+            izmeni(&mut linija);
+            assert_ne!(
+                snapshot_hash("a", &view_of(linija)),
+                osnovni,
+                "„{polje}“ is frozen by the potpis but the snapshot does not cover it, so the \
+                 stored hash would describe a document that changed"
+            );
+        }
+    }
+
     /// Čl. 8 st. 5 releases the book data when „чланови комисије за попис потпишу
     /// те листе“. Nobody signing is not a signature.
     #[test]
@@ -1643,6 +1896,188 @@ mod tests {
             .expect_err("the signed count must not take another line");
 
             assert_eq!(error.code(), "popis_stvarno_stanje_potpisano");
+        });
+    }
+
+    /// Req. 30, the other half of the freeze. The čl. 8 st. 5 potpis fixes a
+    /// **document**, not a number: čl. 8 st. 4 hands the commission the
+    /// nomenklaturni broj, the naziv, the vrsta and the jedinica mere, and čl. 9
+    /// st. 1 t. 1 has it sign the count together with its bliži opis. An obračun
+    /// that could rewrite any of those while keeping the količina would leave the
+    /// potpis attesting to a stavka nobody counted — the same breach as moving the
+    /// količina, wearing a different hat. So every field of the signed identity is
+    /// pinned, one case per field, and the obračun itself still has to work or the
+    /// pin would just be a wall.
+    #[test]
+    fn a_phase_b_edit_that_moves_the_signed_line_identity_is_refused() {
+        with_app("popis_line_identity_frozen", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let mut connection = state.db().open().expect("database should open");
+            sign_phase_a(
+                &mut connection,
+                id,
+                &["Miloš Đurđević".to_string()],
+                "2026-12-31T17:00:00Z",
+            )
+            .expect("the čl. 8 st. 5 potpis should record");
+            let computed = compute_differences(&connection, id, "2027-01-02T09:00:00Z")
+                .expect("the obračun should open");
+            let line_id = computed.linije[0].id;
+
+            let podmetanja: [IzmenaUnosa; 6] = [
+                ("lista_vrsta", |input| input.lista_vrsta = "gotovina".into()),
+                ("šifra", |input| input.sifra = Some("PODMETNUTO-9".into())),
+                ("naziv", |input| input.naziv = "Nešto sasvim drugo".into()),
+                ("vrsta", |input| {
+                    input.vrsta = Some("Muška konfekcija".into())
+                }),
+                ("jedinica mere", |input| {
+                    input.jedinica_mere = Some("kg".into())
+                }),
+                ("bliži opis", |input| {
+                    input.blizi_opis = Some("Drugo mesto".into())
+                }),
+            ];
+
+            for (polje, podmetni) in podmetanja {
+                let mut input = line_input("KOS-1", 7_000);
+                podmetni(&mut input);
+                let error = save_line(
+                    &connection,
+                    id,
+                    Some(line_id),
+                    &input,
+                    "2027-01-02T10:00:00Z",
+                )
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("moving „{polje}“ after the čl. 8 st. 5 potpis must be refused")
+                });
+
+                assert_eq!(
+                    error.code(),
+                    "popis_stvarno_stanje_potpisano",
+                    "„{polje}“ said: {error}"
+                );
+                assert!(
+                    error.to_string().contains("čl. 8 st. 5"),
+                    "the refusal must name the article, „{polje}“ said: {error}"
+                );
+            }
+
+            // Nothing the commission signed moved, and no new stavka appeared.
+            let after = load_session(&connection, id).expect("the session should load");
+            assert_eq!(after.linije.len(), 1);
+            assert_eq!(after.linije[0].lista_vrsta, "roba");
+            assert_eq!(after.linije[0].sifra.as_deref(), Some("KOS-1"));
+            assert_eq!(after.linije[0].naziv, "Košulja");
+            assert_eq!(after.linije[0].vrsta.as_deref(), Some("Ženska konfekcija"));
+            assert_eq!(after.linije[0].jedinica_mere.as_deref(), Some("kom"));
+            assert_eq!(after.linije[0].blizi_opis.as_deref(), Some("Polica A2"));
+            assert_eq!(after.linije[0].stvarna_kolicina_milli, 7_000);
+
+            // And the obračun the freeze exists to allow still goes through: čl. 9
+            // st. 1 t. 5 pricing over the line the commission counted.
+            let mut obracun = line_input("KOS-1", 7_000);
+            obracun.cena_minor = Some(249_900);
+            let priced = save_line(
+                &connection,
+                id,
+                Some(line_id),
+                &obracun,
+                "2027-01-02T10:05:00Z",
+            )
+            .expect("the obračun must still be able to price the signed stavka");
+            assert_eq!(priced.linije[0].cena_minor, Some(249_900));
+            assert_eq!(
+                priced.linije[0].knjigovodstvena_kolicina_milli,
+                Some(KNJIGOVODSTVENO_STANJE_MILLI),
+                "the pricing edit must not blank what the potpis released"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Req. 34 — the čl. 9 st. 2 perpetual-inventory shortcut
+    // -----------------------------------------------------------------
+
+    /// Req. 34 / design §4 — the shortcut is a conditional gate, not a default.
+    /// Čl. 9 st. 2 lets a shop that keeps a continuous quantity-and-value record
+    /// enter its book state as the state po popisu **only** „под условом да је у
+    /// току године извршен попис имовине и да су вишкови и мањкови утврђени тим
+    /// пописом прокњижени“. With no such popis behind it the reference is a claim
+    /// about a document that does not exist, and storing it unchecked would let
+    /// the shop skip a count it owes.
+    #[test]
+    fn the_perpetual_shortcut_is_refused_without_a_posted_in_year_popis() {
+        with_app("popis_perpetual_gate", |app| {
+            let state = app.state::<AppState>();
+            let mut connection = state.db().open().expect("database should open");
+
+            let mut request = open_request();
+            request.perpetual_odluka_ref = Some("Odluka 7/2026".into());
+            let error = open_popis(&mut connection, &request, "2026-12-31T08:00:00Z")
+                .expect_err("the shortcut must be refused with nothing behind it");
+
+            assert_eq!(error.code(), "popis_nema_popisa_u_toku_godine");
+            assert!(
+                error.to_string().contains("čl. 9 st. 2"),
+                "the refusal must name the article it enforces, said: {error}"
+            );
+            assert_eq!(
+                session_count(state.inner()),
+                0,
+                "a refused open must persist no session"
+            );
+
+            // An in-year popis that only got as far as counting is not „извршен и
+            // прокњижен“ either — the gate is the knjiženje, not the attempt.
+            let nezavrsen = seeded_count_on(state.inner(), "KOS-2", "2026-06-30");
+            assert_eq!(session_status(state.inner(), nezavrsen), "counting");
+            let error = open_popis(&mut connection, &request, "2026-12-31T08:00:00Z")
+                .expect_err("an unposted in-year popis does not open the shortcut");
+            assert_eq!(error.code(), "popis_nema_popisa_u_toku_godine");
+        });
+    }
+
+    /// The other side of the gate, and what keeps the refusal above from being a
+    /// blanket „no“: once an in-year popis is posted the reference is accepted and
+    /// stored, because that is the čl. 9 st. 2 condition met.
+    #[test]
+    fn the_perpetual_shortcut_is_accepted_once_an_in_year_popis_is_posted() {
+        with_app("popis_perpetual_gate_open", |app| {
+            let state = app.state::<AppState>();
+            walk_to_posted_on(state.inner(), "KOS-7", "2026-06-30");
+            let mut connection = state.db().open().expect("database should open");
+
+            let mut request = open_request();
+            request.perpetual_odluka_ref = Some("Odluka 7/2026".into());
+            let session = open_popis(&mut connection, &request, "2026-12-31T08:00:00Z")
+                .expect("a posted in-year popis opens the čl. 9 st. 2 shortcut");
+
+            assert_eq!(
+                session.perpetual_odluka_ref.as_deref(),
+                Some("Odluka 7/2026")
+            );
+        });
+    }
+
+    /// The year is part of the condition: čl. 9 st. 2 says „у току године“, and a
+    /// popis posted in a different business year says nothing about this one.
+    #[test]
+    fn a_posted_popis_from_another_year_does_not_open_the_shortcut() {
+        with_app("popis_perpetual_gate_other_year", |app| {
+            let state = app.state::<AppState>();
+            walk_to_posted_on(state.inner(), "KOS-8", "2025-06-30");
+            let mut connection = state.db().open().expect("database should open");
+
+            let mut request = open_request();
+            request.perpetual_odluka_ref = Some("Odluka 7/2026".into());
+            let error = open_popis(&mut connection, &request, "2026-12-31T08:00:00Z")
+                .expect_err("last year's popis does not excuse this year's count");
+
+            assert_eq!(error.code(), "popis_nema_popisa_u_toku_godine");
         });
     }
 
