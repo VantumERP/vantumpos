@@ -638,6 +638,99 @@ unchanged.
 
 ---
 
+### SW-12 — Mašinski čitljiv cenovnik (2026-08-02)
+
+The published cenovnik, the archive of every version of it, the till guard that keeps the shop to the
+prices it published, and the folder the file lands in, shipped as a nine-task TDD plan
+(`docs/superpowers/plans/2026-08-01-sw12-cenovnik.md`, design at
+`docs/superpowers/specs/2026-08-01-sw12-cenovnik-design.md`) against the verified rule set in
+`docs/REMAINING-SW-VERIFIED-RULES.md` §2b, §3 V2 and §4 reqs. 10–18. Baseline at plan time was
+`0920ac6` — cargo **672**, bun **407**, migration **v18**.
+
+**What is deliberately not in it, stated first because the register would otherwise read as a closed
+item.** ZZP čl. 6 st. 2 requires publication *„na svojoj internet stranici“*. This cycle builds
+everything up to and including writing the file into a folder the shop nominates — it does **not** put
+that folder on the internet, because a hosted endpoint means Actaer running a public service carrying
+its customers' prices, with its own uptime, cost and liability, and čl. 6 st. 4 binds the shop to
+whatever that service serves. That is a founder decision and it is now **F-13** in the register's §4.
+Čl. 6 **st. 6**'s account on the Nacionalni portal otvorenih podataka is not built either, and could
+not be: st. 6 keys the format to a standard *„propisan podzakonskim aktom“*, and that bylaw does not
+exist (§6 items 4 and 12).
+
+**And what the product must never say.** Whether a trader **without** a website must create one is
+**unresolved** — st. 2's possessive presupposes a site, no ZZP provision obliges any trader to have
+one, and extending a prekršaj to an unwritten duty runs into lex certa (ZoP čl. 3). So no screen and no
+document says the pilot is in breach today; the panel's strongest sentence is *„nije podešeno mesto
+objave“*. Nor does anything date the exposure to 1 May 2026: čl. 6 is in the čl. 220 carve-out, **čl. 210
+is not**.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — schema | **Migration v19**: `cenovnik_snapshots` — immutable, **no `updated_at`**, a `BEFORE UPDATE` trigger covering every identity and content column (**`id` included**, because it is both the current-row tie-break and the handle a divergence record names) and a second trigger letting `published_at` / `published_target` be written exactly once — and `products.jedinicna_cena_jedinica` / `jedinicna_cena_sadrzaj_milli` on the schema-wide milli scale (a 0,75 l bottle is `750`). An outlet's **current** cenovnik is derived, `ORDER BY generated_at DESC, id DESC LIMIT 1`, so there is no pointer two writers could desynchronise. `DELETE` is deliberately left open so the čl. 213 purge in Task 4 can reach an expired row | `3e4da52`, `1b13f76` |
+| 2 — the render | `cenovnik.rs`, pure: no database, no clock, no filesystem. `render_csv` emits the de facto data.gov.rs shape — **UTF-8 with BOM, `;` separator, DD-MM-YYYY, two decimals from integer para at the boundary, 13-digit barcode quoted as text** — in `sifra` order, so the same catalog always renders the same bytes and therefore the same `content_hash` (SHA-256). `published_prices` is the exact inverse and finds its columns **by name out of the file's own header**. Eight columns, not six: `jedinicna_cena` and `jedinica_za_jedinicnu_cenu` are req. 10, because čl. 6 st. 2's second sentence pulls st. 1 into the published file | `f2592fb`, `87da10f` |
+| 3 — republish on write | Čl. 6 st. 3 says *„ažurira u realnom vremenu“*, so publication rides the write that moved a price — a nightly batch is a defect against st. 3, not a simplification. **Four paths**: `commands::catalog`, `campaigns` (activation, markdown step, ending), `importer` (**once per batch**, since the file is the whole catalog) and `kep_storno::post_nivelacija` — whose returned verdict `commands::kep` republishes on, after its own commit — each threading `record_offered_price_change`'s own answer instead of re-deciding what a price move is; the catalog path adds the jedinična cena, the one published price that log does not watch. It runs **after `tx.commit()`** — a publish failure is logged and the price stands. Plain `INSERT` only, **never `INSERT OR REPLACE`**, with its own assertion: a REPLACE is a DELETE plus an INSERT no trigger sees. The archive key is minted once and frozen in `settings.cenovnik_prodajno_mesto`, derived from settings and never taken from the frontend | `5f11623`, `47b0148` |
+| 4 — archive + retention | Čl. 6 st. 5 asks the trader to enable a comparison of *„prethodno objavljenih cena“* with the realtime ones, so a publication is never overwritten: `list_snapshots` reads an outlet's lineage newest-first and `read_snapshot` returns the body byte for byte. `RecordClass::CenovnikArchive` joins the shared retention table with the **two-year floor of the čl. 213 zastarelost**, upward-only — and it is the one class in that table holding **no personal data**, which is what keeps it out of the čl. 47 register. `purge_expired_snapshots` runs at launch and on the 6-hourly timer in `lib.rs`, never touches an outlet's current file however old it is, and a test scans the crate to prove it is the **only** code that deletes from the table — no trigger can tell a purge from a cover-up, so the constraint is a property of the code | `58df8fa`, `376cf0f` |
+| 5 — till guard | `sales_assess_price_integrity` runs against the draft cart, so the operator learns before the money moves. It **warns and never blocks** — „Završi prodaju“ stays enabled — fires only in the above-published direction (a discount is not a breach, which is also what keeps it to one comparison), and names the snapshot it was measured against, because čl. 6 st. 4 binds the shop to the file in force and not to the catalog that file was rendered from. `sales_complete` writes a `cenovnik_price_divergence` row into the never-deleted `compliance_log`. **No published snapshot means no guard and no block**; a check that could not run says so rather than reading as an all-clear | `62504b8` |
+| 6 — čl. 210 notice | `legal.rs::cenovnik_not_published` — the **tenth** notice, in `all_notices`, in the duplicated inline list, asserted count bumped to **10**. Preduzetnik: **fixed 100.000 (čl. 210 st. 3)**, halved to 50.000 on payment within eight days of a prekršajni nalog (ZoP čl. 173 st. 1). The citation carries the escalation ladder that actually matters — čl. 207 t. 1 → čl. 206 st. 1 zapisnik → st. 4 rešenje → st. 5 privremena zabrana prometa → čl. 209 st. 1 t. 40 — and the čl. 213 limitation. Req. 18's guard makes the pravno-lice **200.000 unreachable under the preduzetnik profile**, and `51e923d` widened it from this one notice to the blanket check | `2edf93e`, `51e923d` |
+| 7 — publish targets | `PublishTarget` with `LocalFolderTarget` and a `NotConfigured` default that is a **state, not an error**: the snapshot is still rendered and archived, and a price save never fails because the hosting question is open. Req. 13's seven fetchability rules — no login, no CAPTCHA or bot-fight rule, no JS-rendering requirement, no `robots.txt` disallow, no aggressive rate limit, a stable URL per prodajni objekat, `text/csv; charset=utf-8` — are written into the trait's doc comment as a **contract on any future implementation**, because čl. 6 st. 5 is a duty to *enable* and bot protection would manufacture a breach for our own customer. The local write stages through a per-publish temporary so a reader never sees a half-written cenovnik | `e1e4f99`, `c6baf79` |
+| 8 — frontend | Podešavanja → **Cenovnik** (self-loading, the RetentionPanel pattern): the duty, the state of the publishing target, the outlet's archive newest-first, any prior file openable byte for byte. `cenovnik_get_notice` resolves čl. 210 against the **stored** legal form and an unset form answers `penalty: null` rather than letting a screen pick a tier. The till warning. And the product sheet's unit-price pair, sent on **every** save because `SaveProductRequest` replaces the whole row. **No „objavi sada“ button**: publication rides the price write, and a second answer to *„when did this shop last publish“* is the one thing an operator could believe wrongly. The review caught two live defects — the package content collapsing by a thousand through `toLocaleString("sr-RS")`'s dot separator, and the panel promising a file a fresh install never makes because `publish_current` archives nothing until the prodajni objekat is identified | `47de099`, `0ce4756` |
+| 9 — docs + gates | This section; register row 25 and the SW-12 row in §3 re-stated; **F-13** opened for the hosting decision; §6 items 4 and 12 carry the čl. 6 st. 7 bylaw's verified absence, the **quarterly Sl. glasnik RS monitoring trigger for *cenovnik* / *zaštita potrošača* through the čl. 216 deadline of 01.05.2027**, and the *practice, not law* label on the data.gov.rs shape (req. 17) | this commit |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **447 passed** / 0 failed, 30 files (was 407 / 28) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **778 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 672) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+106 cargo / +40 bun** over the plan baseline. Latest migration: **v19**.
+
+**Whose tests those are, honestly split.** SW-12 itself contributes **+102 cargo** — 37 in `cenovnik.rs`,
+41 in `commands/cenovnik.rs`, 9 in `commands/sales.rs`, 5 in `legal.rs`, 4 in `db/migrations.rs`, 3 in
+`retention.rs`, 2 in `importer.rs`, 1 in `campaigns.rs` — and **+35 bun**: 17 in
+`src/app/settings/CenovnikPanel.test.tsx`, 6 in `CatalogModule.test.tsx`, 6 in
+`src/services/local-adapter.test.ts`, 5 in `RegisterScreen.test.tsx`, 1 in `SettingsScreen.test.tsx`.
+The remaining **+4 cargo / +5 bun** are two SW-14 fix commits that landed in the same window
+(`3a36d0f`, `a18d9fe`) and are not SW-12's.
+
+**Deliberately not built** — read these as decisions, not as gaps. No hosted endpoint and no public URL
+(**F-13**). No čl. 6 st. 6 open-data-portal upload while the standard it is keyed to does not exist. No
+„objavi sada“ button, and no nightly regeneration job — both would be second answers to *when did this
+shop last publish*. No hard block at the till: čl. 6 st. 4 is a duty to adhere to published prices, not
+a reason a sale cannot complete, and a POS that refuses to sell is a POS the shop stops using. No
+guessed jedinična cena — an article whose measure and package content the shop has not entered
+publishes an **empty** cell, because a missing cell is a visible gap and an inferred one is a false
+statement the shop answers for under čl. 6 st. 4. No claim of breach anywhere, and no exposure dated to
+1 May 2026.
+
+**Still open after this batch.**
+
+- **Req. 15 — the hosted endpoint.** The trait, its seven-rule contract and the archive are ready for
+  it; the decision is F-13. Until it lands, a shop with a website complies by pointing the local folder
+  at what that site serves, and a shop without one is in the unresolved §2b position.
+- **Čl. 6 st. 6 — the Nacionalni portal otvorenih podataka account**, blocked on the missing čl. 6 st. 7
+  bylaw rather than on engineering. The monitoring trigger is §6 item 12.
+- **Req. 16's *„column mapping in configuration“* is only half true.** `cenovnik::COLUMNS` is a
+  constant, not a setting — a schema swap is a code change and a release, not something the shop can do.
+  That is the right trade while no format is prescribed, but the requirement's wording is stronger than
+  the code, and this is the disclosure rather than a claim that it was met.
+- **A publish failure is visible only in the log.** `republish_after_price_move` logs and returns; the
+  Cenovnik panel shows the archive and the configured target, so an operator can infer staleness from a
+  missing recent snapshot, but nothing raises the failure at the moment it happens.
+- **`docs_guard::no_retention_row_promises_a_purge_no_job_performs` was cleared against the wrong list
+  for the register**, and this task fixed it. `commands::personnel::PurgeableClass` is exhaustive for
+  the čl. 23 notice, which is only ever about an employee's data; it stopped being the whole answer for
+  the register when Task 4 shipped a second sweep, `commands::cenovnik::purge_expired_snapshots`, for a
+  class that holds no personal data and could never have a `PurgeableClass` variant. The register arm
+  now matches exhaustively on `retention::RecordClass`, each variant naming either the sweep that
+  discards it or the reason there is none.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.

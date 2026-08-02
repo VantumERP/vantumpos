@@ -226,9 +226,25 @@ fn the_trajno_retention_row_names_what_actually_protects_it_on_a_restore() {
 /// purged on period close“* while the notice was being corrected one file over.
 /// That is the document counsel and an inspector actually read, so a guard that
 /// stops at the employee notice stops one reader short.
+///
+/// **The two documents are cleared against different lists, and they have to
+/// be.** `PurgeableClass` is `commands::personnel::purge_expired_classes`'s own
+/// argument type, so on the čl. 23 notice — which is only ever about an
+/// employee's data — it is both exhaustive and self-enforcing. It stopped being
+/// the whole answer for the *register* when SW-12 shipped a second, entirely
+/// separate sweep: `commands::cenovnik::purge_expired_snapshots`, wired into
+/// launch and the 6-hourly timer in `lib.rs` beside the personnel one, discards
+/// `RecordClass::CenovnikArchive` — a class that holds no personal data, has no
+/// row in the čl. 23 notice, and could never have a `PurgeableClass` variant.
+/// Leaving it out would have made this guard reject a true sentence and tell its
+/// author to add a variant to a type that must not have one. So the register arm
+/// matches on `RecordClass` instead, exhaustively: every class in the shared
+/// retention table answers either with the register's word for it **and the
+/// sweep that discards it**, or with `None` and the reason there is none.
 #[test]
 fn no_retention_row_promises_a_purge_no_job_performs() {
     use crate::commands::personnel::PurgeableClass;
+    use crate::retention::RecordClass;
 
     // A sweep stated as something that happens, in the notice's Serbian:
     // „brišu se“, „briše se“, „uklanjaju se“, „uklanja se“.
@@ -251,26 +267,45 @@ fn no_retention_row_promises_a_purge_no_job_performs() {
             PurgeableClass::AccessLog => "evidencija pristupa",
         })
         .collect();
-    let swept_register: Vec<&str> = PurgeableClass::ALL
+    let swept_register: Vec<&str> = RecordClass::ALL
         .iter()
-        .map(|class| match class {
-            PurgeableClass::Credentials => "credential",
-            PurgeableClass::AccessLog => "access log",
+        .filter_map(|class| match class {
+            // `commands::personnel::purge_expired_classes` — the two
+            // `PurgeableClass` variants, in the register's words.
+            RecordClass::Credentials => Some("credential"),
+            RecordClass::AccessLog => Some("access log"),
+            // `commands::cenovnik::purge_expired_snapshots` (SW-12 req. 14) —
+            // the čl. 213 sweep, which never reaches an outlet's current file.
+            RecordClass::CenovnikArchive => Some("cenovnik archive"),
+            // `trajno`: ZEOR čl. 7 st. 2 for the two worktime/personnel rows,
+            // ZZPL čl. 47 st. 7 for the register. `never_purge` makes them
+            // unreachable by every sweep, so no document may say they go.
+            RecordClass::WorktimeClassification
+            | RecordClass::Personnel
+            | RecordClass::ProcessingRegister => None,
+            // `retention::{draft_purge_eligible, overtime_log_purge_eligible}`
+            // are **gates, not sweeps** — they answer *may this go yet*, and
+            // every call site is inside `retention.rs`'s own test module.
+            RecordClass::WorktimeOvertimeLog | RecordClass::WorktimeDraft => None,
         })
         .collect();
 
-    for (label, text, promises, swept) in [
+    for (label, text, promises, swept, cleared_against) in [
         (
             "docs/compliance/obavestenje-zaposlenima.md",
             NOTICE,
             PROMISE_SR.as_slice(),
             &swept_notice,
+            "`commands::personnel::PurgeableClass`",
         ),
         (
             "docs/SERBIAN-LAW-COMPLIANCE.md",
             REGISTER,
             PROMISE_EN.as_slice(),
             &swept_register,
+            "an exhaustive match on `retention::RecordClass`, naming every class a production \
+             sweep discards — `purge_expired_classes` for the credentials and the access log, \
+             `commands::cenovnik::purge_expired_snapshots` for the cenovnik archive",
         ),
     ] {
         for (index, line) in text.lines().enumerate() {
@@ -292,13 +327,13 @@ fn no_retention_row_promises_a_purge_no_job_performs() {
 
             assert!(
                 swept.iter().any(|subject| lowercase.contains(subject)),
-                "{label}:{line_no} states that a class of data is deleted. \
-                 `commands::personnel::PurgeableClass` names every class a purge job actually \
+                "{label}:{line_no} states that a class of data is deleted. This document is \
+                 cleared against {cleared_against}, which names every class a purge job actually \
                  sweeps — {swept:?} — and this row is none of them. \
                  `retention::draft_purge_eligible` and `overtime_log_purge_eligible` are gates \
                  with no production caller, so they delete nothing. State the not-before bound \
                  the stored `napomena` states („Brišu se tek pošto…“), or write the sweep and \
-                 give the class a `PurgeableClass` variant."
+                 name the class in the list this document is cleared against."
             );
         }
     }
