@@ -1019,8 +1019,11 @@ CREATE TABLE cenovnik_snapshots (
     -- of nothing.
     prodajno_mesto TEXT NOT NULL CHECK (prodajno_mesto <> ''),
     -- RFC3339, passed in as `now: &str` by the command layer like every other
-    -- decision timestamp in this schema. Never datetime('now').
-    generated_at TEXT NOT NULL,
+    -- decision timestamp in this schema. Never datetime('now'). Non-empty: an
+    -- undated row sorts below every RFC3339 stamp, so it could never be selected
+    -- as an outlet's current cenovnik and could never take part in the st. 5
+    -- comparison — a snapshot the archive cannot date is not an archive entry.
+    generated_at TEXT NOT NULL CHECK (generated_at <> ''),
     row_count INTEGER NOT NULL CHECK (row_count >= 0),
     content_hash TEXT NOT NULL CHECK (content_hash <> ''),
     -- The rendered file, byte for byte. An archive holding only a hash could not
@@ -1032,15 +1035,27 @@ CREATE TABLE cenovnik_snapshots (
     -- price save must not fail because of it.
     published_at TEXT,
     published_target TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL CHECK (created_at <> '')
 );
 CREATE INDEX idx_cenovnik_snapshots_prodajno_mesto
     ON cenovnik_snapshots(prodajno_mesto, generated_at);
 -- What was published is evidence — čl. 6 st. 4 makes the shop answerable for the
--- prices in it — so the body, its hash and its identity are immutable in the
--- engine rather than by convention in a command.
+-- prices in it — so NO UPDATE may rewrite a snapshot's body, its hash or its
+-- identity. `id` is in the list with the rest: it is the tie-break that decides
+-- which row is an outlet's current cenovnik and the only handle a divergence
+-- record can name, so a mutable primary key would let that evidence link be
+-- repointed at a different published file.
+--
+-- That is the whole of what the engine enforces, and no more. DELETE is open by
+-- design (see čl. 213 below), and so is `INSERT OR REPLACE`: SQLite runs REPLACE
+-- as a DELETE plus an INSERT, no UPDATE happens for either trigger to see, and
+-- with recursive_triggers off — as this app runs it — the delete half fires no
+-- trigger either. Closing that here would close the retention purge with it, so
+-- it is a constraint on the write path rather than a claim made here: the publish
+-- path uses a plain INSERT only, and the retention purge is the only code
+-- permitted to DELETE from this table. Both halves are asserted in the tests.
 CREATE TRIGGER trg_cenovnik_snapshots_telo_nepromenljivo
-BEFORE UPDATE OF prodajno_mesto, generated_at, row_count, content_hash, body, created_at
+BEFORE UPDATE OF id, prodajno_mesto, generated_at, row_count, content_hash, body, created_at
     ON cenovnik_snapshots
 BEGIN
     SELECT RAISE(ABORT, 'Objavljeni cenovnik je nepromenljiv — nova cena je novi snimak.');
@@ -1065,12 +1080,13 @@ END;
 -- the piece the two differ. Nullable, because a product priced per piece may
 -- legitimately have neither.
 ALTER TABLE products ADD COLUMN jedinicna_cena_jedinica TEXT;
--- The content of one selling unit in that measure, in milli-units: 0,75 l is
--- 750000. NULL means one selling unit IS one of the measure, so the jedinična cena
--- equals the prodajna cena. Without this column the unit price of anything sold by
--- package could only ever be a copy of the sale price, which is exactly the defect
--- req. 10 names. A sadržaj without its measure divides by nothing and cannot
--- produce a price, so the schema refuses that half-state.
+-- The content of one selling unit in that measure, on the schema-wide milli scale
+-- — value × 1000, the same one `quantity_milli` and `minimum_stock_milli` carry —
+-- so a 0,75 l bottle is 750. NULL means one selling unit IS one of the measure, so
+-- the jedinična cena equals the prodajna cena. Without this column the unit price
+-- of anything sold by package could only ever be a copy of the sale price, which
+-- is exactly the defect req. 10 names. A sadržaj without its measure divides by
+-- nothing and cannot produce a price, so the schema refuses that half-state.
 ALTER TABLE products ADD COLUMN jedinicna_cena_sadrzaj_milli INTEGER
     CHECK (jedinicna_cena_sadrzaj_milli IS NULL
            OR (jedinicna_cena_sadrzaj_milli > 0 AND jedinicna_cena_jedinica IS NOT NULL));
@@ -2682,13 +2698,35 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             )
             .expect("seed a product");
 
+            // The sadržaj is on the schema-wide milli scale — value × 1000, the same
+            // divisor `quantity_milli` and `minimum_stock_milli` use — so a 0,75 l
+            // bottle is 750, not 750000. A column reading `_milli` but meaning
+            // something else than everywhere else in the same database would publish a
+            // jedinična cena wrong by three orders of magnitude, which is precisely
+            // the čl. 6 st. 2 defect req. 10 exists to prevent.
             conn.execute(
                 "UPDATE products SET jedinicna_cena_jedinica = 'l',
-                                     jedinicna_cena_sadrzaj_milli = 750000
+                                     jedinicna_cena_sadrzaj_milli = 750
                  WHERE id = 190",
                 [],
             )
             .expect("a measure with its content should store");
+
+            let (jedinica, jedinicna_cena_minor): (String, i64) = conn
+                .query_row(
+                    "SELECT jedinicna_cena_jedinica,
+                            sale_price_minor * 1000 / jedinicna_cena_sadrzaj_milli
+                       FROM products WHERE id = 190",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the jedinična cena should derive from the stored sadržaj");
+            assert_eq!(jedinica, "l");
+            assert_eq!(
+                jedinicna_cena_minor, 37_200,
+                "27.900 para for a 0,75 l bottle is 372,00 RSD/l — a sadržaj stored on \
+                 any scale but the schema-wide milli is off by a factor of 1000"
+            );
 
             // A sadržaj without the measure it is expressed in cannot produce a
             // jedinična cena, so the schema refuses to hold that half-state.
@@ -2732,6 +2770,30 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "a snapshot without a content hash cannot be compared against anything"
             );
 
+            // An undated row sorts below every RFC3339 stamp, so it could never be
+            // selected as an outlet's current cenovnik and could never take part in
+            // the čl. 6 st. 5 comparison — a snapshot the archive cannot date.
+            assert!(
+                conn.execute(
+                    "INSERT INTO cenovnik_snapshots (prodajno_mesto, generated_at, row_count,
+                                                     content_hash, body, created_at)
+                     VALUES ('Radnja 1', '', 1, 'h1', 'telo', '2026-08-02T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "a snapshot the archive cannot date must be rejected"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO cenovnik_snapshots (prodajno_mesto, generated_at, row_count,
+                                                     content_hash, body, created_at)
+                     VALUES ('Radnja 1', '2026-08-02T09:00:00Z', 1, 'h1', 'telo', '')",
+                    [],
+                )
+                .is_err(),
+                "a snapshot without a created_at must be rejected"
+            );
+
             conn.execute_batch(
                 "INSERT INTO cenovnik_snapshots (id, prodajno_mesto, generated_at, row_count,
                                                  content_hash, body, created_at)
@@ -2740,40 +2802,68 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                             (2, 'Radnja 1', '2026-08-02T11:00:00Z', 2, 'h-novi', 'novi cenovnik',
                              '2026-08-02T11:00:00Z'),
                             (3, 'Radnja 2', '2026-08-02T10:00:00Z', 1, 'h-druga', 'druga radnja',
-                             '2026-08-02T10:00:00Z');",
+                             '2026-08-02T10:00:00Z'),
+                            (4, 'Radnja 1', '2026-08-02T11:00:00Z', 3, 'h-isti-tren',
+                             'jos noviji cenovnik', '2026-08-02T11:00:00Z');",
             )
-            .expect("three snapshots should insert");
+            .expect("four snapshots should insert");
 
             // No stored current-snapshot pointer exists to go stale: „the current
-            // cenovnik for an outlet“ is derived as the newest row for that outlet.
-            let current: Vec<(String, i64)> = conn
-                .prepare(
-                    "SELECT prodajno_mesto, id FROM cenovnik_snapshots s
-                      WHERE generated_at = (SELECT MAX(generated_at) FROM cenovnik_snapshots
-                                             WHERE prodajno_mesto = s.prodajno_mesto)
-                      ORDER BY prodajno_mesto",
+            // cenovnik for an outlet“ is derived as the newest row for that outlet,
+            // ties on generated_at broken by the larger id. Rows 2 and 4 share a
+            // generated_at to the second — two price saves inside one second is
+            // ordinary at a till — so here the tie-break alone decides which file
+            // čl. 6 st. 4 binds the shop to, and it must be the later insert.
+            let current_for = |outlet: &str| -> i64 {
+                conn.query_row(
+                    "SELECT id FROM cenovnik_snapshots
+                      WHERE prodajno_mesto = ?1
+                      ORDER BY generated_at DESC, id DESC
+                      LIMIT 1",
+                    rusqlite::params![outlet],
+                    |row| row.get(0),
                 )
-                .expect("current query should prepare")
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .expect("current query should run")
-                .collect::<Result<Vec<_>, _>>()
-                .expect("current rows should collect");
+                .expect("the current snapshot should resolve")
+            };
             assert_eq!(
-                current,
-                vec![("Radnja 1".to_string(), 2), ("Radnja 2".to_string(), 3)],
-                "each outlet's current snapshot is its newest one, and the older one survives"
+                current_for("Radnja 1"),
+                4,
+                "on a same-second tie the larger id is the current cenovnik"
+            );
+            assert_eq!(
+                current_for("Radnja 2"),
+                3,
+                "each outlet resolves its own current cenovnik"
+            );
+
+            let kept: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM cenovnik_snapshots WHERE prodajno_mesto = 'Radnja 1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the archive should count");
+            assert_eq!(
+                kept, 3,
+                "čl. 6 st. 5: a publication is never overwritten by the next one"
             );
         }
         std::fs::remove_file(&path).expect("test database should be removed");
     }
 
     /// A published cenovnik is evidence of what the shop offered at a moment in
-    /// time (čl. 6 st. 4 binds the trader to the prices it published), so the body
-    /// and its hash are immutable in the engine. DELETE stays open, because the
-    /// čl. 213 two-year limitation gives the archive a retention floor rather than
-    /// a trajno duty and the purge (req. 14) must be able to reach an expired row.
+    /// time (čl. 6 st. 4 binds the trader to the prices it published), so no UPDATE
+    /// may rewrite its body, its hash or its identity. That is the whole of what
+    /// the engine enforces, and this test pins both halves of the boundary: DELETE
+    /// stays open, because the čl. 213 two-year limitation gives the archive a
+    /// retention floor rather than a trajno duty and the purge (req. 14) must be
+    /// able to reach an expired row — and INSERT OR REPLACE, which SQLite runs as a
+    /// DELETE followed by an INSERT without firing an UPDATE trigger, is therefore
+    /// open too. Closing that in the engine would close the purge with it, so it is
+    /// a constraint on the write path instead, asserted here so the schema comment
+    /// can never quietly become a promise the engine does not keep.
     #[test]
-    fn migration_v19_keeps_a_published_snapshot_immutable_and_purgeable() {
+    fn migration_v19_blocks_every_update_but_leaves_delete_and_replace_open() {
         let path = test_database_path("migration_v19_immutable");
         {
             let db = Db::new(&path).expect("database should initialize");
@@ -2793,6 +2883,11 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             )
             .expect("a snapshot should insert");
 
+            // `id` belongs in this list: it is the archive's only handle on a
+            // snapshot — the tie-break that decides which row is an outlet's current
+            // cenovnik, and the only thing a Task 5 divergence can name as the
+            // snapshot it was compared against. A mutable primary key would let that
+            // evidence link be silently repointed at a different published file.
             for (column, value) in [
                 ("body", "izmenjeno telo"),
                 ("content_hash", "h-lazni"),
@@ -2800,6 +2895,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 ("prodajno_mesto", "Radnja 2"),
                 ("row_count", "9"),
                 ("created_at", "2026-08-02T12:00:00Z"),
+                ("id", "999"),
             ] {
                 assert!(
                     conn.execute(
@@ -2843,6 +2939,42 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 .expect("the publication stamp should read back");
             assert_eq!(published_at, "2026-08-02T09:00:05Z");
             assert_eq!(target, "local_folder");
+
+            // The gap the engine cannot close without closing the purge. REPLACE is a
+            // DELETE plus an INSERT: no UPDATE happens for either trigger to see, and
+            // with recursive_triggers off (the default this app runs on — db/mod.rs
+            // sets foreign_keys, busy_timeout and journal_mode and nothing else) the
+            // delete half fires no trigger either. So this succeeds, and it silently
+            // rewrites a published body and drops its publication stamp. It is
+            // closed by discipline on the write path, not by
+            // the schema: the publish path uses a plain INSERT only — never INSERT OR
+            // REPLACE, never ON CONFLICT DO UPDATE — and the retention purge is the
+            // only code permitted to DELETE from this table.
+            conn.execute(
+                "INSERT OR REPLACE INTO cenovnik_snapshots (id, prodajno_mesto, generated_at,
+                                                            row_count, content_hash, body,
+                                                            created_at)
+                 VALUES (10, 'Radnja 1', '2026-08-02T09:00:00Z', 2, 'h-10', 'podmetnuto telo',
+                         '2026-08-02T09:00:00Z')",
+                [],
+            )
+            .expect("REPLACE is a DELETE plus an INSERT — no UPDATE trigger sees it");
+
+            let (body, still_published): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT body, published_at FROM cenovnik_snapshots WHERE id = 10",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the replaced row should read back");
+            assert_eq!(
+                body, "podmetnuto telo",
+                "the engine does NOT stop REPLACE — the publish path must never use it"
+            );
+            assert!(
+                still_published.is_none(),
+                "REPLACE also drops the publication stamp, leaving no trace of the overwrite"
+            );
 
             conn.execute("DELETE FROM cenovnik_snapshots WHERE id = 10", [])
                 .expect("an expired snapshot must remain purgeable");
