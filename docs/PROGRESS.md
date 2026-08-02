@@ -430,7 +430,7 @@ under ZoP čl. 3, §6 R-2); and no headcount gate or plan-tier upsell on any of 
   line that automatic deletion of that class *„ne postoji“*, date-stamped. `draft_purge_eligible` and
   `overtime_log_purge_eligible` remain gates with no production caller, and SW-13's sweep still does not
   touch the class — the row now says exactly that. Two `docs_guard` tests pin both halves:
-  `no_notice_retention_row_promises_a_purge_no_job_performs` clears a deletion promise in the notice's
+  `no_retention_row_promises_a_purge_no_job_performs` clears a deletion promise in the notice's
   retention table only against an **exhaustive** match on `commands::personnel::PurgeableClass`, so a new
   promise costs a new variant and a new variant costs a real sweep; and
   `the_class_b_retention_row_says_no_automatic_purge_exists_for_it` keeps a bound with no sweep behind it
