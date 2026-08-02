@@ -48,9 +48,38 @@ describe("SettingsScreen", () => {
       await screen.findByRole("heading", { name: "Rokovi čuvanja" }),
     ).toBeInTheDocument();
 
+    await user.click(screen.getByRole("tab", { name: "Cenovnik" }));
+    expect(
+      await screen.findByRole("heading", { name: "Mesto objave" }),
+    ).toBeInTheDocument();
+
     await user.click(screen.getByRole("tab", { name: "Backup" }));
     expect(
       await screen.findByRole("heading", { name: "Status backupa" }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * SW-12 req. 15: where the published cenovnik goes is a setting the owner has
+   * to be able to reach and to see. A capability nobody can find discharges
+   * nothing — and the one thing this tab may not do is tell the shop it is in
+   * breach, because the no-website case is unresolved (§2b).
+   */
+  it("reaches the cenovnik surface without asserting the shop is in breach", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await screen.findByLabelText("Naziv radnje");
+    await user.click(screen.getByRole("tab", { name: "Cenovnik" }));
+
+    expect(
+      await screen.findByText(/nije podešeno mesto objave/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/u prekršaju|kršite/i)).not.toBeInTheDocument();
+    // The archive is the čl. 6 st. 5 comparison surface and it reaches this tab
+    // with the outlet's real publications on it.
+    expect(
+      screen.getByRole("heading", { name: "Objavljeni cenovnici" }),
     ).toBeInTheDocument();
   });
 

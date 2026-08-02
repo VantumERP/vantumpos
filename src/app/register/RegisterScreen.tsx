@@ -62,6 +62,7 @@ import type {
   CompletedSale,
   DiscountDraft,
   SalePaymentDraft,
+  PriceDivergence,
   ProductSummary,
   SaleDraftItem,
   SalePreview,
@@ -73,6 +74,13 @@ import type {
  * money changes hands.
  */
 const AML_ASSESS_DEBOUNCE_MS = 200;
+
+/**
+ * The published-price check runs against the whole draft, so it fires on every
+ * quantity keystroke as well as on every scan. Same budget as the AML one: the
+ * warning has to be on screen before „Završi prodaju“ is pressed.
+ */
+const PRICE_INTEGRITY_DEBOUNCE_MS = 200;
 
 interface RegisterScreenProps {
   services: PosServices;
@@ -117,6 +125,10 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   );
   const [amlReason, setAmlReason] = useState("");
   const [amlReasonError, setAmlReasonError] = useState<string | null>(null);
+  // Req. 12 / ZZP čl. 6 st. 4: articles in the draft priced above what the
+  // outlet's current cenovnik publishes. Advisory — nothing here gates the sale.
+  const [divergences, setDivergences] = useState<PriceDivergence[]>([]);
+  const [priceCheckFailed, setPriceCheckFailed] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [isCompleting, setIsCompleting] = useState(false);
   const [overrideOpen, setOverrideOpen] = useState(false);
@@ -170,6 +182,49 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
 
     return () => {
       active = false;
+    };
+  }, [draft, services]);
+
+  // ZZP čl. 6 st. 4 binds a trader WHO PUBLISHES a cenovnik to adhere to the
+  // prices in it, so the till measures the cart against the outlet's current
+  // published file while it is being built — the operator learns about a
+  // divergence before the money changes hands rather than from a log afterwards.
+  //
+  // Warn, never block: `sales_complete` accepts the sale either way and writes
+  // the divergence into the same never-deleted trail. A shop that has published
+  // nothing has made no st. 4 promise to depart from and gets an empty answer.
+  useEffect(() => {
+    if (draft.items.length === 0) {
+      setDivergences([]);
+      setPriceCheckFailed(false);
+      return;
+    }
+
+    let active = true;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const found = await services.sales.assessPriceIntegrity(draft);
+
+          if (active) {
+            setDivergences(found);
+            setPriceCheckFailed(false);
+          }
+        } catch {
+          // A check that could not run is NOT a check that passed — the same
+          // reading the AML branch above takes. Rendering nothing here would put
+          // a silent pass in front of the cashier, who reads it as an all-clear.
+          if (active) {
+            setDivergences([]);
+            setPriceCheckFailed(true);
+          }
+        }
+      })();
+    }, PRICE_INTEGRITY_DEBOUNCE_MS);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
     };
   }, [draft, services]);
 
@@ -748,6 +803,18 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
             </Field>
           </FieldGroup>
 
+          {divergences.length > 0 && (
+            <PublishedPriceNotice divergences={divergences} />
+          )}
+          {priceCheckFailed && (
+            <Alert>
+              <AlertTitle>Provera objavljenih cena nije izvršena</AlertTitle>
+              <AlertDescription>
+                Program nije uspeo da uporedi cene sa objavljenim cenovnikom.
+                Prodaja se može završiti.
+              </AlertDescription>
+            </Alert>
+          )}
           {assessFailed && (
             <Alert>
               <AlertTitle>Provera limita gotovine nije izvršena</AlertTitle>
@@ -919,6 +986,67 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * The till-side rendering of the published-price guard (SW-12 req. 12).
+ *
+ * ZZP čl. 6 st. 4 binds a trader **who publishes** a cenovnik to adhere to the
+ * prices in it. Three things this notice must keep straight:
+ *
+ * - **It warns, it does not block.** „Završi prodaju“ stays enabled and nothing
+ *   here is a precondition of it. The register has to be able to record what
+ *   actually happened at the counter.
+ * - **It names the file.** An outlet's archive holds many publications and st. 4
+ *   binds the shop only to the one in force, so the snapshot's own stamp travels
+ *   with the warning — a divergence with no exhibit is an accusation with none.
+ * - **It states only what the code does.** The divergence is written to the
+ *   sale's own audit trail by `sales_complete`; nothing is sent anywhere, and no
+ *   figure is quoted — the čl. 210 sum belongs to the Cenovnik panel, resolved
+ *   against the shop's stored legal form.
+ */
+function PublishedPriceNotice({
+  divergences,
+}: {
+  divergences: PriceDivergence[];
+}) {
+  return (
+    <Alert variant="destructive" aria-labelledby="cenovnik-divergence-title">
+      <AlertTitle id="cenovnik-divergence-title">
+        Cena je iznad objavljenog cenovnika
+      </AlertTitle>
+      <AlertDescription>
+        <div className="flex flex-col gap-2">
+          <ul className="flex flex-col gap-1">
+            {divergences.map((row) => (
+              <li key={row.productId}>
+                <span className="font-medium">{row.productName}</span>
+                {" — naplaćuje se "}
+                <span className="font-medium">
+                  {formatRsd(row.chargedUnitPriceMinor)}
+                </span>
+                {", a objavljeno je "}
+                <span className="font-medium">
+                  {formatRsd(row.publishedUnitPriceMinor)}
+                </span>
+                .
+              </li>
+            ))}
+          </ul>
+          <p>
+            Upoređeno sa cenovnikom prodajnog objekta napravljenim{" "}
+            {formatInstant(divergences[0].snapshotGeneratedAt)}.
+          </p>
+          <p>
+            Prodaja se može završiti. Odstupanje se upisuje uz račun u trag koji
+            se ne briše. Ako je cena namerno promenjena, cenovnik se sam ponovo
+            objavljuje čim se nova cena sačuva — u šifarniku, kroz akciju, kroz
+            uvoz ili nivelacijom.
+          </p>
+        </div>
+      </AlertDescription>
+    </Alert>
   );
 }
 
@@ -1117,6 +1245,24 @@ function parseQuantityInput(input: string) {
 
 function formatQuantity(quantityMilli: number) {
   return (quantityMilli / 1000).toString().replace(".", ",");
+}
+
+/**
+ * The instant a published cenovnik was made, as a Serbian operator reads it.
+ * Display only — the archive's identity is the stamp the backend recorded, and
+ * nothing here decides anything from the formatted string.
+ */
+function formatInstant(value: string) {
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("sr-Latn-RS", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(parsed);
 }
 
 function errorMessage(error: unknown) {

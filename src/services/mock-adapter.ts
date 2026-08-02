@@ -17,6 +17,8 @@ import type {
   CashDepositCalendar,
   CashDepositReport,
   CategorySummary,
+  CenovnikPublishTarget,
+  CenovnikSnapshot,
   CompanySettings,
   CreateBackupRequest,
   DeclarationGapReason,
@@ -33,6 +35,7 @@ import type {
   KepClosureView,
   KepEntryView,
   PrethodnaCenaDto,
+  PriceDivergence,
   ProcessingActivity,
   ProductLedgerMovement,
   ProductListQuery,
@@ -722,6 +725,25 @@ export function createMockServices(): PosServices {
     logoPath: null,
     currency: "RSD",
   };
+  /**
+   * Where the shop has said its cenovnik goes. A fresh install has said nothing,
+   * and that is an honest state — never „the shop is in breach“ (§2b).
+   */
+  let cenovnikTarget: CenovnikPublishTarget = { kind: "notConfigured" };
+  /**
+   * The outlet's archive (ZZP čl. 6 st. 5), newest LAST in this array and
+   * reversed on read, exactly as `cenovnik_list_snapshots` orders it. Two
+   * publications are seeded so the archive surface has a prior file to compare
+   * the current one against, which is the whole point of st. 5.
+   *
+   * Bodies are the real rendered shape — BOM, `;`, CRLF, prices with a dot —
+   * because a double that published a prettier file than the backend would let
+   * a reader-side defect through.
+   */
+  const cenovnikArchive: { snapshot: CenovnikSnapshot; body: string }[] = [
+    mockSnapshot(1, "2026-06-17T08:30:00Z", 15499),
+    mockSnapshot(2, "2026-06-18T09:45:00Z", 15999),
+  ];
   let receiptSettings: ReceiptSettings = {
     prefix: "VP-",
     nextSequenceNumber: 1,
@@ -1357,6 +1379,7 @@ export function createMockServices(): PosServices {
           externalSource: request.externalSource ?? null,
         };
         products.push(product);
+        republishCenovnik();
         return product;
       },
       async updateProduct(id, request) {
@@ -1375,12 +1398,22 @@ export function createMockServices(): PosServices {
           currentStockMilli: products[index]?.currentStockMilli ?? 0,
           externalSource: request.externalSource ?? null,
         };
+        const before = products[index];
         products[index] = product;
+        if (movesAPublishedPrice(before, product)) {
+          republishCenovnik();
+        }
         return product;
       },
       async setProductActive(id, active) {
         const product = findProduct(id);
+        const changed = product.active !== active;
         product.active = active;
+        // An article going off the shelf, or coming back, changes what the shop
+        // offers — the same reading `record_offered_price_change` takes.
+        if (changed) {
+          republishCenovnik();
+        }
         return product;
       },
       async lookupProductByBarcode(barcode) {
@@ -1457,6 +1490,53 @@ export function createMockServices(): PosServices {
       },
       async assessCashPayment(cashMinor) {
         return assessCashPayment(cashMinor, eurRate, shopProfile);
+      },
+      /**
+       * Mirrors `commands::sales::assess_price_integrity`: the comparison is
+       * against the **unit price the article is offered at**, never the line
+       * total after a discount — a discount is a reduction granted on the
+       * prodajna cena, not a different price for the article, and a discount
+       * that cancelled the warning would be the obvious way to ring above the
+       * published cenovnik unremarked. Only above matters; one entry per
+       * article; no published file means no guard and never a blocked sale.
+       */
+      async assessPriceIntegrity(request) {
+        const published = currentCenovnik();
+        if (!published) {
+          return [];
+        }
+
+        const prices = publishedPrices(published.body);
+        const divergences: PriceDivergence[] = [];
+        for (const item of request.items) {
+          const product = products.find(
+            (candidate) => candidate.id === item.productId,
+          );
+          if (!product) {
+            continue;
+          }
+          const publishedUnitPriceMinor = prices.get(product.sku);
+          if (
+            publishedUnitPriceMinor === undefined ||
+            product.salePriceMinor <= publishedUnitPriceMinor ||
+            divergences.some((row) => row.productId === product.id)
+          ) {
+            continue;
+          }
+
+          divergences.push({
+            productId: product.id,
+            productName: product.name,
+            productSku: product.sku,
+            chargedUnitPriceMinor: product.salePriceMinor,
+            publishedUnitPriceMinor,
+            snapshotId: published.snapshot.id,
+            snapshotGeneratedAt: published.snapshot.generatedAt,
+            snapshotContentHash: published.snapshot.contentHash,
+          });
+        }
+
+        return divergences;
       },
     },
     inventory: {
@@ -2406,11 +2486,171 @@ export function createMockServices(): PosServices {
         return { ...policy };
       },
     },
+    cenovnik: {
+      async listSnapshots() {
+        // Newest first, and „current“ derived rather than stored — the same
+        // reading `cenovnik_list_snapshots` takes, so a stale pointer cannot
+        // exist here either.
+        return [...cenovnikArchive]
+          .reverse()
+          .map(({ snapshot }, index) => ({ ...snapshot, current: index === 0 }));
+      },
+      async getSnapshot(snapshotId) {
+        const found = cenovnikArchive.find(
+          (row) => row.snapshot.id === snapshotId,
+        );
+        if (!found) {
+          return null;
+        }
+
+        return {
+          snapshot: {
+            ...found.snapshot,
+            current:
+              found.snapshot.id ===
+              cenovnikArchive[cenovnikArchive.length - 1]?.snapshot.id,
+          },
+          body: found.body,
+        };
+      },
+      async getPublishTarget() {
+        return cenovnikTarget;
+      },
+      async setPublishTarget(target) {
+        // `cenovnik_set_publish_target` is `require_admin`: where the shop's
+        // published prices go is what čl. 6 st. 4 then binds it to.
+        if (session?.user.role !== "admin") {
+          throw {
+            code: "forbidden",
+            message: "Samo administrator može da izvrši ovu akciju.",
+          };
+        }
+        if (target.kind === "localFolder") {
+          const folder = target.folder.trim();
+          if (!folder) {
+            throw {
+              code: "validation_error",
+              message: "Folder za objavu cenovnika je obavezan.",
+            };
+          }
+          // The backend refuses a relative path: it would resolve against
+          // whatever directory the app was launched from, so the shop would be
+          // told the cenovnik is published and be unable to say where.
+          if (!/^([/\\]|[A-Za-z]:[/\\])/.test(folder)) {
+            throw {
+              code: "validation_error",
+              message:
+                "Putanja do foldera mora biti puna putanja, na primer " +
+                "„/Users/ana/cenovnik“.",
+            };
+          }
+          cenovnikTarget = { kind: "localFolder", folder };
+        } else {
+          cenovnikTarget = { kind: "notConfigured" };
+        }
+
+        return cenovnikTarget;
+      },
+      /**
+       * `penalty` is deliberately `null` whatever the legal form, for the same
+       * reason `assessCashPayment` leaves it null: every statutory fine figure
+       * lives in `src-tauri/src/legal.rs` and nowhere else, and a second copy
+       * here could silently drift out of tier. The panel renders a null penalty
+       * as a pointer to Podešavanja → Profil, never as a figure.
+       */
+      async getNotice() {
+        return {
+          summary:
+            "Trgovac je dužan da na svojoj internet stranici, posebno za svaki " +
+            "prodajni objekat, objavi cenovnik u digitalnom obliku pogodnom za " +
+            "automatsku obradu i da ga ažurira u realnom vremenu. U cenovniku " +
+            "se, kao i na prodajnom mestu, ističu prodajna i jedinična cena. " +
+            "Zakon nigde ne propisuje obavezu trgovca da ima internet stranicu, " +
+            "pa za trgovca koji je nema nije razjašnjeno da li je dužan da je " +
+            "izradi.",
+          penalty: null,
+          citation:
+            "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 35/2026), čl. 6 " +
+            "st. 1–3; prekršaj: čl. 210. Nadzor: tržišna inspekcija.",
+          isLegalDuty: true,
+        } satisfies LegalNotice;
+      },
+    },
     print: {
       async openForPrint() {},
       async openExternalUrl() {},
     },
   };
+
+  /** The outlet's newest publication — the file čl. 6 st. 4 binds it to today. */
+  function currentCenovnik() {
+    return cenovnikArchive[cenovnikArchive.length - 1];
+  }
+
+  /**
+   * Req. 11: a price change republishes, and nothing else does. Čl. 6 st. 3
+   * wants the published file to match the outlet's current prices *„u realnom
+   * vremenu“*, so this rides on the write that moved them — mirroring
+   * `commands::catalog::republish_cenovnik`, including the jedinična cena, which
+   * is a published price under st. 1/st. 2 and moves with the package content
+   * without touching `salePriceMinor`.
+   *
+   * A double that skipped this would warn at the till after every ordinary price
+   * raise, where the real backend stays silent because it republished first.
+   */
+  function republishCenovnik() {
+    const generatedAt = `${new Date(
+      Date.parse(now) + cenovnikArchive.length * 1000,
+    )
+      .toISOString()
+      .slice(0, 19)}Z`;
+    // Inactive articles are not offered, so they have no price to publish.
+    const rows = products
+      .filter((product) => product.active)
+      .map((product) => ({
+        sifra: product.sku,
+        barkod: product.barcode,
+        naziv: product.name,
+        jedinicaMere: product.unitOfMeasure,
+        prodajnaCenaMinor: product.salePriceMinor,
+        jedinicnaCenaMinor: unitPriceMinor(product),
+        jedinicaZaJedinicnuCenu: product.jedinicnaCenaJedinica ?? null,
+      }))
+      .sort((left, right) => left.sifra.localeCompare(right.sifra));
+    const body = renderMockCenovnik(rows, generatedAt);
+
+    cenovnikArchive.push({
+      snapshot: {
+        id: cenovnikArchive.length + 1,
+        prodajnoMesto: MOCK_OUTLET,
+        generatedAt,
+        rowCount: rows.length,
+        contentHash: mockContentHash(body),
+        // No target is configured in the seeded shop, so the file is archived
+        // and goes nowhere — the honest state, not a failure.
+        publishedAt: null,
+        publishedTarget: null,
+        current: false,
+      },
+      body,
+    });
+  }
+
+  /** „Did this write move a published price?“ — the sale price or the pair. */
+  function movesAPublishedPrice(
+    before: ProductSummary | undefined,
+    after: ProductSummary,
+  ): boolean {
+    return (
+      before === undefined ||
+      before.active !== after.active ||
+      before.salePriceMinor !== after.salePriceMinor ||
+      (before.jedinicnaCenaJedinica ?? null) !==
+        (after.jedinicnaCenaJedinica ?? null) ||
+      (before.jedinicnaCenaSadrzajMilli ?? null) !==
+        (after.jedinicnaCenaSadrzajMilli ?? null)
+    );
+  }
 
   /** Integer minutes, like every other duration in this app. */
   function plusMinutes(instant: string, minutes: number): string {
@@ -3049,6 +3289,201 @@ function buildMockCashDepositReport(
     },
     footer: CASH_DEPOSIT_FOOTER,
   };
+}
+
+/**
+ * The prodajno mesto the seeded archive is keyed on. `commands::cenovnik::
+ * prodajno_mesto` derives it from the shop's address and then freezes it, so
+ * this matches `companySettings.address` above.
+ */
+const MOCK_OUTLET = "Bulevar 1, Beograd";
+
+/** `src-tauri/src/cenovnik.rs::COLUMNS`, in order. */
+const CENOVNIK_COLUMNS = [
+  "sifra",
+  "barkod",
+  "naziv",
+  "jedinica_mere",
+  "prodajna_cena",
+  "jedinicna_cena",
+  "jedinica_za_jedinicnu_cenu",
+  "datum_azuriranja",
+];
+
+interface MockCenovnikRow {
+  sifra: string;
+  barkod: string | null;
+  naziv: string;
+  jedinicaMere: string;
+  prodajnaCenaMinor: number;
+  /** `null` when the article states no jedinična cena — a visible gap in the
+   *  published file, never a guessed figure. */
+  jedinicnaCenaMinor: number | null;
+  jedinicaZaJedinicnuCenu: string | null;
+}
+
+/**
+ * The published file in its real shape — BOM, `;` separator, CRLF, the barcode
+ * quoted as text and prices rendered with two decimals from integer para at the
+ * boundary only. A double that published a tidier file than
+ * `src-tauri/src/cenovnik.rs::render_csv` would let a reader-side defect through.
+ */
+function renderMockCenovnik(rows: MockCenovnikRow[], generatedAt: string): string {
+  const day = generatedAt.slice(0, 10).split("-").reverse().join("-");
+  const line = (fields: string[]) => `${fields.join(";")}\r\n`;
+
+  return (
+    "﻿" +
+    line(CENOVNIK_COLUMNS) +
+    rows
+      .map((row) =>
+        line([
+          row.sifra,
+          row.barkod ? `"${row.barkod}"` : "",
+          row.naziv,
+          row.jedinicaMere,
+          rsdFromPara(row.prodajnaCenaMinor),
+          row.jedinicnaCenaMinor === null
+            ? ""
+            : rsdFromPara(row.jedinicnaCenaMinor),
+          row.jedinicaZaJedinicnuCenu ?? "",
+          day,
+        ]),
+      )
+      .join("")
+  );
+}
+
+/** Two decimals from integer para, at the boundary only — never a float. */
+function rsdFromPara(minor: number): string {
+  const sign = minor < 0 ? "-" : "";
+  const absolute = Math.abs(minor);
+
+  return `${sign}${Math.floor(absolute / 100)}.${`${absolute % 100}`.padStart(2, "0")}`;
+}
+
+/**
+ * The jedinična cena in para per one unit of the measure, mirroring
+ * `CenovnikRow::jedinicna_cena_minor`: no measure means no unit price at all,
+ * and no package content means one selling unit IS one of the measure, so the
+ * two prices coincide. Rounded to the nearest para — truncation would publish
+ * 6,66 where the true figure is 6,67.
+ */
+function unitPriceMinor(product: ProductSummary): number | null {
+  if (!product.jedinicnaCenaJedinica) {
+    return null;
+  }
+  const sadrzajMilli = product.jedinicnaCenaSadrzajMilli;
+  if (sadrzajMilli == null) {
+    return product.salePriceMinor;
+  }
+  if (sadrzajMilli <= 0) {
+    return null;
+  }
+
+  return Math.round((product.salePriceMinor * 1000) / sadrzajMilli);
+}
+
+/**
+ * A stand-in for the archive's `content_hash`. **Not SHA-256** — the real digest
+ * is computed in `src-tauri/src/cenovnik.rs::content_hash` and nothing on this
+ * side reproduces it. All a double owes is what the field is used for: a stable
+ * 64-hex handle that changes whenever the body does, so a surface comparing two
+ * publications cannot pass by accident.
+ */
+function mockContentHash(body: string): string {
+  let hash = 0x811c9dc5;
+  for (const character of body) {
+    hash = Math.imul(hash ^ character.codePointAt(0)!, 0x01000193) >>> 0;
+  }
+
+  return Array.from({ length: 8 }, (_, index) =>
+    ((hash + index * 0x9e3779b1) >>> 0).toString(16).padStart(8, "0"),
+  ).join("");
+}
+
+/**
+ * One archived cenovnik for the seeded catalog. `mlekoPriceMinor` is what makes
+ * the older publication differ from the newer one — čl. 6 st. 5 exists so the
+ * two can be compared, and an archive whose files were identical would
+ * demonstrate nothing.
+ */
+function mockSnapshot(
+  id: number,
+  generatedAt: string,
+  mlekoPriceMinor: number,
+): { snapshot: CenovnikSnapshot; body: string } {
+  const body = renderMockCenovnik(
+    [
+      {
+        sifra: "MLEKO-1L",
+        barkod: "8600000000010",
+        naziv: "Mleko 1 l",
+        jedinicaMere: "kom",
+        prodajnaCenaMinor: mlekoPriceMinor,
+        jedinicnaCenaMinor: mlekoPriceMinor,
+        jedinicaZaJedinicnuCenu: "l",
+      } satisfies MockCenovnikRow,
+      {
+        sifra: "KAFA-200",
+        barkod: "8600000000027",
+        naziv: "Kafa 200 g",
+        jedinicaMere: "kom",
+        prodajnaCenaMinor: 50000,
+        jedinicnaCenaMinor: 250000,
+        jedinicaZaJedinicnuCenu: "kg",
+      },
+    ],
+    generatedAt,
+  );
+
+  return {
+    snapshot: {
+      id,
+      prodajnoMesto: MOCK_OUTLET,
+      generatedAt,
+      rowCount: 2,
+      contentHash: mockContentHash(body),
+      // Nothing has accepted the file: the seeded shop has configured no target,
+      // which is the state a fresh install is actually in.
+      publishedAt: null,
+      publishedTarget: null,
+      // Derived on read, exactly as the backend derives it — never stored.
+      current: false,
+    },
+    body,
+  };
+}
+
+/**
+ * The prodajna cena the file publishes for each šifra — the inverse of
+ * `renderMockCenovnik`, and the only source the till guard may compare against.
+ * Columns are located by NAME out of the file's own header, as
+ * `cenovnik.rs::published_prices` does it, so a reordered header cannot silently
+ * shift the price column.
+ */
+function publishedPrices(body: string): Map<string, number> {
+  const lines = body.replace(/^﻿/, "").split(/\r?\n/);
+  const header = (lines.shift() ?? "").split(";");
+  const sifraAt = header.indexOf("sifra");
+  const cenaAt = header.indexOf("prodajna_cena");
+  const prices = new Map<string, number>();
+
+  if (sifraAt < 0 || cenaAt < 0) {
+    return prices;
+  }
+
+  for (const line of lines) {
+    const fields = line.split(";");
+    const sifra = fields[sifraAt];
+    const cena = fields[cenaAt];
+    if (!sifra || !/^-?\d+\.\d{2}$/.test(cena ?? "")) {
+      continue;
+    }
+    prices.set(sifra, Math.round(Number(cena) * 100));
+  }
+
+  return prices;
 }
 
 /**

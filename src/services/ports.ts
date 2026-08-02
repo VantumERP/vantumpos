@@ -20,6 +20,9 @@ import type {
   CashMovementRequest,
   CategorySummary,
   CategorySalesReport,
+  CenovnikPublishTarget,
+  CenovnikSnapshot,
+  CenovnikSnapshotDetail,
   CloseShiftRequest,
   CommitImportRequest,
   CompleteSaleRequest,
@@ -51,6 +54,7 @@ import type {
   OpenShiftRequest,
   PaymentMethodReport,
   PrethodnaCenaDto,
+  PriceDivergence,
   ProductLedger,
   ProductListQuery,
   ProductListResult,
@@ -223,6 +227,15 @@ export interface SalesService {
    * never refuses the sale.
    */
   assessCashPayment(cashMinor: number): Promise<AmlAssessment>;
+  /**
+   * Articles in the draft priced above what the outlet's current cenovnik
+   * publishes (ZZP čl. 6 st. 4, req. 12). Advisory in exactly the way
+   * `assessCashPayment` is: `completeSale` accepts the sale whatever this
+   * returns, and an empty answer is the ordinary case. Asked while the cart is
+   * being built, so the operator learns about a divergence before the money
+   * changes hands rather than from a log afterwards.
+   */
+  assessPriceIntegrity(request: SaleDraftRequest): Promise<PriceDivergence[]>;
 }
 
 export interface InventoryService {
@@ -479,6 +492,34 @@ export interface RetentionService {
   extendPolicy(recordClass: RecordClass, retainUntil: string): Promise<RetentionPolicy>;
 }
 
+/**
+ * The published cenovnik (ZZP čl. 6) — where it goes, and what has been
+ * published so far.
+ *
+ * **Nothing here publishes on demand.** Čl. 6 st. 3 wants the file to match the
+ * outlet's current prices *„u realnom vremenu“*, so publication rides on the
+ * write that moved a price (req. 11) and this surface only reports. A „objavi
+ * sada“ button would be a second source of truth about when the shop last
+ * published, and the one thing an operator could then do wrong is believe it.
+ *
+ * Reads are open; `setPublishTarget` is admin-gated backend-side — where the
+ * shop's published prices go is what čl. 6 st. 4 then binds it to.
+ */
+export interface CenovnikService {
+  /** The outlet's archive, newest first. Empty before the first publish. */
+  listSnapshots(): Promise<CenovnikSnapshot[]>;
+  /** One archived cenovnik with its file, or `null` when no such snapshot exists. */
+  getSnapshot(snapshotId: number): Promise<CenovnikSnapshotDetail | null>;
+  getPublishTarget(): Promise<CenovnikPublishTarget>;
+  setPublishTarget(target: CenovnikPublishTarget): Promise<CenovnikPublishTarget>;
+  /**
+   * The ZZP čl. 6 duty with its čl. 210 figure already resolved against the
+   * **stored** legal form. The frontend never derives a figure and never picks
+   * a tier: an unset legal form answers `penalty: null`.
+   */
+  getNotice(): Promise<LegalNotice>;
+}
+
 export interface PrintService {
   /** Opens an exported document in the OS default handler for printing. */
   openForPrint(path: string): Promise<void>;
@@ -527,5 +568,6 @@ export interface PosServices {
   worktime: WorkTimeService;
   privacy: PrivacyService;
   retention: RetentionService;
+  cenovnik: CenovnikService;
   print: PrintService;
 }

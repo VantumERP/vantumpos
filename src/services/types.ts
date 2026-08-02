@@ -98,6 +98,69 @@ export interface LegalNotice {
   isLegalDuty: boolean;
 }
 
+/**
+ * Where the shop has said its cenovnik goes — `commands::cenovnik::
+ * PublishTargetSettings` (SW-12 req. 15).
+ *
+ * `notConfigured` is an honest state, not a failure: the file is still rendered
+ * and archived, and **nothing in the UI may read it as „the shop is in
+ * breach“**. Whether a trader with no website must create one is unresolved
+ * (§2b), and asserting otherwise is the one claim this product may not make.
+ */
+export type CenovnikPublishTarget =
+  | { kind: "notConfigured" }
+  | { kind: "localFolder"; folder: string };
+
+/**
+ * One archived cenovnik as the list shows it — `commands::cenovnik::
+ * CenovnikSnapshotSummary`, without the file itself.
+ *
+ * `publishedAt` is `null` while the file was generated and archived but no
+ * target accepted it. `current` is DERIVED backend-side (newest `generatedAt`,
+ * a same-second tie broken by the larger id) — it is the file čl. 6 st. 4 binds
+ * the shop to today, and nothing on this side recomputes it.
+ */
+export interface CenovnikSnapshot {
+  id: number;
+  prodajnoMesto: string;
+  /** RFC3339, as every instant in this app travels. */
+  generatedAt: string;
+  rowCount: number;
+  contentHash: string;
+  publishedAt: string | null;
+  publishedTarget: string | null;
+  current: boolean;
+}
+
+/** An archived cenovnik together with the file, byte for byte as published. */
+export interface CenovnikSnapshotDetail {
+  snapshot: CenovnikSnapshot;
+  body: string;
+}
+
+/**
+ * One article the till is about to ring above the price its outlet published —
+ * `commands::sales::PriceDivergence` (req. 12).
+ *
+ * Advisory and only advisory: čl. 6 st. 4 binds a trader **who publishes** a
+ * cenovnik to adhere to it, but the register has to be able to record what
+ * actually happened at the counter, so nothing here may block a sale. Below the
+ * published price is silent — a discount is not a breach.
+ */
+export interface PriceDivergence {
+  productId: number;
+  productName: string;
+  productSku: string;
+  /** What the till is about to charge for one unit, in para. */
+  chargedUnitPriceMinor: number;
+  /** What the outlet's current cenovnik says for that article, in para. */
+  publishedUnitPriceMinor: number;
+  /** The snapshot the comparison was made against — the exhibit, never omitted. */
+  snapshotId: number;
+  snapshotGeneratedAt: string;
+  snapshotContentHash: string;
+}
+
 export type RateSource = "nbs" | "manual";
 
 export interface EurRate {
@@ -445,6 +508,12 @@ export interface ProductSummary {
   countryOfOrigin?: string | null;
   officialGoodsCode?: string | null;
   barcodeKind?: ProductBarcodeKind | null;
+  /** The measure the jedinična cena is EXPRESSED in — `kg`, `l`, `kom`. Read
+   *  back so a form can round-trip it; see `SaveProductRequest`. */
+  jedinicnaCenaJedinica?: string | null;
+  /** The content of one selling unit in that measure, value × 1000: a 0,75 l
+   *  bottle is `750`. */
+  jedinicnaCenaSadrzajMilli?: number | null;
   externalSource: ProductExternalSource | null;
 }
 
@@ -496,6 +565,23 @@ export interface SaveProductRequest {
   countryOfOrigin?: string | null;
   officialGoodsCode?: string | null;
   barcodeKind?: ProductBarcodeKind | null;
+  /**
+   * The jedinična cena pair the published cenovnik needs (SW-12 req. 10). ZZP
+   * čl. 6 st. 2's second sentence pulls st. 1 into the published file, so a
+   * cenovnik carrying only the prodajna cena does not discharge the duty.
+   *
+   * `jedinicnaCenaJedinica` is the measure the unit price is expressed in
+   * (`kg`, `l`, `kom`); `jedinicnaCenaSadrzajMilli` is the content of one
+   * selling unit in that measure, value × 1000 — a 0,75 l bottle is `750`.
+   * Both nullable: a product priced per piece may legitimately have neither,
+   * and nothing guesses a unit price from a package size nobody entered.
+   *
+   * **This request is a FULL replacement of the row.** A form that reads the
+   * pair but does not send it back clears it on the next ordinary edit, and the
+   * published file then loses the article's jedinična cena.
+   */
+  jedinicnaCenaJedinica?: string | null;
+  jedinicnaCenaSadrzajMilli?: number | null;
   externalSource?: ProductExternalSource | null;
 }
 

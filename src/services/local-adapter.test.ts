@@ -1153,6 +1153,67 @@ describe("local service adapter", () => {
     ]);
   });
 
+  it("maps the cenovnik surface to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "cenovnik_list_snapshots":
+          return Promise.resolve([]);
+        case "cenovnik_get_publish_target":
+          return Promise.resolve({ kind: "notConfigured" });
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    await services.cenovnik.listSnapshots();
+    await services.cenovnik.getSnapshot(7);
+    await services.cenovnik.getPublishTarget();
+    await services.cenovnik.setPublishTarget({
+      kind: "localFolder",
+      folder: "/Users/ana/sajt/cenovnik",
+    });
+    await services.cenovnik.getNotice();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "cenovnik_list_snapshots");
+    expect(invoke).toHaveBeenNthCalledWith(2, "cenovnik_get_snapshot", {
+      snapshotId: 7,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "cenovnik_get_publish_target");
+    expect(invoke).toHaveBeenNthCalledWith(4, "cenovnik_set_publish_target", {
+      request: { kind: "localFolder", folder: "/Users/ana/sajt/cenovnik" },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, "cenovnik_get_notice");
+
+    // Čl. 6 st. 3 wants the published file to match the outlet's current prices
+    // „u realnom vremenu“, so publication rides on the write that moved a price
+    // (req. 11). A `publishNow` on this surface would be a second answer to
+    // „when did the shop last publish“ — the assertion is over the SHAPE of the
+    // object, not over the five calls this test happened to make.
+    expect(Object.keys(services.cenovnik).sort()).toEqual([
+      "getNotice",
+      "getPublishTarget",
+      "getSnapshot",
+      "listSnapshots",
+      "setPublishTarget",
+    ]);
+  });
+
+  it("maps the till price-integrity check to sales_assess_price_integrity", async () => {
+    const invoke = vi.fn().mockResolvedValue([]);
+    const services = createLocalServices(invoke);
+    const draft = {
+      items: [{ productId: 1, quantityMilli: 1000 }],
+      receiptDiscount: null,
+    };
+
+    await services.sales.assessPriceIntegrity(draft);
+
+    expect(invoke).toHaveBeenCalledWith("sales_assess_price_integrity", {
+      request: draft,
+    });
+  });
+
   it("opens an exported document for printing through the opener plugin", async () => {
     const { openPath } = await import("@tauri-apps/plugin-opener");
     const services = createLocalServices(vi.fn());
@@ -1169,6 +1230,105 @@ describe("local service adapter", () => {
 });
 
 describe("mock service adapter", () => {
+  /**
+   * Req. 11. A double that did not republish on the price write would warn at
+   * the till after every ordinary price raise, where the real backend stays
+   * silent because it republished first — the exact failure the AML double's
+   * „must not warn where the real backend would stay silent“ rule guards
+   * against, one law over.
+   */
+  it("republishes the cenovnik on a price write and stays silent at the till", async () => {
+    const services = createMockServices();
+    const before = await services.cenovnik.listSnapshots();
+
+    const product = (await services.catalog.getProduct(1))!;
+    await services.catalog.updateProduct(1, {
+      ...product,
+      salePriceMinor: 19_999,
+    });
+
+    const after = await services.cenovnik.listSnapshots();
+    expect(after.length).toBe(before.length + 1);
+    expect(after[0].current).toBe(true);
+    expect(after[1].current).toBe(false);
+
+    const detail = await services.cenovnik.getSnapshot(after[0].id);
+    expect(detail?.body).toContain("199.99");
+
+    await expect(
+      services.sales.assessPriceIntegrity({
+        items: [{ productId: 1, quantityMilli: 1000 }],
+        receiptDiscount: null,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("does not republish for an edit that moves no published price", async () => {
+    const services = createMockServices();
+    const before = await services.cenovnik.listSnapshots();
+
+    const product = (await services.catalog.getProduct(1))!;
+    await services.catalog.updateProduct(1, {
+      ...product,
+      minimumStockMilli: 9_000,
+    });
+
+    expect((await services.cenovnik.listSnapshots()).length).toBe(
+      before.length,
+    );
+  });
+
+  /**
+   * Req. 12 / čl. 6 st. 4. The mock's only way to reach a stale published file
+   * is the one the backend also has: the archive says one price while the
+   * catalog says another. Below the published price stays silent — a discount
+   * is not a breach.
+   */
+  it("warns only for an article priced above what the archive publishes", async () => {
+    const services = createMockServices();
+    const draft = {
+      items: [{ productId: 1, quantityMilli: 1000 }],
+      receiptDiscount: null,
+    };
+
+    // The seeded current file publishes MLEKO-1L at 159,99 — the catalog price.
+    await expect(services.sales.assessPriceIntegrity(draft)).resolves.toEqual(
+      [],
+    );
+
+    const product = (await services.catalog.getProduct(1))!;
+    // Move the catalog price without letting the file follow, which is what a
+    // crash between the commit and the publish leaves behind.
+    product.salePriceMinor = 19_999;
+
+    const [divergence] = await services.sales.assessPriceIntegrity(draft);
+    expect(divergence.productSku).toBe("MLEKO-1L");
+    expect(divergence.chargedUnitPriceMinor).toBe(19_999);
+    expect(divergence.publishedUnitPriceMinor).toBe(15_999);
+    // The exhibit: čl. 6 st. 4 binds the shop only to the file in force.
+    expect(divergence.snapshotId).toBeGreaterThan(0);
+
+    product.salePriceMinor = 9_999;
+    await expect(services.sales.assessPriceIntegrity(draft)).resolves.toEqual(
+      [],
+    );
+  });
+
+  it("refuses a relative publish folder and keeps the target unchanged", async () => {
+    const services = createMockServices();
+    await services.auth.login({ username: "admin", credential: "1234" });
+
+    await expect(
+      services.cenovnik.setPublishTarget({
+        kind: "localFolder",
+        folder: "cenovnik",
+      }),
+    ).rejects.toMatchObject({ message: expect.stringMatching(/puna putanja/) });
+    await expect(services.cenovnik.getPublishTarget()).resolves.toEqual({
+      kind: "notConfigured",
+    });
+  });
+
   it("returns deterministic health for UI tests", async () => {
     const services = createMockServices();
     const health = await services.settings.getHealth();

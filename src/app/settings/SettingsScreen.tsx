@@ -71,6 +71,7 @@ import type {
   TaxRate,
 } from "@/services/types";
 
+import { CenovnikPanel } from "./CenovnikPanel";
 import { RetentionPanel } from "./RetentionPanel";
 import { ShopProfilePanel } from "./ShopProfilePanel";
 
@@ -108,6 +109,7 @@ type SettingsTab =
   | "calendar"
   | "users"
   | "rokovi"
+  | "cenovnik"
   | "backup";
 
 export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
@@ -236,6 +238,12 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           onSelect={() => setActiveTab("rokovi")}
         >
           Rokovi čuvanja
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "cenovnik"}
+          onSelect={() => setActiveTab("cenovnik")}
+        >
+          Cenovnik
         </SettingsTabButton>
         <SettingsTabButton
           active={activeTab === "backup"}
@@ -384,6 +392,18 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       */}
       {activeTab === "rokovi" ? (
         <RetentionPanel retention={services.retention} />
+      ) : null}
+
+      {/*
+        Where the published cenovnik goes IS a podešavanje (ZZP čl. 6 st. 2, req.
+        15), and it is the only part of SW-12 that is: the file itself is
+        republished by the write that moved a price, and the archive is a record
+        the shop keeps, not something anybody switches off. The panel loads its
+        own data — a shop that has published on every price move for a year has a
+        long archive, and no other tab needs it.
+      */}
+      {activeTab === "cenovnik" ? (
+        <CenovnikPanel cenovnik={services.cenovnik} />
       ) : null}
 
       {activeTab === "backup" ? (

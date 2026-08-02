@@ -154,6 +154,23 @@ pub fn publish_target(state: &AppState) -> Result<PublishTargetSettings, AppErro
     load_publish_target(&state.db().open()?)
 }
 
+/// The ZZP čl. 6 duty and its čl. 210 fine, resolved against the **stored**
+/// legal form (req. 18).
+///
+/// The panel that renders this may not author a figure — every statutory sum in
+/// this crate lives in `legal.rs` — and it may not pick a tier either: an unset
+/// legal form yields `penalty: None`, and a screen that filled that silence with
+/// a plausible number would put the pravno-lice 200.000 in front of a
+/// preduzetnik, which is precisely what req. 18 forbids.
+///
+/// Not admin-gated. Reading what the law asks of the shop is not a privilege,
+/// and the same reasoning keeps [`publish_target`] and [`list_snapshots`] open.
+pub fn cenovnik_notice(state: &AppState) -> Result<crate::legal::LegalNotice, AppError> {
+    Ok(crate::legal::cenovnik_not_published(
+        &crate::commands::settings::load_shop_profile(state)?,
+    ))
+}
+
 /// Chooses where the cenovnik is published, from the owner's settings screen.
 ///
 /// **Admin only.** Where the shop's published prices go is the thing čl. 6
@@ -677,6 +694,13 @@ pub fn cenovnik_get_snapshot(
 }
 
 #[tauri::command]
+pub fn cenovnik_get_notice(
+    state: State<'_, AppState>,
+) -> Result<crate::legal::LegalNotice, CommandError> {
+    cenovnik_notice(state.inner()).map_err(Into::into)
+}
+
+#[tauri::command]
 pub fn cenovnik_get_publish_target(
     state: State<'_, AppState>,
 ) -> Result<PublishTargetSettings, CommandError> {
@@ -698,9 +722,9 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        current_published_cenovnik, list_snapshots, publish_current, publish_target,
-        purge_expired_snapshots, read_snapshot, republish_after_price_move, save_publish_target,
-        PublishTargetSettings,
+        cenovnik_notice, current_published_cenovnik, list_snapshots, publish_current,
+        publish_target, purge_expired_snapshots, read_snapshot, republish_after_price_move,
+        save_publish_target, PublishTargetSettings,
     };
     use crate::app_error::AppError;
     use crate::cenovnik::{published_file_name, NotConfigured, PublishOutcome, PublishTarget};
@@ -2290,6 +2314,66 @@ mod tests {
                     "nothing leaves the machine once the target is cleared"
                 );
             });
+        });
+    }
+
+    /// Task 8's panel prints a fine figure, and req. 18 says which one. The
+    /// panel may not author it — every statutory sum lives in `legal.rs` — so it
+    /// is resolved here against the **stored** legal form and handed over whole.
+    ///
+    /// An unset form yields no figure at all: the panel then says nothing about
+    /// money rather than guessing a tier, which is the one mistake that cannot be
+    /// walked back once a shop owner has read it.
+    #[test]
+    fn the_notice_resolves_the_stored_tier_and_stays_silent_while_it_is_unset() {
+        with_shop("cenovnik_notice_tier", |state| {
+            sign_in_admin(state);
+
+            let unset = cenovnik_notice(state).expect("notice should resolve");
+            assert!(
+                unset.penalty.is_none(),
+                "no legal form is stored yet, so no figure may be quoted: {:?}",
+                unset.penalty
+            );
+            assert!(
+                unset.citation.contains("čl. 6 st. 1–3"),
+                "{}",
+                unset.citation
+            );
+
+            crate::commands::settings::save_shop_profile(
+                state,
+                crate::commands::settings::ShopProfileRequest {
+                    pravna_forma: Some(crate::commands::settings::PravnaForma::Preduzetnik),
+                    pdv_obveznik: Some(false),
+                    distance_selling: Some(false),
+                    lpfr_in_premises: Some(true),
+                    lpfr_carve_out_internet_only: Some(false),
+                    lpfr_carve_out_own_used_assets: Some(false),
+                    esir_elements: Vec::new(),
+                },
+            )
+            .expect("admin should save the profile");
+
+            let notice = cenovnik_notice(state).expect("notice should resolve");
+            let penalty = notice.penalty.expect("the stored tier is known");
+            assert!(
+                penalty.contains("100.000"),
+                "the preduzetnik row is ZZP čl. 210 st. 3: {penalty}"
+            );
+            assert!(
+                penalty.contains("50.000"),
+                "ZoP čl. 173 st. 1 halves it on payment within eight days: {penalty}"
+            );
+            assert!(
+                !penalty.contains("200.000"),
+                "the pravno-lice sum must never reach a preduzetnik: {penalty}"
+            );
+            assert!(
+                notice.summary.contains("nije razjašnjeno"),
+                "the no-website case is unresolved and the panel says so: {}",
+                notice.summary
+            );
         });
     }
 

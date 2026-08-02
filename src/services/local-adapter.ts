@@ -19,6 +19,9 @@ import type {
   CashierTurnoverReport,
   CategorySummary,
   CategorySalesReport,
+  CenovnikPublishTarget,
+  CenovnikSnapshot,
+  CenovnikSnapshotDetail,
   CompanySettings,
   CorrectionReport,
   CompletedSale,
@@ -43,6 +46,7 @@ import type {
   LowStockReport,
   PaymentMethodReport,
   PrethodnaCenaDto,
+  PriceDivergence,
   ProcessingActivity,
   RetentionPolicy,
   ProductLedger,
@@ -191,6 +195,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<CompletedSale>("sales_complete", { request }),
       assessCashPayment: (cashMinor) =>
         invoke<AmlAssessment>("sales_assess_cash_payment", { cashMinor }),
+      assessPriceIntegrity: (request) =>
+        invoke<PriceDivergence[]>("sales_assess_price_integrity", { request }),
     },
     inventory: {
       listStock: (query) => invoke<StockListResult>("inventory_list_stock", { query }),
@@ -397,6 +403,21 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
           recordClass,
           retainUntil,
         }),
+    },
+    cenovnik: {
+      listSnapshots: () =>
+        invoke<CenovnikSnapshot[]>("cenovnik_list_snapshots"),
+      getSnapshot: (snapshotId) =>
+        invoke<CenovnikSnapshotDetail | null>("cenovnik_get_snapshot", {
+          snapshotId,
+        }),
+      getPublishTarget: () =>
+        invoke<CenovnikPublishTarget>("cenovnik_get_publish_target"),
+      setPublishTarget: (request) =>
+        invoke<CenovnikPublishTarget>("cenovnik_set_publish_target", {
+          request,
+        }),
+      getNotice: () => invoke<LegalNotice>("cenovnik_get_notice"),
     },
     print: {
       openForPrint: (path) => openPath(path),

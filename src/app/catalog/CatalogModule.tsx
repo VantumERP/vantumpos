@@ -107,6 +107,16 @@ interface ProductFormState {
   barcode: string;
   categoryId: string;
   unitOfMeasure: string;
+  /**
+   * The jedinična cena pair the published cenovnik needs (SW-12 req. 10, ZZP
+   * čl. 6 st. 1/st. 2). `jedinicnaCenaJedinica` is the measure the unit price is
+   * EXPRESSED in — `unitOfMeasure` above is the one the goods are SOLD in, and
+   * for a 0,75 l bottle sold by the piece the two differ. `jedinicnaCenaSadrzaj`
+   * is the content of one selling unit in that measure, typed the way a person
+   * writes it („0,75“) and converted to the schema-wide milli scale on save.
+   */
+  jedinicnaCenaJedinica: string;
+  jedinicnaCenaSadrzaj: string;
   salePrice: string;
   purchasePrice: string;
   taxRateId: string;
@@ -163,6 +173,11 @@ const EMPTY_PRODUCT_FORM: ProductFormState = {
   barcode: "",
   categoryId: "none",
   unitOfMeasure: "kom",
+  // Empty, never guessed: an article priced per piece may legitimately have no
+  // jedinična cena of its own, and a unit price inferred from a package size
+  // nobody entered would be published as fact under čl. 6 st. 4.
+  jedinicnaCenaJedinica: "",
+  jedinicnaCenaSadrzaj: "",
   salePrice: "",
   purchasePrice: "",
   taxRateId: "",
@@ -365,6 +380,14 @@ export function CatalogModule({ services, onOpenInventory }: CatalogModuleProps)
       barcode: product.barcode ?? "",
       categoryId: product.categoryId?.toString() ?? "none",
       unitOfMeasure: product.unitOfMeasure,
+      // Read back so an ordinary edit round-trips it: `SaveProductRequest`
+      // replaces the whole row, so a form that dropped the pair here would clear
+      // the article's published jedinična cena on the next save.
+      jedinicnaCenaJedinica: product.jedinicnaCenaJedinica ?? "",
+      jedinicnaCenaSadrzaj:
+        product.jedinicnaCenaSadrzajMilli == null
+          ? ""
+          : quantityInput(product.jedinicnaCenaSadrzajMilli),
       salePrice: minorUnitsInput(product.salePriceMinor),
       purchasePrice: minorUnitsInput(product.purchasePriceMinor),
       taxRateId: product.taxRateId.toString(),
@@ -1708,6 +1731,43 @@ function ProductSheet({
                         }
                       />
                     </div>
+                    {/*
+                      ZZP čl. 6 st. 1: uz prodajnu se ističe i jedinična cena, i
+                      čl. 6 st. 2 to isto traži u objavljenom cenovniku. Program
+                      ne pogađa sadržaj pakovanja — ako ova dva polja ostanu
+                      prazna, u cenovniku stoji prazna ćelija umesto izmišljene
+                      cene.
+                    */}
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <TextField
+                        error={errors.jedinicnaCenaJedinica}
+                        id="product-jedinicna-cena-jedinica"
+                        label="Jedinica za jediničnu cenu"
+                        value={form.jedinicnaCenaJedinica}
+                        onChange={(value) =>
+                          onFormChange({
+                            ...form,
+                            jedinicnaCenaJedinica: value,
+                          })
+                        }
+                      />
+                      <TextField
+                        error={errors.jedinicnaCenaSadrzaj}
+                        id="product-jedinicna-cena-sadrzaj"
+                        label="Sadržaj pakovanja"
+                        value={form.jedinicnaCenaSadrzaj}
+                        onChange={(value) =>
+                          onFormChange({ ...form, jedinicnaCenaSadrzaj: value })
+                        }
+                      />
+                    </div>
+                    <FieldDescription>
+                      Jedinična cena je cena po jedinici mere — na primer po
+                      litru ili po kilogramu. Za flašu od 0,75 l unesite „l“ i
+                      „0,75“; program sam deli prodajnu cenu i objavljuje
+                      rezultat u cenovniku. Ostavite prazno za artikal koji se
+                      prodaje po komadu.
+                    </FieldDescription>
                     <Field orientation="horizontal">
                       <Switch
                         id="product-negative-stock"
@@ -2439,6 +2499,31 @@ function validateProductForm(form: ProductFormState): ProductFieldErrors {
       "Obrazloženje je obavezno za kvarljivu robu.";
   }
 
+  // The same two refusals `commands::catalog::normalize_product_request` makes,
+  // said here so the operator reads them beside the input rather than after a
+  // round trip. A sadržaj without its measure divides by nothing and can state
+  // no jedinična cena at all (ZZP čl. 6 st. 1).
+  if (form.jedinicnaCenaSadrzaj.trim()) {
+    let sadrzajMilli: number | null = null;
+    try {
+      sadrzajMilli = parseQuantityInput(form.jedinicnaCenaSadrzaj);
+    } catch (error) {
+      errors.jedinicnaCenaSadrzaj = commandMessage(
+        error,
+        "Sadržaj pakovanja nije ispravan.",
+      );
+    }
+
+    if (sadrzajMilli !== null && sadrzajMilli <= 0) {
+      errors.jedinicnaCenaSadrzaj = "Sadržaj pakovanja mora biti veći od nule.";
+    }
+
+    if (!form.jedinicnaCenaJedinica.trim()) {
+      errors.jedinicnaCenaJedinica =
+        "Uz sadržaj pakovanja izaberite i jedinicu za jediničnu cenu.";
+    }
+  }
+
   return errors;
 }
 
@@ -2472,6 +2557,17 @@ function productRequest(form: ProductFormState): SaveProductRequest {
       form.barcodeKind === UNSET_BARCODE_KIND
         ? null
         : (form.barcodeKind as ProductBarcodeKind),
+    // SW-12 req. 10. Sent on EVERY save, not only when the operator touched
+    // them: `SaveProductRequest` replaces the whole row, so omitting the pair
+    // would clear the article's published jedinična cena on an ordinary edit.
+    jedinicnaCenaJedinica: form.jedinicnaCenaJedinica.trim() || null,
+    // A sadržaj is meaningless without its measure — `validateProductForm` has
+    // already refused that pairing, and dropping it here keeps the two from
+    // ever disagreeing, exactly as the Rust side does.
+    jedinicnaCenaSadrzajMilli:
+      form.jedinicnaCenaJedinica.trim() && form.jedinicnaCenaSadrzaj.trim()
+        ? parseQuantityInput(form.jedinicnaCenaSadrzaj)
+        : null,
     externalSource: form.externalSource,
   };
 }

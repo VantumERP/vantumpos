@@ -366,6 +366,160 @@ describe("CatalogModule", () => {
     });
   });
 
+  /**
+   * SW-12 req. 10 `[LEGAL]`. ZZP čl. 6 st. 2's second sentence pulls st. 1 into
+   * the published cenovnik, so the file has to carry a jedinična cena — and it
+   * can only carry one if the form captures the measure and the package content
+   * the backend divides by. Without this the published file's jedinična cena is
+   * empty for every article.
+   *
+   * A 0,75 l bottle at 279,00 RSD is 372,00 RSD per litar; the division itself
+   * is asserted in `src-tauri/src/cenovnik.rs`, and what this test owns is that
+   * the pair the division needs actually leaves the form.
+   */
+  describe("jedinična cena (ZZP čl. 6 st. 1/st. 2)", () => {
+    it("sends the measure and the package content on save", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      const price = await screen.findByLabelText("Prodajna cena sa PDV");
+      await user.clear(price);
+      await user.type(price, "279");
+      await user.type(
+        screen.getByLabelText("Jedinica za jediničnu cenu"),
+        "l",
+      );
+      await user.type(
+        screen.getByLabelText("Sadržaj pakovanja"),
+        "0,75",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({
+            salePriceMinor: 27_900,
+            jedinicnaCenaJedinica: "l",
+            // The schema-wide milli scale: value × 1000, so 0,75 l is 750. A
+            // renderer that assumed any other scale would publish a jedinična
+            // cena wrong by three orders of magnitude.
+            jedinicnaCenaSadrzajMilli: 750,
+          }),
+        );
+      });
+    });
+
+    /**
+     * `SaveProductRequest` is a FULL replacement of the row, so a form that
+     * reads the pair but does not send it back clears it on the next ordinary
+     * edit — and the published file silently loses that article's jedinična
+     * cena.
+     */
+    it("round-trips the pair through an edit that touches neither field", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Jedinica za jediničnu cenu"),
+        "l",
+      );
+      await user.type(screen.getByLabelText("Sadržaj pakovanja"), "1");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
+
+      // Reopen and save again, touching only the name.
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      expect(await screen.findByLabelText("Jedinica za jediničnu cenu")).toHaveValue(
+        "l",
+      );
+      expect(screen.getByLabelText("Sadržaj pakovanja")).toHaveValue("1");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenLastCalledWith(
+          1,
+          expect.objectContaining({
+            jedinicnaCenaJedinica: "l",
+            jedinicnaCenaSadrzajMilli: 1000,
+          }),
+        );
+      });
+    });
+
+    /**
+     * A sadržaj without its measure divides by nothing, so it can state no
+     * jedinična cena at all — the Rust side refuses that pairing and the form
+     * says so before the round trip rather than after it.
+     */
+    it("refuses a package content with no measure to express it in", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Sadržaj pakovanja"),
+        "0,75",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      expect(
+        await screen.findByText(
+          "Uz sadržaj pakovanja izaberite i jedinicu za jediničnu cenu.",
+        ),
+      ).toBeInTheDocument();
+      expect(updateProduct).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Nothing guesses a unit price from a package size nobody entered: an
+     * article priced per piece may legitimately have neither field, and the
+     * published cell is then empty — a visible gap, not a fabricated figure.
+     */
+    it("sends both as null when the operator says nothing", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({
+            jedinicnaCenaJedinica: null,
+            jedinicnaCenaSadrzajMilli: null,
+          }),
+        );
+      });
+    });
+  });
+
   // ZoT čl. 34 st. 5 — the Rust gate refuses every create/update from a
   // distance-selling shop that carries no proizvođač and no zemlja proizvodnje.
   // Without these fields on the sheet that shop cannot save a single article.
