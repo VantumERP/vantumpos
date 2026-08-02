@@ -381,7 +381,7 @@ obavezujući nalog are live. The one **legal** duty in SW-10 is čl. 46, and it 
 | 7 — obrazac | `breaches_export_obrazac` renders the **Pravilnik 40/2019** obrazac in its five prescribed sections, down to the mesto/datum + Ime i prezime + Potpis block and the „Prilog:“ slot. Print/scan only — **no submission API exists** — and the countdown is the flat **72 h of Pravilnik čl. 3**. The export is a disclosure and is logged as one, so a rendered obrazac never outlives its čl. 48 st. 2 line | `497c95c`, `fb3b4a7` |
 | 8 — čl. 47 register | `cl47.rs` generates the evidencija radnji obrade at every launch and on demand (`cl47_generate` / `cl47_export`). Every rok is read out of `retention_policies` **at generation time**, so the register cannot print a period the till does not apply; `trajno` is printed for this register alone (čl. 47 st. 7) and for neither log, which is a test rather than a comment | `31fa18a`, `db814ef` |
 | 9 — Privatnost | `src/app/privacy/` — four panels (Daljinska podrška, Evidencija pristupa, Povrede podataka, Radnje obrade), **admin-only in the nav and admin-gated behind every command**, with Daljinska podrška first so the module's one legal duty is its first surface. The čl. 50 copy reads „nije propisan prekršaj“ and names the opomena and the obavezujući nalog that *are* consequences | `a9ff1f7`, `546987f` |
-| 10 — docs + gates | This section; register rows 8, 9, 10, 11 and 12 re-stated; SW-10, SW-13 and SW-17 flipped to shipped with SW-10 kept labelled **prudential** and SW-17 re-worded per req. 50 (*provides the record required by* čl. 52 st. 6–7 — never *satisfies* the article); and the čl. 23 notice's new evidencija-pristupa section (req. 9) | this commit |
+| 10 — docs + gates | This section; register rows 8, 9, 10, 11 and 12 re-stated; SW-10, SW-13 and SW-17 flipped to shipped with SW-10 kept labelled **prudential** and SW-17 re-worded per req. 50 (*provides the record required by* čl. 52 st. 6–7 — never *satisfies* the article); and the čl. 23 notice's new evidencija-pristupa section (req. 9). The review of this task caught the notice's class-B retention row promising a deletion nothing performs; the row now states the not-before bound its stored `napomena` states and says that automatic deletion of the class „ne postoji“, pinned by two new `docs_guard` tests | this commit |
 
 **Verification gates — all six run from the repo root, every command exited `0`:**
 
@@ -389,16 +389,16 @@ obavezujući nalog are live. The one **legal** duty in SW-10 is čl. 46, and it 
 |---|---|---|
 | `bun run test` | **400 passed** / 0 failed, 27 files (was 359 / 22) | `0` |
 | `bun run build` | tsc + vite, 2740 modules transformed | `0` |
-| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **659 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 558) | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **661 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 558) | `0` |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
 | `git diff --check` | clean, no output | `0` |
 
-Net **+101 cargo / +41 bun** over the plan baseline. Latest migration: **v18**.
+Net **+103 cargo / +41 bun** over the plan baseline. Latest migration: **v18**.
 
 New Rust tests: 22 in `audit.rs`, 29 in `commands/audit.rs`, 13 in `commands/personnel.rs`, 14 in
-`commands/breaches.rs`, 13 in `cl47.rs`, plus additions in `db/migrations.rs`, `retention.rs` and
-`legal.rs`; 37 frontend tests across the five `src/app/privacy/*.test.tsx` files.
+`commands/breaches.rs`, 13 in `cl47.rs`, 2 in `docs_guard.rs`, plus additions in `db/migrations.rs`,
+`retention.rs` and `legal.rs`; 37 frontend tests across the five `src/app/privacy/*.test.tsx` files.
 
 **Deliberately not built** (`docs/REMAINING-SW-VERIFIED-RULES.md` §5 items 1–6, 14, 15, 22, 23, 24, 30)
 — read these as decisions, not as gaps: no claim anywhere that ZZPL requires an audit log, and no
@@ -421,11 +421,20 @@ under ZoP čl. 3, §6 R-2); and no headcount gate or plan-tier upsell on any of 
   the čl. 52 st. 7 skeleton. No breach-log retention class and no redaction path exists; the row is kept.
 - **SW-14 req. 28 — remote-support masking** of the absence-reason column, with the unmask logged, is
   still not built. SW-10 was its stated dependency and has now landed, so nothing blocks it.
-- **The two SW-14 defects found by the previous batch's closing audit are still open** and were not in
-  this batch's scope: `docs/compliance/obavestenje-zaposlenima.md` still prints the pravno-lice fine band
-  in its header, and its class-B retention row still promises a deletion (*„Brišu se pošto je mesec
-  zaključen“*) that no code performs — `retention::draft_purge_eligible` has no production caller, and
-  SW-13's purge sweep does not touch that class either.
+- **One of the two SW-14 defects found by the previous batch's closing audit is still open.**
+  `docs/compliance/obavestenje-zaposlenima.md` still prints the pravno-lice fine band in its header;
+  `the_cl_47_record_prints_only_the_preduzetnik_fine_tier` guards that shape for the sibling document and
+  has no counterpart for the čl. 23 notice. **The other is fixed.** The class-B retention row no longer
+  promises a deletion no code performs: it now states the not-before bound the stored `napomena` already
+  stated (*„Brišu se **tek** pošto je mesec zaključen i klasifikacija izvedena“*) and says on the same
+  line that automatic deletion of that class *„ne postoji“*, date-stamped. `draft_purge_eligible` and
+  `overtime_log_purge_eligible` remain gates with no production caller, and SW-13's sweep still does not
+  touch the class — the row now says exactly that. Two `docs_guard` tests pin both halves:
+  `no_notice_retention_row_promises_a_purge_no_job_performs` clears a deletion promise in the notice's
+  retention table only against an **exhaustive** match on `commands::personnel::PurgeableClass`, so a new
+  promise costs a new variant and a new variant costs a real sweep; and
+  `the_class_b_retention_row_says_no_automatic_purge_exists_for_it` keeps a bound with no sweep behind it
+  from being softened into what reads like a schedule.
 - **Backup encryption is opt-in.** `backup_crypto.rs` encrypts only once an admin sets a passphrase, so
   the čl. 50 st. 2 tač. 1 measure is available rather than in force. Register row 8 now says so; SW-2
   remains the action.

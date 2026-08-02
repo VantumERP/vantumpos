@@ -163,6 +163,114 @@ fn the_trajno_retention_row_names_what_actually_protects_it_on_a_restore() {
     );
 }
 
+/// A retention row that tells an employee something *is deleted* is a promise,
+/// and the only thing that can keep it is a sweep that names the class.
+/// `commands::personnel::PurgeableClass` is that list in full — two variants,
+/// `Credentials` and `AccessLog` — and a class absent from it is discarded by
+/// nothing. `retention::draft_purge_eligible` and `overtime_log_purge_eligible`
+/// are **gates, not sweeps**: they answer *may this go yet*, and every call site
+/// is inside `retention.rs`'s own `#[cfg(test)]` module.
+///
+/// So the Class B row that told an employee their drafts *„Brišu se pošto je
+/// mesec zaključen“* promised a deletion nothing performs — while the `napomena`
+/// stored beside that same class was written correctly as a not-before bound
+/// (*„Brišu se **tek** pošto je period zatvoren“*). The notice contradicted the
+/// machine-readable text it mirrors, and this is the second time this document
+/// promised the employee something the code never had (see `66636a3`).
+///
+/// The whitelist below is an **exhaustive** match on `PurgeableClass`, so a new
+/// promise in the notice costs a new variant, and a new variant costs a sweep.
+#[test]
+fn no_notice_retention_row_promises_a_purge_no_job_performs() {
+    use crate::commands::personnel::PurgeableClass;
+
+    // A sweep stated as something that happens: „brišu se“, „briše se“,
+    // „uklanjaju se“, „uklanja se“.
+    const PROMISE: [&str; 4] = ["brišu se", "briše se", "uklanjaju se", "uklanja se"];
+    // The one word that turns the promise back into what it really is — the
+    // earliest permitted day, not an event: „Brišu se **tek** pošto…“.
+    const NOT_BEFORE: &str = "tek ";
+
+    let swept: Vec<&str> = PurgeableClass::ALL
+        .iter()
+        .map(|class| match class {
+            PurgeableClass::Credentials => "PIN i lozinka",
+            PurgeableClass::AccessLog => "Evidencija pristupa",
+        })
+        .collect();
+
+    for (index, line) in NOTICE.lines().enumerate() {
+        let line_no = index + 1;
+        // The retention table is where the per-class claim is made; §2's prose
+        // narrates the same sweeps and is answerable to the rows it summarises.
+        if !line.starts_with('|') {
+            continue;
+        }
+
+        let lowercase = line.to_lowercase();
+        if !PROMISE.iter().any(|needle| lowercase.contains(needle)) {
+            continue;
+        }
+        if lowercase.contains(NOT_BEFORE) {
+            continue;
+        }
+
+        assert!(
+            swept.iter().any(|subject| line.contains(subject)),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} tells an employee that a class of \
+             their data is deleted. `commands::personnel::PurgeableClass` names every class a purge \
+             job actually sweeps — {swept:?} — and this row is none of them. \
+             `retention::draft_purge_eligible` and `overtime_log_purge_eligible` are gates with no \
+             production caller, so they delete nothing. State the not-before bound the stored \
+             `napomena` states („Brišu se tek pošto…“), or write the sweep and give the class a \
+             `PurgeableClass` variant."
+        );
+    }
+}
+
+/// The other half of the same defect, and the reason the pair exists: the guard
+/// above fires only on a promise, so softening the row to a bound satisfies it
+/// while leaving the employee unable to tell that **nothing sweeps this class at
+/// all**. A bound with no sweep behind it reads as a schedule.
+///
+/// Class B (`retention::RecordClass::WorktimeDraft`) is that class, so the row
+/// has to carry both facts — the not-before bound, and that no automatic
+/// deletion exists — and the stored `napomena` has to keep the bound it already
+/// states, because the two are read as one claim.
+#[test]
+fn the_class_b_retention_row_says_no_automatic_purge_exists_for_it() {
+    let rows = lines_with(NOTICE, "Radne verzije unosa");
+    assert!(
+        !rows.is_empty(),
+        "docs/compliance/obavestenje-zaposlenima.md must keep the Class B \
+         (`retention::RecordClass::WorktimeDraft`) retention row"
+    );
+
+    for (line_no, line) in rows {
+        assert!(
+            line.contains("tek pošto"),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} states the Class B retention as \
+             an event rather than as the not-before bound it is. Nothing purges this class; \
+             `draft_purge_eligible` only answers whether it *may* go. Mirror the stored `napomena`: \
+             „Brišu se tek pošto je mesec zaključen i klasifikacija izvedena“."
+        );
+        assert!(
+            line.contains("Automatsko brisanje") && line.contains("ne postoji"),
+            "docs/compliance/obavestenje-zaposlenima.md:{line_no} gives the employee a bound with \
+             no sweep behind it, which reads as a schedule. No purge job names this class — say so \
+             on the same line („Automatsko brisanje … ne postoji“), the way the trajno rows say \
+             that automatic cleanup of old backups „ne postoji“."
+        );
+    }
+
+    let napomena = crate::retention::RecordClass::WorktimeDraft.napomena();
+    assert!(
+        napomena.contains("tek pošto"),
+        "the note stored beside Class B must keep the not-before bound the čl. 23 notice mirrors — \
+         it is the machine-readable half of the same sentence: {napomena}"
+    );
+}
+
 /// The register and `PROGRESS.md` both credited `worktime::check_protection`
 /// with „maloletnik 35 h/8 h“. Only the daily leg exists — see
 /// `worktime::MINOR_DAILY_CAP_MINUTES` and the doc comment on
