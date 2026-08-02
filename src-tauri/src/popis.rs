@@ -174,14 +174,14 @@ pub fn advance(current: PopisStatus, event: PopisEvent) -> Result<PopisStatus, A
 /// the pure predicate and the engine guard cannot disagree about which states
 /// are blind.
 ///
-/// **This is one of the two limbs and must not be used alone to release book
-/// data.** `status` is a claim any UPDATE can make, and a session can be born in
-/// `counted_signed` with no potpis behind it — which is precisely the failure
-/// čl. 8 st. 5 names. Call [`book_quantities_released`] instead wherever the
-/// answer decides whether the commission gets the data; this predicate is for
-/// the case where the potpis is already known to exist, and for reasoning about
-/// the states themselves.
-pub fn book_quantities_visible(status: PopisStatus) -> bool {
+/// **This is one of the two limbs and it is module-private so that it cannot be
+/// used alone to release book data.** `status` is a claim any UPDATE can make,
+/// and a session can be born in `counted_signed` with no potpis behind it —
+/// which is precisely the failure čl. 8 st. 5 names. The visibility is the
+/// enforcement: a comment saying „call the other one“ is a convention, and this
+/// project's stated failure mode is guards that are conventions rather than
+/// mechanisms. [`book_quantities_released`] is the released interface.
+fn book_quantities_visible(status: PopisStatus) -> bool {
     !matches!(status, PopisStatus::Draft | PopisStatus::Counting)
 }
 
@@ -190,6 +190,19 @@ pub fn book_quantities_visible(status: PopisStatus) -> bool {
 /// … потпишу те листе“ — so both are required: the session must have left Phase
 /// A **and** a `faza = 'a'` signature must exist for it. The čl. 9 st. 3 potpis
 /// is a different event and does not stand in for it.
+///
+/// **This predicate governs every source of a book quantity in a popis response,
+/// not only `popis_lines.knjigovodstvena_kolicina_milli`.** The v20 write guard
+/// protects that one column and nothing else, so it is not the boundary — the
+/// perpetual book stock lives in `inventory_balances.quantity_milli` and is
+/// derivable from `inventory_movements`, and both are readable by any query at
+/// any time, in any popis session, with no trigger in the way. A `popis_lines`
+/// list or a count sheet that joins either of them to show an „expected“ or
+/// „prema knjigama“ column during `draft`/`counting` breaches čl. 8 st. 5 with
+/// every test in this repository still green. What the article forbids is book
+/// data reaching the commission before it has counted and signed, whatever
+/// table it is read out of; so when this predicate is false, a popis response
+/// carries no book quantity from any source at all.
 pub fn book_quantities_released(status: PopisStatus, phase_a_signed: bool) -> bool {
     book_quantities_visible(status) && phase_a_signed
 }
@@ -438,6 +451,18 @@ mod tests {
                     Some(status),
                     "{status:?} should survive the round trip through its stored value"
                 );
+                // The third mapping. `as_db_str` is a hand-written literal while
+                // the wire form is derived from the variant *identifier*, so a
+                // rename moves one and not the other: `CountedSigned` →
+                // `SignedCount` would send `signed_count` over IPC while the
+                // column kept `counted_signed`, and every assertion above would
+                // still pass. Pinning the two to each other puts the wire form
+                // behind the same schema anchor as the stored form.
+                assert_eq!(
+                    serde_json::to_string(&status).expect("a status should serialize"),
+                    format!("\"{}\"", status.as_db_str()),
+                    "{status:?} must reach the frontend as its stored value"
+                );
             }
 
             assert!(
@@ -445,6 +470,35 @@ mod tests {
                 "an unknown stored value must not resolve to a state"
             );
         });
+    }
+
+    /// `PopisEvent` never reaches a column, so nothing in the schema can anchor
+    /// it the way the status CHECK anchors `PopisStatus` — its only contract is
+    /// the IPC wire form, and that form is derived from the variant identifier,
+    /// so a rename silently rewrites it. Written out here so the frontend's
+    /// half of the contract has to be changed deliberately rather than by
+    /// renaming a variant.
+    #[test]
+    fn the_event_wire_form_is_the_frontend_contract() {
+        for (event, wire) in [
+            (PopisEvent::Count, "count"),
+            (PopisEvent::SignA, "sign_a"),
+            (PopisEvent::Compute, "compute"),
+            (PopisEvent::SignB, "sign_b"),
+            (PopisEvent::Post, "post"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&event).expect("an event should serialize"),
+                format!("\"{wire}\""),
+                "{event:?} must reach the frontend as {wire}"
+            );
+            assert_eq!(
+                serde_json::from_str::<PopisEvent>(&format!("\"{wire}\""))
+                    .expect("the frontend's own string must deserialize"),
+                event,
+                "{wire} must come back from the frontend as {event:?}"
+            );
+        }
     }
 
     /// The pure predicate and the v20 write guard must not be able to disagree
