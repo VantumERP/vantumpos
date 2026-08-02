@@ -779,7 +779,7 @@ Net **+3 cargo / +3 bun** over the Task 9 baseline. Latest migration: **v19**, u
 
 | Req. | State |
 |---|---|
-| **10** — jedinična cena + jedinica mere in the file | **Built, with one hole found during this gate run and NOT fixed — see below.** The eight columns ship, the unconfigured article publishes an empty cell rather than a guessed one, and D2 closed the catalog-form route to a wrong figure |
+| **10** — jedinična cena + jedinica mere in the file | **Built.** The eight columns ship, the unconfigured article publishes an empty cell rather than a guessed one, and both writers of `products` — the catalog form and the CSV import — now refuse a wrong figure through **one** validator, `cenovnik::validate_jedinicna_cena` (D2, then D4 below) |
 | **11** — publish rides the write | **Built.** Four paths, each threading `record_offered_price_change`'s own answer; the catalog path adds the jedinična cena, the one published price that log does not watch |
 | **12** — till guard | **Built.** Warns and never blocks, above-published direction only, names its exhibit, logs a `cenovnik_price_divergence` row; arms only off a file a target accepted |
 | **13** — anonymously fetchable endpoint | **NOT built and disclosed.** There is no endpoint. The seven fetchability rules ship as a contract in `PublishTarget`'s doc comment with a test that keeps them there; the acceptance criteria are F-13 (b) |
@@ -789,24 +789,36 @@ Net **+3 cargo / +3 bun** over the Task 9 baseline. Latest migration: **v19**, u
 | **17** — document that the čl. 6 st. 6 standard does not exist | **Done.** §6 items 4 and 12 carry the verified absence, the quarterly Sl. glasnik RS trigger through 01.05.2027, and the *practice, not law* label |
 | **18** — 100.000 preduzetnik, `200.000` unreachable | **Done.** `legal.rs::cenovnik_not_published`, and the blanket guard on the fixed-sum phrasing *„200.000 dinara“* — the bare literal cannot be the needle, because ZoR čl. 274 st. 2 legitimately fines a preduzetnik *„od 200.000 do 400.000“* elsewhere in the product |
 
-**Newly identified and still open — the import path can publish a wrong jedinična cena, and clobbers the
-jedinica mere on the way.** `[LEGAL]` D2 closed the catalog form. It did **not** close `importer.rs`,
-which writes `products` with its own `UPDATE`/`INSERT` and never calls `normalize_product_request`.
-Two things follow, and the second is the one that reaches the published file:
+**D4 — the import path clobbered the jedinica mere and could publish a wrong jedinična cena. FIXED
+02.08.2026.** `[LEGAL]` D2 closed the catalog form. It did **not** close `importer.rs`, which writes
+`products` with its own `UPDATE`/`INSERT` and never called `normalize_product_request`. Both legs were
+reproduced as failing tests before either was fixed:
 
-- `unit_of_measure` is `required: false` in the mapping step (`ImportWizard.tsx:109`), and when it is
-  unmapped `optional_value` returns `""`, which `importer.rs:744` substitutes with **`"kom"`**. A
-  routine price-update import therefore **silently rewrites the jedinica mere of every article it
-  matches**, whatever the shop had configured.
-- The pair `jedinicna_cena_jedinica` / `jedinicna_cena_sadrzaj_milli` is left untouched by that UPDATE,
-  and the v19 CHECK constrains only the pair against itself, never against `unit_of_measure`. So an
-  article legitimately configured under the NULL-sadržaj convention — `unit_of_measure = 'l'`,
-  jedinica `'l'`, sadržaj blank, which is exactly what D2's new gate *accepts* — comes out of an import
-  as `unit_of_measure = 'kom'` with jedinica still `'l'`, and the batch's own republish
-  (`importer.rs:450`) then publishes the D2 figure verbatim. Reproduced against the shipped tree: the
-  archived body reads `SKU-1;;Hleb;kom;372.00;372.00;l;02-08-2026` — *372,00 RSD po litru* for goods the
-  same row says are sold **po komadu**. Same wrong published number as D2, same čl. 6 st. 1 / st. 4
-  exposure, and **no warning at any layer**, because the operator never typed the unit at all.
+- **The measure was rewritten from a column nobody mapped.** `unit_of_measure` is `required: false` in
+  the mapping step (`ImportWizard.tsx:109`), and when unmapped `optional_value` returned `""`, which
+  the importer substituted with **`"kom"`**. A routine price-update import therefore silently rewrote
+  the jedinica mere of every article it matched. **Fix:** `supplied_unit_of_measure` returns `None` for
+  an unmapped column *and* for a blank cell in a mapped one — both are „not supplied“, neither is a
+  measure — and the UPDATE writes `unit_of_measure = COALESCE(?5, unit_of_measure)`, so a file that
+  says nothing about the measure leaves the shop's own configuration standing. A **CREATE** still
+  defaults to `"kom"`: a new row has no prior truth to destroy, and the code says so at the parameter.
+  `required: false` on the mapping step is now correct rather than dangerous — unmapped genuinely means
+  unsupplied.
+- **The clobbered measure then orphaned the jedinična cena pair.** `jedinicna_cena_jedinica` /
+  `jedinicna_cena_sadrzaj_milli` are untouched by that UPDATE, and the v19 CHECK constrains only the
+  pair against itself, never against `unit_of_measure`. So an article legitimately configured under the
+  NULL-sadržaj convention — `unit_of_measure = 'l'`, jedinica `'l'`, sadržaj blank, which is exactly
+  what D2's gate *accepts* — came out of an import as `unit_of_measure = 'kom'` with jedinica still
+  `'l'`, and the batch's own republish published the D2 figure verbatim: the archived body read
+  `SKU-1;;Hleb;kom;372.00;372.00;l;02-08-2026` — *372,00 RSD po litru* for goods the same row says are
+  sold **po komadu**. **Fix:** the D2 rule moved out of `commands::catalog` into
+  `cenovnik::validate_jedinicna_cena`, and **both** writers now call it — the form maps the returned
+  `JedinicnaCenaDefect` to its Serbian field error, the importer to a **row** error, so a refused row
+  surfaces in the per-row report the operator already reads instead of failing the file wholesale. The
+  importer judges the state the row would *leave* the product in: the measure the file supplies, or the
+  stored one when it supplies none, against the product's own pair. One rule, one home — the defect
+  existed precisely because there were two write paths and only one guard. A CREATE needs no check: the
+  import stores no pair, so a new row has nothing to orphan.
 
 **Also open, and smaller.** Nothing previews the computed jedinična cena at the point of entry: the
 product sheet takes the measure and the package content and shows no derived figure, so a sadržaj typed

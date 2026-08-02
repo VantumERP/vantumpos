@@ -107,6 +107,100 @@ impl CenovnikRow {
     }
 }
 
+/// Why a product's unit-price configuration cannot state a jedinična cena the
+/// shop could stand behind.
+///
+/// Each variant carries the operator-facing wording, so every writer that
+/// refuses the state refuses it in the same words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JedinicnaCenaDefect {
+    /// A sadržaj of zero or less divides by nothing.
+    SadrzajNotPositive,
+    /// A sadržaj with no jedinica names no measure to divide into.
+    SadrzajWithoutJedinica,
+    /// A jedinica that differs from the measure the goods are SOLD in, with no
+    /// package content to bridge them.
+    DifferingJedinicaWithoutSadrzaj,
+}
+
+impl JedinicnaCenaDefect {
+    /// The Serbian operator message.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::SadrzajNotPositive => "Sadržaj pakovanja mora biti veći od nule.",
+            Self::SadrzajWithoutJedinica => {
+                "Uz sadržaj pakovanja izaberite i jedinicu za jediničnu cenu."
+            }
+            Self::DifferingJedinicaWithoutSadrzaj => {
+                "Jedinica za jediničnu cenu se razlikuje od jedinice mere — unesite sadržaj pakovanja. Prazan sadržaj znači da je jedna prodajna jedinica jednaka jednoj jedinici mere (na primer 1 kom = 1 l)."
+            }
+        }
+    }
+
+    /// The form field the message points at, in the frontend's camelCase.
+    pub fn field(self) -> &'static str {
+        match self {
+            Self::SadrzajNotPositive | Self::DifferingJedinicaWithoutSadrzaj => {
+                "jedinicnaCenaSadrzajMilli"
+            }
+            Self::SadrzajWithoutJedinica => "jedinicnaCenaJedinica",
+        }
+    }
+}
+
+/// The one rule every writer of `products` applies before storing the unit-price
+/// triple — the catalog form (`commands::catalog`) and the CSV import
+/// (`importer`) both call this rather than keeping a copy.
+///
+/// That single home is the point. The state this refuses reached the published
+/// file precisely because there were two write paths and only one guard: the
+/// form learned the rule, the importer did not, and an import could leave a
+/// product in exactly the shape the form had just started refusing.
+///
+/// What it enforces, given the measure the goods are SOLD in
+/// (`products.unit_of_measure`) and the stored jedinična cena pair:
+///
+/// * a sadržaj must be positive — the v19 CHECK says so, and a non-positive one
+///   divides by nothing;
+/// * a sadržaj must name its jedinica — otherwise it can state no jedinična
+///   cena at all (ZZP čl. 6 st. 1);
+/// * a jedinica with **no** sadržaj is the v19 convention for „jedna prodajna
+///   jedinica JESTE jedna jedinica mere“, and [`CenovnikRow::jedinicna_cena_minor`]
+///   accordingly publishes the sale price AS the jedinična cena. That is right
+///   exactly while the two measures agree, and provably wrong the moment they
+///   differ: a 0,75 l bottle sold „po komadu“ at 279,00 would publish 279,00
+///   per litre where the figure is 372,00, and čl. 6 st. 4 makes the shop
+///   answer for the published number.
+///
+/// The measures are compared case-insensitively because „L“ and „l“ are one
+/// measure to a shopper, and a shop that really sells one litre per piece still
+/// has a way to say so: a sadržaj of 1.
+pub fn validate_jedinicna_cena(
+    unit_of_measure: &str,
+    jedinicna_cena_jedinica: Option<&str>,
+    jedinicna_cena_sadrzaj_milli: Option<i64>,
+) -> Result<(), JedinicnaCenaDefect> {
+    if let Some(sadrzaj_milli) = jedinicna_cena_sadrzaj_milli {
+        if sadrzaj_milli <= 0 {
+            return Err(JedinicnaCenaDefect::SadrzajNotPositive);
+        }
+
+        if jedinicna_cena_jedinica.is_none() {
+            return Err(JedinicnaCenaDefect::SadrzajWithoutJedinica);
+        }
+    }
+
+    if let Some(jedinica) = jedinicna_cena_jedinica {
+        if jedinicna_cena_sadrzaj_milli.is_none()
+            && jedinica.to_lowercase() != unit_of_measure.to_lowercase()
+        {
+            return Err(JedinicnaCenaDefect::DifferingJedinicaWithoutSadrzaj);
+        }
+    }
+
+    Ok(())
+}
+
 /// Renders the published file: BOM, header, one line per row, CRLF-terminated.
 ///
 /// Rows are emitted in `sifra` order regardless of the order given (ties keep
@@ -747,6 +841,41 @@ mod tests {
 
         let fields = data_fields(&render_csv(&[row]));
         assert_eq!(fields[5], "", "{fields:?}");
+    }
+
+    /// The three states no writer of `products` may store, in the one place
+    /// that decides them. Both writers — the catalog form and the CSV importer
+    /// — refuse through this function, so neither can drift from the other.
+    #[test]
+    fn the_shared_validator_refuses_every_half_configured_pair() {
+        assert_eq!(
+            validate_jedinicna_cena("kom", Some("l"), Some(0)),
+            Err(JedinicnaCenaDefect::SadrzajNotPositive)
+        );
+        assert_eq!(
+            validate_jedinicna_cena("kom", None, Some(750)),
+            Err(JedinicnaCenaDefect::SadrzajWithoutJedinica)
+        );
+        // The D2 state: a 0,75 l bottle sold „po komadu“ whose package content
+        // nobody entered would publish its sale price as the price per litre.
+        assert_eq!(
+            validate_jedinicna_cena("kom", Some("l"), None),
+            Err(JedinicnaCenaDefect::DifferingJedinicaWithoutSadrzaj)
+        );
+    }
+
+    /// The v19 convention stays expressible, and the refusal above must not
+    /// reach it: goods sold by the kilogram priced per kilogram need no package
+    /// content, „L“ and „l“ are one measure to a shopper, and a described
+    /// package divides correctly whatever the selling measure.
+    #[test]
+    fn the_shared_validator_accepts_every_configuration_that_divides() {
+        assert_eq!(validate_jedinicna_cena("kg", Some("kg"), None), Ok(()));
+        assert_eq!(validate_jedinicna_cena("L", Some("l"), None), Ok(()));
+        assert_eq!(validate_jedinicna_cena("kom", Some("l"), Some(750)), Ok(()));
+        // Nothing configured at all: the file publishes an empty cell, which is
+        // a visible gap rather than a guess.
+        assert_eq!(validate_jedinicna_cena("kom", None, None), Ok(()));
     }
 
     #[test]

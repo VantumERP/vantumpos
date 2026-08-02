@@ -596,9 +596,36 @@ fn validate_product_rows(
             status = ImportRowStatus::Error;
             message = "PDV stopa nije pronađena.".to_string();
         } else if let Some(existing_id) = find_existing_product(connection, &sku, &barcode)? {
-            status = ImportRowStatus::Warning;
             action = ImportRowAction::Update;
-            message = format!("Postojeći artikal #{existing_id} biće ažuriran.");
+            // The same rule the catalog form applies (SW-12 / ZZP čl. 6 st. 1
+            // and st. 4), judged on the state this row would LEAVE the product
+            // in: the measure the file supplies, or the stored one when it
+            // supplies none, against the product's own jedinična cena pair.
+            // A row that would orphan that pair is refused here, as a row error
+            // the operator can see and fix, rather than being written and then
+            // published as a jedinična cena the goods contradict.
+            //
+            // A CREATE needs no such check: the import stores no jedinična cena
+            // pair, so a new row has nothing to orphan.
+            let (stored_unit, jedinica, sadrzaj_milli) =
+                load_measure_state(connection, existing_id)?;
+            let resulting_unit =
+                supplied_unit_of_measure(lookup, row, mapping).unwrap_or(stored_unit);
+
+            match crate::cenovnik::validate_jedinicna_cena(
+                &resulting_unit,
+                jedinica.as_deref(),
+                sadrzaj_milli,
+            ) {
+                Ok(()) => {
+                    status = ImportRowStatus::Warning;
+                    message = format!("Postojeći artikal #{existing_id} biće ažuriran.");
+                }
+                Err(defect) => {
+                    status = ImportRowStatus::Error;
+                    message = defect.message().to_string();
+                }
+            }
         } else if product_name_exists(connection, &name)? {
             status = ImportRowStatus::Warning;
             message = "Naziv već postoji; proverite da nije duplikat.".to_string();
@@ -740,12 +767,7 @@ fn commit_product_rows(
             .ok_or_else(|| ImportError::new("validation_error", "PDV stopa nije pronađena."))?;
         let minimum_stock =
             parse_optional_quantity(lookup, row, mapping, "minimum_stock", true)?.unwrap_or(0);
-        let unit = optional_value(lookup, row, mapping, "unit_of_measure");
-        let unit = if unit.is_empty() {
-            "kom".to_string()
-        } else {
-            unit
-        };
+        let supplied_unit = supplied_unit_of_measure(lookup, row, mapping);
         let now = now_utc_string()?;
         let product_id = if let Some(product_id) =
             find_existing_product(tx, &sku_input, barcode.as_deref().unwrap_or(""))?
@@ -753,13 +775,18 @@ fn commit_product_rows(
             // Read before the UPDATE: afterwards the row already carries the new
             // price and the comparison would silently record nothing.
             let before = load_offering_state(tx, product_id)?;
+            // COALESCE, not a bare `?5`: an unsupplied jedinica mere means „the
+            // file said nothing about it“, and this UPDATE must leave the
+            // shop's own configuration standing. Substituting a default here
+            // silently rewrote a PUBLISHED column (`jedinica_mere`, SW-12
+            // req. 10) on every article a routine price file happened to match.
             tx.execute(
                 "UPDATE products
                  SET name = ?1,
                      sku = ?2,
                      barcode = ?3,
                      category_id = ?4,
-                     unit_of_measure = ?5,
+                     unit_of_measure = COALESCE(?5, unit_of_measure),
                      sale_price_minor = ?6,
                      purchase_price_minor = ?7,
                      tax_rate_id = ?8,
@@ -771,7 +798,7 @@ fn commit_product_rows(
                     sku,
                     barcode,
                     category_id,
-                    unit,
+                    supplied_unit,
                     sale_price,
                     purchase_price,
                     tax_rate_id,
@@ -815,7 +842,11 @@ fn commit_product_rows(
                     sku,
                     barcode,
                     category_id,
-                    unit,
+                    // A CREATE has no prior truth to destroy, so an unsupplied
+                    // measure may still default — „kom“ is the v1 schema
+                    // default and the only sane guess for a brand-new row.
+                    // The UPDATE above deliberately does NOT do this.
+                    supplied_unit.unwrap_or_else(|| "kom".to_string()),
                     sale_price,
                     purchase_price,
                     tax_rate_id,
@@ -1154,6 +1185,37 @@ fn optional_value(
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// The jedinica mere this row actually supplies, or `None` when it supplies
+/// none.
+///
+/// An unmapped column and a blank cell in a mapped one are the same answer:
+/// „not supplied“. Neither is a measure, and the difference matters only to
+/// whoever wrote the file — what matters here is that an UPDATE built from
+/// either must leave `products.unit_of_measure` alone rather than invent one.
+fn supplied_unit_of_measure(
+    lookup: &HeaderLookup,
+    row: &[String],
+    mapping: &HashMap<String, String>,
+) -> Option<String> {
+    empty_to_none(optional_value(lookup, row, mapping, "unit_of_measure"))
+}
+
+/// The stored measure triple of an existing product: the measure the goods are
+/// SOLD in, plus the jedinična cena pair, as
+/// [`crate::cenovnik::validate_jedinicna_cena`] takes them.
+fn load_measure_state(
+    connection: &Connection,
+    product_id: i64,
+) -> Result<(String, Option<String>, Option<i64>), rusqlite::Error> {
+    connection.query_row(
+        "SELECT unit_of_measure, jedinicna_cena_jedinica, jedinicna_cena_sadrzaj_milli
+         FROM products
+         WHERE id = ?1",
+        params![product_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
 }
 
 fn row_values(headers: &[String], row: &[String]) -> HashMap<String, String> {
@@ -1986,6 +2048,268 @@ mod tests {
             assert_eq!(result.rows[0].status, ImportRowStatus::Valid);
             assert_eq!(result.rows[0].action, ImportRowAction::Create);
         });
+    }
+
+    /// Configures an existing article the way the catalog form would: the
+    /// measure it is SOLD in, plus the jedinična cena pair. `None` for the
+    /// sadržaj is the v19 convention — one selling unit IS one unit of the
+    /// measure — which the form accepts only while the two measures agree.
+    fn configure_measure(
+        db: &Db,
+        product_id: i64,
+        unit_of_measure: &str,
+        jedinica: Option<&str>,
+        sadrzaj_milli: Option<i64>,
+    ) {
+        db.open()
+            .expect("database should open")
+            .execute(
+                "UPDATE products
+                 SET unit_of_measure = ?1,
+                     jedinicna_cena_jedinica = ?2,
+                     jedinicna_cena_sadrzaj_milli = ?3
+                 WHERE id = ?4",
+                params![unit_of_measure, jedinica, sadrzaj_milli, product_id],
+            )
+            .expect("measure should configure");
+    }
+
+    fn stored_measure(db: &Db, product_id: i64) -> String {
+        db.open()
+            .expect("database should open")
+            .query_row(
+                "SELECT unit_of_measure FROM products WHERE id = ?1",
+                params![product_id],
+                |row| row.get(0),
+            )
+            .expect("measure should query")
+    }
+
+    /// An unmapped column means „not supplied“, never „kom“.
+    ///
+    /// A routine price-update import — a file of šifra and cena and nothing
+    /// else — used to substitute `"kom"` for the unmapped jedinica mere and
+    /// rewrite it on every article it matched. That is silent corruption of a
+    /// published column (`jedinica_mere`, SW-12 req. 10) the shop configured
+    /// deliberately, and the operator never typed a measure at all.
+    #[test]
+    fn price_update_import_leaves_the_unit_of_measure_untouched() {
+        with_test_database(
+            "price_update_import_leaves_the_unit_of_measure_untouched",
+            |db| {
+                let product_id = seed_product(db, "SKU-1", "8600001");
+                configure_measure(db, product_id, "l", Some("l"), None);
+
+                commit_import(db, &products_request("150,00"), admin_id(db))
+                    .expect("a price-only import should commit");
+
+                assert_eq!(stored_measure(db, product_id), "l");
+            },
+        );
+    }
+
+    /// A blank cell in a mapped column is the same „not supplied“: an empty
+    /// jedinica mere is not a measure, and substituting one would corrupt the
+    /// same column by a different route.
+    #[test]
+    fn a_blank_measure_cell_leaves_the_unit_of_measure_untouched() {
+        with_test_database(
+            "a_blank_measure_cell_leaves_the_unit_of_measure_untouched",
+            |db| {
+                let product_id = seed_product(db, "SKU-1", "8600001");
+                configure_measure(db, product_id, "l", Some("l"), None);
+
+                let request = CommitImportRequest {
+                    import_type: ImportType::Products,
+                    file_name: "artikli.csv".to_string(),
+                    csv_text: "Naziv;Cena;PDV;Sifra;JM\nHleb;150,00;20;SKU-1;\n".to_string(),
+                    mapping: mapping(&[
+                        ("name", "Naziv"),
+                        ("sale_price", "Cena"),
+                        ("vat_rate", "PDV"),
+                        ("sku", "Sifra"),
+                        ("unit_of_measure", "JM"),
+                    ]),
+                };
+
+                commit_import(db, &request, admin_id(db))
+                    .expect("a blank measure cell should commit");
+
+                assert_eq!(stored_measure(db, product_id), "l");
+            },
+        );
+    }
+
+    /// A mapped, filled column is a supplied measure and still applies.
+    #[test]
+    fn a_supplied_measure_still_updates_the_existing_product() {
+        with_test_database(
+            "a_supplied_measure_still_updates_the_existing_product",
+            |db| {
+                let product_id = seed_product(db, "SKU-1", "8600001");
+                configure_measure(db, product_id, "kom", None, None);
+
+                let request = CommitImportRequest {
+                    import_type: ImportType::Products,
+                    file_name: "artikli.csv".to_string(),
+                    csv_text: "Naziv;Cena;PDV;Sifra;JM\nHleb;150,00;20;SKU-1;kg\n".to_string(),
+                    mapping: mapping(&[
+                        ("name", "Naziv"),
+                        ("sale_price", "Cena"),
+                        ("vat_rate", "PDV"),
+                        ("sku", "Sifra"),
+                        ("unit_of_measure", "JM"),
+                    ]),
+                };
+
+                commit_import(db, &request, admin_id(db))
+                    .expect("a supplied measure should commit");
+
+                assert_eq!(stored_measure(db, product_id), "kg");
+            },
+        );
+    }
+
+    /// A CREATE has no prior truth to destroy, so an absent measure still
+    /// defaults to „kom“ — the v1 schema default, and the only sane guess for a
+    /// brand-new row.
+    #[test]
+    fn a_created_product_still_defaults_to_kom() {
+        with_test_database("a_created_product_still_defaults_to_kom", |db| {
+            seed_tax_rate(db, "PDV 20", 2000);
+
+            commit_import(db, &products_request("120,00"), admin_id(db))
+                .expect("a create should commit");
+
+            let measure: String = db
+                .open()
+                .expect("database should open")
+                .query_row(
+                    "SELECT unit_of_measure FROM products WHERE sku = 'SKU-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("measure should query");
+
+            assert_eq!(measure, "kom");
+        });
+    }
+
+    /// The D2 refusal, on the import path.
+    ///
+    /// An article configured under the v19 NULL-sadržaj convention — sold by
+    /// the litre, jedinična cena per litre, no package content — is correct
+    /// until an import moves the measure it is SOLD in. `jedinica` then names a
+    /// litre while the goods go „po komadu“, and
+    /// [`crate::cenovnik::CenovnikRow::jedinicna_cena_minor`] publishes the
+    /// sale price AS the jedinična cena: 372,00 po litru for goods the same row
+    /// says are sold by the piece. The catalog form refuses that pair; the
+    /// import writer has to refuse it too, or the two writers disagree about
+    /// what a valid product is.
+    #[test]
+    fn validate_products_refuses_a_measure_that_orphans_the_jedinicna_cena() {
+        with_test_database(
+            "validate_products_refuses_a_measure_that_orphans_the_jedinicna_cena",
+            |db| {
+                let product_id = seed_product(db, "SKU-1", "8600001");
+                configure_measure(db, product_id, "l", Some("l"), None);
+
+                let request = ValidateImportRequest {
+                    import_type: ImportType::Products,
+                    file_name: "artikli.csv".to_string(),
+                    csv_text: "Naziv;Cena;PDV;Sifra;JM\nHleb;372,00;20;SKU-1;kom\n".to_string(),
+                    mapping: mapping(&[
+                        ("name", "Naziv"),
+                        ("sale_price", "Cena"),
+                        ("vat_rate", "PDV"),
+                        ("sku", "Sifra"),
+                        ("unit_of_measure", "JM"),
+                    ]),
+                };
+
+                let result = validate_import(db, &request).expect("validation should run");
+
+                // A row error, not a failed file: the operator sees which row.
+                assert_eq!(result.error_count, 1);
+                assert_eq!(result.rows[0].row_number, 2);
+                assert_eq!(result.rows[0].status, ImportRowStatus::Error);
+                assert_eq!(
+                    result.rows[0].message,
+                    "Jedinica za jediničnu cenu se razlikuje od jedinice mere — unesite sadržaj pakovanja. Prazan sadržaj znači da je jedna prodajna jedinica jednaka jednoj jedinici mere (na primer 1 kom = 1 l)."
+                );
+
+                // And the commit that follows must not write the row anyway.
+                commit_import(
+                    db,
+                    &CommitImportRequest {
+                        import_type: ImportType::Products,
+                        file_name: "artikli.csv".to_string(),
+                        csv_text: "Naziv;Cena;PDV;Sifra;JM\nHleb;372,00;20;SKU-1;kom\n".to_string(),
+                        mapping: mapping(&[
+                            ("name", "Naziv"),
+                            ("sale_price", "Cena"),
+                            ("vat_rate", "PDV"),
+                            ("sku", "Sifra"),
+                            ("unit_of_measure", "JM"),
+                        ]),
+                    },
+                    admin_id(db),
+                )
+                .expect_err("a refused row must not commit");
+
+                assert_eq!(stored_measure(db, product_id), "l");
+            },
+        );
+    }
+
+    /// The refusal is the narrow one D2 drew: an article whose package content
+    /// IS described divides correctly whatever the selling measure, so a
+    /// measure change on it is a routine update.
+    #[test]
+    fn validate_products_accepts_a_measure_change_when_the_package_content_is_known() {
+        with_test_database(
+            "validate_products_accepts_a_measure_change_when_the_package_content_is_known",
+            |db| {
+                let product_id = seed_product(db, "SKU-1", "8600001");
+                configure_measure(db, product_id, "l", Some("l"), Some(750));
+
+                let request = ValidateImportRequest {
+                    import_type: ImportType::Products,
+                    file_name: "artikli.csv".to_string(),
+                    csv_text: "Naziv;Cena;PDV;Sifra;JM\nHleb;279,00;20;SKU-1;kom\n".to_string(),
+                    mapping: mapping(&[
+                        ("name", "Naziv"),
+                        ("sale_price", "Cena"),
+                        ("vat_rate", "PDV"),
+                        ("sku", "Sifra"),
+                        ("unit_of_measure", "JM"),
+                    ]),
+                };
+
+                let result = validate_import(db, &request).expect("validation should run");
+
+                assert_eq!(result.error_count, 0);
+                commit_import(
+                    db,
+                    &CommitImportRequest {
+                        import_type: ImportType::Products,
+                        file_name: "artikli.csv".to_string(),
+                        csv_text: "Naziv;Cena;PDV;Sifra;JM\nHleb;279,00;20;SKU-1;kom\n".to_string(),
+                        mapping: mapping(&[
+                            ("name", "Naziv"),
+                            ("sale_price", "Cena"),
+                            ("vat_rate", "PDV"),
+                            ("sku", "Sifra"),
+                            ("unit_of_measure", "JM"),
+                        ]),
+                    },
+                    admin_id(db),
+                )
+                .expect("a described package still divides correctly");
+
+                assert_eq!(stored_measure(db, product_id), "kom");
+            },
+        );
     }
 
     #[test]

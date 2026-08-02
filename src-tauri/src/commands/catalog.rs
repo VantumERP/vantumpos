@@ -1356,50 +1356,19 @@ fn normalize_product_request(
         }
     }
 
-    // The v19 CHECK refuses one of the two half-states — a sadržaj carrying no
-    // jedinica — and catching it here turns a raw constraint failure into a
-    // Serbian message pointing at the very input. The mirror half-state, a
-    // jedinica with no sadržaj, the CHECK deliberately permits: a NULL sadržaj
-    // is the v19 convention for „jedna prodajna jedinica JESTE jedna jedinica
-    // mere“, and the gate after this block is what keeps that convention from
-    // quietly covering a package nobody described.
-    if let Some(sadrzaj_milli) = request.jedinicna_cena_sadrzaj_milli {
-        if sadrzaj_milli <= 0 {
-            return Err(validation_error(
-                "Sadržaj pakovanja mora biti veći od nule.",
-                "jedinicnaCenaSadrzajMilli",
-            ));
-        }
-
-        if jedinicna_cena_jedinica.is_none() {
-            // A sadržaj without its measure divides by nothing, so it can state
-            // no jedinična cena at all (čl. 6 st. 1).
-            return Err(validation_error(
-                "Uz sadržaj pakovanja izaberite i jedinicu za jediničnu cenu.",
-                "jedinicnaCenaJedinica",
-            ));
-        }
-    }
-
-    // A jedinica with no sadržaj makes `cenovnik::CenovnikRow::jedinicna_cena_minor`
-    // publish the sale price AS the jedinična cena. That is right exactly while
-    // one selling unit IS one unit of that measure — the v19 convention — and
-    // provably wrong the moment the two measures differ: a 0,75 l bottle sold
-    // „po komadu“ at 279,00 would publish 279,00 per litre where the figure is
-    // 372,00, and čl. 6 st. 4 makes the shop answer for the published number.
-    // The comparison is case-insensitive because „L“ and „l“ are one measure to
-    // a shopper, and a shop that really sells one litre per piece still has a
-    // way to say so: a sadržaj of 1.
-    if let Some(jedinica) = jedinicna_cena_jedinica.as_deref() {
-        if request.jedinicna_cena_sadrzaj_milli.is_none()
-            && jedinica.to_lowercase() != unit_of_measure.to_lowercase()
-        {
-            return Err(validation_error(
-                "Jedinica za jediničnu cenu se razlikuje od jedinice mere — unesite sadržaj pakovanja. Prazan sadržaj znači da je jedna prodajna jedinica jednaka jednoj jedinici mere (na primer 1 kom = 1 l).",
-                "jedinicnaCenaSadrzajMilli",
-            ));
-        }
-    }
+    // The unit-price triple is judged by `cenovnik::validate_jedinicna_cena`,
+    // the single rule this form shares with the CSV importer — the other writer
+    // of `products`. Two copies is what let an import leave a product in the
+    // very state this refuses. The v19 CHECK covers one of the three cases (a
+    // sadržaj carrying no jedinica); calling the validator first turns a raw
+    // constraint failure into a Serbian message pointing at the very input, and
+    // covers the two the CHECK cannot see.
+    crate::cenovnik::validate_jedinicna_cena(
+        &unit_of_measure,
+        jedinicna_cena_jedinica.as_deref(),
+        request.jedinicna_cena_sadrzaj_milli,
+    )
+    .map_err(|defect| validation_error(defect.message(), defect.field()))?;
 
     Ok(NormalizedProductRequest {
         name,
