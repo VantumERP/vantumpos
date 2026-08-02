@@ -1,8 +1,12 @@
 import type {
   AmlAssessment,
   AppHealth,
+  AuditQuery,
+  AuditSearchResult,
   AuthSession,
   BackupJob,
+  Breach,
+  BreachDraft,
   BackupSettings,
   BackupStatus,
   CampaignInput,
@@ -55,6 +59,8 @@ import type {
   ProductSalesReport,
   ProductSearchQuery,
   ProductSummary,
+  ProcessingActivity,
+  SupportSession,
   AnswerInput,
   BasisDoc,
   KalkulacijaSummary,
@@ -382,6 +388,65 @@ export interface WorkTimeService {
   notices(): Promise<WorkTimeNotices>;
 }
 
+/**
+ * The ZZPL trio: the čl. 46 remote-support nalog, the čl. 48 evidencija
+ * pristupa, the čl. 52 internal breach record and the čl. 47 register of
+ * processing activities. Every method maps 1:1 onto a Tauri command name.
+ *
+ * Three properties of the backend this interface must not paper over.
+ *
+ * **The evidencija pristupa has no write verb here and never may have one.**
+ * Req. 7 puts tamper-evidence above completeness: nothing edits or removes a
+ * logged row, and v18's trigger refuses the edit even if something tried. Every
+ * line is written server-side by the feature that performed the radnja, so
+ * there is no `recordAudit` on this surface — a frontend that could assert an
+ * access happened could assert one that did not.
+ *
+ * **`recordBreach` is never gated on notifiability** (req. 43). Čl. 52 st. 6
+ * documents *„svaku povredu“*; the risk test lives in st. 1 and governs only
+ * whether the Poverenik is told. `Breach.notifiable` is a derived flag on a row
+ * that always exists.
+ *
+ * **`exportBreachObrazac` produces a document, not a filing.** Pravilnik
+ * 40/2019 čl. 5 is the whole route — in writing, in person or by post — and
+ * there is no submission API to build.
+ *
+ * Every method here is admin-gated backend-side except `breachNotice`, which is
+ * read-only and must be able to state the exposure before anything is recorded.
+ */
+export interface PrivacyService {
+  /**
+   * Issues the čl. 46 nalog. `durationMinutes` is integer minutes, like every
+   * other duration in this app, and is bounded backend-side — a nalog measured
+   * in weeks is an open-ended one with a date printed on it.
+   */
+  grantSupportAccess(scope: string, durationMinutes: number): Promise<SupportSession>;
+  /**
+   * The support side entering under a live nalog. Gated by the **nalog** and
+   * nothing else: čl. 46 makes the nalog the condition, and the obrađivač holds
+   * no account on this till.
+   */
+  enterSupportSession(): Promise<SupportSession>;
+  /** The vlasnik closing the nalog — ended if it was entered, revoked if not. */
+  endSupportSession(): Promise<SupportSession>;
+  activeSupportSession(): Promise<SupportSession | null>;
+  /** Req. 8's two axes; the chain verdict covers the whole log, not the slice. */
+  searchAudit(query: AuditQuery): Promise<AuditSearchResult>;
+  /** The čl. 48 st. 4 izvod, rendered offline from the till. */
+  exportAuditCsv(query: AuditQuery): Promise<ExportedFile>;
+  listBreaches(): Promise<Breach[]>;
+  recordBreach(draft: BreachDraft): Promise<Breach>;
+  updateBreach(id: number, draft: BreachDraft): Promise<Breach>;
+  /** The čl. 52 exposure with its penalty already tier-resolved. Read-only. */
+  breachNotice(): Promise<LegalNotice>;
+  /** The Pravilnik 40/2019 obrazac for one record — print, sign and file. */
+  exportBreachObrazac(id: number): Promise<ExportedFile>;
+  listProcessingActivities(): Promise<ProcessingActivity[]>;
+  /** Regenerates the register from the app's own configuration (req. 28). */
+  generateProcessingActivities(): Promise<ProcessingActivity[]>;
+  exportProcessingActivities(): Promise<ExportedFile>;
+}
+
 export interface PrintService {
   /** Opens an exported document in the OS default handler for printing. */
   openForPrint(path: string): Promise<void>;
@@ -428,5 +493,6 @@ export interface PosServices {
   reklamacije: ReklamacijeService;
   kep: KepService;
   worktime: WorkTimeService;
+  privacy: PrivacyService;
   print: PrintService;
 }

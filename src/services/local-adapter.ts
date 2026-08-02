@@ -5,8 +5,10 @@ import type { PosServices } from "./ports";
 import type {
   AmlAssessment,
   AppHealth,
+  AuditSearchResult,
   AuthSession,
   BackupJob,
+  Breach,
   BackupSettings,
   BackupStatus,
   CampaignSummary,
@@ -41,6 +43,7 @@ import type {
   LowStockReport,
   PaymentMethodReport,
   PrethodnaCenaDto,
+  ProcessingActivity,
   ProductLedger,
   ProductListResult,
   ProductLookupSuggestion,
@@ -58,6 +61,7 @@ import type {
   ShiftSummary,
   ShopProfile,
   StockListResult,
+  SupportSession,
   TaxRate,
   UserAccount,
   SavedWorkTimeEntry,
@@ -357,6 +361,33 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       myHours: (godina, mesec) =>
         invoke<WorkTimeMonth>("worktime_my_hours", { godina, mesec }),
       notices: () => invoke<WorkTimeNotices>("worktime_notices"),
+    },
+    privacy: {
+      grantSupportAccess: (scope, durationMinutes) =>
+        invoke<SupportSession>("support_grant_access", {
+          request: { scope, durationMinutes },
+        }),
+      enterSupportSession: () =>
+        invoke<SupportSession>("support_request_access"),
+      endSupportSession: () => invoke<SupportSession>("support_end_session"),
+      activeSupportSession: () =>
+        invoke<SupportSession | null>("support_active_session"),
+      searchAudit: (query) =>
+        invoke<AuditSearchResult>("audit_search", { query }),
+      exportAuditCsv: (query) =>
+        invoke<ExportedFile>("audit_export_csv", { query }),
+      listBreaches: () => invoke<Breach[]>("breaches_list"),
+      recordBreach: (draft) => invoke<Breach>("breaches_record", { draft }),
+      updateBreach: (id, draft) =>
+        invoke<Breach>("breaches_update", { id, draft }),
+      breachNotice: () => invoke<LegalNotice>("breaches_notice"),
+      exportBreachObrazac: (id) =>
+        invoke<ExportedFile>("breaches_export_obrazac", { id }),
+      listProcessingActivities: () =>
+        invoke<ProcessingActivity[]>("cl47_list"),
+      generateProcessingActivities: () =>
+        invoke<ProcessingActivity[]>("cl47_generate"),
+      exportProcessingActivities: () => invoke<ExportedFile>("cl47_export"),
     },
     print: {
       openForPrint: (path) => openPath(path),

@@ -1584,3 +1584,190 @@ export interface WorkTimeNotices {
   capsExceeded: LegalNotice;
   preraspodelaCapsExceeded: LegalNotice;
 }
+
+// ---------------------------------------------------------------------------
+// SW-10 / SW-13 / SW-17 — the ZZPL trio
+// ---------------------------------------------------------------------------
+
+/**
+ * One `support_sessions` row — `crate::commands::audit::SupportSession`.
+ *
+ * The row **is** the ZZPL čl. 46 nalog: who authorised the obrađivač, when, for
+ * what obim and until when. `startedAt` is stamped when the support side
+ * actually enters; a nalog closed after entry gets `endedAt`, one withdrawn
+ * before anyone used it gets `revokedAt`, and the two are different facts.
+ */
+export interface SupportSession {
+  id: number;
+  grantedBy: number;
+  grantedByName: string;
+  grantedAt: string;
+  scope: string;
+  expiresAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  revokedAt: string | null;
+}
+
+/**
+ * Req. 8's two axes and no third one — `crate::commands::audit::AuditQuery`.
+ * Both days are `gggg-MM-dd` and both bounds are inclusive; anything that is
+ * not a bare day is refused backend-side rather than silently mis-filtered.
+ */
+export interface AuditQuery {
+  from: string | null;
+  to: string | null;
+  actorUserId: number | null;
+}
+
+/**
+ * One logged row as the operator reads it — `crate::commands::audit::AuditEvent`.
+ *
+ * `actorName` is resolved from `users` at read time and is **not** stored on the
+ * row: the čl. 5 st. 1 t. 3 exclusion list governs `audit_events`, and čl. 48
+ * st. 2's *identitet lica* is answered by the id the table does store.
+ */
+export interface AuditEvent {
+  id: number;
+  at: string;
+  actorUserId: number | null;
+  actorName: string | null;
+  action: string;
+  actionLabel: string;
+  objectType: string;
+  objectTypeLabel: string;
+  objectId: string;
+  reasonCode: string | null;
+  reasonLabel: string | null;
+  recipient: string | null;
+  recipientLabel: string | null;
+  supportSessionId: number | null;
+  prevHash: string;
+  hash: string;
+}
+
+/**
+ * `crate::audit::ChainVerdict`, serde camelCase and externally tagged.
+ * `brokenAt` is a zero-based index into the surviving log.
+ */
+export type ChainVerdict = "intact" | "truncated" | { brokenAt: number };
+
+/**
+ * What the hash chain says about the WHOLE log, never about the filtered slice
+ * — `crate::commands::audit::ChainStatus`. `label` is authored backend-side so
+ * the panel and the izvod can never disagree about the verdict.
+ */
+export interface ChainStatus {
+  verdict: ChainVerdict;
+  intact: boolean;
+  checkedRows: number;
+  label: string;
+}
+
+/** `crate::commands::audit::AuditSearchResult`. */
+export interface AuditSearchResult {
+  events: AuditEvent[];
+  chain: ChainStatus;
+}
+
+/** `crate::commands::breaches::RiskOutcome`, serde snake_case. */
+export type RiskOutcome = "bez_rizika" | "rizik" | "visok_rizik";
+
+/** `crate::commands::breaches::NotifyDecision`, serde snake_case. */
+export type NotifyDecision = "obavestiti" | "ne_obavestiti";
+
+/** The three čl. 53 st. 3 exceptions, closed — `crate::commands::breaches::Cl53Izuzetak`. */
+export type Cl53Izuzetak =
+  | "primenjene_mere_zastite"
+  | "naknadne_mere"
+  | "nesrazmeran_utrosak_vremena_i_sredstava";
+
+/**
+ * What the operator submits for one povreda — `crate::commands::breaches::BreachDraft`.
+ *
+ * `saznanjeAt` rides on the update path too so a client that round-trips the
+ * record cannot silently drop it; the backend compares it against the stored
+ * instant and refuses a change rather than ignoring one.
+ */
+export interface BreachDraft {
+  saznanjeAt: string;
+  occurredAt: string | null;
+  discoveredAt: string | null;
+  obradjivacSaznanjeAt: string | null;
+  rukovalacObavestenAt: string | null;
+  opis: string;
+  posledice: string;
+  mere: string;
+  brojLica: number | null;
+  kategorijePodataka: string | null;
+  riskOutcome: RiskOutcome | null;
+  notifyDecision: NotifyDecision | null;
+  notifyObrazlozenje: string | null;
+  poverenikNotifiedAt: string | null;
+  delayReason: string | null;
+  licaObavestena: boolean | null;
+  licaObavestenaAt: string | null;
+  cl53Izuzetak: Cl53Izuzetak | null;
+  cl53IzuzetakObrazlozenje: string | null;
+}
+
+/**
+ * One stored povreda — `crate::commands::breaches::Breach`: every column, plus
+ * the four answers computed from `now` and therefore never stored.
+ *
+ * `notifiable` is a **derived flag on a row that always exists** (req. 43). It
+ * never decided whether the record was written.
+ */
+export interface Breach extends BreachDraft {
+  id: number;
+  createdAt: string;
+  updatedAt: string;
+  /** Saznanje + 72 h — Pravilnik 40/2019 čl. 3. */
+  rokObavestavanjaIsticeAt: string;
+  notifiable: boolean | null;
+  /** Čl. 52 st. 2 — whether a delay justification is owed as of now. */
+  delayReasonRequired: boolean;
+  /** Čl. 53 st. 1 — whether the affected individuals must be told. */
+  obavestavanjeLicaObavezno: boolean;
+}
+
+/** `crate::retention::RecordClass`, serde snake_case. */
+export type RecordClass =
+  | "worktime_classification"
+  | "worktime_overtime_log"
+  | "worktime_draft"
+  | "personnel"
+  | "credentials"
+  | "access_log"
+  | "processing_register";
+
+/**
+ * One generated radnja obrade — `crate::cl47::ProcessingActivity`.
+ *
+ * The register is generated from the app's own configured purposes, recipients
+ * and retention rows, never typed by the operator: a register that can be
+ * edited into agreement with whatever the till happens to do documents nothing.
+ */
+export interface ProcessingActivity {
+  id: number;
+  kljuc: string;
+  /** St. 1 t. 1. */
+  rukovalacNaziv: string;
+  rukovalacKontakt: string | null;
+  /** St. 1 t. 2. */
+  svrhaObrade: string;
+  /** St. 1 t. 3. */
+  vrstaLica: string;
+  vrstaPodataka: string;
+  /** St. 1 t. 4. */
+  vrstaPrimalaca: string | null;
+  /** St. 1 t. 5. */
+  prenosUDrugeDrzave: string | null;
+  mereZastitePrenosa: string | null;
+  /** St. 1 t. 6 — the period, per category. */
+  rokCuvanja: string | null;
+  retentionRecordClass: RecordClass | null;
+  /** St. 1 t. 7. */
+  opisMeraZastite: string | null;
+  updatedAt: string;
+}

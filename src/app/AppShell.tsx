@@ -26,6 +26,7 @@ import {
   navigationItems,
   type NavigationItemId,
 } from "@/app/navigation";
+import { PrivacyModule } from "@/app/privacy/PrivacyModule";
 import { ReklamacijeModule } from "@/app/reklamacije/ReklamacijeModule";
 import { MyHoursScreen } from "@/app/worktime/MyHoursPanel";
 import { WorkTimeModule } from "@/app/worktime/WorkTimeModule";
@@ -501,6 +502,10 @@ function renderModule({
 
   if (activeId === "moji-sati") {
     return <MyHoursScreen services={services} />;
+  }
+
+  if (activeId === "privatnost") {
+    return <PrivacyModule services={services} />;
   }
 
   if (activeId === "campaigns") {
@@ -1511,6 +1516,20 @@ export function UsersScreen({
           <h2 className="text-lg font-semibold">Korisnici</h2>
           <p className="text-xs text-muted-foreground">
             Lokalni nalozi za administratore i kasire.
+          </p>
+          {/*
+            ZZPL req. 24. The lifecycle here ends at deactivation and there is
+            no delete affordance anywhere — not in this table, not in the
+            employee dialog, not behind a menu. The ZEOR čl. 5 register is a
+            physically separate store kept trajno under čl. 7 st. 2, its foreign
+            key carries no cascade, and this line says so out loud so nobody
+            goes looking for the button that is missing on purpose.
+          */}
+          <p className="text-xs text-muted-foreground">
+            Deaktivacija ne briše evidenciju o zaposlenom: ta evidencija se vodi
+            odvojeno od naloga i čuva se trajno po posebnom propisu (ZEOR čl. 7
+            st. 2), pa program nema radnju koja briše zaposlenog. Korisničko ime
+            se posle deaktivacije ne dodeljuje ponovo.
           </p>
         </div>
         <Button

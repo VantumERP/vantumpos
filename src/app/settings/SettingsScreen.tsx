@@ -342,7 +342,27 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
         <DepositCalendarPanel settings={services.settings} />
       ) : null}
 
-      {activeTab === "users" ? usersPanel : null}
+      {activeTab === "users" ? (
+        <div className="flex flex-col gap-4">
+          {usersPanel}
+          {/*
+            The ZZPL surfaces are one click away from the accounts they describe,
+            but they are NOT in Podešavanja: the čl. 46 nalog, the čl. 48
+            evidencija pristupa and the čl. 52 evidencija povreda are records the
+            rukovalac keeps, not settings anybody adjusts, and filing them under
+            „Podešavanja“ would suggest they can be turned off.
+          */}
+          <Alert>
+            <AlertTitle>Zaštita podataka o ličnosti</AlertTitle>
+            <AlertDescription>
+              Nalog za pristup tehničke podrške, evidencija pristupa podacima,
+              evidencija povreda podataka i evidencija radnji obrade nalaze se u
+              odeljku „Privatnost“ u glavnom meniju. To su evidencije koje
+              rukovalac vodi, a ne podešavanja.
+            </AlertDescription>
+          </Alert>
+        </div>
+      ) : null}
 
       {activeTab === "backup" ? (
         <BackupPanel
