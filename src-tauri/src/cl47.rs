@@ -474,6 +474,16 @@ impl Rendered {
     /// Whether the stored row already says exactly this. Every column the
     /// generator writes is compared — a field left out here would be a field
     /// that silently stops being regenerated.
+    ///
+    /// `mere_zastite_prenosa` is deliberately **not** among them, and that is
+    /// the one column the generator does not own. Čl. 47 st. 1 t. 5's second
+    /// half is the answer this program cannot compute, and both prenos entries
+    /// tell the operator so in words — *„ovde se upisuju naziv te države i opis
+    /// mera zaštite prenosa“*. Comparing it would make a filled-in slot look
+    /// like a drifted row, rewrite it away on the next launch and log a čl. 48
+    /// *menjanje* for the erasure. So it is neither compared here nor touched by
+    /// the UPDATE in [`generate`]; a fresh row is inserted with `NULL` because a
+    /// row nobody has answered for yet has nothing to report.
     fn matches(&self, stored: &ProcessingActivity) -> bool {
         stored.kljuc == self.kljuc
             && stored.rukovalac_naziv == self.rukovalac_naziv
@@ -483,11 +493,6 @@ impl Rendered {
             && stored.vrsta_podataka == self.vrsta_podataka
             && stored.vrsta_primalaca.as_deref() == Some(self.vrsta_primalaca)
             && stored.prenos_u_druge_drzave.as_deref() == Some(self.prenos_u_druge_drzave)
-            // St. 1 t. 5's second half — the safeguards for a transfer — stays
-            // NULL for as long as no transfer has been established. An empty
-            // slot reads as „nothing to report here“; a sentence in it would
-            // read as a transfer with safeguards attached.
-            && stored.mere_zastite_prenosa.is_none()
             && stored.rok_cuvanja.as_deref() == Some(self.rok_cuvanja.as_str())
             && stored.retention_record_class == self.retention_record_class
             && stored.opis_mera_zastite.as_deref() == Some(self.opis_mera_zastite.as_str())
@@ -554,10 +559,13 @@ pub(crate) fn generate(state: &AppState, now: &str) -> Result<Vec<ProcessingActi
             Some(existing) if rendered.matches(&existing) => continue,
             Some(existing) => {
                 tx.execute(
+                    // `mere_zastite_prenosa` is absent on purpose: st. 1 t. 5's
+                    // safeguards slot belongs to whoever answers it, and a
+                    // regeneration is not an answer. See [`Rendered::matches`].
                     "UPDATE processing_activities
                         SET rukovalac_naziv = ?2, rukovalac_kontakt = ?3, svrha_obrade = ?4,
                             vrsta_lica = ?5, vrsta_podataka = ?6, vrsta_primalaca = ?7,
-                            prenos_u_druge_drzave = ?8, mere_zastite_prenosa = NULL,
+                            prenos_u_druge_drzave = ?8,
                             rok_cuvanja = ?9, retention_record_class = ?10,
                             opis_mera_zastite = ?11, updated_at = ?12
                       WHERE id = ?1",
@@ -1110,7 +1118,8 @@ mod tests {
         });
     }
 
-    /// Čl. 47 st. 7 — *„Evidencije iz st. 1. i 4. ovog člana čuvaju se trajno.“*
+    /// Čl. 47 st. 7 — „Evidencije iz st. 1, 3, 4. i 6. ovog člana vode se u
+    /// pismenom obliku, što obuhvata i elektronski oblik i čuvaju se trajno.“
     /// This is the one record in the trio that is `trajno`, and the claim has to
     /// be backed by the shared retention table and by the transaction-level
     /// fence, not by prose alone.
@@ -1160,18 +1169,47 @@ mod tests {
             sign_in_admin(state);
             let register = generate(state, NOW).expect("the register should generate");
 
+            let connection = state.db().open().expect("database should open");
+
             for kljuc in [KLJUC_EVIDENCIJA_PRISTUPA, KLJUC_EVIDENCIJA_POVREDA] {
                 let activity = by_kljuc(&register, kljuc);
                 let rok = activity.rok_cuvanja.as_deref().expect("a rok");
-                assert!(
-                    !rok.contains("trajno") || rok.contains("ne čuva trajno"),
-                    "{kljuc} must not be recorded as trajno — čl. 47 st. 7 governs this register \
-                     and nothing else: {rok}"
-                );
+
+                // A rok has two halves and they have to be asserted apart. The
+                // statutory half is the template's static prose, and it already
+                // says „ne čuva trajno“ for both logs — so any check the prose
+                // can satisfy on its own says nothing about the half that
+                // matters. Here the prose is asserted for what it is: a positive
+                // requirement that the register disclaim st. 7 in words.
                 assert!(
                     rok.contains("Zakon ne propisuje rok"),
                     "{kljuc} has no statutory period and the register has to say so: {rok}"
                 );
+                assert!(
+                    rok.contains("ne čuva trajno"),
+                    "{kljuc} must say in words that čl. 47 st. 7's trajno is not its rule: {rok}"
+                );
+
+                // The operative half: the period the program actually applies,
+                // read out of `retention_policies` at generation time. This is
+                // the half a mis-wired `Template::retention` moves, and the one
+                // that would make the entry contradict itself.
+                assert!(
+                    !rok.contains("primenjuje: trajno"),
+                    "{kljuc}: the period the program applies reads trajno — čl. 47 st. 7 \
+                     prescribes trajno for the evidencija radnji obrade and for no other \
+                     record: {rok}"
+                );
+                if let Some(class) = activity.retention_record_class {
+                    let policy =
+                        load_policy(&connection, class).expect("the wired class is seeded");
+                    assert!(
+                        !policy.never_purge,
+                        "{kljuc} is wired to the `{}` class, whose never_purge puts it beyond \
+                         every purge — that is čl. 47 st. 7's answer for the register alone",
+                        class.key()
+                    );
+                }
             }
         });
     }
@@ -1214,6 +1252,123 @@ mod tests {
                 "regeneration must upsert on `kljuc`, never append a second copy"
             );
         });
+    }
+
+    /// Čl. 47 st. 1 t. 5's second half — the safeguards for a transfer — is the
+    /// one slot on this register the program does not know the answer to, and
+    /// both prenos entries tell the operator in Serbian that *„ovde se upisuju
+    /// naziv te države i opis mera zaštite prenosa“*. A register that invites a
+    /// statutory entry and then erases it on the next launch is worse than one
+    /// that never asked: the column belongs to whoever fills it in, so
+    /// regeneration must leave it alone — and must not log a čl. 48 *menjanje*
+    /// for a row it did not actually change.
+    #[test]
+    fn a_recorded_transfer_safeguard_survives_regeneration() {
+        const MERE: &str =
+            "Prenos u Irsku; standardne ugovorne klauzule i šifrovan saobraćaj (ZZPL čl. 65).";
+
+        with_state("cl47_transfer_safeguard_survives", |state| {
+            sign_in_admin(state);
+            let first = generate(state, NOW).expect("the register should generate");
+            let podrska_id = by_kljuc(&first, "tehnicka_podrska").id;
+
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute(
+                    "UPDATE processing_activities SET mere_zastite_prenosa = ?2 WHERE id = ?1",
+                    rusqlite::params![podrska_id, MERE],
+                )
+                .expect("the st. 1 t. 5 safeguards slot should accept an entry");
+
+            let audit_before = audit_rows(state);
+
+            // Nothing the generator owns has changed, so this run has to be the
+            // same no-op it is for every other row.
+            let second = generate(state, KASNIJE).expect("regeneration should succeed");
+            assert_eq!(
+                by_kljuc(&second, "tehnicka_podrska")
+                    .mere_zastite_prenosa
+                    .as_deref(),
+                Some(MERE),
+                "regeneration erased the operator's čl. 47 st. 1 t. 5 safeguards"
+            );
+            assert_eq!(
+                audit_rows(state),
+                audit_before,
+                "an entry the generator does not own is not a change it may claim in the \
+                 evidencija pristupa"
+            );
+
+            // And a run that genuinely does rewrite the row must still leave the
+            // column to its owner.
+            crate::commands::settings::save_company_settings(
+                state,
+                crate::commands::settings::CompanySettingsRequest {
+                    shop_name: "Butik Đurđevak".to_string(),
+                    address: "Njegoševa 12, Beograd".to_string(),
+                    pib: "111222333".to_string(),
+                    registration_number: "64123456".to_string(),
+                    phone: "0113456789".to_string(),
+                    logo_path: None,
+                    currency: "RSD".to_string(),
+                },
+            )
+            .expect("company settings should save");
+
+            let third = generate(state, KASNIJE).expect("regeneration should succeed");
+            assert_eq!(
+                by_kljuc(&third, "tehnicka_podrska")
+                    .mere_zastite_prenosa
+                    .as_deref(),
+                Some(MERE),
+                "a rewrite of the generated columns must not take the operator's entry with it"
+            );
+            assert_eq!(
+                by_kljuc(&third, "tehnicka_podrska").rukovalac_naziv,
+                "Butik Đurđevak",
+                "…while the generated columns still follow the configuration"
+            );
+        });
+    }
+
+    /// This module's whole job is quoting čl. 47 correctly, so the one place it
+    /// quotes st. 7 verbatim is pinned to the repo's verified text of that stav.
+    /// The enumerated stavovi and the *pismeni oblik* limb are both part of the
+    /// rule, and a quotation that drops either is a misquote inside the module
+    /// least able to afford one.
+    #[test]
+    fn the_quoted_cl_47_st_7_matches_the_verified_text() {
+        const SOURCE: &str = include_str!("cl47.rs");
+        const VERIFIED_RULES: &str = include_str!("../../docs/REMAINING-SW-VERIFIED-RULES.md");
+
+        let red = VERIFIED_RULES
+            .lines()
+            .find(|line| line.contains("**ZZPL čl. 47 st. 7**"))
+            .expect("docs/REMAINING-SW-VERIFIED-RULES.md must carry the verified čl. 47 st. 7");
+        let od = red.find('"').expect("the verified text is quoted") + 1;
+        let do_ = red.rfind('"').expect("the verified text is quoted");
+        let verified = &red[od..do_];
+        assert!(
+            verified.contains("čuvaju se trajno"),
+            "the verified line was parsed wrong: {verified}"
+        );
+
+        // Doc comments wrap, so the comparison runs on the source with the
+        // `///` markers stripped and every run of whitespace collapsed.
+        let source = SOURCE
+            .lines()
+            .map(|line| line.trim().trim_start_matches("///"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            source.contains(verified),
+            "cl47.rs quotes ZZPL čl. 47 st. 7 as something other than the verified text. \
+             The verified stav reads: „{verified}“"
+        );
     }
 
     /// A changed input is the other half of idempotence: when the shop's own
