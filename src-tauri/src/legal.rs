@@ -8,7 +8,8 @@
 //!
 //! Verified against primary text on 31.07.2026 — see
 //! `docs/SW11-SW15-VERIFIED-RULES.md` §2. The two ZoR working-time notices are
-//! verified against `docs/SW14-VERIFIED-RULES.md` §3 W1.
+//! verified against `docs/SW14-VERIFIED-RULES.md` §3 W1, and the ZZP čl. 6
+//! cenovnik notice against `docs/REMAINING-SW-VERIFIED-RULES.md` §3 V2 and §2b.
 //!
 //! Rendered by the AML, cash-deposit and declaration surfaces (Tasks 8, 13 and
 //! 19), so `dead_code` is allowed here until that wiring lands — mirroring the
@@ -278,6 +279,69 @@ pub fn breach_notification_missing(profile: &ShopProfile) -> LegalNotice {
     }
 }
 
+/// ZZP čl. 6 — the machine-readable cenovnik, and the čl. 210 fixed fine.
+///
+/// Verified against `docs/REMAINING-SW-VERIFIED-RULES.md` §3 V2 and §2b.
+///
+/// **The preduzetnik sum is the fixed 100.000 of čl. 210 st. 3.** Čl. 210 st. 1
+/// is the pravno-lice row and st. 2 the odgovorno-lice one, which čl. 210 st. 2
+/// ties to a *pravno lice* and therefore never reaches him. ZZP contains zero
+/// occurrences of *privredni prestup*, so the ZPP čl. 6 st. 1 trap does not
+/// arise here and every tier is a prekršaj. Because every amount is fixed,
+/// enforcement runs by prekršajni nalog from the tržišna inspekcija (ZoP čl. 168
+/// st. 1) — which is what makes ZoP čl. 173 st. 1's half-within-eight-days the
+/// number the shop actually pays.
+///
+/// **Čl. 210 was not in the čl. 220 carve-out.** That carve-out named čl. 4
+/// st. 1 and čl. 6 only, so the duty has run since the law entered into force
+/// while the offence provision waited out the three months. No copy may date the
+/// shop's exposure to the first of May 2026.
+///
+/// **The no-website case is unresolved (§2b).** Čl. 6 st. 2 says *„na svojoj
+/// internet stranici“* — a possessive presupposing a site — and no ZZP provision
+/// obliges a trader to have one; extending a prekršaj to an unwritten duty to
+/// create one runs into lex certa (ZoP čl. 3). The summary says so plainly,
+/// because the alternative is telling a shop it is already in breach on a
+/// question the text does not settle. What IS settled, and is stated first, is
+/// that st. 2 draws no line at all — not at the trader's size and not at whether
+/// he already has a site — so there is no carve-out to hide behind either.
+pub fn cenovnik_not_published(profile: &ShopProfile) -> LegalNotice {
+    LegalNotice {
+        summary: "Trgovac je dužan da na svojoj internet stranici, posebno za svaki prodajni \
+                  objekat, objavi cenovnik u digitalnom obliku pogodnom za automatsku obradu i \
+                  da ga ažurira u realnom vremenu, kako bi odgovarao trenutnim cenama. \
+                  U cenovniku se, kao i na prodajnom mestu, ističu prodajna i jedinična cena. \
+                  Izuzetka od ove obaveze nema — ni prema veličini trgovca, ni prema tome da li \
+                  trgovac ima internet stranicu. Ali zakon nigde ne propisuje obavezu trgovca da \
+                  ima internet stranicu, pa za trgovca koji je nema nije razjašnjeno da li je \
+                  dužan da je izradi: to pitanje nije rešeno ni podzakonskim aktom, ni \
+                  mišljenjem, ni sudskom praksom."
+            .to_string(),
+        penalty: tiered(
+            profile,
+            "Prekršaj: novčana kazna u fiksnom iznosu od 100.000 dinara (čl. 210 st. 3). \
+             Plaćanjem polovine — 50.000 dinara — u roku od osam dana od prijema prekršajnog \
+             naloga prihvata se odgovornost za prekršaj i oslobađa plaćanja druge polovine \
+             (Zakon o prekršajima, čl. 173 st. 1).",
+            "Prekršaj: novčana kazna u fiksnom iznosu od 200.000 dinara (čl. 210 st. 1 tač. 1), \
+             uz kaznu za odgovorno lice u pravnom licu u fiksnom iznosu od 50.000 dinara \
+             (čl. 210 st. 2).",
+        ),
+        citation: "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 35/2026), čl. 6 st. 1–3; \
+                   prekršaj: čl. 210 st. 1 tač. 1. Čl. 6 se primenjuje od stupanja zakona na \
+                   snagu, ali čl. 210 nije obuhvaćen izuzetkom iz čl. 220, pa se primenjuje tek \
+                   po isteku tri meseca od tog dana. Nadzor: tržišna inspekcija — po čl. 207 \
+                   tač. 1 inspektor najpre zapisnikom nalaže otklanjanje nepravilnosti u \
+                   ostavljenom roku (čl. 206 st. 1), a ako se ne otkloni — donosi rešenje \
+                   (čl. 206 st. 4). Ako se ni po rešenju ne postupi, inspektor rešenjem izriče \
+                   privremenu zabranu prometa robe na koju se mera odnosi (čl. 206 st. 5), a \
+                   nepostupanje po rešenju je i poseban prekršaj (čl. 209 st. 1 tač. 40). \
+                   Zastarelost: čl. 213, dve godine od izvršenja."
+            .to_string(),
+        is_legal_duty: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +370,7 @@ mod tests {
             overtime_caps_exceeded(p),
             preraspodela_caps_exceeded(p),
             breach_notification_missing(p),
+            cenovnik_not_published(p),
         ]
     }
 
@@ -325,7 +390,7 @@ mod tests {
 
         assert_eq!(
             enumerated.len(),
-            9,
+            10,
             "adding a notice function means adding it to all_notices, to the \
              list below, AND bumping this count — an omission from both lists \
              is otherwise invisible"
@@ -341,6 +406,7 @@ mod tests {
             overtime_caps_exceeded(&p),
             preraspodela_caps_exceeded(&p),
             breach_notification_missing(&p),
+            cenovnik_not_published(&p),
         ] {
             assert!(
                 enumerated.contains(&notice),
@@ -866,6 +932,233 @@ mod tests {
                         !haystack.contains(forbidden),
                         "no ZEOR notice may reach an operator while čl. 50/51 is \
                          unresolved; found {forbidden:?} in: {rendered}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// ZZP čl. 210 carries three rows and the preduzetnik one is **st. 3**.
+    ///
+    /// Every amount is fixed, which is what puts the offence in prekršajni-nalog
+    /// territory (ZoP čl. 168 st. 1) and makes the ZoP čl. 173 st. 1 halving a
+    /// real number for the shop rather than a footnote — so „fiksnom“ and the
+    /// eight-day window are load-bearing copy, not decoration. ZZP contains zero
+    /// occurrences of *privredni prestup*, so every tier here is a prekršaj.
+    #[test]
+    fn cenovnik_fine_is_the_fixed_cl_210_st_3_sum_with_the_eight_day_halving() {
+        let preduzetnik = cenovnik_not_published(&profile(Some(PravnaForma::Preduzetnik)));
+        let penalty = preduzetnik.penalty.expect("preduzetnik penalty is known");
+        assert!(penalty.contains("100.000"), "čl. 210 st. 3: {penalty}");
+        assert!(
+            penalty.contains("fiksnom"),
+            "a fixed sum, not a range — this is what makes it issuable by \
+             prekršajni nalog: {penalty}"
+        );
+        assert!(penalty.contains("čl. 210 st. 3"), "{penalty}");
+        assert!(
+            penalty.contains("50.000") && penalty.contains("osam dana"),
+            "half within eight days of the prekršajni nalog (ZoP čl. 173 st. 1) \
+             is the amount the shop actually pays: {penalty}"
+        );
+        assert!(
+            penalty.contains("čl. 173 st. 1"),
+            "the halving is ZoP's rule, not ZZP's — cite it: {penalty}"
+        );
+        assert!(
+            !penalty.contains("odgovorno lice"),
+            "čl. 210 st. 2 reaches only an odgovorno lice u pravnom licu; \
+             a preduzetnik has none: {penalty}"
+        );
+        assert!(preduzetnik.is_legal_duty);
+
+        let pravno = cenovnik_not_published(&profile(Some(PravnaForma::PravnoLice)));
+        let penalty = pravno.penalty.expect("pravno lice penalty is known");
+        assert!(penalty.contains("200.000"), "čl. 210 st. 1: {penalty}");
+        assert!(penalty.contains("čl. 210 st. 1 tač. 1"), "{penalty}");
+        assert!(
+            penalty.contains("50.000")
+                && penalty.contains("odgovorno lice")
+                && penalty.contains("čl. 210 st. 2"),
+            "the odgovorno-lice row belongs on the pravno-lice tier: {penalty}"
+        );
+        assert!(
+            !penalty.to_lowercase().contains("privredni prestup"),
+            "ZZP prescribes prekršaji only — it contains no privredni prestup: {penalty}"
+        );
+    }
+
+    /// The summary is the shop's statement of what čl. 6 asks of it, and §2b is
+    /// the reason it may not be written as a finding of breach.
+    ///
+    /// Čl. 6 st. 2's second sentence pulls st. 1 into the published file, so the
+    /// jedinična cena belongs in the duty the operator reads (req. 10); st. 3 is
+    /// the real-time leg; and the no-website case is **unresolved** — čl. 6 st. 2
+    /// says *„na svojoj internet stranici“*, a possessive presupposing a site,
+    /// and no ZZP provision obliges a trader to have one.
+    #[test]
+    fn cenovnik_notice_states_the_duty_and_leaves_the_no_website_case_open() {
+        // Summary and citation carry no figure, so the UNSET arm exercises
+        // exactly the same two strings the other tiers render.
+        let notice = cenovnik_not_published(&profile(None));
+
+        assert!(
+            notice.penalty.is_none(),
+            "an UNSET legal form renders no figure: {:?}",
+            notice.penalty
+        );
+        assert!(
+            notice.summary.contains("posebno za svaki prodajni objekat"),
+            "one cenovnik per prodajni objekat, not one per trader: {}",
+            notice.summary
+        );
+        assert!(
+            notice.summary.contains("jedinična cena"),
+            "čl. 6 st. 2's second sentence pulls st. 1 in, so the unit price is \
+             part of the duty (req. 10): {}",
+            notice.summary
+        );
+        assert!(
+            notice.summary.contains("u realnom vremenu"),
+            "čl. 6 st. 3 — a nightly batch is not compliance: {}",
+            notice.summary
+        );
+        assert!(
+            notice.summary.contains("ne propisuje obavezu")
+                && notice.summary.contains("internet stranicu"),
+            "§2b: no ZZP provision obliges a trader to have a website, and the \
+             copy must say so rather than imply the duty resolves itself: {}",
+            notice.summary
+        );
+
+        let haystack = format!("{} {}", notice.summary, notice.citation).to_lowercase();
+        for forbidden in ["u prekršaju", "kršite", "prekršili ste", "niste u skladu"] {
+            assert!(
+                !haystack.contains(forbidden),
+                "§2b — the no-website case is unresolved, so no copy may find the \
+                 shop in breach; found {forbidden:?} in: {haystack}"
+            );
+        }
+
+        assert!(
+            notice.citation.contains("čl. 6 st. 1"),
+            "the duty: {}",
+            notice.citation
+        );
+        assert!(
+            notice.citation.contains("čl. 210 st. 1 tač. 1"),
+            "the offence: {}",
+            notice.citation
+        );
+        assert!(
+            notice.citation.contains("čl. 220") && notice.citation.contains("tri meseca"),
+            "čl. 6 applies from entry into force but čl. 210 was NOT in the \
+             čl. 220 carve-out — the deferral has to travel with the offence: {}",
+            notice.citation
+        );
+        assert!(
+            notice.citation.contains("čl. 213"),
+            "the two-year limitation is the retention floor's authority too: {}",
+            notice.citation
+        );
+        assert!(
+            notice.is_legal_duty,
+            "čl. 6 is an obaveza, never a preporuka"
+        );
+    }
+
+    /// Req. 18's CI guard: the pravno-lice sum must be unreachable as a
+    /// preduzetnik's čl. 6 exposure.
+    ///
+    /// It cannot be a needle on the blanket forbidden-substring guard above,
+    /// because „200.000“ is a **correct** preduzetnik figure elsewhere in this
+    /// module — ZoR čl. 274 st. 2 fines him 200.000 do 400.000 — so forbidding
+    /// it outright would fail on two lawful notices and the guard would be
+    /// deleted rather than fixed. Req. 18 words it narrowly for the same reason:
+    /// the string must not be reachable *as a čl. 6 exposure*. So the scope is
+    /// every ZZP čl. 6 notice, which is what any future one will also be.
+    ///
+    /// The emptiness assertion is the other half: a filter that matches nothing
+    /// passes every loop below it, and a renamed citation would silently turn
+    /// this guard off.
+    #[test]
+    fn no_zzp_cl_6_notice_quotes_the_pravno_lice_sum_to_a_preduzetnik() {
+        fn is_zzp_cl_6(notice: &LegalNotice) -> bool {
+            notice.citation.contains("Zakon o zaštiti potrošača")
+                && notice.citation.contains("čl. 6")
+        }
+
+        let p = profile(Some(PravnaForma::Preduzetnik));
+        let guarded: Vec<LegalNotice> = all_notices(&p).into_iter().filter(is_zzp_cl_6).collect();
+
+        assert!(
+            !guarded.is_empty(),
+            "no ZZP čl. 6 notice was found to guard — a citation rewrite would \
+             switch this guard off in silence"
+        );
+
+        for notice in guarded {
+            let rendered = format!(
+                "{} {} {}",
+                notice.summary,
+                notice.penalty.clone().unwrap_or_default(),
+                notice.citation
+            );
+
+            for forbidden in ["200.000", "čl. 210 st. 2", "odgovorno lice"] {
+                assert!(
+                    !rendered.contains(forbidden),
+                    "a preduzetnik's čl. 6 exposure is the fixed 100.000 of \
+                     čl. 210 st. 3; found {forbidden:?} in: {rendered}"
+                );
+            }
+
+            // „čl. 210 st. 1“ is deliberately NOT a needle: st. 1 tač. 1 is the
+            // biće, and st. 3 reaches the preduzetnik by referring back to it
+            // („Za prekršaj iz stava 1. ovog člana kazniće se i preduzetnik“) —
+            // the same shape as čl. 15 st. 1 tač. 4 → st. 3 in `lpfr_required`
+            // and čl. 95 st. 1 tač. 24 → st. 4 in `breach_notification_missing`.
+            // Dropping the offence article would be a worse notice, not a safer
+            // one. What must never happen is quoting st. 1 without resolving the
+            // amount through st. 3.
+            assert!(
+                !rendered.contains("čl. 210") || rendered.contains("čl. 210 st. 3"),
+                "a notice that names čl. 210 to a preduzetnik must resolve the \
+                 amount through st. 3: {rendered}"
+            );
+        }
+    }
+
+    /// Čl. 220's carve-out named čl. 4 st. 1 and čl. 6 — and **not** čl. 210, so
+    /// the offence provision did not apply from the day the law entered into
+    /// force. Dating a shop's exposure to the first of May 2026 overstates it by
+    /// three months, in the one direction a shop cannot check.
+    ///
+    /// Applied to every notice, not only the ZZP one: no notice in this module
+    /// names a calendar date today, and one that ever needs to should fail here
+    /// loudly first.
+    #[test]
+    fn no_notice_dates_an_exposure_to_the_first_of_may_2026() {
+        for forma in [
+            Some(PravnaForma::Preduzetnik),
+            Some(PravnaForma::PravnoLice),
+            None,
+        ] {
+            let p = profile(forma);
+            for notice in all_notices(&p) {
+                let rendered = format!(
+                    "{} {} {}",
+                    notice.summary,
+                    notice.penalty.clone().unwrap_or_default(),
+                    notice.citation
+                );
+
+                for forbidden in ["1. maja 2026", "1. maj 2026", "01.05.2026", "1.5.2026"] {
+                    assert!(
+                        !rendered.contains(forbidden),
+                        "čl. 210 was not in the čl. 220 carve-out, so no exposure \
+                         may be dated to the first of May; found {forbidden:?} \
+                         in: {rendered}"
                     );
                 }
             }
