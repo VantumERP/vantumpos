@@ -1488,7 +1488,7 @@ pub(crate) const POPIS_SETTINGS_KEY: &str = "popis";
 /// **Why the filing deadline is configuration and not a constant.** PoP čl. 13
 /// st. 2 counts the annual izveštaj's rok back from the rok za dostavljanje
 /// redovnog godišnjeg finansijskog izveštaja, and ZoRač čl. 44 st. 1 sets that at
-/// 31 March *„osim ако посебним законом није друкчије уређено“*. The date is
+/// 31 March *„осим ако посебним законом није друкчије уређено“*. The date is
 /// therefore not this crate's to own: a special law, or a change to čl. 44, must
 /// be a setting the shop's accountant edits and not a release of the app. Nothing
 /// is presumed in its place — an unset deadline refuses the annual izveštaj by
@@ -1540,7 +1540,12 @@ pub struct IzvestajRequest {
     /// liste by `crate::popis::ensure_liste_kompletne` before anything is composed.
     /// A parameter for the reason Task 5 gave: presence is a fact about the shop
     /// that no ledger in this database holds.
-    #[serde(default)]
+    ///
+    /// **Required on the wire, exactly as `popis_provera_listi` requires it.** The
+    /// gate refuses a *declared* lista that is empty, so a request that simply
+    /// omitted the field would satisfy it vacuously and compose an izveštaj with no
+    /// req. 36 check behind it at all. An explicit empty array still says „ništa
+    /// nije prijavljeno“; an absent field says nothing.
     pub prijavljene_liste: Vec<PopisLista>,
     /// The five čl. 13 st. 1 elements the commission writes.
     pub narativ: IzvestajNarativ,
@@ -1783,7 +1788,7 @@ pub(crate) fn compose_izvestaj(
 
     let mut upozorenja = komisija_upozorenja(&session.komisija);
 
-    // Req. 31 / čl. 9 st. 3 — „uz štampanje pописних листа које потписују чланови
+    // Req. 31 / čl. 9 st. 3 — „уз штампање пописних листа које потписују чланови
     // комисије“. The izveštaj rests on those liste, so an izveštaj drafted before
     // they are signed rests on a document that is not yet evidence. A warning and
     // not a refusal: drafting the izveštaj early is not itself a breach, and this
@@ -4256,6 +4261,197 @@ mod tests {
                 "the izveštaj must say that this application does not keep it, said: {poruke}"
             );
         });
+    }
+
+    /// The fifth warning limb, and the only one carrying a **statutory deadline of
+    /// its own**: čl. 2 st. 6 gives the owner of tuđa roba ten days for a signed
+    /// copy of the posebna lista, counted from the day of the popis. The izveštaj is
+    /// the document the shop reads when the count is over, so the reminder travels
+    /// with it — derived from the liste, carrying the rok, and saying plainly that
+    /// this application does not deliver the lista. The negative control is asserted
+    /// first: a popis with no tuđa roba on it owes nobody a copy, and a reminder
+    /// that fired on every izveštaj would be the noise that teaches a shop to click
+    /// past the ones that matter.
+    #[test]
+    fn a_konsignacija_stavka_puts_the_cl_2_st_6_rok_in_the_izvestaj() {
+        with_app("popis_izvestaj_konsignacija", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let bez_konsignacije = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a complete izveštaj should compose");
+            assert!(
+                bez_konsignacije
+                    .upozorenja
+                    .iter()
+                    .all(|poruka| !poruka.contains("čl. 2 st. 6")),
+                "a popis without tuđa roba owes nobody a copy, warnings were: {:?}",
+                bez_konsignacije.upozorenja
+            );
+
+            // Čl. 2 st. 5 — tuđa roba goes on its own posebna lista. Inserted the way
+            // the other posebne liste are seeded here, because the obračun is open and
+            // the stavka is not the one the komisija signed.
+            let connection = state.db().open().expect("database should open");
+            connection
+                .execute(
+                    "INSERT INTO popis_lines (session_id, lista_vrsta, naziv,
+                                              stvarna_kolicina_milli, cena_minor,
+                                              created_at, updated_at)
+                     VALUES (?1, 'konsignacija', 'Haljina — vlasnik „Tekstil d.o.o.“',
+                             2000, 450000, ?2, ?2)",
+                    params![id, "2027-01-02T09:45:00Z"],
+                )
+                .expect("the konsignacija lista should take its stavka");
+
+            let mut request = izvestaj_request();
+            request.prijavljene_liste = vec![PopisLista::Roba, PopisLista::Konsignacija];
+            let izvestaj = compose_izvestaj(state.inner(), id, &request)
+                .expect("tuđa roba is reported, never a refusal");
+
+            let podsetnik = izvestaj
+                .upozorenja
+                .iter()
+                .find(|poruka| poruka.contains("čl. 2 st. 6"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the čl. 2 st. 6 duty must travel with the izveštaj, warnings were: {:?}",
+                        izvestaj.upozorenja
+                    )
+                });
+            assert!(
+                podsetnik.contains("2027-01-10"),
+                "the reminder must carry its rok — ten days from the 31 December count, said: \
+                 {podsetnik}"
+            );
+            assert!(
+                podsetnik.contains("ne dostavlja"),
+                "the reminder must say the application does not deliver the lista, said: \
+                 {podsetnik}"
+            );
+        });
+    }
+
+    /// **No operator string may promise content the composed document does not
+    /// carry.** The three computed elements are answered by the figures in `ukupno`
+    /// and `liste`, and those figures are money and counts of stavki: nothing
+    /// anywhere in this payload is a količina, because a količina summed across
+    /// komada, metara and kilograma is a number with no unit. So the uputstvo for
+    /// each of the three says what the izveštaj *does* carry and sends the reader to
+    /// the popisne liste for the naturalne količine — which is where čl. 9 st. 1
+    /// t. 4 puts them, and where they actually are.
+    #[test]
+    fn the_computed_elements_promise_only_the_figures_the_izvestaj_carries() {
+        with_app("popis_izvestaj_uputstva", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_izvestaj_popis(state.inner(), "KOS-1");
+            set_rok_predaje_fi(state.inner(), Some(ROK_PREDAJE_FI));
+
+            let izvestaj = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a complete izveštaj should compose");
+
+            /// Every key in the payload, however deep — a promise is judged against
+            /// the whole document and not against one struct.
+            fn kljucevi(vrednost: &serde_json::Value, skup: &mut Vec<String>) {
+                match vrednost {
+                    serde_json::Value::Object(mapa) => {
+                        for (kljuc, dete) in mapa {
+                            skup.push(kljuc.clone());
+                            kljucevi(dete, skup);
+                        }
+                    }
+                    serde_json::Value::Array(niz) => {
+                        for dete in niz {
+                            kljucevi(dete, skup);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let payload =
+                serde_json::to_value(&izvestaj).expect("the izveštaj should serialize for IPC");
+            let mut sva = Vec::new();
+            kljucevi(&payload, &mut sva);
+            let naturalna: Vec<&String> = sva
+                .iter()
+                .filter(|kljuc| {
+                    let kljuc = kljuc.to_lowercase();
+                    kljuc.contains("kolicina") || kljuc.contains("milli")
+                })
+                .collect();
+            assert!(
+                naturalna.is_empty(),
+                "the izveštaj carries no natural quantity, so nothing in it may promise one — \
+                 if this ever changes, the three uputstva below must change with it; found: \
+                 {naturalna:?}"
+            );
+
+            for element in [
+                IzvestajElement::StvarnoStanje,
+                IzvestajElement::KnjigovodstvenoStanje,
+                IzvestajElement::Razlike,
+            ] {
+                let pregled = izvestaj
+                    .elementi
+                    .iter()
+                    .find(|pregled| pregled.element == element)
+                    .expect("every element is present");
+                assert!(
+                    pregled.tekst.is_none(),
+                    "{element:?} is computed, so nobody types it"
+                );
+                assert!(
+                    pregled.uputstvo.contains("Izveštaj iskazuje"),
+                    "{element:?} must say what the izveštaj itself carries, said: {}",
+                    pregled.uputstvo
+                );
+                assert!(
+                    pregled.uputstvo.contains("na popisnim listama"),
+                    "{element:?} must send the reader to the popisne liste for the količine \
+                     rather than promise them here, said: {}",
+                    pregled.uputstvo
+                );
+            }
+        });
+    }
+
+    /// Req. 36's gate must not be **opt-in from the wire**. `ensure_liste_kompletne`
+    /// refuses only a *declared* lista that is empty, so a caller that omitted the
+    /// declaration would pass the gate vacuously and compose an izveštaj with no
+    /// req. 36 check behind it at all. `popis_provera_listi` requires the identical
+    /// argument for the identical rule; so does the generator. „Ništa nije
+    /// prijavljeno“ stays expressible — as an explicit empty array, which is an
+    /// answer, unlike an absent field.
+    #[test]
+    fn an_izvestaj_request_must_declare_which_liste_the_shop_has() {
+        let narativ = serde_json::to_value(potpun_narativ()).expect("the narativ should serialize");
+
+        let error = serde_json::from_value::<IzvestajRequest>(serde_json::json!({
+            "narativ": narativ.clone(),
+        }))
+        .expect_err("an omitted declaration must be a wire error, not an empty declaration");
+        assert!(
+            error.to_string().contains("prijavljeneListe"),
+            "the wire error must name the missing field, said: {error}"
+        );
+
+        let prijavljeno = serde_json::from_value::<IzvestajRequest>(serde_json::json!({
+            "prijavljeneListe": ["roba", "konsignacija"],
+            "narativ": narativ.clone(),
+        }))
+        .expect("a declaration should deserialize");
+        assert_eq!(
+            prijavljeno.prijavljene_liste,
+            vec![PopisLista::Roba, PopisLista::Konsignacija]
+        );
+
+        let nista = serde_json::from_value::<IzvestajRequest>(serde_json::json!({
+            "prijavljeneListe": [],
+            "narativ": narativ,
+        }))
+        .expect("„nothing declared“ is an answer and must stay expressible");
+        assert!(nista.prijavljene_liste.is_empty());
     }
 
     /// The rok is only as good as the date it is computed from, and a filing

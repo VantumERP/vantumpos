@@ -676,15 +676,30 @@ impl IzvestajElement {
     /// predlozi element carries the four the article spells out; the rest say
     /// plainly what belongs there, because „predlozi za likvidaciju razlika“ on an
     /// empty box is a heading and not a question.
+    ///
+    /// **The three computed elements say what the izveštaj carries and no more.**
+    /// This document totals money and counts of stavki: a količina summed across
+    /// komada, metara and kilograma is a number with no unit, so the naturalne
+    /// količine stay per stavka on the popisne liste — where čl. 9 st. 1 t. 4 puts
+    /// them — and the three uputstva send the reader there rather than naming a
+    /// figure the composed izveštaj does not have.
     pub fn uputstvo(self) -> &'static str {
         match self {
             Self::StvarnoStanje => {
-                "Popunjava se iz popisnih listi — prebrojano stanje i njegova vrednost."
+                "Iz popisnih listi. Izveštaj iskazuje vrednost prebrojanog stanja i broj stavki; \
+                 prebrojane količine stoje po stavkama na popisnim listama koje se prilažu uz \
+                 izveštaj."
             }
             Self::KnjigovodstvenoStanje => {
-                "Popunjava se iz knjiga, tek posle potpisa stvarnog stanja (PoP čl. 8 st. 5)."
+                "Iz knjiga, tek posle potpisa stvarnog stanja (PoP čl. 8 st. 5). Izveštaj iskazuje \
+                 vrednost knjigovodstvenog stanja; knjigovodstvene količine stoje po stavkama na \
+                 popisnim listama."
             }
-            Self::Razlike => "Popunjava se obračunom: viškovi i manjkovi, naturalno i vrednosno.",
+            Self::Razlike => {
+                "Iz obračuna. Izveštaj iskazuje vrednosnu razliku i broj stavki sa viškom odnosno \
+                 manjkom; naturalne razlike stoje po stavkama na popisnim listama koje se prilažu \
+                 uz izveštaj."
+            }
             Self::UzrociNeslaganja => {
                 "Navedite zbog čega se stvarno i knjigovodstveno stanje razlikuju."
             }
