@@ -1967,32 +1967,138 @@ pub struct NivelacijaObuhvatView {
     pub vec_na_listama: i64,
 }
 
-/// What the report is built from, said plainly.
+/// What this report does with one `price_history.source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IzvorPracenje {
+    /// A retail selling price moved, and the report raises the čl. 21 obligation.
+    Prati,
+    /// A retail selling price moved, and the report does **not** raise it. Saying
+    /// so is the whole point: a shop that is not told reads the list as complete.
+    NePrati,
+    /// The row is not a movement of a retail selling price at all — a first price,
+    /// a withdrawal from sale, a migration carrying prices forward.
+    NijePromena,
+}
+
+/// One enumerated `price_history.source`, what the report does with it, and how the
+/// shop is told — the three in one place so the copy cannot drift from the query.
+struct IzvorPromene {
+    /// The value as `price_history.source` records it. The whole vocabulary of the
+    /// live CHECK must appear here; the tests read that CHECK and hold this list to
+    /// it, so a migration that adds a source fails until it is answered for. Read by
+    /// that guard and by nothing at runtime — which is the point of it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    source: &'static str,
+    pracenje: IzvorPracenje,
+    /// The shop's words for it. Sources that are one thing to the shop share one
+    /// wording and are printed once.
+    opis: &'static str,
+}
+
+/// What the report is built from, source by source.
 ///
 /// `price_history` is this codebase's append-only record of the price the shop
-/// **offers** (ZoT čl. 37 st. 3), and a `source = 'update'` row carrying a price is
+/// **offers** (ZoT čl. 37 st. 3). A `source = 'update'` row carrying a price is
 /// exactly a retail selling price that moved — whether it moved through the SW-9b
-/// nivelacija or through a catalog edit. Both are „промена продајних цена … у
-/// малопродајном објекту“ under ZoRač čl. 21, and neither is this module's to
-/// excuse.
+/// nivelacija or through a catalog edit. A `reactivate` row carrying a price
+/// different from the last one on record is the same thing arrived at the long way
+/// round: the article left the shelf, its price was edited while it was off it —
+/// which `record_offered_price_change` logs nowhere at all — and it came back dearer
+/// or cheaper. All of them are „промена продајних цена … у малопродајном објекту“
+/// under ZoRač čl. 21, and none is this module's to excuse.
 ///
 /// It is deliberately **not** derived from `kep_entries`: SW-9b writes no ledger
 /// row for an article with nothing on hand, so a report built on the ledger would
 /// lose that repricing silently — and čl. 21 attaches to the price change, not to
 /// the value delta.
+const NIVELACIJA_IZVORI: &[IzvorPromene] = &[
+    IzvorPromene {
+        source: "update",
+        pracenje: IzvorPracenje::Prati,
+        opis: "nivelacije i izmene cene u katalogu artikala",
+    },
+    IzvorPromene {
+        source: "reactivate",
+        pracenje: IzvorPracenje::Prati,
+        opis: "vraćanje artikla u prodaju po ceni koja se razlikuje od poslednje evidentirane",
+    },
+    IzvorPromene {
+        source: "import",
+        pracenje: IzvorPracenje::NePrati,
+        opis: "cene unete uvozom artikala",
+    },
+    IzvorPromene {
+        source: "campaign_start",
+        pracenje: IzvorPracenje::NePrati,
+        opis: "akcijske cene iz kampanja",
+    },
+    IzvorPromene {
+        source: "campaign_step",
+        pracenje: IzvorPracenje::NePrati,
+        opis: "akcijske cene iz kampanja",
+    },
+    IzvorPromene {
+        source: "campaign_end",
+        pracenje: IzvorPracenje::NePrati,
+        opis: "akcijske cene iz kampanja",
+    },
+    IzvorPromene {
+        source: "create",
+        pracenje: IzvorPracenje::NijePromena,
+        opis: "prvo unošenje artikla u katalog",
+    },
+    IzvorPromene {
+        source: "deactivate",
+        pracenje: IzvorPracenje::NijePromena,
+        opis: "povlačenje artikla iz prodaje",
+    },
+    IzvorPromene {
+        source: "seed",
+        pracenje: IzvorPracenje::NijePromena,
+        opis: "prenos zatečenih cena pri nadogradnji baze",
+    },
+];
+
+const IZVOR_PRATI: &str = "Prati promene prodajne cene evidentirane u aplikaciji: ";
+const IZVOR_NE_PRATI: &str = "Ne prati: ";
+const IZVOR_NIJE_PROMENA: &str = "Ne računaju se u promenu prodajne cene: ";
+
+/// The report's account of itself, written out of [`NIVELACIJA_IZVORI`].
 ///
-/// The two kinds of price move it does not follow are named, because a list that
-/// reads as complete and is not is worse than no list: a shop would conclude it
-/// owed nothing.
-const NIVELACIJA_IZVOR: &str =
-    "Prati promene prodajne cene evidentirane u aplikaciji — nivelacije \
-     i izmene cene u katalogu artikala. Akcijske cene iz kampanja i cene unete uvozom artikala \
-     ovde se ne prate; da li i one traže popis, proverite sa knjigovođom.";
+/// Composed rather than hand-written so the sentence a shop reads and the query it
+/// describes have one author. A list that reads as complete and is not is worse
+/// than no list: a shop would conclude it owed nothing.
+fn nivelacija_izvor() -> String {
+    fn opisi(pracenje: IzvorPracenje) -> Vec<&'static str> {
+        let mut opisi: Vec<&'static str> = Vec::new();
+        for izvor in NIVELACIJA_IZVORI {
+            if izvor.pracenje == pracenje && !opisi.contains(&izvor.opis) {
+                opisi.push(izvor.opis);
+            }
+        }
+        opisi
+    }
+
+    format!(
+        "{IZVOR_PRATI}{}. {IZVOR_NE_PRATI}{} — da li i one traže popis, proverite sa knjigovođom. \
+         {IZVOR_NIJE_PROMENA}{}.",
+        opisi(IzvorPracenje::Prati).join("; "),
+        opisi(IzvorPracenje::NePrati).join("; "),
+        opisi(IzvorPracenje::NijePromena).join("; "),
+    )
+}
 
 /// Every recorded retail price move, newest first, grouped by the day it happened.
 ///
 /// One row per article per day: a price corrected twice in one afternoon is one
 /// price change for the popis it raises.
+///
+/// The `reactivate` limb compares against the last price on record for that article
+/// and not against nothing: an article that returns to the shelf at the price it
+/// left on has moved no price, and raising a popis for it would be this module
+/// inventing a duty ZoRač čl. 21 does not impose. A NULL there — no earlier price at
+/// all — is an article being offered for the first time, and `<>` against NULL is
+/// falsy, which is the answer wanted.
 fn nivelacija_promene(
     connection: &Connection,
 ) -> Result<Vec<(String, Vec<NivelacijaArtikalView>)>, AppError> {
@@ -2001,7 +2107,17 @@ fn nivelacija_promene(
            FROM price_history h
            JOIN products p ON p.id = h.product_id
            LEFT JOIN categories c ON c.id = p.category_id
-          WHERE h.source = 'update' AND h.price_minor IS NOT NULL
+          WHERE h.price_minor IS NOT NULL
+            AND (h.source = 'update'
+                 OR (h.source = 'reactivate'
+                     AND (SELECT r.price_minor
+                            FROM price_history r
+                           WHERE r.product_id = h.product_id
+                             AND r.price_minor IS NOT NULL
+                             AND (r.effective_from < h.effective_from
+                                  OR (r.effective_from = h.effective_from AND r.id < h.id))
+                           ORDER BY r.effective_from DESC, r.id DESC
+                           LIMIT 1) <> h.price_minor))
           GROUP BY datum, p.id
           ORDER BY datum DESC, p.id",
     )?;
@@ -2110,7 +2226,7 @@ pub(crate) fn nivelacija_pregled(
     Ok(NivelacijaPregledView {
         obaveze,
         obavestenje: crate::popis::nivelacija_obavestenje(),
-        izvor: NIVELACIJA_IZVOR.to_string(),
+        izvor: nivelacija_izvor(),
     })
 }
 
@@ -5083,8 +5199,9 @@ mod tests {
                 pregled.obavestenje.obaveza,
                 crate::popis::NIVELACIJA_OBAVEZA
             );
-            assert!(
-                !pregled.izvor.is_empty(),
+            assert_eq!(
+                pregled.izvor,
+                nivelacija_izvor(),
                 "the report must say which price moves it is built from"
             );
         });
@@ -5315,6 +5432,239 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The `price_history.source` vocabulary as the schema itself enumerates it,
+    /// read out of the live CHECK rather than copied into this file. A migration
+    /// that widens the vocabulary widens this list, and the classification below
+    /// fails until the new value has been given an answer.
+    fn izvori_iz_seme(connection: &Connection) -> Vec<String> {
+        let schema: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'price_history'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the price_history schema should load");
+        schema
+            .split("source IN (")
+            .nth(1)
+            .expect("price_history must CHECK its source vocabulary")
+            .split(')')
+            .next()
+            .expect("the CHECK list must close")
+            .split(',')
+            .map(|token| token.trim().trim_matches('\'').to_string())
+            .collect()
+    }
+
+    /// Req. 33 — **the report's account of itself must be the report's behaviour.**
+    ///
+    /// `izvor` is the sentence a shop reads to decide what it does *not* owe, and a
+    /// list that reads as complete and is not would let it conclude it owed no
+    /// popis when a čl. 58 prekršaj was already running. So the claim is not taken
+    /// on trust: every value the schema admits in `price_history.source` is seeded
+    /// as a real price move, the report is asked what it does with it, and the
+    /// answer must be the one [`NIVELACIJA_IZVORI`] claims — with the rendered copy
+    /// naming that source in the sentence that says so, and in no other.
+    ///
+    /// A reworded claim, a new source value and a widened query all fail here until
+    /// the copy and the query agree again.
+    #[test]
+    fn the_nivelacija_report_follows_exactly_the_price_moves_its_copy_claims() {
+        with_app("popis_nivelacija_izvor", |app| {
+            let state = app.state::<AppState>();
+            let connection = state.db().open().expect("database should open");
+
+            let mut iz_seme = izvori_iz_seme(&connection);
+            let mut klasifikovani: Vec<String> = NIVELACIJA_IZVORI
+                .iter()
+                .map(|izvor| izvor.source.to_string())
+                .collect();
+            iz_seme.sort();
+            klasifikovani.sort();
+            assert_eq!(
+                klasifikovani, iz_seme,
+                "every recorded price source must be either followed or named as unfollowed"
+            );
+
+            for (redni, izvor) in NIVELACIJA_IZVORI.iter().enumerate() {
+                let sifra = format!("IZV-{redni}");
+                let product_id = seed_artikal(state.inner(), &sifra, "Artikal", None);
+                // A price already on record, so the row below is a *move* of the
+                // offered price and not an article's first one.
+                connection
+                    .execute(
+                        "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                         VALUES (?1, '2026-11-19T10:00:00Z', 100000, 'seed', '2026-11-19T10:00:00Z')",
+                        params![product_id],
+                    )
+                    .expect("the baseline price should insert");
+                connection
+                    .execute(
+                        "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                         VALUES (?1, ?2, 120000, ?3, ?2)",
+                        params![product_id, STAMP_NIVELACIJE, izvor.source],
+                    )
+                    .expect("the price move should insert");
+
+                let pregled = nivelacija_pregled(&connection).expect("the report should compose");
+                let prijavljen = pregled.obaveze.iter().any(|obaveza| {
+                    obaveza.datum == DAN_NIVELACIJE
+                        && obaveza
+                            .artikli
+                            .iter()
+                            .any(|artikal| artikal.sifra.as_deref() == Some(sifra.as_str()))
+                });
+                assert_eq!(
+                    prijavljen,
+                    izvor.pracenje == IzvorPracenje::Prati,
+                    "source `{}` is classified {:?}, and the report disagrees",
+                    izvor.source,
+                    izvor.pracenje
+                );
+            }
+
+            // And the copy says exactly that, sentence by sentence.
+            //
+            // The three claims are pinned literally first. A guard that only split
+            // the rendered text on these markers would be hollow — the claim could
+            // be falsified *inside a marker* („Prati SVE promene …, uključujući
+            // akcijske cene iz kampanja“) and every segment below would still be
+            // right. The copy may be improved; it may not be improved without coming
+            // back here and reading it against the table above.
+            assert_eq!(
+                IZVOR_PRATI,
+                "Prati promene prodajne cene evidentirane u aplikaciji: "
+            );
+            assert_eq!(IZVOR_NE_PRATI, "Ne prati: ");
+            assert_eq!(
+                IZVOR_NIJE_PROMENA,
+                "Ne računaju se u promenu prodajne cene: "
+            );
+
+            let tekst = nivelacija_izvor();
+            let pocetak_prati = tekst
+                .find(IZVOR_PRATI)
+                .expect("the copy must say what it follows")
+                + IZVOR_PRATI.len();
+            let pocetak_ne_prati = tekst
+                .find(IZVOR_NE_PRATI)
+                .expect("the copy must say which price moves it does not follow");
+            let pocetak_nije_promena = tekst
+                .find(IZVOR_NIJE_PROMENA)
+                .expect("the copy must say what it does not treat as a price move");
+            assert!(
+                pocetak_prati < pocetak_ne_prati && pocetak_ne_prati < pocetak_nije_promena,
+                "the three sentences must not be reordered without revisiting this guard"
+            );
+            let segmenti = [
+                (
+                    IzvorPracenje::Prati,
+                    &tekst[pocetak_prati..pocetak_ne_prati],
+                ),
+                (
+                    IzvorPracenje::NePrati,
+                    &tekst[pocetak_ne_prati + IZVOR_NE_PRATI.len()..pocetak_nije_promena],
+                ),
+                (
+                    IzvorPracenje::NijePromena,
+                    &tekst[pocetak_nije_promena + IZVOR_NIJE_PROMENA.len()..],
+                ),
+            ];
+
+            for izvor in NIVELACIJA_IZVORI {
+                // Once in the whole sentence, and in the segment that classifies it.
+                // Sources that read as one thing to the shop share one wording and
+                // are printed once; a wording that turned up a second time — in a
+                // marker, in the advisory tail — would be a second, unchecked claim.
+                assert_eq!(
+                    tekst.matches(izvor.opis).count(),
+                    1,
+                    "„{}“ must be claimed exactly once, and `{}` is what it claims",
+                    izvor.opis,
+                    izvor.source
+                );
+                for (pracenje, segment) in segmenti {
+                    assert_eq!(
+                        segment.contains(izvor.opis),
+                        pracenje == izvor.pracenje,
+                        "`{}` is classified {:?} but its wording „{}“ sits in the {:?} sentence",
+                        izvor.source,
+                        izvor.pracenje,
+                        izvor.opis,
+                        pracenje
+                    );
+                }
+            }
+        });
+    }
+
+    /// Req. 33 / ZoRač čl. 21 — **an article returning to the shelf at a different
+    /// price has had its retail selling price moved**, and the report must raise the
+    /// popis for it.
+    ///
+    /// The sequence is one `commands::catalog` produces and nothing else records: a
+    /// withdrawn article logs a NULL gap row, an edit made while it is withdrawn
+    /// logs nothing at all (`price_history::record_offered_price_change`, the
+    /// `(false, false)` branch), and the return row is the only trace the price ever
+    /// moved. A report that followed `source = 'update'` alone would lose the whole
+    /// sequence silently.
+    ///
+    /// The control matters as much: an article that returns at the price it left on
+    /// has moved no price, and telling the shop it owes a popis for that would be
+    /// this module inventing a duty.
+    #[test]
+    fn an_article_returning_to_the_shelf_at_a_new_price_raises_the_nivelacija_popis() {
+        with_app("popis_nivelacija_vracen_artikal", |app| {
+            let state = app.state::<AppState>();
+            let connection = state.db().open().expect("database should open");
+
+            let vracen = seed_artikal(state.inner(), "VRA-1", "Kaput", Some(3_000));
+            let isti = seed_artikal(state.inner(), "IST-1", "Šal", Some(3_000));
+
+            for (product_id, cena_povratka) in [(vracen, 289_900), (isti, 249_900)] {
+                connection
+                    .execute(
+                        "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                         VALUES (?1, '2026-01-01T00:00:00Z', 249900, 'create', '2026-01-01T00:00:00Z')",
+                        params![product_id],
+                    )
+                    .expect("the article's first offered price should insert");
+                connection
+                    .execute(
+                        "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                         VALUES (?1, '2026-11-10T09:00:00Z', NULL, 'deactivate', '2026-11-10T09:00:00Z')",
+                        params![product_id],
+                    )
+                    .expect("the offering gap should insert");
+                connection
+                    .execute(
+                        "INSERT INTO price_history (product_id, effective_from, price_minor, source, created_at)
+                         VALUES (?1, ?2, ?3, 'reactivate', ?2)",
+                        params![product_id, STAMP_NIVELACIJE, cena_povratka],
+                    )
+                    .expect("the return to the shelf should insert");
+            }
+
+            let pregled = nivelacija_pregled(&connection).expect("the report should compose");
+            assert_eq!(
+                pregled.obaveze.len(),
+                1,
+                "one article came back at a new price, so one popis is owed"
+            );
+            let obaveza = &pregled.obaveze[0];
+            assert_eq!(obaveza.datum, DAN_NIVELACIJE);
+            assert_eq!(
+                obaveza
+                    .artikli
+                    .iter()
+                    .map(|artikal| artikal.sifra.as_deref().unwrap_or_default())
+                    .collect::<Vec<_>>(),
+                vec!["VRA-1"],
+                "the article that returned at the price it left on moved no price"
+            );
+        });
     }
 
     /// The narrowing is a nivelacija answer and only a nivelacija answer. A godišnji
