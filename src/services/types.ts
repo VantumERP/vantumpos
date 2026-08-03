@@ -1448,6 +1448,46 @@ export interface BasisDoc {
 }
 
 /**
+ * One scope offered for a nivelacija (price-change) popis — mirrors
+ * `crate::popis::NivelacijaObuhvatOpcija` (serde camelCase).
+ *
+ * `pravniStatus` is a label that must travel with the option wherever it is
+ * rendered: narrowing the count to the repriced articles is a **preporuka** and
+ * never a legal duty (SW-16 req. 33 — neither ZoRač čl. 21 nor PoP čl. 3 scopes
+ * the count, and the narrowing is borrowed from a regime this shop cannot use).
+ * `podrazumevani` marks the offered default; it is a default, not a limit.
+ */
+export interface NivelacijaObuhvatOpcija {
+  obuhvat: "samo_nivelisani" | "ceo_objekat";
+  naziv: string;
+  pravniStatus: string;
+  obrazlozenje: string;
+  podrazumevani: boolean;
+}
+
+/**
+ * What a change of retail selling prices tells the shop about the popis it raises
+ * — mirrors `crate::popis::NivelacijaObavestenje` (serde camelCase).
+ *
+ * A nivelacija carries TWO obligations on one event: the KEP kolona-4 delta
+ * (SW-9b) and the ZoRač čl. 21 / PoP čl. 3 popis. Neither discharges the other.
+ * The app opens no popis on the shop's behalf and `napomena` says so — ZoRač
+ * čl. 20 st. 3 puts the reconciliation confirmation before the popis.
+ */
+export interface NivelacijaObavestenje {
+  obaveza: string;
+  pravniOsnov: string;
+  /**
+   * PoP čl. 13 st. 2, second limb — days after the **popis**, never days after
+   * the price change that raised it.
+   */
+  rokDana: number;
+  rokObjasnjenje: string;
+  obuhvat: NivelacijaObuhvatOpcija[];
+  napomena: string;
+}
+
+/**
  * One kalkulacija list row — mirrors `crate::kep_kalkulacija::KalkulacijaSummary`
  * (serde camelCase). `razlikaUCeniMinor` (element 10, the marža) is derived
  * backward from the catalog price and MAY be negative for a loss-leader.

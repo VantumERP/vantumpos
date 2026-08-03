@@ -2148,7 +2148,40 @@ export function createMockServices(): PosServices {
           rowCount: 1,
         };
       },
-      async nivelacija() {},
+      // A test double, not demo copy: the wording a shop actually reads is
+      // composed by `crate::popis::nivelacija_obavestenje`. What is kept here is
+      // the shape plus the two facts a UI test may assert on — that the popis
+      // duty rides back with the price change (SW-16 req. 33) and that the
+      // narrowed scope is labelled a preporuka.
+      async nivelacija() {
+        return {
+          obaveza:
+            "Promena prodajnih cena u maloprodajnom objektu traži popis (ZoRač čl. 21, PoP čl. 3).",
+          pravniOsnov: "ZoRač čl. 21, PoP čl. 3",
+          rokDana: 30,
+          rokObjasnjenje:
+            "Izveštaj o popisu po nivelaciji sastavlja se najkasnije 30 dana po izvršenom popisu (PoP čl. 13 st. 2).",
+          obuhvat: [
+            {
+              obuhvat: "samo_nivelisani" as const,
+              naziv: "samo artikli obuhvaćeni nivelacijom",
+              pravniStatus: "preporuka — nije zakonska obaveza",
+              obrazlozenje:
+                "Sužavanje obima je preporuka i nije zakonska obaveza — obim slobodno proširite.",
+              podrazumevani: true,
+            },
+            {
+              obuhvat: "ceo_objekat" as const,
+              naziv: "ceo maloprodajni objekat",
+              pravniStatus: "najšire tumačenje — ni ono nije propisano",
+              obrazlozenje: "Popis celog objekta ne izostavlja ništa.",
+              podrazumevani: false,
+            },
+          ],
+          napomena:
+            "Aplikacija ne otvara popis umesto vas (ZoRač čl. 20 st. 3).",
+        };
+      },
       async postAdjustment() {},
       async correctEntry() {},
       async closePreview(bookYear) {

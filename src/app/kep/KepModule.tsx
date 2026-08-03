@@ -59,6 +59,7 @@ import type {
   KepEntryView,
   KepLedger,
   KepStatus,
+  NivelacijaObavestenje,
   ProductSummary,
   StornoCauseId,
 } from "@/services/types";
@@ -784,6 +785,15 @@ function AdjustmentForm({
   const [basis, setBasis] = useState<BasisDoc>(EMPTY_BASIS);
   const [error, setError] = useState<string | undefined>();
   const [submitting, setSubmitting] = useState(false);
+  /**
+   * SW-16 req. 33 — the popis obligation the posted nivelacija raised (ZoRač
+   * čl. 21). It outlives `resetForm` on purpose: it is a duty with a rok, not a
+   * confirmation, and a toast that faded would be the only time the shop was
+   * ever told.
+   */
+  const [popisObaveza, setPopisObaveza] = useState<
+    NivelacijaObavestenje | undefined
+  >();
 
   const meta = causeId ? CAUSE_BY_ID[causeId] : undefined;
 
@@ -852,7 +862,10 @@ function AdjustmentForm({
     }
     const doc: BasisDoc = { naziv, broj, datum };
 
-    let action: () => Promise<void>;
+    // A nivelacija answers with the popis obligation the same price change
+    // raises; every other cause answers with nothing. Two obligations on one
+    // event (SW-16 req. 33) — the KEP Δ below does not discharge the popis.
+    let action: () => Promise<NivelacijaObavestenje | undefined>;
     if (meta.isNivelacija) {
       let priceMinor: number;
       try {
@@ -870,14 +883,17 @@ function AdjustmentForm({
         setError(errorMessage(parseError, "Količina nije ispravna."));
         return;
       }
-      action = () =>
-        kep.postAdjustment(meta.id as StornoCauseId, selected.id, quantityMilli, doc);
+      action = async () => {
+        await kep.postAdjustment(meta.id as StornoCauseId, selected.id, quantityMilli, doc);
+        return undefined;
+      };
     }
 
     setSubmitting(true);
     try {
-      await action();
+      const obavestenje = await action();
       resetForm();
+      setPopisObaveza(obavestenje);
       onPosted();
       toast.success("Izmena je proknjižena.");
     } catch (postError) {
@@ -902,6 +918,7 @@ function AdjustmentForm({
           korisnika. Nivelacija menja i prodajnu cenu artikla.
         </p>
       </div>
+      {popisObaveza ? <PopisObavezaNotice obavestenje={popisObaveza} /> : null}
       <FieldGroup>
         {error ? <FieldError>{error}</FieldError> : null}
         <Field className="w-auto">
@@ -1032,6 +1049,54 @@ function AdjustmentForm({
         ) : null}
       </FieldGroup>
     </form>
+  );
+}
+
+/**
+ * SW-16 req. 33 — what a posted nivelacija owes beyond its KEP delta.
+ *
+ * Three things this block must do and one it must not. It states the duty and its
+ * authority (ZoRač čl. 21 / PoP čl. 3); it carries the čl. 13 st. 2 rok with the
+ * anchor spelled out, since the 30 days run from the popis and not from this price
+ * change; and it repeats, for each scope, the label the backend put on it — the
+ * narrowed scope is a **preporuka** and design §7 t. 8 forbids presenting it as
+ * required, so `pravniStatus` is rendered beside the name and never dropped for
+ * being long. What it must not do is imply the app opened anything: `napomena`
+ * says it did not, because ZoRač čl. 20 st. 3 puts the reconciliation confirmation
+ * before any popis.
+ *
+ * Every string here comes from the backend. Nothing about the duty is worded in
+ * the frontend, so there is one wording of it and not two.
+ */
+function PopisObavezaNotice({
+  obavestenje,
+}: {
+  obavestenje: NivelacijaObavestenje;
+}) {
+  return (
+    <div
+      role="status"
+      aria-label="Popis po nivelaciji"
+      className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs"
+    >
+      <p className="text-sm font-medium">Popis po nivelaciji</p>
+      <p>{obavestenje.obaveza}</p>
+      <p className="text-muted-foreground">{obavestenje.pravniOsnov}</p>
+      <p>{obavestenje.rokObjasnjenje}</p>
+      <div className="flex flex-col gap-1">
+        <p className="font-medium">Obim popisa</p>
+        {obavestenje.obuhvat.map((opcija) => (
+          <p key={opcija.obuhvat}>
+            <span className="font-medium">{opcija.naziv}</span>
+            {opcija.podrazumevani ? " (predlog)" : ""} — {opcija.pravniStatus}.{" "}
+            <span className="text-muted-foreground">
+              {opcija.obrazlozenje}
+            </span>
+          </p>
+        ))}
+      </div>
+      <p className="text-muted-foreground">{obavestenje.napomena}</p>
+    </div>
   );
 }
 

@@ -265,6 +265,10 @@ pub fn run() {
             commands::popis::popis_izvestaj,
             commands::popis::popis_podesavanja_get,
             commands::popis::popis_podesavanja_set,
+            // Req. 33 — the ZoRač čl. 21 price-change trigger. Both are reads: the
+            // duty is reported, never opened on the shop's behalf (req. 39).
+            commands::popis::popis_nivelacija_pregled,
+            commands::popis::popis_nivelacija_obuhvat,
             commands::sales::sales_preview,
             commands::sales::sales_complete,
             commands::sales::sales_assess_cash_payment,

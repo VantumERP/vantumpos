@@ -1643,9 +1643,20 @@ describe("mock service adapter", () => {
       fileName: "kalkulacija-5.html",
       mimeType: "text/html",
     });
+    // SW-16 req. 33 — a nivelacija answers with the popis obligation the same
+    // price change raises, and the narrowed scope reaches the caller labelled a
+    // preporuka. The double keeps the shape; the wording a shop reads is the
+    // backend's (`crate::popis::nivelacija_obavestenje`).
     await expect(
       services.kep.nivelacija(1, 17600, basis),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      pravniOsnov: "ZoRač čl. 21, PoP čl. 3",
+      rokDana: 30,
+      obuhvat: [
+        { obuhvat: "samo_nivelisani", podrazumevani: true },
+        { obuhvat: "ceo_objekat", podrazumevani: false },
+      ],
+    });
     await expect(
       services.kep.postAdjustment("otpis", 1, 35000, basis),
     ).resolves.toBeUndefined();

@@ -70,6 +70,7 @@ import type {
   AnswerInput,
   BasisDoc,
   KalkulacijaSummary,
+  NivelacijaObavestenje,
   StornoCauseId,
   ReklamacijaInput,
   ReklamacijaSummary,
@@ -340,11 +341,16 @@ export interface KepService {
   status(): Promise<KepStatus>;
   listKalkulacije(bookYear: number): Promise<KalkulacijaSummary[]>;
   exportKalkulacija(id: number): Promise<ExportedFile>;
+  /**
+   * Returns the popis obligation the same price change raises (SW-16 req. 33 —
+   * ZoRač čl. 21). It is a second, independent duty on one event: the KEP delta
+   * does not discharge it. Surface it; do not treat it as a receipt.
+   */
   nivelacija(
     productId: number,
     newSalePriceMinor: number,
     basis: BasisDoc,
-  ): Promise<void>;
+  ): Promise<NivelacijaObavestenje>;
   postAdjustment(
     cause: StornoCauseId,
     productId: number,

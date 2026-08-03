@@ -36,6 +36,7 @@ import type {
   ImportValidationResult,
   InventoryAdjustmentResult,
   KalkulacijaSummary,
+  NivelacijaObavestenje,
   KepClosePreview,
   KepClosure,
   KepClosureView,
@@ -325,7 +326,11 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       exportKalkulacija: (id) =>
         invoke<ExportedFile>("kep_export_kalkulacija", { id }),
       nivelacija: (productId, newSalePriceMinor, basis) =>
-        invoke<void>("kep_nivelacija", { productId, newSalePriceMinor, basis }),
+        invoke<NivelacijaObavestenje>("kep_nivelacija", {
+          productId,
+          newSalePriceMinor,
+          basis,
+        }),
       postAdjustment: (cause, productId, quantityMilli, basis) =>
         invoke<void>("kep_post_adjustment", {
           cause,

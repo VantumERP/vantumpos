@@ -33,8 +33,8 @@ use tauri::State;
 use crate::app_error::{AppError, CommandError};
 use crate::popis::{
     advance, book_quantities_released, ensure_izvestaj_kompletan, izvestaj_due, konsignacija_rok,
-    nedostajuce_liste, vrednost_minor, IzvestajElement, IzvestajNarativ, PopisEvent, PopisLista,
-    PopisStatus, PopisVrsta,
+    nedostajuce_liste, vrednost_minor, IzvestajElement, IzvestajNarativ, NivelacijaObuhvat,
+    PopisEvent, PopisLista, PopisStatus, PopisVrsta,
 };
 use crate::state::AppState;
 
@@ -1889,6 +1889,340 @@ pub(crate) fn compose_izvestaj(
 }
 
 // ---------------------------------------------------------------------------
+// The nivelacija mode (req. 33)
+// ---------------------------------------------------------------------------
+
+/// One article as PoP čl. 8 st. 4 hands it to the commission: „листе са
+/// номенклатурним бројевима, називима, врсти и јединицама мере имовине која се
+/// пописује“.
+///
+/// **Four fields, and no quantity among them.** That is not an omission to be
+/// tidied up later — it is čl. 8 st. 5 applied to the one document that is read
+/// *before* anything is counted. A perpetual stanje beside each article here would
+/// hand the commission the book quantities at the very start of the count, and no
+/// later potpis could unring it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NivelacijaArtikalView {
+    /// The nomenklaturni broj — `products.sku`.
+    pub sifra: Option<String>,
+    pub naziv: String,
+    /// The vrsta, taken from the article's category.
+    pub vrsta: Option<String>,
+    pub jedinica_mere: Option<String>,
+}
+
+/// A nivelacija popis already opened for a price change and not yet posted.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NivelacijaPokriceView {
+    pub session_id: i64,
+    pub status: PopisStatus,
+    pub datum_popisa: String,
+}
+
+/// One outstanding čl. 21 obligation: a day on which retail prices moved, and the
+/// articles they moved for.
+///
+/// Grouped by day because one nivelacija is one event however many articles it
+/// touched, and one event raises one popis.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NivelacijaObavezaView {
+    /// The day the prices moved, `gggg-MM-dd`.
+    pub datum: String,
+    pub broj_artikala: i64,
+    pub artikli: Vec<NivelacijaArtikalView>,
+    /// A nivelacija popis opened on or after `datum` and not yet posted. `None`
+    /// means nothing has been started for this price change at all.
+    pub popis_u_toku: Option<NivelacijaPokriceView>,
+}
+
+/// The standing report of req. 33: which recorded price changes still owe a popis.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NivelacijaPregledView {
+    pub obaveze: Vec<NivelacijaObavezaView>,
+    pub obavestenje: crate::popis::NivelacijaObavestenje,
+    /// Exactly which recorded price moves this report is built from — stated rather
+    /// than implied, because a list that looked complete and was not would let a
+    /// shop believe it owed no popis when it did.
+    pub izvor: String,
+}
+
+/// The čl. 8 st. 4 list for one nivelacija popis, under one scope.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NivelacijaObuhvatView {
+    pub session_id: i64,
+    pub datum_popisa: String,
+    /// The scope this list was built for — [`NivelacijaObuhvat::PODRAZUMEVANI`]
+    /// when the caller named none.
+    pub obuhvat: NivelacijaObuhvat,
+    /// The duty, the rok and **both** scopes with their reasoning (req. 33).
+    pub obavestenje: crate::popis::NivelacijaObavestenje,
+    pub artikli: Vec<NivelacijaArtikalView>,
+    /// How many of them already have a stavka on this popis's liste, so a screen
+    /// can show what is left to write down without asking a second question.
+    pub vec_na_listama: i64,
+}
+
+/// What the report is built from, said plainly.
+///
+/// `price_history` is this codebase's append-only record of the price the shop
+/// **offers** (ZoT čl. 37 st. 3), and a `source = 'update'` row carrying a price is
+/// exactly a retail selling price that moved — whether it moved through the SW-9b
+/// nivelacija or through a catalog edit. Both are „промена продајних цена … у
+/// малопродајном објекту“ under ZoRač čl. 21, and neither is this module's to
+/// excuse.
+///
+/// It is deliberately **not** derived from `kep_entries`: SW-9b writes no ledger
+/// row for an article with nothing on hand, so a report built on the ledger would
+/// lose that repricing silently — and čl. 21 attaches to the price change, not to
+/// the value delta.
+///
+/// The two kinds of price move it does not follow are named, because a list that
+/// reads as complete and is not is worse than no list: a shop would conclude it
+/// owed nothing.
+const NIVELACIJA_IZVOR: &str =
+    "Prati promene prodajne cene evidentirane u aplikaciji — nivelacije \
+     i izmene cene u katalogu artikala. Akcijske cene iz kampanja i cene unete uvozom artikala \
+     ovde se ne prate; da li i one traže popis, proverite sa knjigovođom.";
+
+/// Every recorded retail price move, newest first, grouped by the day it happened.
+///
+/// One row per article per day: a price corrected twice in one afternoon is one
+/// price change for the popis it raises.
+fn nivelacija_promene(
+    connection: &Connection,
+) -> Result<Vec<(String, Vec<NivelacijaArtikalView>)>, AppError> {
+    let mut statement = connection.prepare(
+        "SELECT substr(h.effective_from, 1, 10) AS datum, p.sku, p.name, c.name, p.unit_of_measure
+           FROM price_history h
+           JOIN products p ON p.id = h.product_id
+           LEFT JOIN categories c ON c.id = p.category_id
+          WHERE h.source = 'update' AND h.price_minor IS NOT NULL
+          GROUP BY datum, p.id
+          ORDER BY datum DESC, p.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            NivelacijaArtikalView {
+                sifra: row.get(1)?,
+                naziv: row.get(2)?,
+                vrsta: row.get(3)?,
+                jedinica_mere: row.get(4)?,
+            },
+        ))
+    })?;
+
+    let mut promene: Vec<(String, Vec<NivelacijaArtikalView>)> = Vec::new();
+    for row in rows {
+        let (datum, artikal) = row?;
+        match promene.last_mut() {
+            Some((poslednji, artikli)) if *poslednji == datum => artikli.push(artikal),
+            _ => promene.push((datum, vec![artikal])),
+        }
+    }
+
+    Ok(promene)
+}
+
+/// Whether a nivelacija popis dated on or after `datum` has been **posted**.
+///
+/// Posting is the anchor because ZoRač čl. 21 requires the popis *and* the
+/// usklađivanje stanja, and čl. 14 st. 3 knjiženje is where this module records
+/// that the result was actually taken up. A popis merely opened clears nothing —
+/// otherwise a draft somebody abandoned would silence the reminder for good.
+fn nivelacija_izmirena(connection: &Connection, datum: &str) -> Result<bool, AppError> {
+    let izmirena: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1
+                          FROM popis_sessions
+                         WHERE vrsta = ?1 AND status = ?2 AND datum_popisa >= ?3)",
+        params![
+            PopisVrsta::Nivelacioni.as_db_str(),
+            PopisStatus::Posted.as_db_str(),
+            datum
+        ],
+        |row| row.get(0),
+    )?;
+
+    Ok(izmirena)
+}
+
+/// The first nivelacija popis opened for a price change and not yet posted — the
+/// one a screen sends the shop back into rather than opening a second.
+fn nivelacija_pokrice(
+    connection: &Connection,
+    datum: &str,
+) -> Result<Option<NivelacijaPokriceView>, AppError> {
+    let row = connection
+        .query_row(
+            "SELECT id, status, datum_popisa
+               FROM popis_sessions
+              WHERE vrsta = ?1 AND status <> ?2 AND datum_popisa >= ?3
+              ORDER BY datum_popisa, id
+              LIMIT 1",
+            params![
+                PopisVrsta::Nivelacioni.as_db_str(),
+                PopisStatus::Posted.as_db_str(),
+                datum
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    row.map(|(session_id, status, datum_popisa)| {
+        Ok(NivelacijaPokriceView {
+            session_id,
+            status: decode_status(&status)?,
+            datum_popisa,
+        })
+    })
+    .transpose()
+}
+
+/// Req. 33 — the price changes that still owe a popis, newest first.
+pub(crate) fn nivelacija_pregled(
+    connection: &Connection,
+) -> Result<NivelacijaPregledView, AppError> {
+    let mut obaveze = Vec::new();
+    for (datum, artikli) in nivelacija_promene(connection)? {
+        if nivelacija_izmirena(connection, &datum)? {
+            continue;
+        }
+        let popis_u_toku = nivelacija_pokrice(connection, &datum)?;
+        obaveze.push(NivelacijaObavezaView {
+            broj_artikala: artikli.len() as i64,
+            artikli,
+            popis_u_toku,
+            datum,
+        });
+    }
+
+    Ok(NivelacijaPregledView {
+        obaveze,
+        obavestenje: crate::popis::nivelacija_obavestenje(),
+        izvor: NIVELACIJA_IZVOR.to_string(),
+    })
+}
+
+/// Every article the shop currently offers — the [`NivelacijaObuhvat::CeoObjekat`]
+/// scope.
+///
+/// Active articles only, and for one reason beyond the obvious: the alternative
+/// filter — „articles the books say we have“ — would read `inventory_balances`, and
+/// the mere presence of a line would then tell the commission which articles the
+/// books carry stock for. That is a book quantity leaking through a list of names.
+fn ceo_objekat(connection: &Connection) -> Result<Vec<NivelacijaArtikalView>, AppError> {
+    let mut statement = connection.prepare(
+        "SELECT p.sku, p.name, c.name, p.unit_of_measure
+           FROM products p
+           LEFT JOIN categories c ON c.id = p.category_id
+          WHERE p.active = 1
+          ORDER BY p.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(NivelacijaArtikalView {
+            sifra: row.get(0)?,
+            naziv: row.get(1)?,
+            vrsta: row.get(2)?,
+            jedinica_mere: row.get(3)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+/// Req. 33 / design §3 — the čl. 8 st. 4 list for a nivelacija popis, under the
+/// scope the shop chose.
+///
+/// **`obuhvat: None` is the offer, not the rule.** Design §3 has the narrowed scope
+/// offered as a default „with the reasoning visible“, and §7 t. 8 forbids any claim
+/// that it is required; so the default is applied here, the answer says which scope
+/// it applied, and [`crate::popis::NivelacijaObavestenje`] carries both options with
+/// the reasoning attached. Nothing narrows silently.
+///
+/// **Nothing is written.** The list is handed over exactly as čl. 8 st. 4 hands one
+/// over; the counted state is the commission's to write. Seeding the popisne liste
+/// from it was considered and rejected: `stvarna_kolicina_milli` is NOT NULL, so a
+/// seeded stavka would carry a count of zero that nothing distinguishes from a
+/// counted zero — a manjak of the whole stanje, on a document that is evidence.
+pub(crate) fn nivelacija_obuhvat(
+    connection: &Connection,
+    session_id: i64,
+    obuhvat: Option<NivelacijaObuhvat>,
+) -> Result<NivelacijaObuhvatView, AppError> {
+    let session = read_session(connection, session_id)?;
+    if session.vrsta != PopisVrsta::Nivelacioni {
+        return Err(AppError::business(
+            "popis_nije_nivelacioni",
+            format!(
+                "Obuhvat po nivelaciji se nudi samo za popis po nivelaciji (ZoRač čl. 21), a ovo \
+                 je {}.",
+                session.vrsta.naziv()
+            ),
+        ));
+    }
+
+    let obuhvat = obuhvat.unwrap_or(NivelacijaObuhvat::PODRAZUMEVANI);
+    let artikli = match obuhvat {
+        NivelacijaObuhvat::CeoObjekat => ceo_objekat(connection)?,
+        NivelacijaObuhvat::SamoNivelisani => {
+            let mut artikli: Vec<NivelacijaArtikalView> = Vec::new();
+            for (datum, promenjeni) in nivelacija_promene(connection)? {
+                // A price change after this count is not one this popis covers, and
+                // one a later popis already took up is nobody's to count twice.
+                if datum > session.datum_popisa || nivelacija_izmirena(connection, &datum)? {
+                    continue;
+                }
+                for artikal in promenjeni {
+                    if !artikli.contains(&artikal) {
+                        artikli.push(artikal);
+                    }
+                }
+            }
+            artikli
+        }
+    };
+
+    // The šifre already written down on this popis, read once rather than once per
+    // article: the widened scope is the whole catalog, and a query per article
+    // would make the honest choice the slow one.
+    let mut statement = connection
+        .prepare("SELECT sifra FROM popis_lines WHERE session_id = ?1 AND sifra IS NOT NULL")?;
+    let upisane = statement
+        .query_map(params![session_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let vec_na_listama = artikli
+        .iter()
+        .filter(|artikal| {
+            artikal
+                .sifra
+                .as_deref()
+                .is_some_and(|sifra| upisane.iter().any(|upisana| upisana == sifra))
+        })
+        .count() as i64;
+
+    Ok(NivelacijaObuhvatView {
+        session_id: session.id,
+        datum_popisa: session.datum_popisa,
+        obuhvat,
+        obavestenje: crate::popis::nivelacija_obavestenje(),
+        artikli,
+        vec_na_listama,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
@@ -2015,6 +2349,29 @@ pub fn popis_podesavanja_set(
 ) -> Result<PopisPodesavanja, CommandError> {
     super::auth::require_admin(state.inner())?;
     save_podesavanja(state.inner(), &podesavanja).map_err(Into::into)
+}
+
+/// Req. 33 — which recorded price changes still owe a popis (ZoRač čl. 21).
+#[tauri::command]
+pub fn popis_nivelacija_pregled(
+    state: State<'_, AppState>,
+) -> Result<NivelacijaPregledView, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    nivelacija_pregled(&connection).map_err(Into::into)
+}
+
+/// Req. 33 — the čl. 8 st. 4 list for a nivelacija popis. `obuhvat` omitted is the
+/// narrowed default; naming [`NivelacijaObuhvat::CeoObjekat`] widens it.
+#[tauri::command]
+pub fn popis_nivelacija_obuhvat(
+    state: State<'_, AppState>,
+    id: i64,
+    obuhvat: Option<NivelacijaObuhvat>,
+) -> Result<NivelacijaObuhvatView, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    nivelacija_obuhvat(&connection, id, obuhvat).map_err(Into::into)
 }
 
 /// Req. 37. Read-only: the izveštaj is composed from the popis and the narrative
@@ -4546,6 +4903,565 @@ mod tests {
                 .expect("an admin should compose the izveštaj");
             assert_eq!(izvestaj.session_id, id);
             assert_eq!(izvestaj.rok, ROK_IZVESTAJA);
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Req. 33 — the nivelacija mode and the KEP hook
+    // -----------------------------------------------------------------
+
+    /// The day the price moved in every fixture below, and the day after it — the
+    /// earliest a popis raised by it could be taken.
+    const DAN_NIVELACIJE: &str = "2026-11-20";
+    const DAN_POPISA: &str = "2026-11-21";
+    const STAMP_NIVELACIJE: &str = "2026-11-20T10:00:00Z";
+
+    /// Seeds one catalog article, optionally with a perpetual balance. Returns its
+    /// `products.id` — the handle the SW-9b nivelacija takes.
+    ///
+    /// `stanje_milli` is `None` for the article nobody has any of: `post_nivelacija`
+    /// writes **no** KEP row for it (there is no value to revalue) while the price
+    /// still moves, which is the case the popis obligation must not be derived out
+    /// of existence by.
+    fn seed_artikal(state: &AppState, sku: &str, naziv: &str, stanje_milli: Option<i64>) -> i64 {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO tax_rates (name, rate_basis_points, created_at, updated_at)
+                 VALUES ('Opšta', 2000, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("tax rate should insert");
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO categories (name, created_at, updated_at)
+                 VALUES ('Ženska konfekcija', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("category should insert");
+        connection
+            .execute(
+                "INSERT INTO products (name, sku, category_id, unit_of_measure, sale_price_minor,
+                                       purchase_price_minor, tax_rate_id, created_at, updated_at)
+                 VALUES (?1, ?2, (SELECT id FROM categories WHERE name = 'Ženska konfekcija'),
+                         'kom', 249900, 120000, (SELECT id FROM tax_rates ORDER BY id LIMIT 1),
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                params![naziv, sku],
+            )
+            .expect("article should insert");
+        let product_id = connection.last_insert_rowid();
+
+        if let Some(quantity_milli) = stanje_milli {
+            connection
+                .execute(
+                    "INSERT INTO inventory_balances (product_id, quantity_milli, updated_at)
+                     VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
+                    params![product_id, quantity_milli],
+                )
+                .expect("balance should insert");
+        }
+
+        product_id
+    }
+
+    /// Changes a retail selling price exactly as `kep_nivelacija` does — through the
+    /// SW-9b domain function it wraps — but at a stamp this test chooses, so nothing
+    /// here depends on the machine's clock.
+    fn nivelisi(state: &AppState, product_id: i64, nova_cena_minor: i64, now: &str) {
+        let mut connection = state.db().open().expect("database should open");
+        let transaction = connection.transaction().expect("transaction should open");
+        crate::kep_storno::post_nivelacija(
+            &transaction,
+            product_id,
+            nova_cena_minor,
+            &crate::kep_storno::BasisDoc {
+                naziv: "Odluka o nivelaciji".into(),
+                broj: "4".into(),
+                datum: "20.11.2026".into(),
+            },
+            1,
+            now,
+        )
+        .expect("the nivelacija should post");
+        transaction.commit().expect("the nivelacija should commit");
+    }
+
+    /// Opens a popis of vrsta `nivelacioni` through `open_popis` — the real path,
+    /// including the req. 39 gate — rather than by editing the column afterwards.
+    fn otvori_nivelacioni(state: &AppState, datum_popisa: &str) -> i64 {
+        let mut request = open_request();
+        request.vrsta = PopisVrsta::Nivelacioni;
+        request.datum_popisa = datum_popisa.into();
+        request.period_from = None;
+        request.period_to = None;
+        let mut connection = state.db().open().expect("database should open");
+        open_popis(&mut connection, &request, "2026-11-21T08:00:00Z")
+            .expect("the nivelacija popis should open")
+            .id
+    }
+
+    /// Walks a nivelacija popis through both potpisi to `posted`.
+    fn proknjizi_nivelacioni(state: &AppState, id: i64) {
+        let mut connection = state.db().open().expect("database should open");
+        start_count(&connection, id, "2026-11-21T09:00:00Z").expect("the count should start");
+        sign_phase_a(
+            &mut connection,
+            id,
+            &["Miloš Đurđević".to_string()],
+            "2026-11-21T17:00:00Z",
+        )
+        .expect("the čl. 8 st. 5 potpis should record");
+        compute_differences(&connection, id, "2026-11-22T09:00:00Z")
+            .expect("the obračun should open");
+        sign_phase_b(
+            &mut connection,
+            id,
+            &["Miloš Đurđević".to_string()],
+            "2026-11-22T10:00:00Z",
+        )
+        .expect("the čl. 9 st. 3 potpis should record");
+        post_popis(&connection, id, "2026-11-23T11:00:00Z").expect("the result should post");
+    }
+
+    /// Every KEP row there is, in the order the ledger reads them — the fingerprint
+    /// the popis must not move.
+    fn kep_otisak(state: &AppState) -> Vec<(i64, i64, String, Option<String>)> {
+        let connection = state.db().open().expect("database should open");
+        let mut statement = connection
+            .prepare("SELECT redni_broj, amount_minor, kind, cause FROM kep_entries ORDER BY id")
+            .expect("the ledger should read");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("the ledger should map");
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .expect("the ledger should collect")
+    }
+
+    /// Req. 33 / ZoRač čl. 21 — **a change of retail selling prices raises a popis
+    /// obligation**, and until a popis covers it that obligation is outstanding.
+    /// This is the trigger the compliance register had missed entirely, so the
+    /// negative control comes first: with no price change behind it the report is
+    /// empty, and the assertion below cannot pass vacuously.
+    #[test]
+    fn a_price_change_raises_a_pending_nivelacija_popis() {
+        with_app("popis_nivelacija_obaveza", |app| {
+            let state = app.state::<AppState>();
+            let product_id = seed_artikal(state.inner(), "KOS-1", "Košulja", Some(7_000));
+            let connection = state.db().open().expect("database should open");
+
+            assert!(
+                nivelacija_pregled(&connection)
+                    .expect("the report should compose")
+                    .obaveze
+                    .is_empty(),
+                "a shop that has not moved a price owes no popis by nivelaciji"
+            );
+
+            nivelisi(state.inner(), product_id, 269_900, STAMP_NIVELACIJE);
+
+            let pregled = nivelacija_pregled(&connection).expect("the report should compose");
+            assert_eq!(pregled.obaveze.len(), 1, "one price change, one popis");
+            let obaveza = &pregled.obaveze[0];
+            assert_eq!(obaveza.datum, DAN_NIVELACIJE);
+            assert_eq!(obaveza.broj_artikala, 1);
+            assert!(
+                obaveza.popis_u_toku.is_none(),
+                "nothing has been opened for it yet"
+            );
+
+            // Čl. 8 st. 4's four fields — what the commission is handed before it
+            // counts — and the article is named by all of them.
+            let artikal = &obaveza.artikli[0];
+            assert_eq!(artikal.sifra.as_deref(), Some("KOS-1"));
+            assert_eq!(artikal.naziv, "Košulja");
+            assert_eq!(artikal.jedinica_mere.as_deref(), Some("kom"));
+            assert_eq!(artikal.vrsta.as_deref(), Some("Ženska konfekcija"));
+
+            assert_eq!(
+                pregled.obavestenje.obaveza,
+                crate::popis::NIVELACIJA_OBAVEZA
+            );
+            assert!(
+                !pregled.izvor.is_empty(),
+                "the report must say which price moves it is built from"
+            );
+        });
+    }
+
+    /// The obligation follows the **price change**, not the value delta.
+    ///
+    /// `post_nivelacija` writes no KEP row for an article with nothing on hand —
+    /// there is no stock to revalue — so an obligation derived from the ledger would
+    /// silently lose exactly that repricing. ZoRač čl. 21 attaches to „промене
+    /// продајних цена производа и робе у малопродајном објекту“ and says nothing
+    /// about stock, and the scope of the count it raises is not scoped by either
+    /// article (req. 33). A missed popis is a čl. 58 prekršaj, so the miss is the
+    /// dangerous direction and this pins it.
+    #[test]
+    fn a_repricing_with_nothing_on_hand_still_raises_the_popis() {
+        with_app("popis_nivelacija_bez_zaliha", |app| {
+            let state = app.state::<AppState>();
+            let product_id = seed_artikal(state.inner(), "KOS-2", "Mantil", None);
+
+            nivelisi(state.inner(), product_id, 269_900, STAMP_NIVELACIJE);
+
+            let connection = state.db().open().expect("database should open");
+            let kep: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM kep_entries WHERE cause = 'nivelacija'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the ledger should count");
+            assert_eq!(
+                kep, 0,
+                "there is no stock to revalue, so SW-9b books nothing — that is the point"
+            );
+
+            let pregled = nivelacija_pregled(&connection).expect("the report should compose");
+            assert_eq!(
+                pregled.obaveze.len(),
+                1,
+                "the price still moved, so the čl. 21 popis is still owed"
+            );
+            assert_eq!(pregled.obaveze[0].artikli[0].naziv, "Mantil");
+        });
+    }
+
+    /// The obligation is discharged by a popis that was actually **taken and
+    /// posted** — čl. 21 requires the popis *and* the usklađivanje stanja, and
+    /// posting (čl. 14 st. 3) is where this module records that. A popis merely
+    /// opened is reported as open and does not clear anything: a draft somebody
+    /// abandoned would otherwise silence the reminder for good.
+    #[test]
+    fn only_a_posted_nivelacija_popis_discharges_the_obligation() {
+        with_app("popis_nivelacija_izmirenje", |app| {
+            let state = app.state::<AppState>();
+            let product_id = seed_artikal(state.inner(), "KOS-1", "Košulja", Some(7_000));
+            nivelisi(state.inner(), product_id, 269_900, STAMP_NIVELACIJE);
+
+            let id = otvori_nivelacioni(state.inner(), DAN_POPISA);
+            let connection = state.db().open().expect("database should open");
+
+            let pregled = nivelacija_pregled(&connection).expect("the report should compose");
+            assert_eq!(pregled.obaveze.len(), 1, "an open popis discharges nothing");
+            let pokrice = pregled.obaveze[0]
+                .popis_u_toku
+                .as_ref()
+                .expect("the open popis must be named");
+            assert_eq!(pokrice.session_id, id);
+            assert_eq!(pokrice.status, PopisStatus::Draft);
+            assert_eq!(pokrice.datum_popisa, DAN_POPISA);
+
+            proknjizi_nivelacioni(state.inner(), id);
+
+            assert!(
+                nivelacija_pregled(&connection)
+                    .expect("the report should compose")
+                    .obaveze
+                    .is_empty(),
+                "a posted nivelacija popis discharges the price change it covers"
+            );
+        });
+    }
+
+    /// Req. 33 / design §3 — „offer the narrowed scope as a **default** … and let
+    /// the shop widen it“. Both halves are asserted: asked for nothing the module
+    /// answers with the repriced articles alone, and asked for the whole objekat it
+    /// answers with every article the shop offers. The narrowing is never applied
+    /// silently — the answer says which scope it is and carries the reasoning.
+    #[test]
+    fn the_nivelacija_scope_defaults_to_the_repriced_articles_and_widens_on_request() {
+        with_app("popis_nivelacija_obuhvat", |app| {
+            let state = app.state::<AppState>();
+            let nivelisan = seed_artikal(state.inner(), "KOS-1", "Košulja", Some(7_000));
+            seed_artikal(state.inner(), "KOS-2", "Mantil", Some(3_000));
+            seed_artikal(state.inner(), "KOS-3", "Torba", Some(2_000));
+            nivelisi(state.inner(), nivelisan, 269_900, STAMP_NIVELACIJE);
+
+            let id = otvori_nivelacioni(state.inner(), DAN_POPISA);
+            let connection = state.db().open().expect("database should open");
+
+            let uzi = nivelacija_obuhvat(&connection, id, None).expect("the scope should compose");
+            assert_eq!(
+                uzi.obuhvat,
+                NivelacijaObuhvat::SamoNivelisani,
+                "asked for nothing, the module offers the narrowed scope"
+            );
+            assert_eq!(uzi.artikli.len(), 1, "only the article whose price moved");
+            assert_eq!(uzi.artikli[0].sifra.as_deref(), Some("KOS-1"));
+
+            // Design §7 t. 8 — the narrowing travels with its own label, wherever it
+            // is rendered.
+            let opcija = uzi
+                .obavestenje
+                .obuhvat
+                .iter()
+                .find(|opcija| opcija.obuhvat == NivelacijaObuhvat::SamoNivelisani)
+                .expect("the narrowed scope must be offered by name");
+            assert!(opcija.podrazumevani);
+            assert!(
+                opcija.pravni_status.contains("preporuka"),
+                "„{}“",
+                opcija.pravni_status
+            );
+
+            let siri = nivelacija_obuhvat(&connection, id, Some(NivelacijaObuhvat::CeoObjekat))
+                .expect("the scope should widen");
+            assert_eq!(siri.obuhvat, NivelacijaObuhvat::CeoObjekat);
+            assert_eq!(
+                siri.artikli.len(),
+                3,
+                "the whole maloprodajni objekat, narrowed by nothing"
+            );
+        });
+    }
+
+    /// Req. 29 / PoP čl. 8 st. 5, at the one screen that is read **before** anything
+    /// is counted.
+    ///
+    /// Čl. 8 st. 4 hands the commission „листе са номенклатурним бројевима,
+    /// називима, врсти и јединицама мере“ — four fields, and no quantity among them.
+    /// A scope list that carried the perpetual stanje beside each article would put
+    /// the book quantities in the commission's hands at the very start of the count,
+    /// which is the leak the blind count exists to prevent. The seeded balance is a
+    /// number that appears nowhere else, and it must appear nowhere in the answer —
+    /// under either scope.
+    #[test]
+    fn the_nivelacija_scope_hands_over_no_book_quantity() {
+        with_app("popis_nivelacija_slepo", |app| {
+            let state = app.state::<AppState>();
+            let product_id = seed_artikal(
+                state.inner(),
+                "KOS-1",
+                "Košulja",
+                Some(KNJIGOVODSTVENO_STANJE_MILLI),
+            );
+            nivelisi(state.inner(), product_id, 269_900, STAMP_NIVELACIJE);
+
+            let id = otvori_nivelacioni(state.inner(), DAN_POPISA);
+            let connection = state.db().open().expect("database should open");
+
+            let session = load_session(&connection, id).expect("the session should load");
+            assert!(
+                !session.knjigovodstvo_dostupno,
+                "the čl. 8 st. 5 potpis has not been taken, so the assertion below bites"
+            );
+
+            let stanje = KNJIGOVODSTVENO_STANJE_MILLI.to_string();
+            for obuhvat in [None, Some(NivelacijaObuhvat::CeoObjekat)] {
+                let view =
+                    nivelacija_obuhvat(&connection, id, obuhvat).expect("the scope should compose");
+                assert!(
+                    !view.artikli.is_empty(),
+                    "the fixture must carry an article"
+                );
+                let payload =
+                    serde_json::to_string(&view).expect("the scope view should serialize");
+                assert!(
+                    !payload.contains(&stanje),
+                    "{obuhvat:?} released the knjigovodstveno stanje before the čl. 8 st. 5 \
+                     potpis: {payload}"
+                );
+            }
+
+            // The same for the standing report, which is read even earlier.
+            let payload =
+                serde_json::to_string(&nivelacija_pregled(&connection).expect("the report"))
+                    .expect("the report should serialize");
+            assert!(!payload.contains(&stanje), "{payload}");
+        });
+    }
+
+    /// The structural half of the assertion above, in the house style of the
+    /// signature step's: no statement in the nivelacija region may **name** an
+    /// inventory table at all. A blind list that selected the quantity and dropped
+    /// it in Rust would look identical from the outside and be a different thing —
+    /// there would be a value in the row for a log line, a debug print or the next
+    /// refactor to spill.
+    ///
+    /// Comment lines are skipped, as the deadline engine's own source guard skips
+    /// them: `ceo_objekat`'s doc comment names `inventory_balances` precisely to say
+    /// why it does not read it, and prose is not what runs a query.
+    #[test]
+    fn the_nivelacija_scope_query_names_no_inventory_table() {
+        const SOURCE: &str = include_str!("popis.rs");
+
+        let region = SOURCE
+            .split("// The nivelacija mode (req. 33)")
+            .nth(1)
+            .expect("the nivelacija region must exist")
+            .split("// Commands")
+            .next()
+            .expect("the nivelacija region must end at the commands");
+
+        assert!(
+            region.contains("fn nivelacija_promene("),
+            "this guard is reading the wrong region of the module"
+        );
+
+        for line in region.lines() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            for tabela in ["inventory_balances", "inventory_movements"] {
+                assert!(
+                    !code.contains(tabela),
+                    "the nivelacija scope reads `{tabela}`; čl. 8 st. 5 withholds book quantities \
+                     whatever table they are read out of: {code}"
+                );
+            }
+        }
+    }
+
+    /// The narrowing is a nivelacija answer and only a nivelacija answer. A godišnji
+    /// popis is taken „на датум биланса“ over the whole imovina (ZoRač čl. 20 st. 2)
+    /// and there is no repricing to narrow it to; offering one would be the module
+    /// suggesting a shortcut nothing supports.
+    #[test]
+    fn the_scope_is_offered_only_for_a_nivelacija_popis() {
+        with_app("popis_nivelacija_pogresna_vrsta", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+
+            let error = nivelacija_obuhvat(&connection, id, None)
+                .expect_err("a godišnji popis has no nivelacija scope");
+            assert_eq!(error.code(), "popis_nije_nivelacioni");
+        });
+    }
+
+    /// Req. 33 — **two obligations on one event, and neither stands in for the
+    /// other.** SW-9b books the value delta in kolona 4; ZoRač čl. 21 requires the
+    /// count. Taking and posting the popis must not touch the ledger by so much as
+    /// a row: the KEP is append-only (PEP čl. 14), and a popis that quietly booked
+    /// something would corrupt the saldo an inspector reads first.
+    #[test]
+    fn the_popis_and_the_kep_entry_are_two_obligations_on_one_event() {
+        with_app("popis_nivelacija_kep_netaknut", |app| {
+            let state = app.state::<AppState>();
+            let product_id = seed_artikal(state.inner(), "KOS-1", "Košulja", Some(7_000));
+            nivelisi(state.inner(), product_id, 269_900, STAMP_NIVELACIJE);
+
+            let pre = kep_otisak(state.inner());
+            assert_eq!(pre.len(), 1, "the nivelacija booked its kolona-4 Δ");
+            assert_eq!(pre[0].3.as_deref(), Some("nivelacija"));
+            assert_eq!(pre[0].1, 140_000, "7 kom × 200,00 razlike u ceni");
+
+            let id = otvori_nivelacioni(state.inner(), DAN_POPISA);
+            proknjizi_nivelacioni(state.inner(), id);
+
+            assert_eq!(
+                kep_otisak(state.inner()),
+                pre,
+                "the popis is a separate obligation and books nothing of its own"
+            );
+
+            let connection = state.db().open().expect("database should open");
+            assert!(
+                nivelacija_pregled(&connection)
+                    .expect("the report should compose")
+                    .obaveze
+                    .is_empty(),
+                "the popis really was taken — otherwise the assertion above is about nothing"
+            );
+        });
+    }
+
+    /// Req. 33 / PoP čl. 13 st. 2 second limb, through the **real** path: a popis
+    /// opened as `nivelacioni` (not one whose vrsta was edited afterwards) gets a
+    /// rok 30 days after the count, and gets it **without** a configured rok za
+    /// dostavljanje finansijskog izveštaja — the annual anchor does not reach the
+    /// in-year limb, and requiring one would have every nivelacija caller invent a
+    /// date that is then ignored.
+    #[test]
+    fn a_nivelacija_popis_opened_as_such_is_due_thirty_days_after_the_count() {
+        with_app("popis_nivelacija_rok_pun_put", |app| {
+            let state = app.state::<AppState>();
+            let product_id = seed_artikal(state.inner(), "KOS-1", "Košulja", Some(7_000));
+            nivelisi(state.inner(), product_id, 269_900, STAMP_NIVELACIJE);
+            sign_in_admin(state.inner());
+
+            assert_eq!(
+                load_podesavanja(state.inner())
+                    .expect("the settings should load")
+                    .rok_predaje_fi,
+                None,
+                "no filing deadline is configured, and the nivelacija limb does not need one"
+            );
+
+            let id = otvori_nivelacioni(state.inner(), DAN_POPISA);
+            let mut connection = state.db().open().expect("database should open");
+            start_count(&connection, id, "2026-11-21T09:00:00Z").expect("the count should start");
+            save_line(
+                &connection,
+                id,
+                None,
+                &line_input("KOS-1", 7_000),
+                "2026-11-21T09:10:00Z",
+            )
+            .expect("a counted line should save");
+            sign_phase_a(
+                &mut connection,
+                id,
+                &["Miloš Đurđević".to_string()],
+                "2026-11-21T17:00:00Z",
+            )
+            .expect("the čl. 8 st. 5 potpis should record");
+            compute_differences(&connection, id, "2026-11-22T09:00:00Z")
+                .expect("the obračun should open");
+
+            let izvestaj = compose_izvestaj(state.inner(), id, &izvestaj_request())
+                .expect("a nivelacija izveštaj needs no filing deadline");
+
+            assert_eq!(izvestaj.vrsta, PopisVrsta::Nivelacioni);
+            assert_eq!(izvestaj.rok, "2026-12-21", "21.11.2026 + 30 dana");
+            assert_eq!(
+                izvestaj.odluka_o_usvajanju.rok, "2026-12-21",
+                "čl. 14 st. 2 rides on the čl. 13 st. 2 rok and is not a second deadline"
+            );
+        });
+    }
+
+    #[test]
+    fn the_nivelacija_commands_are_rejected_for_a_cashier() {
+        with_app("popis_nivelacija_admin_gate", |app| {
+            let state = app.state::<AppState>();
+            let product_id = seed_artikal(state.inner(), "KOS-1", "Košulja", Some(7_000));
+            nivelisi(state.inner(), product_id, 269_900, STAMP_NIVELACIJE);
+            let id = otvori_nivelacioni(state.inner(), DAN_POPISA);
+
+            sign_in_cashier(state.inner());
+            assert_eq!(
+                popis_nivelacija_pregled(app.state::<AppState>())
+                    .expect_err("a cashier must not read the popis obligations")
+                    .code,
+                "forbidden"
+            );
+            assert_eq!(
+                popis_nivelacija_obuhvat(app.state::<AppState>(), id, None)
+                    .expect_err("a cashier must not read the scope")
+                    .code,
+                "forbidden"
+            );
+
+            sign_in_admin(state.inner());
+            assert_eq!(
+                popis_nivelacija_pregled(app.state::<AppState>())
+                    .expect("an admin should read the obligations")
+                    .obaveze
+                    .len(),
+                1
+            );
+            assert_eq!(
+                popis_nivelacija_obuhvat(app.state::<AppState>(), id, None)
+                    .expect("an admin should read the scope")
+                    .session_id,
+                id
+            );
         });
     }
 }

@@ -821,6 +821,189 @@ pub fn ensure_izvestaj_kompletan(narativ: &IzvestajNarativ) -> Result<(), AppErr
     ))
 }
 
+// ---------------------------------------------------------------------------
+// The nivelacija mode (req. 33)
+// ---------------------------------------------------------------------------
+
+/// The authority for the duty a price change raises. Quoted wherever the duty is
+/// stated, so one citation is maintained instead of several.
+pub const NIVELACIJA_OBAVEZA_PRAVNI_OSNOV: &str = "ZoRač čl. 21, PoP čl. 3";
+
+/// Req. 33 — **the duty**, and this string is the only place it is asserted.
+///
+/// ZoRač čl. 21 — „Поред пописа имовине и обавеза из члана 20. овог закона, правно
+/// лице, односно предузетник врши попис и усклађивање стања и приликом …
+/// **промене продајних цена производа и робе у малопродајном објекту**…“. It is
+/// the most POS-relevant popis trigger there is, and the one the compliance
+/// register had missed entirely.
+///
+/// It is kept apart from the scope copy below and that separation is the point:
+/// **that a popis is due is law; how wide it has to be is not.** One paragraph
+/// carrying both would read as „the law says count only the repriced articles“,
+/// which design §7 t. 8 forbids in as many words.
+pub const NIVELACIJA_OBAVEZA: &str = "Promena prodajnih cena proizvoda i robe u maloprodajnom \
+     objektu traži popis i usklađivanje stanja (ZoRač čl. 21, PoP čl. 3) — isti postupak kao kod \
+     godišnjeg popisa, samo iz drugog povoda.";
+
+/// Req. 39, said at the moment of the price change: this module reports the duty,
+/// it does not discharge it. A popis cannot be opened before the shop confirms the
+/// usklađivanje knjiga (ZoRač čl. 20 st. 3 legislates that order), so nothing here
+/// may open one on the shop's behalf — and a notice that sounded as though it had
+/// would be an operator string promising behaviour the code does not implement.
+pub const NIVELACIJA_NAPOMENA: &str = "Aplikacija ne otvara popis umesto vas: popis se otvara tek \
+     kada potvrdite da su glavna knjiga sa dnevnikom i pomoćne knjige sa glavnom knjigom usklađene \
+     (ZoRač čl. 20 st. 3).";
+
+/// PoP čl. 13 st. 2, second limb, in words — pinned to the constant the engine
+/// computes with rather than typed out beside it, because a rok that reads „30
+/// dana“ in the copy and computes something else in the answer is the defect this
+/// project has shipped before.
+///
+/// The anchor is half the sentence: the 30 days run from the **popis**, not from
+/// the price change that raised it. A shop that read the rok off the nivelacija
+/// would file early at best and, if the count slipped, late while believing it was
+/// early.
+pub fn nivelacija_rok_objasnjenje() -> String {
+    format!(
+        "Izveštaj o popisu po nivelaciji sastavlja se najkasnije {IZVESTAJ_ROK_DANA_PO_POPISU} \
+         dana po izvršenom popisu (PoP čl. 13 st. 2) — rok teče od dana popisa, ne od dana promene \
+         cene."
+    )
+}
+
+/// How wide a nivelacija count is taken — req. 33 / design §3.
+///
+/// **Neither option is prescribed.** Nothing in ZoRač čl. 21 or PoP čl. 3 scopes
+/// the count at all, so this enum is a choice offered to the shop and not a rule
+/// applied to it. The narrowed option is the default because it is the workable
+/// one, and it carries its own reasoning so the shop can see what it rests on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NivelacijaObuhvat {
+    /// `[PRUDENTIAL]` — only the articles the nivelacija repriced.
+    SamoNivelisani,
+    /// The whole maloprodajni objekat, narrowed by nothing.
+    CeoObjekat,
+}
+
+impl NivelacijaObuhvat {
+    pub const ALL: [Self; 2] = [Self::SamoNivelisani, Self::CeoObjekat];
+
+    /// Design §3 — „offer the narrowed scope as a default … and let the shop widen
+    /// it“. A default, never a limit.
+    pub const PODRAZUMEVANI: Self = Self::SamoNivelisani;
+
+    /// The wire key. Nothing stores an obuhvat — no column exists for one and v20
+    /// is the module's only migration — but it crosses the IPC boundary, and the
+    /// key is asserted equal to the serde form for the reason the stored vocabularies
+    /// are: a variant rename moves the derived form and leaves this literal behind.
+    pub fn kljuc(self) -> &'static str {
+        match self {
+            Self::SamoNivelisani => "samo_nivelisani",
+            Self::CeoObjekat => "ceo_objekat",
+        }
+    }
+
+    pub fn from_kljuc(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|obuhvat| obuhvat.kljuc() == value)
+    }
+
+    pub fn naziv(self) -> &'static str {
+        match self {
+            Self::SamoNivelisani => "samo artikli obuhvaćeni nivelacijom",
+            Self::CeoObjekat => "ceo maloprodajni objekat",
+        }
+    }
+
+    /// What kind of thing the choice is. **A preporuka is not a duty**, and this is
+    /// the label a screen puts beside the option.
+    pub fn pravni_status(self) -> &'static str {
+        match self {
+            Self::SamoNivelisani => "preporuka — nije zakonska obaveza",
+            Self::CeoObjekat => "najšire tumačenje — ni ono nije propisano",
+        }
+    }
+
+    /// Design §3 — „with the reasoning visible“. The shop is not asked to take the
+    /// narrowing on trust: it is told where it comes from and why that source does
+    /// not bind this radnja.
+    pub fn obrazlozenje(self) -> &'static str {
+        match self {
+            Self::SamoNivelisani => {
+                "Sužavanje popisa na artikle kojima je promenjena cena je preporuka i nije \
+                 zakonska obaveza: ni ZoRač čl. 21 ni PoP čl. 3 ne određuju obim popisa pri \
+                 promeni cena. Sužavanje je preuzeto po analogiji iz Pravilnika 140/2004 čl. 16, \
+                 koji uređuje prosto knjigovodstvo — režim koji se na ovu radnju ne primenjuje. \
+                 Obim slobodno proširite ako procenite da tako treba."
+            }
+            Self::CeoObjekat => {
+                "Popis celog maloprodajnog objekta ne izostavlja ništa i ne počiva ni na kakvoj \
+                 analogiji. Ni ovaj obim nije propisan — ni ZoRač čl. 21 ni PoP čl. 3 ne određuju \
+                 obim popisa pri promeni cena — ali je najšire tumačenje."
+            }
+        }
+    }
+}
+
+/// One scope as it is offered to the shop: what it is called, what kind of thing
+/// it is, why, and whether it is the default.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NivelacijaObuhvatOpcija {
+    pub obuhvat: NivelacijaObuhvat,
+    pub naziv: String,
+    pub pravni_status: String,
+    pub obrazlozenje: String,
+    pub podrazumevani: bool,
+}
+
+pub fn nivelacija_obuhvat_opcije() -> Vec<NivelacijaObuhvatOpcija> {
+    NivelacijaObuhvat::ALL
+        .into_iter()
+        .map(|obuhvat| NivelacijaObuhvatOpcija {
+            obuhvat,
+            naziv: obuhvat.naziv().to_string(),
+            pravni_status: obuhvat.pravni_status().to_string(),
+            obrazlozenje: obuhvat.obrazlozenje().to_string(),
+            podrazumevani: obuhvat == NivelacijaObuhvat::PODRAZUMEVANI,
+        })
+        .collect()
+}
+
+/// What a shop is told when it changes a retail price (req. 33).
+///
+/// The KEP nivelacija and the popis are **two obligations on one event** — SW-9b
+/// books the value delta, ZoRač čl. 21 requires the count — and neither stands in
+/// for the other. This is the popis half, composed here rather than at the KEP
+/// call site so the sentence the till shows and the sentence the popis module
+/// shows are one sentence.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NivelacijaObavestenje {
+    pub obaveza: String,
+    pub pravni_osnov: String,
+    /// PoP čl. 13 st. 2, second limb — the days, so a caller can compute rather
+    /// than parse the sentence.
+    pub rok_dana: i64,
+    pub rok_objasnjenje: String,
+    /// Both scopes, the narrowed one flagged as the default (req. 33 / design §3).
+    pub obuhvat: Vec<NivelacijaObuhvatOpcija>,
+    pub napomena: String,
+}
+
+pub fn nivelacija_obavestenje() -> NivelacijaObavestenje {
+    NivelacijaObavestenje {
+        obaveza: NIVELACIJA_OBAVEZA.to_string(),
+        pravni_osnov: NIVELACIJA_OBAVEZA_PRAVNI_OSNOV.to_string(),
+        rok_dana: IZVESTAJ_ROK_DANA_PO_POPISU,
+        rok_objasnjenje: nivelacija_rok_objasnjenje(),
+        obuhvat: nivelacija_obuhvat_opcije(),
+        napomena: NIVELACIJA_NAPOMENA.to_string(),
+    }
+}
+
 /// One date in, strictly `gggg-MM-dd` — exactly the shape every date column in
 /// the v20 schema is GLOB-checked into. Strict on purpose: '2027-3-31' and an
 /// RFC3339 stamp are both refused rather than truncated or repaired, because a
@@ -863,8 +1046,11 @@ mod tests {
 
     use super::{
         advance, book_quantities_released, book_quantities_visible, ensure_izvestaj_kompletan,
-        ensure_liste_kompletne, izvestaj_due, konsignacija_rok, nedostajuce_liste, vrednost_minor,
-        IzvestajElement, IzvestajNarativ, PopisEvent, PopisLista, PopisStatus, PopisVrsta,
+        ensure_liste_kompletne, izvestaj_due, konsignacija_rok, nedostajuce_liste,
+        nivelacija_obavestenje, nivelacija_obuhvat_opcije, nivelacija_rok_objasnjenje,
+        vrednost_minor, IzvestajElement, IzvestajNarativ, NivelacijaObuhvat, PopisEvent,
+        PopisLista, PopisStatus, PopisVrsta, IZVESTAJ_ROK_DANA_PO_POPISU, NIVELACIJA_OBAVEZA,
+        NIVELACIJA_OBAVEZA_PRAVNI_OSNOV,
     };
     use crate::app_error::AppError;
     use crate::db::{test_database_path, Db};
@@ -2018,6 +2204,202 @@ mod tests {
                     number + 1
                 );
             }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The nivelacija mode (req. 33)
+    // ---------------------------------------------------------------------
+
+    /// Words that turn a sentence into a duty. The narrowing of a nivelacija count
+    /// to the repriced articles is `[PRUDENTIAL]` — design §3, §7 t. 8 and req. 33
+    /// all say so — and none of these may appear in the copy that offers it.
+    ///
+    /// „obaveza“ is deliberately NOT on the list: the copy has to be able to say
+    /// „nije zakonska obaveza“, which is the whole point of it.
+    const RECI_OBAVEZE: [&str; 6] = [
+        "morate",
+        "dužni ste",
+        "dužan je",
+        "obavezno",
+        "obavezan je",
+        "nalaže",
+    ];
+
+    /// Req. 33 / design §7 t. 8 — **no claim that scoping a nivelacija count to the
+    /// repriced articles is legally required.**
+    ///
+    /// The two are separate strings on purpose and this asserts both halves: the
+    /// duty copy states the čl. 21 obligation and cites it, the obuhvat copy offers
+    /// a narrowing and states in the same breath that it is not one. A single
+    /// paragraph carrying both would be a sentence a shop reads as „the law says
+    /// count only these“, which is exactly the thing §7 t. 8 forbids.
+    #[test]
+    fn the_nivelacija_scope_is_a_preporuka_and_never_an_obaveza() {
+        let uzi = NivelacijaObuhvat::SamoNivelisani;
+
+        assert_eq!(
+            NivelacijaObuhvat::PODRAZUMEVANI,
+            uzi,
+            "the narrowed scope is the offered default"
+        );
+        assert!(
+            uzi.pravni_status().contains("preporuka"),
+            "the narrowing must be labelled a preporuka, is „{}“",
+            uzi.pravni_status()
+        );
+        assert!(
+            uzi.obrazlozenje().contains("nije zakonska obaveza"),
+            "the narrowing must say plainly that it is not a duty: „{}“",
+            uzi.obrazlozenje()
+        );
+        for trag in ["ZoRač čl. 21", "PoP čl. 3", "ne određuju obim"] {
+            assert!(
+                uzi.obrazlozenje().contains(trag),
+                "the reasoning must stay visible — „{trag}“ is missing from „{}“",
+                uzi.obrazlozenje()
+            );
+        }
+        for trag in ["140/2004", "ne primenjuje"] {
+            assert!(
+                uzi.obrazlozenje().contains(trag),
+                "the narrowing is borrowed from a regime this shop cannot use and must say so \
+                 — „{trag}“ is missing from „{}“",
+                uzi.obrazlozenje()
+            );
+        }
+        assert!(
+            uzi.obrazlozenje().contains("proširite"),
+            "the shop must be told it may widen the scope: „{}“",
+            uzi.obrazlozenje()
+        );
+
+        for obuhvat in NivelacijaObuhvat::ALL {
+            for tekst in [
+                obuhvat.naziv(),
+                obuhvat.pravni_status(),
+                obuhvat.obrazlozenje(),
+            ] {
+                for rec in RECI_OBAVEZE {
+                    assert!(
+                        !tekst.to_lowercase().contains(rec),
+                        "{obuhvat:?} states the scope as a duty („{rec}“): „{tekst}“"
+                    );
+                }
+            }
+        }
+
+        // The duty itself is stated — somewhere else, and with its authority.
+        assert!(
+            NIVELACIJA_OBAVEZA.contains("popis"),
+            "the čl. 21 duty must be stated: „{NIVELACIJA_OBAVEZA}“"
+        );
+        for osnov in ["ZoRač čl. 21", "PoP čl. 3"] {
+            assert!(
+                NIVELACIJA_OBAVEZA_PRAVNI_OSNOV.contains(osnov),
+                "the duty must cite {osnov}, cites „{NIVELACIJA_OBAVEZA_PRAVNI_OSNOV}“"
+            );
+        }
+    }
+
+    /// Both scopes are offered, the narrowed one is flagged as the default, and the
+    /// wire form of the enum is pinned to its key — for the reason every other
+    /// vocabulary in this module is pinned: serde derives the wire form from the
+    /// variant *identifier* while `kljuc` is a hand-written literal, so a rename
+    /// moves one and not the other and a frontend that sent `samoNivelisani` would
+    /// silently widen a count nobody asked to widen.
+    #[test]
+    fn both_scopes_are_offered_with_the_narrowed_one_defaulted() {
+        let opcije = nivelacija_obuhvat_opcije();
+
+        assert_eq!(
+            opcije.len(),
+            NivelacijaObuhvat::ALL.len(),
+            "the shop is offered every modelled scope, not just the default"
+        );
+        let podrazumevani: Vec<NivelacijaObuhvat> = opcije
+            .iter()
+            .filter(|opcija| opcija.podrazumevani)
+            .map(|opcija| opcija.obuhvat)
+            .collect();
+        assert_eq!(
+            podrazumevani,
+            vec![NivelacijaObuhvat::SamoNivelisani],
+            "exactly one scope is the default and it is the narrowed one"
+        );
+
+        for obuhvat in NivelacijaObuhvat::ALL {
+            assert_eq!(
+                serde_json::to_string(&obuhvat).expect("a scope should serialize"),
+                format!("\"{}\"", obuhvat.kljuc()),
+                "{obuhvat:?} must reach the frontend as its own key"
+            );
+            assert_eq!(
+                NivelacijaObuhvat::from_kljuc(obuhvat.kljuc()),
+                Some(obuhvat),
+                "{obuhvat:?} should survive the round trip through its key"
+            );
+            assert!(
+                !obuhvat.naziv().is_empty(),
+                "{obuhvat:?} needs a name a shop can read"
+            );
+        }
+        assert!(
+            NivelacijaObuhvat::from_kljuc("sve").is_none(),
+            "an unknown key must not resolve to a scope"
+        );
+    }
+
+    /// Req. 33 — the nivelacija izveštaj is due 30 days after the popis, and the
+    /// sentence that says so is pinned to the constant the engine computes with.
+    /// Two numbers, one of them prose, is how a rok in the copy and a rok in the
+    /// answer come to disagree; and the anchor matters as much as the count, so the
+    /// sentence has to say the 30 days run from the popis and not from the price
+    /// change that raised it.
+    #[test]
+    fn the_nivelacija_notice_dates_its_rok_from_the_popis() {
+        let obavestenje = nivelacija_obavestenje();
+
+        assert_eq!(
+            obavestenje.rok_dana, IZVESTAJ_ROK_DANA_PO_POPISU,
+            "the notice's rok is PoP čl. 13 st. 2's second limb"
+        );
+        assert!(
+            nivelacija_rok_objasnjenje().contains(&format!("{IZVESTAJ_ROK_DANA_PO_POPISU} dana")),
+            "the sentence must carry the same number the engine computes with: „{}“",
+            nivelacija_rok_objasnjenje()
+        );
+        for trag in ["po izvršenom popisu", "PoP čl. 13 st. 2"] {
+            assert!(
+                nivelacija_rok_objasnjenje().contains(trag),
+                "„{trag}“ is missing from the rok sentence: „{}“",
+                nivelacija_rok_objasnjenje()
+            );
+        }
+        assert!(
+            nivelacija_rok_objasnjenje().contains("ne od dana promene cene"),
+            "the rok runs from the popis, not from the price change: „{}“",
+            nivelacija_rok_objasnjenje()
+        );
+
+        // The engine and the notice have to agree about what „30 dana“ means.
+        assert_eq!(
+            izvestaj_due(PopisVrsta::Nivelacioni, "2026-11-25", None)
+                .expect("a nivelacija popis has a rok"),
+            "2026-12-25"
+        );
+
+        assert_eq!(obavestenje.obaveza, NIVELACIJA_OBAVEZA);
+        assert_eq!(obavestenje.pravni_osnov, NIVELACIJA_OBAVEZA_PRAVNI_OSNOV);
+        assert_eq!(obavestenje.obuhvat.len(), NivelacijaObuhvat::ALL.len());
+        // Req. 39 is why the notice cannot open the popis itself, and a notice that
+        // implied it had would be promising behaviour that does not exist.
+        for trag in ["ne otvara", "ZoRač čl. 20 st. 3"] {
+            assert!(
+                obavestenje.napomena.contains(trag),
+                "„{trag}“ is missing from the notice's napomena: „{}“",
+                obavestenje.napomena
+            );
         }
     }
 

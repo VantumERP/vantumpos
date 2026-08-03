@@ -91,13 +91,27 @@ pub fn kep_export_kalkulacija(
 /// Nivelacija — the one adjustment that changes the product price. Updates the
 /// catalog price, records the offered-price change, and posts the KEP kolona-4 Δ
 /// in one transaction (all in `crate::kep_storno::post_nivelacija`).
+///
+/// **It also hands back the popis obligation the same event raises** (SW-16
+/// req. 33). ZoRač čl. 21 requires a popis i usklađivanje stanja „приликом …
+/// промене продајних цена производа и робе у малопродајном објекту“, and that is a
+/// second, independent duty on this one act — the KEP Δ does not discharge it and
+/// it does not change the KEP Δ. It is returned rather than merely logged because
+/// the moment the shop changes a price is the only moment it is certain to be
+/// looking; the compliance register missed this trigger entirely until 01.08.2026,
+/// and a duty nobody is told about is a duty nobody performs.
+///
+/// The notice is composed by `crate::popis`, so what the till shows and what the
+/// popis module shows are one wording. It **states plainly that it opens nothing**:
+/// req. 39 / ZoRač čl. 20 st. 3 puts the reconciliation confirmation before the
+/// popis, so nothing here may open one on the shop's behalf.
 #[tauri::command]
 pub fn kep_nivelacija(
     state: State<'_, AppState>,
     product_id: i64,
     new_sale_price_minor: i64,
     basis: BasisDoc,
-) -> Result<(), CommandError> {
+) -> Result<crate::popis::NivelacijaObavestenje, CommandError> {
     let acting = super::auth::require_admin(state.inner())?;
     let mut connection = state.db().open().map_err(CommandError::from)?;
     let now = crate::clock::utc_now()?;
@@ -118,7 +132,10 @@ pub fn kep_nivelacija(
     if prices_moved {
         super::cenovnik::republish_after_price_move(&connection, &now);
     }
-    Ok(())
+    // SW-16 req. 33. Composed from constants and the čl. 13 st. 2 rok — it reads no
+    // row and no clock, so there is nothing here that could fail a nivelacija whose
+    // price and KEP Δ are already durable.
+    Ok(crate::popis::nivelacija_obavestenje())
 }
 
 /// Posts a value-only storno for a non-nivelacija cause. The string maps to a
@@ -569,6 +586,84 @@ mod tests {
                 )
                 .expect("the nivelacija must republish the cenovnik");
             assert!(body.contains("176.00"), "{body:?}");
+        });
+    }
+
+    /// SW-16 req. 33 — **one event, two obligations.** SW-9b books the value delta
+    /// in kolona 4; ZoRač čl. 21 requires a popis for the same price change. The
+    /// register had missed the second one entirely, and a shop that is never told
+    /// about it at the moment it changes a price is a shop that does not take the
+    /// popis. So the nivelacija hands back the popis duty with its rok and its
+    /// scope options — and books its KEP Δ exactly as before, because neither
+    /// obligation stands in for the other.
+    #[test]
+    fn a_nivelacija_raises_the_popis_duty_and_still_books_its_kep_delta() {
+        with_app("kep_nivelacija_raises_the_popis", |app| {
+            let state = app.state::<AppState>();
+            sign_in_admin(state.inner());
+            seed_product(state.inner(), 1, "Mleko 1l", 15600);
+            // On-hand, so there is a value to revalue and a kolona-4 row to assert
+            // on: `post_nivelacija` books nothing for an article nobody has any of.
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute(
+                    "INSERT INTO inventory_balances (product_id, quantity_milli, updated_at)
+                     VALUES (1, 35000, '2026-01-01T00:00:00Z')",
+                    [],
+                )
+                .expect("balance should insert");
+
+            let obavestenje = kep_nivelacija(app.state::<AppState>(), 1, 17600, basis())
+                .expect("admin should post the nivelacija");
+
+            assert_eq!(obavestenje.obaveza, crate::popis::NIVELACIJA_OBAVEZA);
+            assert_eq!(
+                obavestenje.pravni_osnov,
+                crate::popis::NIVELACIJA_OBAVEZA_PRAVNI_OSNOV
+            );
+            assert_eq!(
+                obavestenje.rok_dana,
+                crate::popis::IZVESTAJ_ROK_DANA_PO_POPISU,
+                "PoP čl. 13 st. 2, second limb"
+            );
+            let podrazumevani: Vec<_> = obavestenje
+                .obuhvat
+                .iter()
+                .filter(|opcija| opcija.podrazumevani)
+                .collect();
+            assert_eq!(
+                podrazumevani.len(),
+                1,
+                "one scope is offered as the default"
+            );
+            assert!(
+                podrazumevani[0].pravni_status.contains("preporuka"),
+                "the narrowed scope reaches the till labelled a preporuka: „{}“",
+                podrazumevani[0].pravni_status
+            );
+
+            // The KEP half is untouched: the price change still books its Δ.
+            let (kolona, kind, cause) = state
+                .db()
+                .open()
+                .expect("database should open")
+                .query_row(
+                    "SELECT kolona, kind, cause FROM kep_entries ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .expect("the nivelacija must book its kolona-4 Δ");
+            assert_eq!(kolona, "zaduzenje");
+            assert_eq!(kind, "nivelacija_up");
+            assert_eq!(cause.as_deref(), Some("nivelacija"));
         });
     }
 
