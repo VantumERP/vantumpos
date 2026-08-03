@@ -681,6 +681,23 @@ export function createMockServices(): PosServices {
         "Automatsko čišćenje nikada ne uklanja važeći cenovnik prodajnog objekta.",
       updatedAt: now,
     },
+    {
+      recordClass: "popis_dokumentacija",
+      naziv: "Popisne liste i dokumentacija o popisu",
+      // The one class on the business-year clock (ZoRač čl. 28 st. 9), so the
+      // seeded floor is 31 December of the mock's year plus five — not the
+      // seeding day's anniversary the way every other bounded row above is.
+      retainUntil: "2031-12-31",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Popisne liste, sastav komisije i potpisi. Rok čuvanja je pet godina, računato od " +
+        "poslednjeg dana poslovne godine na koju se popis odnosi (ZoRač čl. 28 st. 7 i st. 9); " +
+        "rok se pomera samo unapred. Izveštaj o popisu se ne čuva u aplikaciji — štampa se na " +
+        "zahtev. Automatsko brisanje popisne dokumentacije ne postoji.",
+      updatedAt: now,
+    },
   ];
   let currentShift: ShiftSummary | null = {
     id: 1,

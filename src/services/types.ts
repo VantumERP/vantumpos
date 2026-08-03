@@ -1882,7 +1882,8 @@ export type RecordClass =
   | "credentials"
   | "access_log"
   | "processing_register"
-  | "cenovnik_archive";
+  | "cenovnik_archive"
+  | "popis_dokumentacija";
 
 /**
  * One row of the shared retention table — `crate::commands::retention::

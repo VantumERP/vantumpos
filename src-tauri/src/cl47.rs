@@ -125,7 +125,7 @@ const PRENOS_PODRSKA: &str = "Nije utvrđen prenos u druge države ni u međunar
      mera zaštite prenosa (ZZPL čl. 47 st. 1 tač. 5) — to je pitanje za pružaoca alata, a ne \
      pretpostavka programa.";
 
-/// The eleven radnje this program performs. Every `retention_policies` class
+/// The twelve radnje this program performs. Every `retention_policies` class
 /// appears at least once, which
 /// `every_configured_retention_class_reaches_the_register` enforces: a period the
 /// app applies and the register never disclosed is a čl. 47 st. 1 t. 6 gap.
@@ -310,6 +310,36 @@ const TEMPLATES: &[Template] = &[
         retention: None,
         mere: "Evidencija se vodi u istoj bazi, pod istom kontrolom pristupa; kontakt potrošača \
              se koristi samo za postupanje po toj reklamaciji.",
+    },
+    Template {
+        kljuc: "popis_imovine",
+        svrha_obrade:
+            "Sprovođenje popisa imovine i obaveza i usklađivanje knjigovodstvenog stanja \
+             sa stvarnim stanjem (ZoRač čl. 20 i čl. 21) i dokazivanje da je popis vodila komisija \
+             sastavljena onako kako propis traži (Pravilnik o popisu, čl. 5 st. 1 i čl. 6).",
+        vrsta_lica: "Članovi komisije za popis, odnosno jedno lice koje kod preduzetnika vrši \
+             popis, i lica koja potpisuju popisne liste.",
+        vrsta_podataka: "Ime i prezime, uloga u popisu (predsednik komisije, član ili jedno lice) \
+             i podatak o tome da li lice rukuje imovinom koja se popisuje — taj podatak se vodi \
+             zato što lica koja rukuju imovinom ne mogu biti određena u komisiju. Uz svaki potpis \
+             beleže se ime potpisnika i vreme potpisivanja. Ostalo u popisnim listama odnosi se na \
+             robu, gotovinu, potraživanja i obaveze, a ne na lica.",
+        vrsta_primalaca: "Poreska uprava u nadzoru nad evidentiranjem poslovnih promena (ZoRač \
+             čl. 56 st. 1); knjigovođa koji knjiži utvrđene razlike; vlasnik tuđe robe, kome \
+             obveznik dostavlja primerak potpisane posebne popisne liste (Pravilnik o popisu, \
+             čl. 2 st. 6) — tu listu dostavlja obveznik, program je ne šalje nikome.",
+        rok_osnov:
+            "ZoRač čl. 28 st. 7 — isprave na osnovu kojih se unose podaci u poslovne knjige \
+             čuvaju se pet godina, a rok se računa od poslednjeg dana poslovne godine na koju se \
+             odnose (čl. 28 st. 9). Nijedan propis ne imenuje popisne liste izričito, pa je ovo \
+             zaključak a ne izričita odredba; rok se pomera samo unapred. Izveštaj o popisu se ne \
+             čuva u aplikaciji — sastavlja se i štampa na zahtev, pa štampani primerak čuva \
+             obveznik.",
+        retention: Some(RecordClass::PopisDokumentacija),
+        mere: "Podaci iz knjigovodstva o količinama ne izdaju se komisiji pre nego što je stvarno \
+             stanje upisano u popisne liste i pre nego što su te liste potpisane (Pravilnik o \
+             popisu, čl. 8 st. 5); to ograničenje je postavljeno u samoj bazi i u upitima, a ne u \
+             izgledu ekrana. Proknjižen popis se više ne menja — ispravka ide kroz novi popis.",
     },
     Template {
         kljuc: "evidencija_radnji_obrade",

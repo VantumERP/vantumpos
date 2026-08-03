@@ -69,15 +69,23 @@ pub enum AdjustableClass {
     /// two-year limitation. Nothing in the ZZP prescribes a period, so a shop
     /// that wants a longer published-price record may keep one.
     CenovnikArchive,
+    /// The popisne liste and the rest of the popis documentation (SW-16 req. 42)
+    /// — [`crate::retention::POPIS_RETENTION_YEARS`] on ZoRač čl. 28 st. 7,
+    /// counted from the last day of the business year (st. 9). No provision
+    /// names popisne liste expressly (§6 R-7), so the five years are an
+    /// inference and a shop whose knjigovođa reads it longer must be able to say
+    /// so — which is the whole reason this class is here rather than fixed.
+    PopisDokumentacija,
 }
 
 impl AdjustableClass {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::WorktimeOvertimeLog,
         Self::WorktimeDraft,
         Self::Credentials,
         Self::AccessLog,
         Self::CenovnikArchive,
+        Self::PopisDokumentacija,
     ];
 
     /// The shared `retention_policies` row this variant moves.
@@ -88,6 +96,7 @@ impl AdjustableClass {
             Self::Credentials => RecordClass::Credentials,
             Self::AccessLog => RecordClass::AccessLog,
             Self::CenovnikArchive => RecordClass::CenovnikArchive,
+            Self::PopisDokumentacija => RecordClass::PopisDokumentacija,
         }
     }
 

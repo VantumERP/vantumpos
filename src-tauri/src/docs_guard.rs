@@ -285,10 +285,15 @@ fn no_retention_row_promises_a_purge_no_job_performs() {
             RecordClass::WorktimeClassification
             | RecordClass::Personnel
             | RecordClass::ProcessingRegister => None,
-            // `retention::{draft_purge_eligible, overtime_log_purge_eligible}`
-            // are **gates, not sweeps** — they answer *may this go yet*, and
-            // every call site is inside `retention.rs`'s own test module.
-            RecordClass::WorktimeOvertimeLog | RecordClass::WorktimeDraft => None,
+            // `retention::{draft_purge_eligible, overtime_log_purge_eligible,
+            // popis_purge_eligible}` are **gates, not sweeps** — they answer
+            // *may this go yet*, and every call site is inside `retention.rs`'s
+            // own test module. The popis class joins them for a second reason
+            // too: PoP čl. 14 st. 3 write-locks a posted popis, so the only
+            // thing that could ever discard one is a sweep written on purpose.
+            RecordClass::WorktimeOvertimeLog
+            | RecordClass::WorktimeDraft
+            | RecordClass::PopisDokumentacija => None,
         })
         .collect();
 
@@ -496,6 +501,13 @@ fn no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move() {
             // retention table still costs a decision about what, if anything,
             // the employee is told it is called.
             AdjustableClass::CenovnikArchive => "arhiva objavljenih cenovnika",
+            // The popis documentation names the komisija members, and PoP čl. 5
+            // st. 1 keeps lica koja rukuju imovinom off it — so where the shop
+            // appoints an employee, this class does hold an employee's data. The
+            // čl. 23 notice has no row about it today (the čl. 47 register,
+            // which the Poverenik reads, does), and this string is what such a
+            // row would have to be called if one is ever added.
+            AdjustableClass::PopisDokumentacija => "popisne liste",
         })
         .collect();
 

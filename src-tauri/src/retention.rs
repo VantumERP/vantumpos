@@ -47,6 +47,15 @@
 //! and each snapshot's own `generated_at` through [`expiry_cutoff`] — plus one
 //! rule no date can override: an outlet's current cenovnik is never removed.
 //!
+//! **`popis_dokumentacija`** (SW-16 req. 42). The popisne liste, the popis
+//! itself, the komisija and the two statutory potpisi. Five years
+//! ([`POPIS_RETENTION_YEARS`]) on ZoRač čl. 28 st. 7 — and the **one class whose
+//! clock is not the record's own anniversary**: čl. 28 st. 9 counts from the
+//! last day of the business year, which is what [`business_year_floor`] computes
+//! and what [`popis_purge_eligible`] applies as the second of the two clocks.
+//! The izveštaj o popisu is deliberately **not** in this class: nothing stores
+//! one, it is composed and printed on demand, and the stored note says so.
+//!
 //! **The direction of the trade-off, once.** Under-retention outranks
 //! over-retention for this shop: the ZEOR čl. 50 st. 1 tač. 3 offence is *"ako
 //! ne čuva trajno"*. Every decision here therefore fails safe toward KEEPING —
@@ -110,6 +119,26 @@ pub const ACCESS_LOG_RETENTION_YEARS: i32 = 2;
 /// to compare against without it — which is a rule about *which row*, not about
 /// how long, and it lives in `commands::cenovnik::purge_expired_snapshots`.
 pub const CENOVNIK_ARCHIVE_RETENTION_YEARS: i32 = 2;
+
+/// SW-16 req. 42. How long the popisne liste and the rest of the popis
+/// documentation are kept.
+///
+/// **`[LEGAL-INFERRED]`, and the note stored beside the class says so.** No
+/// provision names popisne liste expressly (§6 R-7). Five years is the answer on
+/// either of the two footings the documents can take: as *isprave na osnovu
+/// kojih se unose podaci u poslovne knjige* they fall under ZoRač čl. 28 st. 7,
+/// which PoP čl. 14 st. 3 supports — the izveštaj *„dostavlja se na knjiženje“*
+/// — and even read as pomoćne knjige the answer is the same five years under
+/// st. 5. Doubly safe, which is why the figure ships ahead of counsel's sign-off
+/// while the inference does not ship as settled law.
+///
+/// **The clock is different from every other floor in this module**, and that is
+/// the whole reason [`business_year_floor`] exists: čl. 28 st. 9 counts the rok
+/// *„od poslednjeg dana poslovne godine na koju se odnose“*, so a nivelacija
+/// popis taken in May and the godišnji popis of the same year expire on the same
+/// 31 December. [`retention_floor`]'s anniversary would discard the first of
+/// them seven months early.
+pub const POPIS_RETENTION_YEARS: i32 = 5;
 
 /// The tables no purge, reset, restore or backup-prune path may ever reduce
 /// (§4d: *"the trajno classes must be structurally unreachable"*).
@@ -210,10 +239,26 @@ pub enum RecordClass {
     /// req. 42), not a personal-data-only one — see [`Self::personal_data`],
     /// which is what keeps it out of the čl. 47 register.
     CenovnikArchive,
+    /// SW-16 req. 42 — the popisne liste and the rest of the popis
+    /// documentation: the session and its liste, the komisija and the two
+    /// statutory potpisi. [`POPIS_RETENTION_YEARS`] on ZoRač čl. 28 st. 7,
+    /// counted from the last day of the business year (st. 9) — the **one class
+    /// here whose clock is the business year rather than the record's own
+    /// anniversary**, which is what [`business_year_floor`] is for.
+    ///
+    /// It holds personal data, unlike [`Self::CenovnikArchive`]: `popis_commission`
+    /// stores each member by name with a `rukuje_imovinom` flag (PoP čl. 5 st. 1)
+    /// and `popis_signatures` stores who signed each of the two liste. The
+    /// article rows beside them carry no data subject at all, but the class is
+    /// one class and the more sensitive half decides.
+    ///
+    /// **The izveštaj o popisu is not in it, because nothing stores one.** It is
+    /// composed on demand and printed; the paper is the shop's to keep.
+    PopisDokumentacija,
 }
 
 impl RecordClass {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::WorktimeClassification,
         Self::WorktimeOvertimeLog,
         Self::WorktimeDraft,
@@ -222,6 +267,7 @@ impl RecordClass {
         Self::AccessLog,
         Self::ProcessingRegister,
         Self::CenovnikArchive,
+        Self::PopisDokumentacija,
     ];
 
     /// The `record_class` value stored in `retention_policies`.
@@ -235,6 +281,7 @@ impl RecordClass {
             Self::AccessLog => "access_log",
             Self::ProcessingRegister => "processing_register",
             Self::CenovnikArchive => "cenovnik_archive",
+            Self::PopisDokumentacija => "popis_dokumentacija",
         }
     }
 
@@ -259,6 +306,7 @@ impl RecordClass {
             Self::AccessLog => "Evidencija pristupa podacima o ličnosti",
             Self::ProcessingRegister => "Evidencija o radnjama obrade",
             Self::CenovnikArchive => "Arhiva objavljenih cenovnika",
+            Self::PopisDokumentacija => "Popisne liste i dokumentacija o popisu",
         }
     }
 
@@ -279,6 +327,14 @@ impl RecordClass {
     /// carries šifra, naziv, jedinica mere and prices, and the archive rows add
     /// the prodajno mesto and the timestamps. No data subject appears in any of
     /// it.
+    ///
+    /// [`Self::PopisDokumentacija`] answers `true` and is worth stating, because
+    /// most of what it holds is article rows that look exactly like the cenovnik
+    /// archive's. What decides it is the other half: PoP čl. 5 st. 1 makes the
+    /// composition of the komisija a legal question about **named people**, so
+    /// `popis_commission` stores each of them by name with a `rukuje_imovinom`
+    /// flag, and `popis_signatures` records who signed. A class is one class, and
+    /// the half that carries a data subject decides for the whole of it.
     pub fn personal_data(self) -> bool {
         !matches!(self, Self::CenovnikArchive)
     }
@@ -331,6 +387,10 @@ impl RecordClass {
             Self::WorktimeDraft | Self::Credentials => parse_iso_date(date_only(now)).map(iso_date),
             Self::AccessLog => retention_floor(now, ACCESS_LOG_RETENTION_YEARS),
             Self::CenovnikArchive => retention_floor(now, CENOVNIK_ARCHIVE_RETENTION_YEARS),
+            // The one class on the business-year clock (ZoRač čl. 28 st. 9), so
+            // the seeded floor is 31 December of the launch year plus five —
+            // never the launch day's anniversary.
+            Self::PopisDokumentacija => business_year_floor(now, POPIS_RETENTION_YEARS),
         }
     }
 
@@ -365,6 +425,9 @@ impl RecordClass {
             }
             Self::CenovnikArchive => {
                 "Arhiva objavljenih cenovnika (ZZP čl. 6 st. 5 — poređenje ranije objavljenih cena sa cenama objavljenim u realnom vremenu). Podrazumevani rok je dve godine, koliko traje zastarelost prekršajnog gonjenja iz ZZP čl. 213; rok se pomera samo unapred. Automatsko čišćenje uklanja samo snimke starije od tog roka i nikada važeći cenovnik prodajnog objekta, koji ostaje bez obzira na starost. Ova arhiva ne sadrži podatke o ličnosti — u njoj su šifre, nazivi i cene artikala i naziv prodajnog mesta."
+            }
+            Self::PopisDokumentacija => {
+                "Popisne liste sa svim posebnim listama, podaci o popisu, sastav komisije za popis i potpisi na listama (ZoRač čl. 20 i čl. 21; Pravilnik o popisu). Rok čuvanja je pet godina, a računa se od poslednjeg dana poslovne godine na koju se popis odnosi (ZoRač čl. 28 st. 7 i st. 9) — zato popis izvršen u toku godine i popis na datum bilansa iste godine ističu istog dana. Rok se pomera samo unapred. Nijedan propis ne imenuje popisne liste izričito: rok od pet godina je zaključak po osnovu da su to isprave na osnovu kojih se unose podaci u poslovne knjige, a isti rok bi dao i čl. 28 st. 5 kada bi se posmatrale kao pomoćne knjige. Proknjižen popis se ne menja — ispravka ide kroz novi popis (PoP čl. 14 st. 3; ZoRač čl. 8 st. 4). Izveštaj o popisu se ne čuva u aplikaciji: sastavlja se i štampa na zahtev, pa štampani i potpisani primerak čuva obveznik. Automatsko brisanje popisne dokumentacije ne postoji — program samo računa najraniji dan od kog čuvanje više ne bi bilo obavezno."
             }
         }
     }
@@ -599,6 +662,42 @@ pub fn overtime_log_purge_eligible(
     Ok(date_only(today) >= floor.as_str())
 }
 
+/// One popis's documentation: two clocks again, and both must agree (SW-16
+/// req. 42).
+///
+/// The shared policy row is one — a legal hold or an unreached class floor stops
+/// this purge like it stops any other. The popis's own **business year** is the
+/// second, and it is the one that binds in the long run, exactly as
+/// [`overtime_log_purge_eligible`] anchors to the record's `dan` and
+/// `kep_close::purge_eligible` to the book's `closed_at`. Without it the class
+/// floor would release every popis the shop has ever taken the moment the seeded
+/// date passed.
+///
+/// `datum_popisa` is the anchor and nothing else is: PoP čl. 14 st. 3's knjiženje
+/// may fall in the following calendar year — for a godišnji popis it nearly
+/// always does — but čl. 28 st. 9 counts from the business year the isprava
+/// *relates to*, which is the year it was taken in. Anchoring on `posted_at`
+/// instead, or taking the later of the two, would silently add a whole year to
+/// the ordinary case rather than to the exceptional one.
+///
+/// An unreadable `datum_popisa` yields no floor, and no floor means keep.
+pub fn popis_purge_eligible(
+    conn: &Connection,
+    datum_popisa: &str,
+    today: &str,
+) -> Result<bool, AppError> {
+    let policy = load_policy(conn, RecordClass::PopisDokumentacija)?;
+    if !is_purgeable(&policy, today) {
+        return Ok(false);
+    }
+
+    let Some(floor) = business_year_floor(datum_popisa, POPIS_RETENTION_YEARS) else {
+        return Ok(false);
+    };
+
+    Ok(date_only(today) >= floor.as_str())
+}
+
 /// Row counts of [`NEVER_PURGE_TABLES`], taken **before** a destructive
 /// operation and handed back to [`assert_never_purge_intact`] before it commits.
 ///
@@ -670,6 +769,49 @@ pub fn retention_floor(day: &str, years: i32) -> Option<String> {
         .map(iso_date)
 }
 
+/// The last day of `day`'s business year, shifted forward by `years`, as
+/// `gggg-MM-dd`. This is the ZoRač čl. 28 st. 9 clock — *„рокови … рачунају се од
+/// последњег дана пословне године на коју се односе“* — and it is a different
+/// axis from [`retention_floor`], not a variation on it: every day of one
+/// business year resolves to the **same** floor, so a popis taken on 14 May and
+/// one taken on 31 December of that year are kept exactly as long.
+///
+/// The business year is taken as the calendar year. Nothing in this crate lets a
+/// shop declare a divergent one, and ZoRač čl. 2 t. 33 defines the poslovna
+/// godina as the calendar year in the ordinary case; a shop that ever declares
+/// otherwise needs this function to learn about it, not a caller to compensate.
+///
+/// **Panic-safe, in the sense SW-9c's `kep_close::retention_floor` fixed:**
+/// nothing is sliced by byte offset, the year shift is checked, and every input
+/// this cannot read as a calendar day yields `None`. The caller then has no
+/// floor, and no floor means keep — the direction the module note fixes for
+/// every decision here. The difference from SW-9c is deliberate and is the one
+/// deviation worth naming: `kep_close` falls back to a computed year-end floor
+/// because a KEP book always has a `book_year` to fall back **to**, and this
+/// function has only the string it was handed.
+///
+/// 31 December exists in every year, so unlike [`retention_floor`] and
+/// [`expiry_cutoff`] this one needs no leap-day fallback at all.
+///
+/// **A year before 1 is refused rather than rendered.** `time::Date` accepts
+/// negative years and [`iso_date`]'s `{:04}` renders year −4 as `-004`, so a
+/// shift that walked off the bottom of the calendar would come back as
+/// `Some("-004-12-31")` — a *success*, carrying a string that is not
+/// `gggg-MM-dd`, that no date column would accept, and that compares
+/// lexicographically below every real day, releasing the whole class. SW-16
+/// Task 3 fixed the identical hole in the deadline engine's `iso_datum`.
+pub fn business_year_floor(day: &str, years: i32) -> Option<String> {
+    let date = parse_iso_date(date_only(day))?;
+    let godina = date.year().checked_add(years)?;
+    if godina < 1 {
+        return None;
+    }
+
+    Date::from_calendar_date(godina, Month::December, 31)
+        .ok()
+        .map(iso_date)
+}
+
 /// `day` shifted **backwards** by `years`, as `gggg-MM-dd` — the oldest day a
 /// bounded class may still keep. A record whose own day is strictly earlier than
 /// the cutoff has outlived its period.
@@ -697,9 +839,10 @@ mod tests {
     use rusqlite::params;
 
     use super::{
-        draft_purge_eligible, expiry_cutoff, extend_retain_until, is_purgeable, load_policy,
-        overtime_log_purge_eligible, retention_floor, seed_retention_policies, RecordClass,
-        RetentionPolicy, ACCESS_LOG_RETENTION_YEARS, CENOVNIK_ARCHIVE_RETENTION_YEARS,
+        business_year_floor, draft_purge_eligible, expiry_cutoff, extend_retain_until,
+        is_purgeable, load_policy, overtime_log_purge_eligible, popis_purge_eligible,
+        retention_floor, seed_retention_policies, RecordClass, RetentionPolicy,
+        ACCESS_LOG_RETENTION_YEARS, CENOVNIK_ARCHIVE_RETENTION_YEARS, POPIS_RETENTION_YEARS,
         STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
     };
     use crate::db::{test_database_path, Db};
@@ -1181,6 +1324,204 @@ mod tests {
         assert!(
             access_log.contains("Ova evidencija se ne čuva trajno"),
             "and req. 6 forbids trajno for this class: {access_log}"
+        );
+    }
+
+    /// SW-16 req. 42, and the one thing the popis floor does **not** share with
+    /// every other floor in this module: its clock is the **business year**, not
+    /// the record's own anniversary.
+    ///
+    /// ZoRač čl. 28 st. 7 gives *isprave na osnovu kojih se unose podaci u
+    /// poslovne knjige* five years, and st. 9 starts that clock *„od poslednjeg
+    /// dana poslovne godine на коју се односе“*. So a nivelacija popis taken on
+    /// 14 May and the godišnji popis of the same year expire on the **same day**
+    /// — 31 December five years on. [`retention_floor`], which every other class
+    /// here uses, would answer 14 May 2031 for the first of them and discard a
+    /// računovodstvena isprava seven months early. That is the mutation this test
+    /// exists to catch, and it is asserted directly rather than implied.
+    #[test]
+    fn the_popis_floor_runs_from_the_business_year_end_not_from_the_count_day() {
+        assert_eq!(POPIS_RETENTION_YEARS, 5);
+
+        // The annual popis: 31 December of the business year it belongs to.
+        assert_eq!(
+            business_year_floor("2026-12-31", POPIS_RETENTION_YEARS).as_deref(),
+            Some("2031-12-31")
+        );
+        // A nivelacija taken mid-year belongs to the same business year and is
+        // therefore kept exactly as long — čl. 28 st. 9 anchors the rok to the
+        // year, never to the day.
+        assert_eq!(
+            business_year_floor("2026-05-14", POPIS_RETENTION_YEARS).as_deref(),
+            Some("2031-12-31"),
+            "the clock is the business year the popis relates to"
+        );
+        assert_ne!(
+            retention_floor("2026-05-14", POPIS_RETENTION_YEARS).as_deref(),
+            business_year_floor("2026-05-14", POPIS_RETENTION_YEARS).as_deref(),
+            "reaching for the anniversary floor here would discard a čl. 28 st. 7 \
+             isprava seven months early — the two must not be interchangeable"
+        );
+        // The first day of a business year is on the same clock as its last.
+        assert_eq!(
+            business_year_floor("2026-01-01", POPIS_RETENTION_YEARS).as_deref(),
+            Some("2031-12-31")
+        );
+        // A leap day needs no fallback at all on this clock: the anchor is
+        // always 31 December, which exists in every year.
+        assert_eq!(
+            business_year_floor("2028-02-29", POPIS_RETENTION_YEARS).as_deref(),
+            Some("2033-12-31")
+        );
+        // An RFC3339 stamp reduces to its calendar day, like everywhere else.
+        assert_eq!(
+            business_year_floor("2026-12-31T23:30:00Z", POPIS_RETENTION_YEARS).as_deref(),
+            Some("2031-12-31")
+        );
+
+        // Panic-safe in the SW-9c sense: nothing is sliced, and every date this
+        // function cannot read yields no floor — and no floor means keep.
+        for unreadable in ["31.12.2026.", "2026-12-1", "2026", "", "bad"] {
+            assert_eq!(
+                business_year_floor(unreadable, POPIS_RETENTION_YEARS),
+                None,
+                "an unreadable count date must refuse the purge, never invent a floor: \
+                 {unreadable}"
+            );
+        }
+        // …including the two ends of the calendar, where the shift itself leaves it.
+        assert_eq!(
+            business_year_floor("9999-12-31", POPIS_RETENTION_YEARS),
+            None
+        );
+        assert_eq!(business_year_floor("0001-01-01", -5), None);
+    }
+
+    /// Req. 42 through the shared table (design §8): the class row is one clock
+    /// and the popis's own business year is the other, exactly as the overtime
+    /// log takes the record's `dan`. Without the second, every popis in the shop
+    /// would be released the moment the class row's seeded date passed.
+    #[test]
+    fn popis_documentation_needs_both_the_class_floor_and_its_own_business_year() {
+        with_state("retention_popis_two_clocks", |state| {
+            seed_retention_policies(state, "2026-08-01T08:00:00Z").expect("classes should seed");
+            let connection = state.db().open().expect("database should open");
+
+            // Seeded on 01.08.2026, so the class floor is 31.12.2031.
+            let policy = load_policy(&connection, RecordClass::PopisDokumentacija)
+                .expect("the popis class must be seeded");
+            assert_eq!(policy.retain_until.as_deref(), Some("2031-12-31"));
+            assert!(
+                !policy.never_purge,
+                "a računovodstvena isprava is not trajno"
+            );
+
+            // A popis of the SAME business year: both clocks land together.
+            assert!(
+                !popis_purge_eligible(&connection, "2026-12-31", "2031-12-30")
+                    .expect("eligibility should query"),
+                "the day before the floor is still too early"
+            );
+            assert!(
+                popis_purge_eligible(&connection, "2026-12-31", "2031-12-31")
+                    .expect("eligibility should query"),
+                "both clocks have run out"
+            );
+
+            // A LATER popis outlives the class floor — this is the limb that
+            // makes the second clock load-bearing.
+            assert!(
+                !popis_purge_eligible(&connection, "2029-06-01", "2031-12-31")
+                    .expect("eligibility should query"),
+                "req. 42 anchors the five years to the popis, not to the launch day"
+            );
+            assert!(
+                popis_purge_eligible(&connection, "2029-06-01", "2034-12-31")
+                    .expect("eligibility should query"),
+                "…and releases it once its own business year has run out"
+            );
+
+            // An unreadable count date yields no floor, and no floor means keep.
+            assert!(
+                !popis_purge_eligible(&connection, "31.12.2026.", "9999-12-31")
+                    .expect("eligibility should query"),
+                "a date that cannot be read refuses the purge"
+            );
+
+            // The shared row is the other clock and outranks the popis's age.
+            connection
+                .execute(
+                    "UPDATE retention_policies SET legal_hold = 1 WHERE record_class = ?1",
+                    params![RecordClass::PopisDokumentacija.key()],
+                )
+                .expect("legal hold should store");
+            assert!(
+                !popis_purge_eligible(&connection, "2026-12-31", "9999-12-31")
+                    .expect("eligibility should query"),
+                "a legal hold outranks both clocks"
+            );
+        });
+    }
+
+    /// The note stored beside the popis class is what a shop owner reads when it
+    /// asks why the liste are still there — and what it reads to find out what
+    /// this program is **not** keeping for it.
+    ///
+    /// Three claims in it are load-bearing and none of them is decoration.
+    ///
+    /// **The izveštaj o popisu is not stored.** Task 6 composes it on demand and
+    /// prints it; no table holds one. Req. 42 names *„popisne liste and the
+    /// izveštaj“* together, so a note that repeated the requirement verbatim
+    /// would promise a five-year archive of a document this application never
+    /// held — and the shop would stop keeping the paper.
+    ///
+    /// **No automatic deletion exists.** [`popis_purge_eligible`] is a gate, not
+    /// a sweep: it answers *may this go yet*, and nothing calls it outside this
+    /// module's tests. A rok with no sweep behind it reads as a schedule.
+    ///
+    /// **The five years are an inference** (§6 R-7): no provision names popisne
+    /// liste expressly, and the note says so rather than presenting the mapping
+    /// to čl. 28 st. 7 as settled law.
+    #[test]
+    fn the_popis_retention_note_says_what_is_kept_what_is_not_and_on_whose_authority() {
+        let class = RecordClass::PopisDokumentacija;
+        let note = class.napomena();
+
+        assert!(
+            class.personal_data(),
+            "the komisija members and the potpisnici are named natural persons, so \
+             the čl. 47 register owes this class an entry"
+        );
+        assert!(!class.never_purge(), "a five-year floor is not trajno");
+
+        assert!(
+            note.contains("pet godina") && note.contains("poslednjeg dana poslovne godine"),
+            "the period and the clock it runs on (ZoRač čl. 28 st. 7 i st. 9): {note}"
+        );
+        assert!(
+            note.contains("čl. 28 st. 7"),
+            "the authority the shop can hand to an inspector: {note}"
+        );
+        assert!(
+            note.contains("pomera samo unapred"),
+            "the rok is a setting the shop may lengthen; `AdjustableClass` is what \
+             keeps that promise: {note}"
+        );
+        assert!(
+            note.contains("ne imenuje popisne liste"),
+            "§6 R-7 — no provision names them expressly, and the note may not \
+             present the inference as settled: {note}"
+        );
+        assert!(
+            note.contains("Izveštaj o popisu se ne čuva u aplikaciji"),
+            "req. 42 names the izveštaj beside the liste, but nothing in this \
+             schema stores one — the note must say so or the shop stops keeping \
+             the printed copy: {note}"
+        );
+        assert!(
+            note.contains("Automatsko brisanje") && note.contains("ne postoji"),
+            "nothing sweeps this class; a bound with no sweep behind it reads as \
+             a schedule: {note}"
         );
     }
 

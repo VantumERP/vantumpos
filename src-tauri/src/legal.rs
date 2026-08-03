@@ -342,6 +342,81 @@ pub fn cenovnik_not_published(profile: &ShopProfile) -> LegalNotice {
     }
 }
 
+/// ZoRač čl. 20 i čl. 21 — the popis imovine i obaveza, and the čl. 58 prekršaj.
+///
+/// Verified against `docs/REMAINING-SW-VERIFIED-RULES.md` §2c and §3 V5.
+///
+/// **The preduzetnik row is a prekršaj, and it is čl. 58 — never čl. 57.**
+/// Čl. 57 st. 1 tač. 12) is the provision that *describes* the failure („не
+/// попише имовину и обавезе у складу са овим законом (чл. 20. и 21.)“), which is
+/// exactly why it is the one a reader reaches for; but it is a **privredni
+/// prestup**, and ZPP čl. 6 st. 1 confines that offence to a pravno lice and its
+/// odgovorno lice. It cannot reach a preduzetnik at all. Čl. 58 is the article
+/// that does, and its band — 100.000 do 500.000 — is roughly six times lower at
+/// the top than čl. 57 st. 1's. §3 V5 names that mis-copy as the trap.
+///
+/// The čl. 58 band sits inside the ZoP čl. 39 st. 1 tač. 3) preduzetnik range
+/// (10.000–500.000) with the maximum exactly at the ceiling, so there is no
+/// conflict to quarantine and nothing to soften.
+///
+/// **The duty has two limbs and the second is the POS-relevant one.** Čl. 20
+/// st. 2 is the balance-date popis; čl. 21 adds one on primopredaja dužnosti
+/// računopolagača, on **promena prodajnih cena proizvoda i robe u maloprodajnom
+/// objektu**, on statusne promene and on the opening or closing of liquidation
+/// or bankruptcy. A boutique repricing a rail fires the second limb several
+/// times a season, and a notice naming only the annual count would tell it that
+/// one popis a year discharges the article.
+///
+/// **Čl. 20 st. 3's ordering is legislated**, not good practice: glavna
+/// knjiga↔dnevnik and pomoćne knjige↔glavna knjiga are reconciled *before* the
+/// popis and before the annual statements are drawn up.
+///
+/// **Pravilnik 89/2020 carries no kaznene odredbe of its own** (§2c — čl. 1–16
+/// and the minister's signature, with zero occurrences of *kazn*, *prekršaj*,
+/// *privredni prestup* or *nadzor*). So a bylaw slip — a commission that should
+/// not have been appointed, liste that were never printed and signed, a late
+/// izveštaj — is reachable only derivatively, on the argument that the popis was
+/// not taken *„u skladu sa ovim zakonom“*. The copy states both halves: the
+/// Pravilnik prescribes no penalty, **and** a procedural defect is not therefore
+/// consequence-free. Asserting either half alone would be a misstatement in one
+/// of the two directions a shop cannot check.
+///
+/// This function states the shop's duty and resolves the tier. It says nothing
+/// about what the application does, because the application takes no popis,
+/// delivers no lista and files no izveštaj — the surfaces that render it own
+/// those sentences, and `popis.rs` owns their wording.
+pub fn popis_not_conducted(profile: &ShopProfile) -> LegalNotice {
+    LegalNotice {
+        summary: "Popis imovine i obaveza vrši se na datum bilansa, a stanje po knjigama se \
+                  usklađuje sa stanjem po popisu. Usklađivanje prometa i stanja glavne knjige sa \
+                  dnevnikom i pomoćnih knjiga sa glavnom knjigom vrši se pre popisa i pre \
+                  sastavljanja godišnjih finansijskih izveštaja — taj redosled propisuje zakon. \
+                  Osim popisa na datum bilansa, popis i usklađivanje stanja vrše se i prilikom \
+                  primopredaje dužnosti računopolagača, promene prodajnih cena proizvoda i robe \
+                  u maloprodajnom objektu, statusnih promena i otvaranja, odnosno zaključenja \
+                  postupka likvidacije ili stečaja. Pravilnik koji uređuje kako se popis sprovodi \
+                  — komisija, plan rada, popisne liste, rokovi i sadržina izveštaja — ne propisuje \
+                  kazne; nepravilnost u samom postupku može da se kazni samo posredno, ako se \
+                  uzme da popis nije izvršen u skladu sa zakonom."
+            .to_string(),
+        penalty: tiered(
+            profile,
+            "Prekršaj: novčana kazna od 100.000 do 500.000 dinara (čl. 58, \
+             za radnje iz čl. 57 st. 1 tač. 12).",
+            "Privredni prestup: novčana kazna od 100.000 do 3.000.000 dinara \
+             (čl. 57 st. 1 tač. 12), uz kaznu za odgovorno lice od 20.000 do 150.000 dinara \
+             (čl. 57 st. 2).",
+        ),
+        citation: "Zakon o računovodstvu, čl. 20 st. 2 i st. 3 i čl. 21; prekršaj: čl. 58. \
+                   Postupak popisa: Pravilnik o načinu i rokovima vršenja popisa i usklađivanja \
+                   knjigovodstvenog stanja sa stvarnim stanjem (Sl. glasnik RS, br. 89/2020) — \
+                   taj pravilnik nema kaznene odredbe. Nadzor nad ispravnim evidentiranjem \
+                   poslovnih promena: Poreska uprava (ZoRač čl. 56 st. 1)."
+            .to_string(),
+        is_legal_duty: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +446,7 @@ mod tests {
             preraspodela_caps_exceeded(p),
             breach_notification_missing(p),
             cenovnik_not_published(p),
+            popis_not_conducted(p),
         ]
     }
 
@@ -390,7 +466,7 @@ mod tests {
 
         assert_eq!(
             enumerated.len(),
-            10,
+            11,
             "adding a notice function means adding it to all_notices, to the \
              list below, AND bumping this count — an omission from both lists \
              is otherwise invisible"
@@ -407,6 +483,7 @@ mod tests {
             preraspodela_caps_exceeded(&p),
             breach_notification_missing(&p),
             cenovnik_not_published(&p),
+            popis_not_conducted(&p),
         ] {
             assert!(
                 enumerated.contains(&notice),
@@ -421,10 +498,17 @@ mod tests {
     /// `the_blanket_guard_catches_a_cl_6_sibling_the_citation_filter_would_miss`
     /// applies it to a notice `all_notices` does not contain — which is the only
     /// way to exercise the *screen* rather than today's inventory.
-    const FORBIDDEN_TO_A_PREDUZETNIK: [&str; 4] = [
+    const FORBIDDEN_TO_A_PREDUZETNIK: [&str; 5] = [
         "privredni prestup",
         "2.000.000",
         "300.000,00 do 2.000.000",
+        // ZoRač čl. 57 st. 1's pravno-lice ceiling. §3 V5 names this exact
+        // mis-copy — *„Reading 100.000–3.000.000 off čl. 57 and applying it to
+        // the pilot would be wrong by roughly a factor of six at the top end“* —
+        // and „privredni prestup“ alone would not catch a sibling that quoted
+        // the band without naming the offence. No preduzetnik figure anywhere in
+        // this module reaches 3.000.000, so the bare literal is a safe needle.
+        "3.000.000",
         // ZZP čl. 210 st. 1 tač. 1's fixed sum, which is a pravno-lice figure;
         // a preduzetnik's čl. 6 exposure is the fixed 100.000 of st. 3.
         //
@@ -1238,5 +1322,156 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// ZoRač carries **two** offences for the popis and they sit in different
+    /// chapters of liability. Čl. 57 st. 1 tač. 12) is a *privredni prestup*, and
+    /// ZPP čl. 6 st. 1 confines that to a pravno lice and its odgovorno lice — so
+    /// it cannot reach a preduzetnik at all. His whole exposure is the čl. 58
+    /// prekršaj, 100.000 do 500.000.
+    ///
+    /// This is the single most likely misreading in the module: čl. 57 is the
+    /// article that *describes* the failure to take the popis, and its band tops
+    /// out roughly six times higher. §3 V5 flags it by name.
+    #[test]
+    fn popis_penalty_is_the_cl_58_prekrsaj_and_never_the_cl_57_privredni_prestup() {
+        let preduzetnik = popis_not_conducted(&profile(Some(PravnaForma::Preduzetnik)));
+        let penalty = preduzetnik.penalty.expect("preduzetnik penalty is known");
+        assert!(
+            penalty.contains("100.000 do 500.000"),
+            "the preduzetnik row is čl. 58: {penalty}"
+        );
+        assert!(penalty.contains("čl. 58"), "{penalty}");
+        assert!(
+            penalty.contains("tač. 12"),
+            "čl. 58 sets the amount by referring back to the čl. 57 st. 1 radnje; \
+             the biće is tač. 12): {penalty}"
+        );
+        assert!(
+            !penalty.contains("3.000.000"),
+            "3.000.000 is the čl. 57 st. 1 pravno-lice ceiling: {penalty}"
+        );
+        assert!(
+            !penalty.contains("odgovorno lice") && !penalty.contains("150.000"),
+            "čl. 57 st. 2 reaches only an odgovorno lice u pravnom licu; \
+             a preduzetnik has none: {penalty}"
+        );
+        assert!(preduzetnik.is_legal_duty);
+
+        let pravno = popis_not_conducted(&profile(Some(PravnaForma::PravnoLice)));
+        let penalty = pravno.penalty.expect("pravno lice penalty is known");
+        assert!(
+            penalty.to_lowercase().contains("privredni prestup"),
+            "{penalty}"
+        );
+        assert!(penalty.contains("100.000 do 3.000.000"), "{penalty}");
+        assert!(penalty.contains("čl. 57 st. 1 tač. 12"), "{penalty}");
+        assert!(
+            penalty.contains("20.000 do 150.000") && penalty.contains("čl. 57 st. 2"),
+            "the odgovorno-lice row belongs on the pravno-lice tier: {penalty}"
+        );
+        assert!(
+            !penalty.contains("čl. 58"),
+            "čl. 58 is the preduzetnik row and quoting it beside a privredni \
+             prestup fines the pravno lice twice for one act: {penalty}"
+        );
+    }
+
+    /// The summary is what a shop owner reads about a duty whose breach is the
+    /// čl. 58 prekršaj, and three things in it are load-bearing.
+    ///
+    /// **Two duty limbs, not one.** Čl. 20 st. 2 is the balance-date popis; čl. 21
+    /// adds one on *promena prodajnih cena proizvoda i robe u maloprodajnom
+    /// objektu*, which is the trigger a till fires several times a season and the
+    /// one the register missed entirely until 01.08.2026. A summary naming only
+    /// the annual popis would tell a boutique it owes one count a year.
+    ///
+    /// **The ordering is legislated, not advisory.** Čl. 20 st. 3 puts the
+    /// glavna knjiga↔dnevnik and pomoćne knjige↔glavna knjiga reconciliations
+    /// *before* the popis, so it belongs in the duty rather than in a checklist.
+    ///
+    /// **The Pravilnik carries no kaznene odredbe of its own** (§2c: čl. 1–16 and
+    /// the minister's signature, zero occurrences of *kazn*, *prekršaj*,
+    /// *privredni prestup*, *nadzor*). A bylaw slip is reachable only
+    /// derivatively — *an argument* that the popis was not taken „u skladu sa
+    /// ovim zakonom“ — so the copy may neither promise a fine for every
+    /// procedural defect nor promise immunity from one.
+    #[test]
+    fn popis_notice_states_both_duty_limbs_the_ordering_and_the_bylaw_penalty_gap() {
+        // Summary and citation carry no figure, so the UNSET arm exercises
+        // exactly the two strings every other tier renders.
+        let notice = popis_not_conducted(&profile(None));
+
+        assert!(
+            notice.penalty.is_none(),
+            "an UNSET legal form renders no figure: {:?}",
+            notice.penalty
+        );
+        assert!(
+            notice.summary.contains("na datum bilansa"),
+            "čl. 20 st. 2 — the annual popis is taken as at the balance-sheet \
+             date: {}",
+            notice.summary
+        );
+        assert!(
+            notice
+                .summary
+                .contains("promene prodajnih cena proizvoda i robe u maloprodajnom objektu"),
+            "čl. 21 — the price-change popis is the POS-relevant limb and must \
+             not be lost behind the annual one: {}",
+            notice.summary
+        );
+        assert!(
+            notice.summary.contains("pre popisa"),
+            "čl. 20 st. 3 legislates the ordering — the ledger reconciliations \
+             come before the popis: {}",
+            notice.summary
+        );
+        assert!(
+            notice.summary.contains("ne propisuje kazne"),
+            "§2c — Pravilnik 89/2020 has no kaznene odredbe, and a shop told \
+             every bylaw slip carries a fine reads a certainty that is not \
+             there: {}",
+            notice.summary
+        );
+        assert!(
+            notice.summary.contains("posredno"),
+            "…and the copy must not swing the other way either: a procedural \
+             defect is reachable on the argument that the popis was not taken \
+             in accordance with the statute: {}",
+            notice.summary
+        );
+
+        // The notice states a duty on the shop. Nothing in this crate takes a
+        // popis, delivers a lista or files an izveštaj, so no wording here may
+        // read as the application doing it.
+        let haystack = format!("{} {}", notice.summary, notice.citation).to_lowercase();
+        for forbidden in ["aplikacija", "program automatski", "umesto vas"] {
+            assert!(
+                !haystack.contains(forbidden),
+                "a fine-figure notice states the shop's duty, never what this \
+                 program does; found {forbidden:?} in: {haystack}"
+            );
+        }
+
+        assert!(
+            notice.citation.contains("čl. 20") && notice.citation.contains("čl. 21"),
+            "both duty articles: {}",
+            notice.citation
+        );
+        assert!(
+            notice.citation.contains("89/2020"),
+            "the bylaw that governs how the popis is taken: {}",
+            notice.citation
+        );
+        assert!(
+            notice.citation.contains("Poreska uprava"),
+            "ZoRač čl. 56 st. 1 — who supervises: {}",
+            notice.citation
+        );
+        assert!(
+            notice.is_legal_duty,
+            "čl. 20 and čl. 21 are obaveze, never preporuke"
+        );
     }
 }
