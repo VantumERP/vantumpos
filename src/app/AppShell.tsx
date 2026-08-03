@@ -21,6 +21,7 @@ import { FirstRunTaxSetup } from "@/app/FirstRunTaxSetup";
 import { ImportWizard } from "@/app/import/ImportWizard";
 import { InventoryScreen } from "@/app/inventory/InventoryScreen";
 import { KepModule } from "@/app/kep/KepModule";
+import { PopisModule } from "@/app/popis/PopisModule";
 import {
   foundationCards,
   navigationItems,
@@ -494,6 +495,10 @@ function renderModule({
 
   if (activeId === "kep") {
     return <KepModule services={services} />;
+  }
+
+  if (activeId === "popis") {
+    return <PopisModule services={services} />;
   }
 
   if (activeId === "worktime") {

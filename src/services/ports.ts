@@ -53,6 +53,18 @@ import type {
   LoginRequest,
   OpenShiftRequest,
   PaymentMethodReport,
+  IzvestajRequest,
+  IzvestajView,
+  NivelacijaObuhvatId,
+  NivelacijaObuhvatView,
+  NivelacijaPregledView,
+  OpenPopisRequest,
+  PopisLineInput,
+  PopisLista,
+  PopisPodesavanja,
+  PopisSessionView,
+  PopisSummary,
+  ProveraListiView,
   PrethodnaCenaDto,
   PriceDivergence,
   ProductLedger,
@@ -537,6 +549,71 @@ export interface CenovnikService {
   getNotice(): Promise<LegalNotice>;
 }
 
+/**
+ * The admin-gated popis (SW-16, reqs. 29–42). Every method maps 1:1 onto a
+ * `popis_*` command name.
+ *
+ * Four properties of the backend this interface must not paper over.
+ *
+ * **The blind count is enforced at the query layer, not here.** While
+ * `PopisSessionView.knjigovodstvoDostupno` is false the response carries no
+ * book quantity from any source — not `popis_lines.knjigovodstvena_kolicina_
+ * milli`, not `inventory_balances`, not `inventory_movements` — because PoP
+ * čl. 8 st. 5 is about book data reaching the commission, whatever table it is
+ * read out of (req. 29). A screen that hid a column would not be compliance,
+ * and a screen that computed an „očekivano“ figure from the lager would breach
+ * the article with the whole suite green.
+ *
+ * **There is no `update` and no `delete`.** Once the result is knjižen
+ * (čl. 14 st. 3) the popis, its liste, its komisija and any new potpis are
+ * closed, and a correction is a NEW popis — ZoRač čl. 8 st. 4, req. 41. The
+ * retention purge of req. 42 is not a verb on this surface either.
+ *
+ * **`izvestaj` composes a document; it stores nothing.** Nothing in the schema
+ * records an izveštaj, so what comes back exists only for as long as it is on
+ * screen or on paper. Its own `upozorenja` say so.
+ *
+ * **Nothing here opens a popis on the shop's behalf.** `nivelacijaPregled`
+ * reports the ZoRač čl. 21 obligations a price change raised; req. 39 puts the
+ * čl. 20 st. 3 reconciliation confirmation before a popis exists at all, so an
+ * auto-opened session would assert a reconciliation nobody performed.
+ */
+export interface PopisService {
+  list(): Promise<PopisSummary[]>;
+  get(id: number): Promise<PopisSessionView>;
+  /** Req. 36 — which declared category still has an empty lista. */
+  proveraListi(id: number, prijavljene: PopisLista[]): Promise<ProveraListiView>;
+  /** Refused without the ZoRač čl. 20 st. 3 confirmation (req. 39). */
+  open(request: OpenPopisRequest): Promise<PopisSessionView>;
+  /** `lineId` null appends. A book quantity before the čl. 8 st. 5 potpis is refused, never dropped. */
+  saveLine(
+    sessionId: number,
+    lineId: number | null,
+    input: PopisLineInput,
+  ): Promise<PopisSessionView>;
+  startCount(id: number): Promise<PopisSessionView>;
+  /**
+   * The čl. 8 st. 5 potpis. It freezes the counted state and only **then**
+   * releases the book quantities — the statutory order, and the order the v20
+   * write guard enforces.
+   */
+  signPhaseA(id: number, potpisnici: string[]): Promise<PopisSessionView>;
+  compute(id: number): Promise<PopisSessionView>;
+  /** The čl. 9 st. 3 potpis on the printed, computed liste. */
+  signPhaseB(id: number, potpisnici: string[]): Promise<PopisSessionView>;
+  /** Čl. 14 st. 3 — knjiženje. The last permitted write on this popis. */
+  post(id: number): Promise<PopisSessionView>;
+  getPodesavanja(): Promise<PopisPodesavanja>;
+  setPodesavanja(podesavanja: PopisPodesavanja): Promise<PopisPodesavanja>;
+  nivelacijaPregled(): Promise<NivelacijaPregledView>;
+  /** `obuhvat` null takes the narrowed default — a default, never a limit (req. 33). */
+  nivelacijaObuhvat(
+    id: number,
+    obuhvat: NivelacijaObuhvatId | null,
+  ): Promise<NivelacijaObuhvatView>;
+  izvestaj(id: number, request: IzvestajRequest): Promise<IzvestajView>;
+}
+
 export interface PrintService {
   /** Opens an exported document in the OS default handler for printing. */
   openForPrint(path: string): Promise<void>;
@@ -586,5 +663,6 @@ export interface PosServices {
   privacy: PrivacyService;
   retention: RetentionService;
   cenovnik: CenovnikService;
+  popis: PopisService;
   print: PrintService;
 }

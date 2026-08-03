@@ -4,6 +4,7 @@ import {
   BarChart3Icon,
   BookIcon,
   CalendarClockIcon,
+  ClipboardListIcon,
   ClockIcon,
   FileSpreadsheetIcon,
   MessageSquareWarningIcon,
@@ -54,6 +55,16 @@ export const navigationItems = [
     id: "kep",
     label: "KEP",
     icon: BookIcon,
+    adminOnly: true,
+  },
+  // Admin-only, and every `popis_*` command behind it is admin-gated backend
+  // side too. The popis releases the knjigovodstveno stanje to the commission
+  // (PoP čl. 8 st. 5), records who signed for the counted state, and books the
+  // result — none of that is a kasir's to do, and the komisija rows name people.
+  {
+    id: "popis",
+    label: "Popis",
+    icon: ClipboardListIcon,
     adminOnly: true,
   },
   {

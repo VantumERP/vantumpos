@@ -1940,3 +1940,379 @@ export interface ProcessingActivity {
   opisMeraZastite: string | null;
   updatedAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// Popis (SW-16, reqs. 29–42)
+// ---------------------------------------------------------------------------
+
+/**
+ * `crate::popis::PopisStatus`, serde snake_case — the six states in the bylaw's
+ * own sequence.
+ *
+ * **The wire spelling is the only spelling.** Backend-side the stored value and
+ * the IPC value are two hand-written lists held equal by test, precisely
+ * because a rename on one side silently changes the other; inventing a third,
+ * camelCased spelling for the UI would put the drift back where those tests
+ * cannot see it.
+ */
+export type PopisStatus =
+  | "draft"
+  | "counting"
+  | "counted_signed"
+  | "computed"
+  | "computed_signed"
+  | "posted";
+
+/** `crate::popis::PopisVrsta` — the two statutory triggers, serde snake_case. */
+export type PopisVrsta = "godisnji" | "nivelacioni";
+
+/** `crate::popis::PopisLista` — the six popisne liste of req. 36, serde snake_case. */
+export type PopisLista =
+  | "roba"
+  | "ostecena"
+  | "van_objekta"
+  | "gotovina"
+  | "potrazivanja"
+  | "konsignacija";
+
+/** The three `popis_commission.uloga` values. `jedno_lice` is PoP čl. 6 st. 1. */
+export type PopisUloga = "predsednik" | "clan" | "jedno_lice";
+
+/** `crate::popis::NivelacijaObuhvat` — the two offered scopes, serde snake_case. */
+export type NivelacijaObuhvatId = "samo_nivelisani" | "ceo_objekat";
+
+/** One named member of the komisija as it is recorded (req. 40 / PoP čl. 5 st. 1). */
+export interface KomisijaClanInput {
+  ime: string;
+  uloga: PopisUloga;
+  /**
+   * Čl. 5 st. 1 — the goods-handling exclusion. It **warns and never blocks**:
+   * the čl. 6 st. 2 shodna primena is unresolved (§6 R-5), so a surface that
+   * refused the popis would enforce a duty nobody has settled.
+   */
+  rukujeImovinom: boolean;
+}
+
+export interface OpenPopisRequest {
+  vrsta: PopisVrsta;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  /** PoP čl. 8 st. 1–2 — the plan rada, stored as it was approved. */
+  planRadaJson: string | null;
+  odlukaRef: string | null;
+  /**
+   * Req. 34 / PoP čl. 9 st. 2. Not free text: a non-empty value is refused
+   * backend-side unless a popis of the same business year, dated earlier, is
+   * already `posted`. The *usvojen* limb is NOT checked — nothing in the schema
+   * records the čl. 14 st. 2 odluka — and any surface offering this field has
+   * to say so rather than imply a check that does not happen.
+   */
+  perpetualOdlukaRef: string | null;
+  /** Req. 39 / ZoRač čl. 20 st. 3 — the popis cannot be opened without it. */
+  uskladjivanjePotvrdjeno: boolean;
+  komisija: KomisijaClanInput[];
+}
+
+/**
+ * One stavka as it is written down — `crate::commands::popis::PopisLineInput`.
+ *
+ * `knjigovodstvenaKolicinaMilli` rides on the wire on purpose: the čl. 11 st. 1
+ * and čl. 12 st. 2 liste have no perpetual record to populate them from, so
+ * their book side is typed by hand — but only once čl. 8 st. 5 has released it.
+ * A payload carrying it earlier is **refused**, never quietly dropped.
+ */
+export interface PopisLineInput {
+  listaVrsta: PopisLista;
+  sifra: string | null;
+  naziv: string;
+  vrsta: string | null;
+  jedinicaMere: string | null;
+  /** PoP čl. 9 st. 1 t. 1 — the natural count, in milli-units. */
+  stvarnaKolicinaMilli: number;
+  bliziOpis: string | null;
+  knjigovodstvenaKolicinaMilli: number | null;
+  /** PoP čl. 9 st. 1 t. 5, integer minor units (para). On the gotovina lista this is the apoen. */
+  cenaMinor: number | null;
+}
+
+export interface KomisijaClanView {
+  id: number;
+  ime: string;
+  uloga: PopisUloga;
+  rukujeImovinom: boolean;
+}
+
+/** One of the two statutory signature events (req. 30). Immutable once written. */
+export interface PopisSignatureView {
+  id: number;
+  /** `a` = čl. 8 st. 5 (the counted state); `b` = čl. 9 st. 3 (the computed liste). */
+  faza: string;
+  potpisnik: string;
+  potpisanoAt: string;
+  snapshotHash: string;
+}
+
+/**
+ * One stavka as it comes back — `crate::commands::popis::PopisLineView`.
+ *
+ * **`knjigovodstvenaKolicinaMilli` and `razlikaMilli` are `null` during Phase A
+ * because nothing was read, not because something read was dropped.** The blind
+ * read does not name the book column, `inventory_balances` or
+ * `inventory_movements` at all, so there is no value in the row for a render, a
+ * log line or a debug print to spill (req. 29 / PoP čl. 8 st. 5).
+ */
+export interface PopisLineView {
+  id: number;
+  listaVrsta: PopisLista;
+  sifra: string | null;
+  naziv: string;
+  vrsta: string | null;
+  jedinicaMere: string | null;
+  stvarnaKolicinaMilli: number;
+  bliziOpis: string | null;
+  knjigovodstvenaKolicinaMilli: number | null;
+  /** PoP čl. 9 st. 1 t. 4 — derived, so it cannot exist before the book quantity does. */
+  razlikaMilli: number | null;
+  cenaMinor: number | null;
+}
+
+/** One of the six liste with what is on it. All six are always reported, empty ones included. */
+export interface ListaPregled {
+  vrsta: PopisLista;
+  naziv: string;
+  pravniOsnov: string;
+  brojStavki: number;
+}
+
+/** The req. 36 readiness report — the declared categories checked against the liste. */
+export interface ProveraListiView {
+  spremno: boolean;
+  nedostaju: ListaPregled[];
+  /** The refusal the izveštaj generator will give, carried as text so there is one wording. */
+  poruka: string | null;
+}
+
+/**
+ * One popis — `crate::commands::popis::PopisSessionView`.
+ *
+ * **`knjigovodstvoDostupno` is the čl. 8 st. 5 answer and the only one a screen
+ * may consult.** It is `book_quantities_released(status, fazaAPotpisana)`,
+ * whose status limb alone is module-private backend-side precisely so nothing
+ * can reach it: `status` is a claim any UPDATE can make, and a session can be
+ * born in `counted_signed` with no potpis behind it.
+ */
+export interface PopisSessionView {
+  id: number;
+  vrsta: PopisVrsta;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  status: PopisStatus;
+  planRadaJson: string | null;
+  odlukaRef: string | null;
+  perpetualOdlukaRef: string | null;
+  uskladjivanjePotvrdjenoAt: string | null;
+  postedAt: string | null;
+  fazaAPotpisana: boolean;
+  fazaBPotpisana: boolean;
+  knjigovodstvoDostupno: boolean;
+  komisija: KomisijaClanView[];
+  potpisi: PopisSignatureView[];
+  linije: PopisLineView[];
+  liste: ListaPregled[];
+  /** PoP čl. 2 st. 6 — the day a signed copy of the konsignaciona lista is owed to its owner. */
+  konsignacijaRok: string | null;
+  /** Req. 40 warnings and the čl. 2 st. 6 reminder. Warnings, never blocks. */
+  upozorenja: string[];
+}
+
+export interface PopisSummary {
+  id: number;
+  vrsta: PopisVrsta;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  status: PopisStatus;
+  postedAt: string | null;
+  brojLinija: number;
+}
+
+/**
+ * `crate::commands::popis::PopisPodesavanja`.
+ *
+ * `rokPredajeFi` is configuration and not a constant: ZoRač čl. 44 st. 1 sets
+ * 31 March *„osim ako posebnim zakonom nije drukčije uređeno“*, so the date is
+ * not the app's to own. Unset, the **annual** izveštaj is refused by name
+ * rather than dated with a guess.
+ */
+export interface PopisPodesavanja {
+  rokPredajeFi: string | null;
+}
+
+/** The eight PoP čl. 13 st. 1 content elements — `crate::popis::IzvestajElement`. */
+export type IzvestajElementId =
+  | "stvarno_stanje"
+  | "knjigovodstveno_stanje"
+  | "razlike"
+  | "uzroci_neslaganja"
+  | "predlozi_za_likvidaciju_razlika"
+  | "nacin_knjizenja"
+  | "primedbe_lica_koja_rukuju_vrednostima"
+  | "ostale_primedbe_i_predlozi";
+
+/**
+ * The five čl. 13 st. 1 elements the commission writes — `crate::popis::
+ * IzvestajNarativ`. Named fields rather than a map, because req. 37 wants a
+ * structured template with required fields and a map admits an izveštaj that
+ * simply omits an element. Every one is refused **by name** when empty.
+ */
+export interface IzvestajNarativ {
+  uzrociNeslaganja: string;
+  predloziZaLikvidacijuRazlika: string;
+  nacinKnjizenja: string;
+  primedbeLicaKojaRukujuVrednostima: string;
+  ostalePrimedbeIPredlozi: string;
+}
+
+/**
+ * `crate::commands::popis::IzvestajRequest`.
+ *
+ * `prijavljeneListe` is **required on the wire**, exactly as
+ * `popis_provera_listi` requires it: the req. 36 gate refuses a *declared*
+ * lista that is empty, so a request that omitted the field would satisfy it
+ * vacuously. An explicit `[]` says „ništa nije prijavljeno“; an absent field
+ * says nothing.
+ */
+export interface IzvestajRequest {
+  prijavljeneListe: PopisLista[];
+  narativ: IzvestajNarativ;
+}
+
+export interface IzvestajElementView {
+  element: IzvestajElementId;
+  naziv: string;
+  pravniOsnov: string;
+  uputstvo: string;
+  /** `null` for the three the popis itself answers — their content is the figures. */
+  tekst: string | null;
+}
+
+/**
+ * The čl. 9 st. 1 t. 4 and t. 6 figures over one lista or the whole popis.
+ *
+ * **No natural total is reported, and that is deliberate.** Stavke on one lista
+ * can be in komadima, metrima and kilogramima at once, so a summed količina
+ * across them would be a number with no unit — the naturalna razlika stays per
+ * stavka on the popisna lista, where čl. 9 st. 1 t. 4 puts it. The three counts
+ * beside the three amounts are not decoration: an unvalued or unbooked stavka
+ * is reported, never zeroed.
+ */
+export interface IzvestajZbir {
+  brojStavki: number;
+  stavkeBezCene: number;
+  stavkeBezKnjigovodstvenogStanja: number;
+  stavkeSaViskom: number;
+  stavkeSaManjkom: number;
+  vrednostPoPopisuMinor: number;
+  vrednostPoKnjigamaMinor: number;
+  /** Negative is a manjak. */
+  vrednosnaRazlikaMinor: number;
+  potpuno: boolean;
+}
+
+export interface IzvestajListaPregled {
+  vrsta: PopisLista;
+  naziv: string;
+  pravniOsnov: string;
+  zbir: IzvestajZbir;
+}
+
+/**
+ * PoP čl. 14 st. 2 — the odluka o usvajanju izveštaja, surfaced **with** the
+ * izveštaj as one milestone (req. 38): the article gives it the rok „iz člana
+ * 13. stav 2“, so it is the same date and not a second deadline.
+ */
+export interface OdlukaOUsvajanjuView {
+  rok: string;
+  pravniOsnov: string;
+  donosilac: string;
+  /** What this application does NOT do with the decision. */
+  napomena: string;
+}
+
+/**
+ * The izveštaj o popisu (req. 37) — **composed, not stored.** Nothing in this
+ * schema records one: the document is assembled when it is asked for, and
+ * `upozorenja` says so, because a shop that typed five paragraphs and closed
+ * the screen would otherwise lose them without being told.
+ */
+export interface IzvestajView {
+  sessionId: number;
+  vrsta: PopisVrsta;
+  status: PopisStatus;
+  obveznik: string;
+  pib: string;
+  maticniBroj: string;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  komisija: KomisijaClanView[];
+  potpisi: PopisSignatureView[];
+  /** All eight čl. 13 st. 1 elements, in the article's order. */
+  elementi: IzvestajElementView[];
+  /** All six liste, the empty ones included. */
+  liste: IzvestajListaPregled[];
+  ukupno: IzvestajZbir;
+  /** PoP čl. 13 st. 2, computed — never tabulated. */
+  rok: string;
+  rokPravniOsnov: string;
+  odlukaOUsvajanju: OdlukaOUsvajanjuView;
+  upozorenja: string[];
+}
+
+/**
+ * One article as PoP čl. 8 st. 4 hands it to the commission — and **no quantity
+ * among the four fields.** The scope list is read before anything is counted,
+ * so a perpetual stanje beside each article here would hand over the book
+ * quantities at the very start of the count (req. 29).
+ */
+export interface NivelacijaArtikalView {
+  sifra: string | null;
+  naziv: string;
+  vrsta: string | null;
+  jedinicaMere: string | null;
+}
+
+export interface NivelacijaPokriceView {
+  sessionId: number;
+  status: PopisStatus;
+  datumPopisa: string;
+}
+
+/** One outstanding čl. 21 obligation: a day retail prices moved, and for what. */
+export interface NivelacijaObavezaView {
+  datum: string;
+  brojArtikala: number;
+  artikli: NivelacijaArtikalView[];
+  /** A nivelacija popis opened for it and not yet posted; `null` means nothing started. */
+  popisUToku: NivelacijaPokriceView | null;
+}
+
+export interface NivelacijaPregledView {
+  obaveze: NivelacijaObavezaView[];
+  obavestenje: NivelacijaObavestenje;
+  /** Exactly which recorded price moves this report is built from — stated, never implied. */
+  izvor: string;
+}
+
+export interface NivelacijaObuhvatView {
+  sessionId: number;
+  datumPopisa: string;
+  obuhvat: NivelacijaObuhvatId;
+  obavestenje: NivelacijaObavestenje;
+  artikli: NivelacijaArtikalView[];
+  vecNaListama: number;
+}

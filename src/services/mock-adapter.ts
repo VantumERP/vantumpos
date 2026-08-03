@@ -29,11 +29,23 @@ import type {
   EurRate,
   EurRateStatus,
   ImportJob,
+  IzvestajElementId,
+  IzvestajNarativ,
+  IzvestajZbir,
+  KomisijaClanView,
   LegalNotice,
   InventoryAdjustmentRequest,
   KepClosure,
   KepClosureView,
   KepEntryView,
+  NivelacijaObavestenje,
+  PopisLineView,
+  PopisLista,
+  PopisPodesavanja,
+  PopisSessionView,
+  PopisSignatureView,
+  PopisStatus,
+  PopisVrsta,
   PrethodnaCenaDto,
   PriceDivergence,
   ProcessingActivity,
@@ -107,6 +119,180 @@ const DEFAULT_MOCK_EUR_RATE: EurRate = {
  */
 const MANUAL_RATE_MIN_PARA = 5_000;
 const MANUAL_RATE_MAX_PARA = 50_000;
+
+/**
+ * A test double, not demo copy: the wording a shop actually reads is composed
+ * by `crate::popis::nivelacija_obavestenje`. What is kept here is the shape
+ * plus the two facts a UI test may assert on — that the popis duty rides back
+ * with the price change (SW-16 req. 33) and that the narrowed scope is labelled
+ * a **preporuka**, never an obaveza.
+ *
+ * One constant and not two copies: the KEP hook and the popis module read the
+ * same object, exactly as they read one backend string.
+ */
+const MOCK_NIVELACIJA_OBAVESTENJE: NivelacijaObavestenje = {
+  obaveza:
+    "Promena prodajnih cena u maloprodajnom objektu traži popis (ZoRač čl. 21, PoP čl. 3).",
+  pravniOsnov: "ZoRač čl. 21, PoP čl. 3",
+  rokDana: 30,
+  rokObjasnjenje:
+    "Izveštaj o popisu po nivelaciji sastavlja se najkasnije 30 dana po izvršenom popisu (PoP čl. 13 st. 2).",
+  obuhvat: [
+    {
+      obuhvat: "samo_nivelisani",
+      naziv: "samo artikli obuhvaćeni nivelacijom",
+      pravniStatus: "preporuka — nije zakonska obaveza",
+      obrazlozenje:
+        "Sužavanje obima je preporuka i nije zakonska obaveza — obim slobodno proširite.",
+      podrazumevani: true,
+    },
+    {
+      obuhvat: "ceo_objekat",
+      naziv: "ceo maloprodajni objekat",
+      pravniStatus: "najšire tumačenje — ni ono nije propisano",
+      obrazlozenje: "Popis celog objekta ne izostavlja ništa.",
+      podrazumevani: false,
+    },
+  ],
+  napomena: "Aplikacija ne otvara popis umesto vas (ZoRač čl. 20 st. 3).",
+};
+
+/** One popis as this double stores it, before the čl. 8 st. 5 filter runs. */
+interface MockPopis {
+  id: number;
+  vrsta: PopisVrsta;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  status: PopisStatus;
+  planRadaJson: string | null;
+  odlukaRef: string | null;
+  perpetualOdlukaRef: string | null;
+  uskladjivanjePotvrdjenoAt: string | null;
+  postedAt: string | null;
+  komisija: KomisijaClanView[];
+  potpisi: PopisSignatureView[];
+  linije: PopisLineView[];
+}
+
+/** The six req. 36 liste with the provision that requires each. */
+const POPIS_LISTE: { vrsta: PopisLista; naziv: string; pravniOsnov: string }[] = [
+  { vrsta: "roba", naziv: "roba u objektu", pravniOsnov: "PoP čl. 9 st. 1 t. 1" },
+  {
+    vrsta: "ostecena",
+    naziv: "oštećena, zastarela i neupotrebljiva roba",
+    pravniOsnov: "PoP čl. 10 st. 3",
+  },
+  {
+    vrsta: "van_objekta",
+    naziv: "roba van objekta (na popravci i kod trećeg lica)",
+    pravniOsnov: "PoP čl. 10 st. 4",
+  },
+  { vrsta: "gotovina", naziv: "gotovina po apoenima", pravniOsnov: "PoP čl. 11 st. 1" },
+  {
+    vrsta: "potrazivanja",
+    naziv: "nedokumentovana potraživanja i obaveze",
+    pravniOsnov: "PoP čl. 12 st. 2",
+  },
+  {
+    vrsta: "konsignacija",
+    naziv: "konsignaciona i druga tuđa roba",
+    pravniOsnov: "PoP čl. 2 st. 5",
+  },
+];
+
+/**
+ * The eight PoP čl. 13 st. 1 elements. `polje` is empty for the three the popis
+ * itself answers — they are read out of the liste and never typed.
+ */
+const POPIS_IZVESTAJ_ELEMENTI: {
+  element: IzvestajElementId;
+  naziv: string;
+  pravniOsnov: string;
+  uputstvo: string;
+  narativni: boolean;
+  polje: string;
+}[] = [
+  {
+    element: "stvarno_stanje",
+    naziv: "stvarno stanje utvrđeno popisom",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Iz popisnih listi. Izveštaj iskazuje vrednost prebrojanog stanja i broj stavki; prebrojane količine stoje po stavkama na popisnim listama.",
+    narativni: false,
+    polje: "",
+  },
+  {
+    element: "knjigovodstveno_stanje",
+    naziv: "knjigovodstveno stanje",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Iz knjiga, tek posle potpisa stvarnog stanja (PoP čl. 8 st. 5). Izveštaj iskazuje vrednost knjigovodstvenog stanja; knjigovodstvene količine stoje po stavkama na popisnim listama.",
+    narativni: false,
+    polje: "",
+  },
+  {
+    element: "razlike",
+    naziv: "razlike između stvarnog i knjigovodstvenog stanja",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Iz obračuna. Izveštaj iskazuje vrednosnu razliku i broj stavki sa viškom odnosno manjkom; naturalne razlike stoje po stavkama na popisnim listama.",
+    narativni: false,
+    polje: "",
+  },
+  {
+    element: "uzroci_neslaganja",
+    naziv: "uzroci neslaganja stvarnog i knjigovodstvenog stanja",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo: "Navedite zbog čega se stvarno i knjigovodstveno stanje razlikuju.",
+    narativni: true,
+    polje: "uzrociNeslaganja",
+  },
+  {
+    element: "predlozi_za_likvidaciju_razlika",
+    naziv: "predlozi za likvidaciju utvrđenih razlika",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Obuhvata prebijanje manjkova i viškova po osnovu zamena, način naknađivanja manjkova i prihodovanja viškova, otpis zastarelih potraživanja i prihodovanje zastarelih obaveza.",
+    narativni: true,
+    polje: "predloziZaLikvidacijuRazlika",
+  },
+  {
+    element: "nacin_knjizenja",
+    naziv: "način knjiženja razlika",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo: "Navedite kako se utvrđene razlike knjiže.",
+    narativni: true,
+    polje: "nacinKnjizenja",
+  },
+  {
+    element: "primedbe_lica_koja_rukuju_vrednostima",
+    naziv: "primedbe i objašnjenja lica koja rukuju vrednostima",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Unesite primedbe i objašnjenja lica koja rukuju vrednostima. Ako ih nema, upišite i to.",
+    narativni: true,
+    polje: "primedbeLicaKojaRukujuVrednostima",
+  },
+  {
+    element: "ostale_primedbe_i_predlozi",
+    naziv: "ostale primedbe i predlozi",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo: "Ostale primedbe i predlozi. Ako ih nema, upišite i to.",
+    narativni: true,
+    polje: "ostalePrimedbeIPredlozi",
+  },
+];
+
+/** `crate::popis::konsignacija_rok` — čl. 2 st. 6, ten calendar days. */
+function popisPlusDana(datum: string, dana: number): string {
+  const parsed = Date.parse(`${datum}T00:00:00Z`);
+  if (Number.isNaN(parsed)) {
+    return datum;
+  }
+  return new Date(parsed + dana * 86_400_000).toISOString().slice(0, 10);
+}
 
 /** `nbs_rate::is_iso_date` — `YYYY-MM-DD`, month 1–12, day 1–31. */
 function isIsoDate(value: string): boolean {
@@ -808,6 +994,8 @@ export function createMockServices(): PosServices {
     automaticBackupEnabled: true,
   };
   let backupJobs: BackupJob[] = [];
+  const popisSessions: MockPopis[] = [];
+  let popisPodesavanja: PopisPodesavanja = { rokPredajeFi: null };
 
   /**
    * Mirrors `commands::settings::eur_rate_status`. An absent rate is stale —
@@ -2165,39 +2353,12 @@ export function createMockServices(): PosServices {
           rowCount: 1,
         };
       },
-      // A test double, not demo copy: the wording a shop actually reads is
-      // composed by `crate::popis::nivelacija_obavestenje`. What is kept here is
-      // the shape plus the two facts a UI test may assert on — that the popis
-      // duty rides back with the price change (SW-16 req. 33) and that the
-      // narrowed scope is labelled a preporuka.
+      // The KEP hook and the popis module read ONE notice
+      // (`MOCK_NIVELACIJA_OBAVESTENJE`) for the reason the backend composes one:
+      // the duty has a single wording, and two copies would let one surface
+      // soften what the other hardened.
       async nivelacija() {
-        return {
-          obaveza:
-            "Promena prodajnih cena u maloprodajnom objektu traži popis (ZoRač čl. 21, PoP čl. 3).",
-          pravniOsnov: "ZoRač čl. 21, PoP čl. 3",
-          rokDana: 30,
-          rokObjasnjenje:
-            "Izveštaj o popisu po nivelaciji sastavlja se najkasnije 30 dana po izvršenom popisu (PoP čl. 13 st. 2).",
-          obuhvat: [
-            {
-              obuhvat: "samo_nivelisani" as const,
-              naziv: "samo artikli obuhvaćeni nivelacijom",
-              pravniStatus: "preporuka — nije zakonska obaveza",
-              obrazlozenje:
-                "Sužavanje obima je preporuka i nije zakonska obaveza — obim slobodno proširite.",
-              podrazumevani: true,
-            },
-            {
-              obuhvat: "ceo_objekat" as const,
-              naziv: "ceo maloprodajni objekat",
-              pravniStatus: "najšire tumačenje — ni ono nije propisano",
-              obrazlozenje: "Popis celog objekta ne izostavlja ništa.",
-              podrazumevani: false,
-            },
-          ],
-          napomena:
-            "Aplikacija ne otvara popis umesto vas (ZoRač čl. 20 st. 3).",
-        };
+        return MOCK_NIVELACIJA_OBAVESTENJE;
       },
       async postAdjustment() {},
       async correctEntry() {},
@@ -2647,6 +2808,273 @@ export function createMockServices(): PosServices {
         } satisfies LegalNotice;
       },
     },
+    // A test double, not a second implementation. The rules that decide what a
+    // popis may do live in `crate::popis` and `crate::commands::popis`; what is
+    // kept here is the shape plus the four properties a UI test would otherwise
+    // be able to pass vacuously against: the čl. 20 st. 3 gate (req. 39), the
+    // čl. 8 st. 5 blind read (req. 29), the five arrows of the state machine,
+    // and the posting lock (req. 41).
+    popis: {
+      async list() {
+        return popisSessions.map((session) => ({
+          id: session.id,
+          vrsta: session.vrsta,
+          prodajnoMesto: session.prodajnoMesto,
+          datumPopisa: session.datumPopisa,
+          status: session.status,
+          postedAt: session.postedAt,
+          brojLinija: session.linije.length,
+        }));
+      },
+      async get(id) {
+        return popisView(popisById(id));
+      },
+      async proveraListi(id, prijavljene) {
+        const session = popisById(id);
+        const nedostaju = POPIS_LISTE.filter(
+          (lista) =>
+            prijavljene.includes(lista.vrsta) &&
+            !session.linije.some((linija) => linija.listaVrsta === lista.vrsta),
+        ).map((lista) => ({ ...lista, brojStavki: 0 }));
+
+        return {
+          spremno: nedostaju.length === 0,
+          nedostaju,
+          poruka:
+            nedostaju.length === 0
+              ? null
+              : "Popisne liste nisu potpune: " +
+                nedostaju.map((lista) => lista.naziv).join(", ") +
+                ". Prijavljena kategorija bez ijedne stavke ne može u izveštaj.",
+        };
+      },
+      async open(request) {
+        // Req. 39 — ZoRač čl. 20 st. 3 legislates the ordering, so the double
+        // refuses here exactly as the backend does. Without this a UI test
+        // could „open“ a popis the real app would never have opened.
+        if (!request.uskladjivanjePotvrdjeno) {
+          throw new Error(
+            "Popis se ne može otvoriti dok se ne potvrdi usklađivanje glavne " +
+              "knjige sa dnevnikom i pomoćnih knjiga sa glavnom knjigom " +
+              "(ZoRač čl. 20 st. 3).",
+          );
+        }
+
+        const session: MockPopis = {
+          id: popisSessions.length + 1,
+          vrsta: request.vrsta,
+          prodajnoMesto: request.prodajnoMesto,
+          datumPopisa: request.datumPopisa,
+          periodFrom: request.periodFrom,
+          periodTo: request.periodTo,
+          status: "draft",
+          planRadaJson: request.planRadaJson,
+          odlukaRef: request.odlukaRef,
+          perpetualOdlukaRef: request.perpetualOdlukaRef,
+          uskladjivanjePotvrdjenoAt: now,
+          postedAt: null,
+          komisija: request.komisija.map((clan, index) => ({
+            id: index + 1,
+            ime: clan.ime,
+            uloga: clan.uloga,
+            rukujeImovinom: clan.rukujeImovinom,
+          })),
+          potpisi: [],
+          linije: [],
+        };
+        popisSessions.push(session);
+        return popisView(session);
+      },
+      async saveLine(sessionId, lineId, input) {
+        const session = popisById(sessionId);
+        popisEnsureOtvoren(session);
+
+        // Req. 30 — the two potpisi freeze two snapshots. A stavka that could
+        // still be edited after the čl. 8 st. 5 signature would make that
+        // signature attest to a state that no longer exists.
+        if (session.status === "counted_signed") {
+          throw new Error(
+            "Stvarno stanje je potpisano (PoP čl. 8 st. 5) — popisne liste se više ne menjaju.",
+          );
+        }
+        if (session.status === "computed_signed") {
+          throw new Error(
+            "Obračunate popisne liste su potpisane (PoP čl. 9 st. 3) i više se ne menjaju.",
+          );
+        }
+        if (session.status === "computed" && lineId === null) {
+          throw new Error(
+            "Nova stavka se ne dodaje posle potpisa stvarnog stanja — nju niko nije prebrojao (PoP čl. 8 st. 5).",
+          );
+        }
+
+        // Req. 29. The refusal, not a silent drop: a caller that had the field
+        // discarded would believe it had stored book data.
+        if (
+          input.knjigovodstvenaKolicinaMilli !== null &&
+          !popisKnjigovodstvoDostupno(session)
+        ) {
+          throw new Error(
+            "Knjigovodstvena količina se ne unosi pre potpisa stvarnog stanja " +
+              "(PoP čl. 8 st. 5).",
+          );
+        }
+
+        const stored: PopisLineView = {
+          id: lineId ?? session.linije.length + 1,
+          listaVrsta: input.listaVrsta,
+          sifra: input.sifra,
+          naziv: input.naziv,
+          vrsta: input.vrsta,
+          jedinicaMere: input.jedinicaMere,
+          stvarnaKolicinaMilli: input.stvarnaKolicinaMilli,
+          bliziOpis: input.bliziOpis,
+          knjigovodstvenaKolicinaMilli: input.knjigovodstvenaKolicinaMilli,
+          razlikaMilli: null,
+          cenaMinor: input.cenaMinor,
+        };
+        const existing = session.linije.findIndex((linija) => linija.id === lineId);
+        if (existing >= 0) {
+          session.linije[existing] = stored;
+        } else {
+          session.linije.push(stored);
+        }
+
+        return popisView(session);
+      },
+      async startCount(id) {
+        return popisView(popisAdvanceSession(id, "draft", "counting"));
+      },
+      async signPhaseA(id, potpisnici) {
+        const session = popisById(id);
+        popisPotpis(session, "a", potpisnici, "counting");
+        // The statutory order: the potpis first, the book quantities only
+        // after it. The v20 write guard aborts the other way round.
+        session.status = "counted_signed";
+        for (const linija of session.linije) {
+          if (linija.knjigovodstvenaKolicinaMilli === null) {
+            linija.knjigovodstvenaKolicinaMilli = popisKnjigovodstvo(linija);
+          }
+        }
+        return popisView(session);
+      },
+      async compute(id) {
+        const session = popisAdvanceSession(id, "counted_signed", "computed");
+        for (const linija of session.linije) {
+          linija.razlikaMilli =
+            linija.knjigovodstvenaKolicinaMilli === null
+              ? null
+              : linija.stvarnaKolicinaMilli - linija.knjigovodstvenaKolicinaMilli;
+        }
+        return popisView(session);
+      },
+      async signPhaseB(id, potpisnici) {
+        const session = popisById(id);
+        popisPotpis(session, "b", potpisnici, "computed");
+        session.status = "computed_signed";
+        return popisView(session);
+      },
+      async post(id) {
+        const session = popisAdvanceSession(id, "computed_signed", "posted");
+        session.postedAt = now;
+        return popisView(session);
+      },
+      async getPodesavanja() {
+        return { ...popisPodesavanja };
+      },
+      async setPodesavanja(podesavanja) {
+        popisPodesavanja = {
+          rokPredajeFi: podesavanja.rokPredajeFi?.trim() || null,
+        };
+        return { ...popisPodesavanja };
+      },
+      async nivelacijaPregled() {
+        return {
+          obaveze: [],
+          obavestenje: MOCK_NIVELACIJA_OBAVESTENJE,
+          izvor:
+            "Prati se: nivelacije i izmene cene u katalogu artikala. Ne prate " +
+            "se: akcijske cene iz kampanja, cene iz uvoza artikala.",
+        };
+      },
+      async nivelacijaObuhvat(id, obuhvat) {
+        const session = popisById(id);
+        return {
+          sessionId: session.id,
+          datumPopisa: session.datumPopisa,
+          obuhvat: obuhvat ?? "samo_nivelisani",
+          obavestenje: MOCK_NIVELACIJA_OBAVESTENJE,
+          // Four čl. 8 st. 4 fields and no količina among them — the scope list
+          // is read before anything is counted (req. 29).
+          artikli: products.map((product) => ({
+            sifra: product.sku,
+            naziv: product.name,
+            vrsta: product.categoryName,
+            jedinicaMere: product.unitOfMeasure,
+          })),
+          vecNaListama: 0,
+        };
+      },
+      async izvestaj(id, request) {
+        const session = popisById(id);
+        if (!popisKnjigovodstvoDostupno(session)) {
+          throw new Error(
+            "Izveštaj o popisu se ne sastavlja pre potpisa stvarnog stanja " +
+              "(PoP čl. 8 st. 5).",
+          );
+        }
+
+        return {
+          sessionId: session.id,
+          vrsta: session.vrsta,
+          status: session.status,
+          obveznik: "Butik Primer pr Novi Pazar",
+          pib: "100000001",
+          maticniBroj: "60000001",
+          prodajnoMesto: session.prodajnoMesto,
+          datumPopisa: session.datumPopisa,
+          periodFrom: session.periodFrom,
+          periodTo: session.periodTo,
+          komisija: session.komisija,
+          potpisi: session.potpisi,
+          elementi: POPIS_IZVESTAJ_ELEMENTI.map((element) => ({
+            ...element,
+            tekst: element.narativni
+              ? request.narativ[element.polje as keyof IzvestajNarativ]
+              : null,
+          })),
+          liste: POPIS_LISTE.map((lista) => ({
+            vrsta: lista.vrsta,
+            naziv: lista.naziv,
+            pravniOsnov: lista.pravniOsnov,
+            zbir: popisZbir(
+              session.linije.filter((linija) => linija.listaVrsta === lista.vrsta),
+            ),
+          })),
+          ukupno: popisZbir(session.linije),
+          rok:
+            session.vrsta === "nivelacioni"
+              ? "30 dana po izvršenom popisu"
+              : "30.01.2027",
+          rokPravniOsnov: "PoP čl. 13 st. 2",
+          odlukaOUsvajanju: {
+            rok:
+              session.vrsta === "nivelacioni"
+                ? "30 dana po izvršenom popisu"
+                : "30.01.2027",
+            pravniOsnov: "PoP čl. 14 st. 2",
+            donosilac: "preduzetnik lično",
+            napomena:
+              "Aplikacija ne evidentira odluku o usvajanju izveštaja — donesite " +
+              "je i čuvajte uz izveštaj.",
+          },
+          upozorenja: [
+            "Izveštaj o popisu se ne čuva u aplikaciji — odštampajte ga i " +
+              "čuvajte uz popisne liste.",
+          ],
+        };
+      },
+    },
     print: {
       async openForPrint() {},
       async openExternalUrl() {},
@@ -2656,6 +3084,202 @@ export function createMockServices(): PosServices {
   /** The outlet's newest publication — the file čl. 6 st. 4 binds it to today. */
   function currentCenovnik() {
     return cenovnikArchive[cenovnikArchive.length - 1];
+  }
+
+  function popisById(id: number): MockPopis {
+    const found = popisSessions.find((candidate) => candidate.id === id);
+    if (!found) {
+      throw new Error("Popis nije pronađen.");
+    }
+    return found;
+  }
+
+  /**
+   * `crate::popis::book_quantities_released` — **both** limbs. The status limb
+   * alone is module-private backend-side precisely so nothing can reach it: a
+   * session can be born in `counted_signed` with no potpis behind it, and this
+   * double must not be the one place where that shortcut works.
+   */
+  function popisKnjigovodstvoDostupno(session: MockPopis): boolean {
+    return (
+      session.status !== "draft" &&
+      session.status !== "counting" &&
+      session.potpisi.some((potpis) => potpis.faza === "a")
+    );
+  }
+
+  /** Req. 41 — čl. 14 st. 3 with ZoRač čl. 8 st. 4: a correction is a new popis. */
+  function popisEnsureOtvoren(session: MockPopis) {
+    if (session.status === "posted") {
+      throw new Error(
+        "Popis je proknjižen i više se ne menja — ispravka se sprovodi novim popisom.",
+      );
+    }
+  }
+
+  function popisAdvanceSession(
+    id: number,
+    from: PopisStatus,
+    to: PopisStatus,
+  ): MockPopis {
+    const session = popisById(id);
+    popisEnsureOtvoren(session);
+    if (session.status !== from) {
+      throw new Error(
+        `Prelaz nije dozvoljen iz stanja „${session.status}“ u „${to}“.`,
+      );
+    }
+    session.status = to;
+    return session;
+  }
+
+  function popisPotpis(
+    session: MockPopis,
+    faza: "a" | "b",
+    potpisnici: string[],
+    from: PopisStatus,
+  ) {
+    popisEnsureOtvoren(session);
+    if (session.status !== from) {
+      throw new Error(`Potpis nije moguć u stanju „${session.status}“.`);
+    }
+    if (potpisnici.length === 0) {
+      throw new Error("Popisnu listu potpisuju članovi komisije.");
+    }
+    for (const potpisnik of potpisnici) {
+      session.potpisi.push({
+        id: session.potpisi.length + 1,
+        faza,
+        potpisnik,
+        potpisanoAt: now,
+        snapshotHash: `mock-${faza}-${session.id}-${session.potpisi.length + 1}`,
+      });
+    }
+  }
+
+  /**
+   * The perpetual stanje, read at the moment the čl. 8 st. 5 potpis is taken —
+   * the earliest moment the article permits reading it at all. A šifra that
+   * resolves to nothing keeps its `null`: the gotovina and potraživanja liste
+   * have no perpetual record behind them, and a fabricated zero would report a
+   * manjak the shop does not have.
+   */
+  function popisKnjigovodstvo(linija: PopisLineView): number | null {
+    const product = products.find((candidate) => candidate.sku === linija.sifra);
+    return product ? product.currentStockMilli : null;
+  }
+
+  function popisZbir(linije: PopisLineView[]): IzvestajZbir {
+    const zbir: IzvestajZbir = {
+      brojStavki: linije.length,
+      stavkeBezCene: 0,
+      stavkeBezKnjigovodstvenogStanja: 0,
+      stavkeSaViskom: 0,
+      stavkeSaManjkom: 0,
+      vrednostPoPopisuMinor: 0,
+      vrednostPoKnjigamaMinor: 0,
+      vrednosnaRazlikaMinor: 0,
+      potpuno: true,
+    };
+
+    for (const linija of linije) {
+      if (linija.cenaMinor === null) {
+        zbir.stavkeBezCene += 1;
+        zbir.potpuno = false;
+      }
+      if (linija.knjigovodstvenaKolicinaMilli === null) {
+        zbir.stavkeBezKnjigovodstvenogStanja += 1;
+        zbir.potpuno = false;
+      }
+      if (linija.razlikaMilli !== null && linija.razlikaMilli > 0) {
+        zbir.stavkeSaViskom += 1;
+      }
+      if (linija.razlikaMilli !== null && linija.razlikaMilli < 0) {
+        zbir.stavkeSaManjkom += 1;
+      }
+      if (linija.cenaMinor !== null) {
+        zbir.vrednostPoPopisuMinor += Math.round(
+          (linija.stvarnaKolicinaMilli * linija.cenaMinor) / 1000,
+        );
+        if (linija.knjigovodstvenaKolicinaMilli !== null) {
+          zbir.vrednostPoKnjigamaMinor += Math.round(
+            (linija.knjigovodstvenaKolicinaMilli * linija.cenaMinor) / 1000,
+          );
+        }
+      }
+    }
+
+    zbir.vrednosnaRazlikaMinor =
+      zbir.vrednostPoPopisuMinor - zbir.vrednostPoKnjigamaMinor;
+    return zbir;
+  }
+
+  /**
+   * Req. 29 lives here, not in the caller. While the release predicate is false
+   * the view carries **no** book quantity and **no** razlika: this double drops
+   * them on the way out, where the real backend never reads them in the first
+   * place. A double that leaked them would let a UI test that shows an
+   * „očekivano“ column pass.
+   */
+  function popisView(session: MockPopis): PopisSessionView {
+    const dostupno = popisKnjigovodstvoDostupno(session);
+    const upozorenja: string[] = [];
+
+    for (const clan of session.komisija) {
+      if (clan.rukujeImovinom) {
+        upozorenja.push(
+          `${clan.ime} rukuje imovinom koja se popisuje — PoP čl. 5 st. 1 to ` +
+            "ne dozvoljava za člana komisije. Za jedno lice iz čl. 6 st. 1 " +
+            "shodna primena čl. 5 st. 1 nije razjašnjena. Popis nije zaustavljen.",
+        );
+      }
+    }
+
+    if (session.linije.some((linija) => linija.listaVrsta === "konsignacija")) {
+      upozorenja.push(
+        "Potpisanu konsignacionu listu dostavite vlasniku robe u roku od 10 " +
+          "dana od dana popisa (PoP čl. 2 st. 6). Aplikacija je ne dostavlja.",
+      );
+    }
+
+    return {
+      id: session.id,
+      vrsta: session.vrsta,
+      prodajnoMesto: session.prodajnoMesto,
+      datumPopisa: session.datumPopisa,
+      periodFrom: session.periodFrom,
+      periodTo: session.periodTo,
+      status: session.status,
+      planRadaJson: session.planRadaJson,
+      odlukaRef: session.odlukaRef,
+      perpetualOdlukaRef: session.perpetualOdlukaRef,
+      uskladjivanjePotvrdjenoAt: session.uskladjivanjePotvrdjenoAt,
+      postedAt: session.postedAt,
+      fazaAPotpisana: session.potpisi.some((potpis) => potpis.faza === "a"),
+      fazaBPotpisana: session.potpisi.some((potpis) => potpis.faza === "b"),
+      knjigovodstvoDostupno: dostupno,
+      komisija: session.komisija.map((clan) => ({ ...clan })),
+      potpisi: session.potpisi.map((potpis) => ({ ...potpis })),
+      linije: session.linije.map((linija) => ({
+        ...linija,
+        knjigovodstvenaKolicinaMilli: dostupno
+          ? linija.knjigovodstvenaKolicinaMilli
+          : null,
+        razlikaMilli: dostupno ? linija.razlikaMilli : null,
+      })),
+      liste: POPIS_LISTE.map((lista) => ({
+        ...lista,
+        brojStavki: session.linije.filter(
+          (linija) => linija.listaVrsta === lista.vrsta,
+        ).length,
+      })),
+      konsignacijaRok: session.linije.some(
+        (linija) => linija.listaVrsta === "konsignacija",
+      )
+        ? popisPlusDana(session.datumPopisa, 10)
+        : null,
+      upozorenja,
+    };
   }
 
   /**

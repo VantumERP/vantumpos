@@ -7,6 +7,8 @@ import type {
   BasisDoc,
   BreachDraft,
   CampaignInput,
+  IzvestajNarativ,
+  PopisLineInput,
   ReklamacijaInput,
   ShopProfile,
 } from "./types";
@@ -1200,6 +1202,136 @@ describe("local service adapter", () => {
       "listSnapshots",
       "setPublishTarget",
     ]);
+  });
+
+  it("maps the popis surface to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "popis_list":
+          return Promise.resolve([]);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+    const narativ: IzvestajNarativ = {
+      uzrociNeslaganja: "Kalo i lom.",
+      predloziZaLikvidacijuRazlika: "Manjak na teret radnje.",
+      nacinKnjizenja: "Kroz KEP i glavnu knjigu.",
+      primedbeLicaKojaRukujuVrednostima: "Nema primedbi.",
+      ostalePrimedbeIPredlozi: "Nema.",
+    };
+
+    await services.popis.list();
+    await services.popis.get(4);
+    await services.popis.proveraListi(4, ["gotovina"]);
+    await services.popis.startCount(4);
+    await services.popis.signPhaseA(4, ["Amina Hodžić"]);
+    await services.popis.compute(4);
+    await services.popis.signPhaseB(4, ["Amina Hodžić"]);
+    await services.popis.post(4);
+    await services.popis.getPodesavanja();
+    await services.popis.setPodesavanja({ rokPredajeFi: "2027-03-31" });
+    await services.popis.nivelacijaPregled();
+    await services.popis.nivelacijaObuhvat(4, "ceo_objekat");
+    await services.popis.izvestaj(4, { prijavljeneListe: [], narativ });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "popis_list");
+    expect(invoke).toHaveBeenNthCalledWith(2, "popis_get", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(3, "popis_provera_listi", {
+      id: 4,
+      prijavljene: ["gotovina"],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "popis_start_count", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(5, "popis_sign_phase_a", {
+      id: 4,
+      potpisnici: ["Amina Hodžić"],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(6, "popis_compute", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(7, "popis_sign_phase_b", {
+      id: 4,
+      potpisnici: ["Amina Hodžić"],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(8, "popis_post", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(9, "popis_podesavanja_get");
+    expect(invoke).toHaveBeenNthCalledWith(10, "popis_podesavanja_set", {
+      podesavanja: { rokPredajeFi: "2027-03-31" },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(11, "popis_nivelacija_pregled");
+    expect(invoke).toHaveBeenNthCalledWith(12, "popis_nivelacija_obuhvat", {
+      id: 4,
+      obuhvat: "ceo_objekat",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(13, "popis_izvestaj", {
+      id: 4,
+      request: { prijavljeneListe: [], narativ },
+    });
+
+    // Req. 41 at the port, asserted over the SHAPE and not over the calls this
+    // test happened to make. Once the result is knjižen (PoP čl. 14 st. 3) the
+    // popis is closed and a correction is a NEW document (ZoRač čl. 8 st. 4) —
+    // so an `update`, a `delete` or a `reopen` here would be the write the
+    // backend refuses, arriving through the port instead. The req. 42 retention
+    // purge is not a verb on this surface either.
+    expect(Object.keys(services.popis).sort()).toEqual([
+      "compute",
+      "get",
+      "getPodesavanja",
+      "izvestaj",
+      "list",
+      "nivelacijaObuhvat",
+      "nivelacijaPregled",
+      "open",
+      "post",
+      "proveraListi",
+      "saveLine",
+      "setPodesavanja",
+      "signPhaseA",
+      "signPhaseB",
+      "startCount",
+    ]);
+  });
+
+  /**
+   * Req. 29 at the port. A Phase A line write that carried a book quantity is
+   * refused *at the backend boundary* (`popis_knjigovodstvo_pre_potpisa`) — so
+   * the field has to reach it. What the port must never do is invent one: the
+   * adapter forwards the caller's payload unchanged, and this asserts the two
+   * halves separately, because an adapter that defaulted the field to `0`
+   * would turn every blind count into a refused write and an adapter that
+   * dropped it would silence a breach the backend exists to name.
+   */
+  it("forwards a popis line write without inventing or dropping the book quantity", async () => {
+    const invoke = vi.fn().mockResolvedValue(null);
+    const services = createLocalServices(invoke);
+    const blind: PopisLineInput = {
+      listaVrsta: "roba",
+      sifra: "KOS-1",
+      naziv: "Košulja",
+      vrsta: "roba",
+      jedinicaMere: "kom",
+      stvarnaKolicinaMilli: 7000,
+      bliziOpis: null,
+      knjigovodstvenaKolicinaMilli: null,
+      cenaMinor: null,
+    };
+
+    await services.popis.saveLine(4, null, blind);
+    await services.popis.saveLine(4, 9, {
+      ...blind,
+      knjigovodstvenaKolicinaMilli: 8000,
+    });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "popis_save_line", {
+      sessionId: 4,
+      lineId: null,
+      input: blind,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "popis_save_line", {
+      sessionId: 4,
+      lineId: 9,
+      input: { ...blind, knjigovodstvenaKolicinaMilli: 8000 },
+    });
   });
 
   it("maps the till price-integrity check to sales_assess_price_integrity", async () => {

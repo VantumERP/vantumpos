@@ -35,6 +35,13 @@ import type {
   ImportJobDetail,
   ImportValidationResult,
   InventoryAdjustmentResult,
+  IzvestajView,
+  NivelacijaObuhvatView,
+  NivelacijaPregledView,
+  PopisPodesavanja,
+  PopisSessionView,
+  PopisSummary,
+  ProveraListiView,
   KalkulacijaSummary,
   NivelacijaObavestenje,
   KepClosePreview,
@@ -424,6 +431,45 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
           request,
         }),
       getNotice: () => invoke<LegalNotice>("cenovnik_get_notice"),
+    },
+    popis: {
+      list: () => invoke<PopisSummary[]>("popis_list"),
+      get: (id) => invoke<PopisSessionView>("popis_get", { id }),
+      proveraListi: (id, prijavljene) =>
+        invoke<ProveraListiView>("popis_provera_listi", { id, prijavljene }),
+      open: (request) =>
+        invoke<PopisSessionView>("popis_open", { request }),
+      // The payload is forwarded unchanged, `knjigovodstvenaKolicinaMilli`
+      // included. It is refused **at the backend boundary** while čl. 8 st. 5
+      // withholds it, and that refusal is the point: an adapter that dropped
+      // the field would leave a caller believing it had stored book data, and
+      // one that defaulted it would refuse every blind count.
+      saveLine: (sessionId, lineId, input) =>
+        invoke<PopisSessionView>("popis_save_line", {
+          sessionId,
+          lineId,
+          input,
+        }),
+      startCount: (id) => invoke<PopisSessionView>("popis_start_count", { id }),
+      signPhaseA: (id, potpisnici) =>
+        invoke<PopisSessionView>("popis_sign_phase_a", { id, potpisnici }),
+      compute: (id) => invoke<PopisSessionView>("popis_compute", { id }),
+      signPhaseB: (id, potpisnici) =>
+        invoke<PopisSessionView>("popis_sign_phase_b", { id, potpisnici }),
+      post: (id) => invoke<PopisSessionView>("popis_post", { id }),
+      getPodesavanja: () =>
+        invoke<PopisPodesavanja>("popis_podesavanja_get"),
+      setPodesavanja: (podesavanja) =>
+        invoke<PopisPodesavanja>("popis_podesavanja_set", { podesavanja }),
+      nivelacijaPregled: () =>
+        invoke<NivelacijaPregledView>("popis_nivelacija_pregled"),
+      nivelacijaObuhvat: (id, obuhvat) =>
+        invoke<NivelacijaObuhvatView>("popis_nivelacija_obuhvat", {
+          id,
+          obuhvat,
+        }),
+      izvestaj: (id, request) =>
+        invoke<IzvestajView>("popis_izvestaj", { id, request }),
     },
     print: {
       openForPrint: (path) => openPath(path),
