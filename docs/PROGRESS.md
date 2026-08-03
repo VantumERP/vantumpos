@@ -835,6 +835,112 @@ only in the log, and the purge fence that can leave the guard silent rather than
 
 ---
 
+### SW-16 — Popis (2026-08-03)
+
+The godišnji and the nivelacioni popis shipped as a ten-task TDD plan
+(`docs/superpowers/plans/2026-08-01-sw16-popis.md`, design at
+`docs/superpowers/specs/2026-08-01-sw16-popis-design.md`) against the verified rule set in
+`docs/REMAINING-SW-VERIFIED-RULES.md` §2c, §3 V5 and §4 reqs. 29–42. Baseline at plan time was
+`841ee23` — cargo **792**, bun **450**, migration **v19**. *(The task brief quoted 784; that is the
+count at `7399559`/`72797f0`, two commits earlier — `841ee23`, the last SW-12 fix, added eight before
+SW-16 started. The +107 below is measured from `841ee23` and is entirely SW-16's, because every commit
+after it is a popis commit.)*
+
+**What is deliberately not in it, stated first because the register would otherwise read as a closed
+item. There is no print and no export for a popisna lista.** PoP čl. 9 st. 3 authorises the computer
+for the obračun *„uz štampanje“* popisnih lista koje potpisuju članovi komisije — printing is express in
+the bylaw — and this cycle ships no renderer for one. The count sheet, the liste and the izveštaj are
+screens; the shop has to produce the paper the members sign outside this application. Req. 32's header
+block (obveznik,
+PIB/MB, maloprodajni objekat, broj liste), the per-stavka vrednost columns and the **editable default
+template** go with it: `PopisLineView` carries no vrednost, so that half is not frontend-only work.
+No task in this plan owned it and none of the copy pretends otherwise — the signature step says the
+liste are printed and signed by the members and that recording the potpis here **does not replace the
+one on paper**.
+
+**And the constraint the whole module is shaped around.** PoP čl. 8 st. 5 forbids releasing book
+quantities to the komisija before the counted state is written and signed, so the blindness is enforced
+at the **query layer** and anchored on the `faza = 'a'` potpis — never on `status`, which is a claim any
+`UPDATE` can make. The v20 write guard protects `popis_lines.knjigovodstvena_kolicina_milli`; the duty
+is wider, because the perpetual stanje also sits in `inventory_balances` and is derivable from
+`inventory_movements` with no trigger in the way. Every blind read is therefore asserted against a
+**seeded perpetual balance that must appear nowhere in the serialized response**, so the withheld half
+cannot pass vacuously, and adding an „očekivano“ column by joining `inventory_balances` fails exactly
+those tests and nothing else.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — schema | **Migration v20** (`popis_stores_blind_count_and_posting_lock`): `popis_sessions`, `popis_lines`, `popis_signatures`, `popis_commission`. Two module invariants live in the engine because migrations are append-only and neither could be added later without a second migration — the čl. 8 st. 5 blind count as a **write guard** anchored on the potpis, and the req. 41 **posting lock** over the session, its stavke, its komisija and any new potpis, with `popis_signatures` immutable from the moment each signature is taken. No popis table is written with `INSERT OR REPLACE`: a REPLACE is a DELETE plus an INSERT no `BEFORE UPDATE` trigger sees. `DELETE` stays open for the req. 42 purge, as v18 and v19 each reasoned. Deviations: identifiers and stored enum values are ASCII-folded per the schema-wide convention (`uskladjivanje_potvrdjeno_at`, `ostecena`, `potrazivanja`), and `popis_commission.uloga` is a closed enum (`predsednik / clan / jedno_lice`) so the čl. 6 st. 1 one-person popis is expressible rather than implied | `3e39197`, `75cc299` |
+| 2 — state machine | `popis.rs`: `draft → counting → counted_signed → computed → computed_signed → posted`, with **all thirty (status, event) pairs swept exhaustively** and the error *code* asserted rather than a bare `is_err`. The čl. 8 st. 5 predicate is split on purpose — `book_quantities_visible(status)` is only the status limb and is **module-private**, so „call the whole condition“ is a compile error rather than a doc comment, and `book_quantities_released(status, phase_a_signed)` is what a query layer consults. The enums are pinned to the v20 `CHECK` read back off `sqlite_master` **and** to their own IPC wire form, because serde derives the wire name from the variant identifier while `as_db_str` is a hand-written literal | `d92181b`, `1b74804` |
+| 3 — deadline engine | `izvestaj_due`: `rok za predaju FI − 60 dana` for the godišnji popis, `datum popisa + 30 dana` for the nivelacioni. FY2026 → 30.01.2027, FY2027 → **31.01.2028 (the leap case a hardcoded table gets wrong)**, FY2028 → 30.01.2029. The annual rok does not move when the count date does (čl. 13 st. 2 anchors it on the rok za dostavljanje) and the nivelacija limb does not read the filing deadline at all. **One test asserts the source rather than an answer** — no behavioural test can tell a computed 30.01.2027 from a hardcoded one — so the module is scanned for a `gggg-MM-dd` literal and for every wall-clock reader `src/clock.rs` actually exports; the review found the first version of that guard missed `crate::clock::utc_now`, this repository's own canonical reader with 47 call sites. Deviations: the function returns `Result` (it parses two dates it does not own) and takes `Option<&str>` for the filing deadline (čl. 13 st. 2's second limb does not read one) | `a337b54`, `5d043cf` |
+| 4 — commands | `commands/popis.rs`, admin-gated. `popis_open` refuses without the **čl. 20 st. 3** usklađivanje confirmation (req. 39). A Phase A payload carrying a book quantity is **refused by name**, never silently dropped. `read_lines` is **two statements rather than one and a filter**: while the data is withheld the query names neither the column nor `inventory_balances`/`inventory_movements`, so there is no value in the row for a refactor or a log line to spill. `popis_sign_phase_a` writes potpis → state → book quantities, and the order is behaviourally proven — reversing it fails five tests because the v20 guard aborts a book quantity written before its potpis. A šifra that resolves to nothing keeps its NULL rather than a zero: gotovina and potraživanja have no perpetual record behind them and a fabricated zero would report a manjak the shop does not have. The review pinned the **identity** of a signed stavka, not only its količina (čl. 8 st. 4 + čl. 9 st. 1 t. 1 — seven fields, refused by name when moved), and implemented the **req. 34 gate**: a `perpetual_odluka_ref` is refused unless a same-year, earlier, `posted` popis exists | `fbfc24d`, `349cc79` |
+| 5 — the six liste | `PopisLista`, `konsignacija_rok`, `nedostajuce_liste`, `ensure_liste_kompletne` + the per-lista rules. **Presence is a parameter, not a stored declaration** — nothing in this database says that part of the stock is damaged or that a rail belongs to somebody else, and v20 is spent — so the person taking the popis declares it and the declaration becomes binding. The apoen is `cena_minor` in whole notes and coins (čl. 11 st. 1 is exactly a signed integer minor amount) and the čl. 8 st. 5 potpis freezes it, since a signed „5 × 1.000“ that became „5 × 5.000“ in the obračun would leave the potpis attesting to a cash count nobody took. **No denomination whitelist** — that would present a prudential narrowing as čl. 11 st. 1 and refuse a lawful count of devize. The čl. 2 st. 6 reminder is derived from the liste, carries `datum popisa + 10 dana` and says the app does not deliver the lista | `314db22`, `392c425` |
+| 6 — the izveštaj | The eight čl. 13 st. 1 elements as a **closed enum**, five written by the komisija and three computed so nobody is asked to retype the stanje they have just counted. **Composed on demand and stored nowhere** — `compose_izvestaj` is read-only end to end, asserted by a fingerprint over `updated_at`, every line's three figures and the potpis count — and the copy says so, because a shop that typed five paragraphs and closed the screen would otherwise lose them silently. Čl. 8 st. 5 gates it too: a document carrying the knjigovodstveno stanje hands the komisija through prose what a hidden column keeps back. Task 3's open contract closed here — the filing deadline is the `settings.popis` → `rokPredajeFi` key, validated where it is written, and an unset one refuses the annual izveštaj by name rather than presuming 31 March. Valuation is `količina × cena ÷ 1000` in `i128`, rounded **away from zero** so a manjak is never quietly made smaller, refused rather than wrapped. **No natural totals** — mixed units on one lista sum to a number with no unit. The review found the čl. 2 st. 6 limb uncovered, two uputstvo strings promising naturalne količine the payload does not carry, and `#[serde(default)]` making the req. 36 gate opt-in from the wire | `40f8a85`, `5f13bc4` |
+| 7 — nivelacija + KEP hook | The čl. 21 duty and the scope narrowing are **two strings**, and the guard is mechanical: no obuhvat string may contain a duty word (`morate`, `dužni ste`, `dužan je`, `obavezno`, `obavezan je`, `nalaže` — „obaveza“ deliberately excluded, since the copy must be able to deny one). The obligation is derived from **`price_history`, not `kep_entries`** — SW-9b writes no ledger row when on-hand is 0, and an obligation derived from the ledger would lose exactly that repricing silently — is **reported, never auto-created** (an app-opened session would assert a čl. 20 st. 3 usklađivanje nobody performed), and only a **`posted`** nivelacija popis discharges it. The scope list is the čl. 8 st. 4 artefact: four fields, **no količina from any source**, and `CeoObjekat` is `products.active = 1` because filtering on what the books say we have leaks stock through the presence of a line. `kep_nivelacija` returns the notice and `KepModule` renders it as a persistent block, so the duty has one wording; posting a nivelacija popis leaves the ledger fingerprint byte-identical | `ffde4af`, `f564631` |
+| 8 — legal + retention | `legal.rs::popis_not_conducted` — the **eleventh** notice, in `all_notices`, in the duplicated inline list, asserted count bumped to **11** — printing the preduzetnik **čl. 58, 100.000 do 500.000**. The plan's conditional did not fire: §3 V5 does state a preduzetnik figure, so no tier renders `None`. What the memo warns about is the other direction — **čl. 57 st. 1 tač. 12) is a *privredni prestup*** that ZPP čl. 6 st. 1 confines to a pravno lice, so its 100.000–3.000.000 band would overstate the pilot's ceiling roughly sixfold; **„3.000.000“ is now a blanket needle** in `FORBIDDEN_TO_A_PREDUZETNIK`. Retention is `RecordClass::PopisDokumentacija` on the shared table with the **5-year floor of ZoRač čl. 28 st. 7**, counted by a new clock: `business_year_floor` resolves every day of one business year to the same 31 December per **st. 9**, so a nivelacija counted on 14 May 2026 and the godišnji popis of 31.12.2026 expire together instead of the first going seven months early. The class **holds personal data** — `popis_commission` names each popisivač — hence the twelfth čl. 47 radnja, `popis_imovine`. The plan's „panic-safe floor pattern from SW-9c“ is taken as the **fail-safe**, not as the later-of-two-anchors shape: the popis has one statutory clock, and a `posted_at` limb would have added a year to the ordinary case. The test found a real underflow before the implementation shipped — `{:04}` renders year −4 as `-004`, a success-shaped wrong answer | `dd1940d` |
+| 9 — frontend | `src/app/popis/{CountSheet,IzvestajPanel,PopisModule}.tsx` + the `PopisService` port, fifteen wire types, the local adapter, an in-memory double that enforces the same gates, and Popis in the shell. Keyed on the backend's `knjigovodstvoDostupno` — **never on `status`** — and asserted against a payload that carries the book figures anyway, which no real backend sends. Every edit affordance mirrors a write the backend accepts; the three closed states give three different reasons. **`CountSheet` takes `session`, not `status` + `lines`** — the plan's snippet spells the status `countedSigned`, a camelCase form that exists nowhere on the wire. The review moved the req. 36 declaration **out of the izveštaj and onto the count sheet**, where it can still be acted on: asked at the izveštaj it could only fire after the čl. 8 st. 5 potpis, when the only remedy is a whole new popis. It also rendered all six liste including the empty ones, and fixed a negative knjigovodstvena količina making a stavka unsavable | `8760a3a`, `94d1337`, `f41615b` |
+| 10 — docs + gates | This section; register row 19 and the SW-16 row in §3 re-stated, both carrying the **missing print/export** and the three open items **R-5**, **R-6**, **R-7** | this commit |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **503 passed** / 0 failed, 33 files (was 450 / 30) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **899 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 792) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+107 cargo / +53 bun** over the plan baseline. Latest migration: **v20**.
+
+**Whose tests those are.** All of them are SW-16's — every commit after `841ee23` is a popis commit.
+Cargo: **61** in `commands/popis.rs`, **36** in `popis.rs`, **4** in `db/migrations.rs`, **3** in
+`retention.rs`, **2** in `legal.rs`, **1** in `commands/kep.rs`. Bun: **22** in
+`src/app/popis/PopisModule.test.tsx`, **18** in `CountSheet.test.tsx`, **10** in
+`IzvestajPanel.test.tsx`, **2** in `src/services/local-adapter.test.ts`, **1** in
+`src/app/kep/KepModule.test.tsx`.
+
+**Deliberately not built** — read these as decisions, not as gaps, except the first, which is a gap and
+is labelled one. **No print and no export for a popisna lista** (above) — a real hole against čl. 9
+st. 3, disclosed rather than dressed up. No stored izveštaj: the document is composed when asked for,
+which is why req. 42's retention floor reaches the liste, which are rows, and not the izveštaj, which
+lives on paper. No auto-created nivelacija popis. No seeded popisne liste from the nivelacija scope —
+`stvarna_kolicina_milli` is NOT NULL, so a seeded stavka would carry a count of zero that nothing
+distinguishes from a counted zero, i.e. a manjak of the whole stanje on a document that is evidence. No
+denomination whitelist on the gotovina lista. No invented required fields on the other four liste —
+nothing in čl. 2 st. 5, čl. 10 st. 3–4 or čl. 12 st. 2 prescribes one, and a refusal there would block a
+lawful count in the name of a duty that does not exist. No summed naturalna količina. No `update`,
+`delete` or `reopen` verb on the port: čl. 14 st. 3 with ZoRač čl. 8 st. 4 makes a correction a new
+document. No automatic deletion of popis documentation — `popis_purge_eligible` is a gate, like the two
+beside it, and the stored napomena says so.
+
+**Still open after this batch.**
+
+- **Req. 31/32 — the printed popisna lista.** The single largest hole. Čl. 9 st. 3's *„uz štampanje“*
+  is express, SW-8 shipped a printing stack, and no task in this plan wired the two together. Until it
+  lands the shop prints the liste from somewhere else, and the register row says exactly that.
+- **Čl. 9 st. 2's *usvojen* limb is still unchecked.** Req. 34's gate verifies that an in-year popis was
+  *izvršen i proknjižen*; the čl. 14 st. 2 odluka o usvajanju has no stored fact to check, so the
+  module states that it does not record the decision instead of implying that it does.
+- **Presence of a category is a declaration, not a fact the books hold.** `ensure_liste_kompletne`
+  refuses a *declared* lista that is empty; it cannot know about a damaged carton nobody declared.
+  Closing that would need a schema for the fact, which v20 does not have.
+- **The čl. 2 st. 6 consignment copy is a reminder, not a delivery.** The app computes the ten-day rok
+  and says in the same sentence that it does not send the lista to the owner.
+- **R-5, R-6, R-7 are unresolved law**, not engineering. R-5 (goods-handler exclusion *shodno* to a
+  one-person popis) is handled as warn-never-block; R-6 (purely electronic potpis under čl. 9 st. 3) is
+  handled by defaulting to print-and-sign and saying the recorded potpis does not replace the paper
+  one; R-7 (no provision names popisne liste expressly) is handled by carrying the five years as the
+  inference they are, in the napomena the shop reads. Full text in
+  `docs/REMAINING-SW-VERIFIED-RULES.md` §6.
+- **The komisija class holds employee data when the shop appoints an employee to it**, and
+  `docs/compliance/obavestenje-zaposlenima.md` has no row about it. The čl. 23 notice belongs to SW-13;
+  `docs_guard` records what such a row would have to be called („popisne liste“) rather than inventing
+  one here.
+
+---
+
 ## Executive Summary
 
 VantumPOS is a Tauri + React + SQLite POS built strictly local-first (no fiscalization, no Medusa, no cloud). The shared foundation is essentially complete and is the strongest module; auth/shifts, catalog, register/sales, and inventory are all real and working end-to-end; receipts/returns, reports, import, and settings/backup are functionally implemented but carry the bulk of the remaining gaps. Two systemic issues recur across the application: (1) several frontend screens hard-code `userId: 1` for the operator instead of threading the real session user, weakening audit trails; and (2) frontend test breadth lags backend test breadth, with two modules (06, 08) missing spec-required UI tests entirely. The single largest audit-vs-assessment disagreement is module 08 (Settings/Backup), revised down 4 points because the VAT screen is create-only and admin role-gating is absent at every layer.
