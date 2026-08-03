@@ -134,7 +134,12 @@ pub fn add_working_days(
 
 /// Strict `yyyy-MM-dd`. Anything else — `31.07.2026`, `2026-7-1`, `+026-01-01` —
 /// is a parse failure, not an invitation to infer an order for the fields.
-fn parse_iso_date(value: &str) -> Option<Date> {
+///
+/// `pub(crate)` so that `worktime.rs` can anchor the ZoR čl. 53 st. 2 calendar
+/// week on the same civil-date reader this module's deadline walk is proven on,
+/// rather than the codebase carrying a second date parser that could disagree
+/// with this one about what a day is.
+pub(crate) fn parse_iso_date(value: &str) -> Option<Date> {
     let bytes = value.as_bytes();
     if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
         return None;
@@ -171,19 +176,17 @@ fn format_iso_date(date: Date) -> String {
 /// relief is bylaw-level: the statute's own "po bilo kom osnovu" and its kazna
 /// (čl. 7 st. 1 tač. 2) contain no exclusion at all.
 ///
-/// **Known over-reach, deliberately visible.** The carve-out turns on how the
-/// withdrawal was documented, not on the movement type alone, and §3 rule 14 is
-/// explicit that not all bank withdrawals may be excluded. `load_cash_inflows`
-/// nevertheless sets `subject = false` for **every** `bank_withdrawal` row,
-/// because the schema carries no per-movement "documented per čl. 2 st. 2/st. 3"
-/// flag — that flag is still owed, and adding it is what would let this decision
-/// be made on the evidence rather than on the movement type. Until then the
-/// exclusion is wider than the bylaw grants, it under-reports the čl. 3 st. 1
-/// base by any undocumented withdrawal, and the report footer states the
-/// condition so the operator checks the paperwork per excluded amount.
+/// **The carve-out turns on the evidence, not on the movement type.** §3 rule 14
+/// is explicit that not all bank withdrawals may be excluded, so
+/// `load_cash_inflows` sets `subject = false` only for a `bank_withdrawal` the
+/// operator affirmatively marked `documented_per_pravilnik = 1`. An unasserted
+/// (`NULL`) or denied (`0`) withdrawal stays subject: the exclusion defaults
+/// **off**, because a wrongly excluded amount shrinks the čl. 3 st. 1 base and
+/// hands the owner the false „izmireno" state §3 rule 10 forbids, while a
+/// wrongly included one merely over-reports — the safe direction.
 ///
 /// A caller constructing `CashInflow` values by hand still decides `subject`
-/// itself; nothing here forces the loader's blanket rule on it.
+/// itself; nothing here forces the loader's rule on it.
 ///
 /// `amount_minor` may be negative — a documented payout out of the till reduces
 /// that trading date's base.
@@ -530,17 +533,19 @@ const FOOTER_AGGREGATION_IS_A_CONVENTION: &str =
 
 /// §3 rule 14 — the carve-out the app relies on lives one level below the act,
 /// **and carries a condition**. Pravilnik čl. 5 st. 2 excludes only dinars paid
-/// out per čl. 2 st. 2 (against documentation submitted to the bank na uvid i
-/// overu) or st. 3 (the undocumented daily lane). The app has no
-/// per-movement documentation flag, so it excludes every `bank_withdrawal`;
-/// naming the condition here is what keeps that from reading as an
-/// unconditional exclusion, and puts the per-amount check on the operator.
+/// out per čl. 2 st. 2 (against the original documentation submitted to the bank
+/// na uvid i overu) or st. 3 (the 150.000 RSD/day undocumented lane). The app
+/// now excludes a withdrawal only where the operator asserted that condition per
+/// movement, so this note says which withdrawals were excluded and which were
+/// not — the reader must be able to tell the aged amounts from the relieved ones
+/// without opening the ledger.
 const FOOTER_FLOAT_EXCLUSION_IS_BYLAW_RELIEF: &str =
-    "Gotovina podignuta sa tekućeg računa radnje izuzeta je iz osnovice po Pravilniku 77/2011 \
-     čl. 5 st. 2, ali samo ako je isplata izvršena u skladu sa čl. 2 st. 2 ili st. 3 tog \
-     pravilnika — proverite dokumentaciju za svaki izuzeti iznos. To je olakšica na nivou \
-     podzakonskog akta; sam zakon („po bilo kom osnovu“) i kazna iz čl. 7 ne sadrže nijedan \
-     izuzetak.";
+    "Iz osnovice je izuzeta samo ona gotovina podignuta sa tekućeg računa radnje za koju je \
+     zabeleženo da je isplaćena u skladu sa Pravilnikom 77/2011 čl. 2 st. 2 (uz originalnu \
+     dokumentaciju podnetu banci na uvid i overu) ili čl. 2 st. 3 (dnevni limit od 150.000 \
+     dinara bez dokumentacije). Podizanja bez te potvrde ostaju u osnovici i imaju rok za polog. \
+     Izuzeće je olakšica na nivou podzakonskog akta — sam zakon („po bilo kom osnovu“) i kazna \
+     iz čl. 7 ne sadrže nijedan izuzetak.";
 
 /// §3 rule 16 — advisory, supervised by Poreska uprava, blocking nothing.
 const FOOTER_ADVISORY_ONLY: &str =
@@ -601,7 +606,8 @@ pub struct CashDepositReport {
 /// supplier refund, cash rent, the proceeds of an asset sale (§3 rule 10).
 /// Documented payouts (`pay_out`) come back off that date's base, and cash
 /// drawn from the shop's own račun (`bank_withdrawal`) is carried with
-/// `subject = false`: reported, never aged.
+/// `subject = false` — reported, never aged — **only** where the operator
+/// asserted the Pravilnik documentation; see below.
 ///
 /// `as_of` is a real cut-off, not a caption. Cash the shop had not yet received
 /// on the presek date is no part of that date's obligation, and a report headed
@@ -616,14 +622,25 @@ pub struct CashDepositReport {
 /// `refunded`, erasing cash that never left the drawer — the false "clean"
 /// state §3 rule 10 forbids.
 ///
-/// **The `bank_withdrawal` arm currently excludes every such row.** Pravilnik
-/// 77/2011 čl. 5 st. 2 only reaches dinars paid out per čl. 2 st. 2 (against
-/// documentation submitted to the bank) or st. 3 (the undocumented daily lane),
-/// and §3 rule 14 says in terms: do not exclude all bank withdrawals. There is
-/// no per-movement "documented" flag in the schema yet, so the distinction
-/// cannot be drawn here; until one exists the exclusion is wider than the bylaw
-/// and the report footer carries that condition in words so the operator checks
-/// the paperwork per excluded amount.
+/// **The `bank_withdrawal` arm is split in two, and the exclusion defaults
+/// off.** Pravilnik 77/2011 čl. 5 st. 2 only reaches dinars paid out per čl. 2
+/// st. 2 (against the original documentation submitted to the bank na uvid i
+/// overu) or st. 3 (the 150.000 RSD/day undocumented lane), and §3 rule 14 says
+/// in terms: do not exclude all bank withdrawals. So only
+/// `documented_per_pravilnik = 1` — the operator's own assertion, recorded per
+/// movement (migration v16) — comes back `subject = 0`. `NULL` (nothing
+/// asserted, which is every pre-v16 row and every movement recorded without the
+/// box ticked) and `0` come back `subject = 1`.
+///
+/// The `NULL` branch is written out rather than left to fall through, because
+/// `documented_per_pravilnik = 1` and `documented_per_pravilnik <> 1` do **not**
+/// partition the rows in SQL: `NULL <> 1` is `NULL`, so a fall-through arm would
+/// silently drop every unasserted withdrawal out of the base — the same
+/// under-reporting this split exists to end.
+///
+/// Getting this wrong in the excluding direction compounds: a withdrawal kept
+/// out of the base whose cash is later re-deposited still draws down genuine
+/// sale buckets, so a withdraw-then-redeposit float cycle under-reports twice.
 pub fn load_cash_inflows(
     connection: &Connection,
     as_of: &str,
@@ -652,6 +669,14 @@ UNION ALL
 SELECT substr(created_at, 1, 10), SUM(amount_minor), 0
   FROM cash_movements
  WHERE movement_type = 'bank_withdrawal'
+   AND documented_per_pravilnik = 1
+   AND substr(created_at, 1, 10) <= ?1
+ GROUP BY substr(created_at, 1, 10)
+UNION ALL
+SELECT substr(created_at, 1, 10), SUM(amount_minor), 1
+  FROM cash_movements
+ WHERE movement_type = 'bank_withdrawal'
+   AND (documented_per_pravilnik IS NULL OR documented_per_pravilnik = 0)
    AND substr(created_at, 1, 10) <= ?1
  GROUP BY substr(created_at, 1, 10)
 "#,
@@ -1008,6 +1033,38 @@ mod tests {
             .expect("cash movement should insert");
     }
 
+    /// A `bank_withdrawal` on `day` carrying an explicit documentation state:
+    /// `None` is „operator asserted nothing", which is the shipped default and
+    /// must behave exactly like an explicit `Some(false)`.
+    fn seed_bank_withdrawal_on(
+        state: &AppState,
+        day: &str,
+        amount_minor: i64,
+        documented: Option<bool>,
+    ) {
+        let connection = state.db().open().expect("database should open");
+        let user_id = admin_id(state);
+        let shift_id = ensure_shift(&connection, user_id);
+        let created_at = format!("{day}T09:00:00Z");
+
+        connection
+            .execute(
+                "INSERT INTO cash_movements (
+                    shift_id, movement_type, amount_minor, reason,
+                    documented_per_pravilnik, user_id, created_at
+                 )
+                 VALUES (?1, 'bank_withdrawal', ?2, NULL, ?3, ?4, ?5)",
+                params![
+                    shift_id,
+                    amount_minor,
+                    documented.map(i64::from),
+                    user_id,
+                    created_at
+                ],
+            )
+            .expect("bank withdrawal should insert");
+    }
+
     fn inflow(date: &str, amount_minor: i64) -> CashInflow {
         CashInflow {
             date: date.to_string(),
@@ -1128,10 +1185,13 @@ mod tests {
     }
 
     /// Pravilnik 77/2011 čl. 5 st. 2 — cash withdrawn from the shop's own account
-    /// is not "gotov novac" for this duty. Without this the app ages the owner's
-    /// change float as undeposited pazar and invents violations.
+    /// per čl. 2 st. 2 or st. 3 is not "gotov novac" for this duty. Without the
+    /// carve-out the app ages a documented change float as undeposited pazar and
+    /// invents violations. `subject` is the loader's decision (see
+    /// `load_cash_inflows`); this test only fixes what `build_buckets` does with
+    /// it once made.
     #[test]
-    fn bank_withdrawal_never_enters_the_subject_base() {
+    fn a_not_subject_inflow_never_enters_the_subject_base() {
         let buckets = build_buckets(
             &[
                 inflow("2026-08-03", 100_000),
@@ -1360,6 +1420,96 @@ mod tests {
                 "the shop kept 70.000 in cash; only the refunded 30.000 leaves the base"
             );
             assert_eq!(report.outstanding_minor, 70_000);
+        });
+    }
+
+    /// §3 rule 14 — "do not exclude all bank withdrawals". Pravilnik 77/2011
+    /// čl. 5 st. 2 reaches only dinars paid out per čl. 2 st. 2 (against the
+    /// original documentation submitted to the bank na uvid i overu) or čl. 2
+    /// st. 3 (the 150.000 RSD/day undocumented lane). A withdrawal on which the
+    /// operator asserted nothing is **not** shown to be either, so it stays in
+    /// the čl. 3 st. 1 base: excluding it would shrink the base and hand the
+    /// owner the false „izmireno" state rule 10 forbids.
+    #[test]
+    fn an_undocumented_bank_withdrawal_stays_in_the_subject_base() {
+        with_state("cash_deposit_undocumented_withdrawal", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-07-20", 100_000);
+            seed_bank_withdrawal_on(state, "2026-07-20", 50_000, None);
+
+            let report = cash_deposit_report(state, "2026-07-21").expect("report should run");
+
+            assert_eq!(
+                report.outstanding_minor, 150_000,
+                "an unasserted withdrawal is not shown to be čl. 2 st. 2/st. 3 money"
+            );
+            assert_eq!(
+                report.excluded_float_minor, 0,
+                "nothing was excluded, so the report must not claim a carve-out"
+            );
+        });
+    }
+
+    /// An explicit „ne" is the same answer as silence: the bylaw excludes only
+    /// what was paid out per čl. 2 st. 2 or st. 3, and this was not.
+    #[test]
+    fn a_withdrawal_marked_undocumented_stays_in_the_subject_base() {
+        with_state("cash_deposit_flagged_undocumented_withdrawal", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-07-20", 100_000);
+            seed_bank_withdrawal_on(state, "2026-07-20", 50_000, Some(false));
+
+            let report = cash_deposit_report(state, "2026-07-21").expect("report should run");
+
+            assert_eq!(report.outstanding_minor, 150_000);
+            assert_eq!(report.excluded_float_minor, 0);
+        });
+    }
+
+    /// The other half of rule 14: where the operator *did* assert the čl. 2
+    /// st. 2 / st. 3 documentation, the bylaw relief applies and the float
+    /// leaves the base — otherwise the app ages the owner's own change money as
+    /// undeposited pazar.
+    #[test]
+    fn a_documented_bank_withdrawal_is_excluded_from_the_subject_base() {
+        with_state("cash_deposit_documented_withdrawal", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-07-20", 100_000);
+            seed_bank_withdrawal_on(state, "2026-07-20", 50_000, Some(true));
+
+            let report = cash_deposit_report(state, "2026-07-21").expect("report should run");
+
+            assert_eq!(
+                report.outstanding_minor, 100_000,
+                "only the pazar is subject; the documented float is not"
+            );
+            assert_eq!(
+                report.excluded_float_minor, 50_000,
+                "the excluded amount stays visible instead of vanishing"
+            );
+        });
+    }
+
+    /// The compounding case. Excluding a withdrawal from the base while the
+    /// re-deposit of that same cash still draws genuine sale buckets down
+    /// under-reports **twice**: once when the float never enters the base, and
+    /// again when it discharges someone else's bucket on the way back. With the
+    /// withdrawal undocumented, the two legs must net to zero.
+    #[test]
+    fn a_withdraw_then_redeposit_cycle_does_not_under_report_twice() {
+        with_state("cash_deposit_float_cycle", |state| {
+            sign_in_admin(state);
+            seed_cash_sale_on(state, "2026-07-20", 100_000);
+            seed_bank_withdrawal_on(state, "2026-07-21", 50_000, None);
+            seed_cash_movement_on(state, "2026-07-22", "bank_deposit", 50_000);
+
+            let report = cash_deposit_report(state, "2026-07-23").expect("report should run");
+
+            assert_eq!(
+                report.outstanding_minor, 100_000,
+                "the polog returned the float, so the whole pazar is still owed"
+            );
+            assert_eq!(report.excluded_float_minor, 0);
         });
     }
 

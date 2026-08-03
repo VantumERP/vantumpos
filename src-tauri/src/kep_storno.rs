@@ -250,6 +250,11 @@ pub fn post_value_storno(
 /// `"nivelacija"`; `opis = "{naziv} br. {broj} od {datum}"`. `new == old` is
 /// rejected. When on-hand is 0 there is no value to revalue: the price still
 /// updates but no KEP row is written.
+///
+/// Returns whether what the shop OFFERS moved — SW-12 req. 11's trigger (ZZP
+/// čl. 6 st. 3), so the caller can republish the cenovnik once this transaction
+/// has committed. It is false for an article that is off the shelf: a revaluation
+/// of stock nobody can buy changes no published price.
 pub fn post_nivelacija(
     tx: &Transaction<'_>,
     product_id: i64,
@@ -257,7 +262,7 @@ pub fn post_nivelacija(
     basis: &BasisDoc,
     acting: i64,
     now: &str,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     // Gate first: a nivelacija revalues the catalog price (an UPDATE) before it
     // posts the KEP Δ, so the gate must precede that write — a closed-year
     // rejection then leaves the price, price_history, and ledger untouched.
@@ -290,7 +295,7 @@ pub fn post_nivelacija(
         "UPDATE products SET sale_price_minor = ?2, updated_at = ?3 WHERE id = ?1",
         params![product_id, new_sale_price_minor, now],
     )?;
-    record_offered_price_change(
+    let offer_changed = record_offered_price_change(
         tx,
         product_id,
         Some(before),
@@ -305,7 +310,7 @@ pub fn post_nivelacija(
 
     // On-hand 0 → nothing to revalue → no KEP row (the price still updated above).
     if on_hand_milli == 0 {
-        return Ok(());
+        return Ok(offer_changed);
     }
 
     let delta_per_unit = new_sale_price_minor - old_sale_price_minor;
@@ -340,7 +345,7 @@ pub fn post_nivelacija(
             acting,
         ],
     )?;
-    Ok(())
+    Ok(offer_changed)
 }
 
 #[cfg(test)]

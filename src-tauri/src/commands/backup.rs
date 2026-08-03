@@ -347,6 +347,15 @@ pub fn restore_backup(
         },
     )?;
 
+    // SW-14 §4d / req. 18 wants the trajno classes unreachable by every reset,
+    // restore and backup-prune path. The go-live reset gets that from
+    // `assert_never_purge_intact` inside its transaction; this path cannot, and
+    // the safety copy taken a few lines above is what stands in its place — see
+    // `never_purge_counts` for why a refusal here would trap the shop instead of
+    // protecting the register. These counts are the evidence of what the rewind
+    // moved, and they must never be able to stop it.
+    let never_purge_before = never_purge_counts(state);
+
     let file_bytes = std::fs::read(&source_path)?;
     if backup_crypto::is_encrypted(&file_bytes) {
         let local_key = load_backup_encryption(state)?
@@ -380,12 +389,23 @@ pub fn restore_backup(
     }
 
     state.db().migrate()?;
+    // A snapshot taken before v17 restores without the shared retention table;
+    // the migration above recreates it empty, and the classes must be back before
+    // any path can consult them — an absent policy row is the state SW11-SW15
+    // req. 42 exists to prevent. Idempotent, and it never overwrites a floor the
+    // restored database already carried.
+    crate::retention::seed_retention_policies(state, &crate::clock::utc_now()?)?;
+    let never_purge_after = never_purge_counts(state);
     let file_size_bytes = checked_file_size(&source_path)?;
 
     {
         let conn = state.db().open()?;
-        let detail =
-            serde_json::json!({ "source_path": source_path.display().to_string() }).to_string();
+        let detail = serde_json::json!({
+            "source_path": source_path.display().to_string(),
+            "never_purge_before": never_purge_before,
+            "never_purge_after": never_purge_after,
+        })
+        .to_string();
         insert_compliance_event(&conn, "backup_restored", &detail, Some(acting.id))?;
     }
 
@@ -397,6 +417,43 @@ pub fn restore_backup(
         None,
         Some(file_size_bytes),
     )
+}
+
+/// The `never_purge` row counts as **evidence, never as a gate**.
+///
+/// SW-14 §4d asks for the trajno classes to be structurally unreachable, and
+/// [`crate::retention::assert_never_purge_intact`] delivers exactly that
+/// wherever the destructive step is a transaction that can be rolled back. The
+/// restore is not such a step, for two independent reasons:
+///
+/// 1. **There is nothing left to abort.** `Connection::restore` replaces the
+///    database file in place, so by the time anything can be counted the earlier
+///    rows are already gone. The only „abort“ available would be a second
+///    in-place overwrite from the pre-restore copy — a compensating action whose
+///    own failure would lose both states rather than one.
+/// 2. **The comparison cannot tell loss from intent.** A snapshot older than the
+///    newest worked day holds fewer rows *because it is older*. Refusing a
+///    restore that lowers the count would therefore refuse routine disaster
+///    recovery — „vrati stanje od juče“ drops today's entries by definition —
+///    and a shop whose register has any rows at all would be permanently unable
+///    to restore. That is a worse outcome than the one it would prevent, and it
+///    is not the direction §4d's fail-safe points: keeping records is the goal,
+///    and the pre-restore copy is what keeps them here.
+///
+/// So the pre-restore safety backup is the protection on this path and these
+/// counts are the record of what the rewind moved. Reading them must never be
+/// able to stop a restore: a database without the tables (a snapshot older than
+/// v17, mid-restore) yields `None` and the restore carries on.
+fn never_purge_counts(state: &AppState) -> Option<serde_json::Value> {
+    let conn = state.db().open().ok()?;
+    let counts = crate::retention::never_purge_row_counts(&conn).ok()?;
+
+    Some(serde_json::Value::Object(
+        counts
+            .into_iter()
+            .map(|(table, rows)| (table.to_string(), serde_json::json!(rows)))
+            .collect(),
+    ))
 }
 
 const RESET_CONFIRMATION: &str = "OBRISI PODATKE";
@@ -424,6 +481,14 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
 
     let mut conn = state.db().open()?;
     let tx = conn.transaction()?;
+    // SW-14 §4d / req. 18: the trajno classes must be structurally unreachable by
+    // every purge, reset, restore and backup-prune path. This snapshot and the
+    // assertion before the commit are that structure *for the reset* — a future
+    // edit that adds a DELETE against a never-purge table aborts the whole reset
+    // rather than committing it, and the operator keeps the records instead of a
+    // report that they were tidied away. The restore cannot be held to the same
+    // structure and does not pretend to be: see `never_purge_counts`.
+    let never_purge_before = crate::retention::never_purge_row_counts(&tx)?;
     // sale_items + sale_payments cascade via ON DELETE CASCADE.
     tx.execute("DELETE FROM sales", [])?;
     // inventory_movements has no FK cascade — delete explicitly.
@@ -492,6 +557,11 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     // the `non_working_days` table. Those are configuration the operator answered
     // once, not practice trading data — wiping them would silently drop the shop
     // back to `pravna_forma = None` and re-seed praznici the admin had deleted.
+    //
+    // Also deliberately untouched, and for a stronger reason: `work_time_entries`,
+    // `work_time_periods` and `retention_policies`. Hours a real person worked
+    // during the pilot are not practice trading data, and ZEOR's offence is
+    // „ako ne čuva trajno“ — see `retention::NEVER_PURGE_TABLES`.
     let detail = serde_json::json!({
         "note": "Go-live reset (SW-3).",
         // §2 Q4: the general 10-year floor is ZPPPA čl. 114ž (apsolutna
@@ -502,6 +572,7 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     })
     .to_string();
     insert_compliance_event(&tx, "trading_data_reset", &detail, Some(acting.id))?;
+    crate::retention::assert_never_purge_intact(&tx, &never_purge_before)?;
     tx.commit()?;
     Ok(())
 }
@@ -1046,6 +1117,119 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
         });
     }
 
+    /// SW-14 §4d / req. 18. Payroll-adjacent records are a `never_purge` class:
+    /// the go-live reset is a pre-production tool for practice **trading** data,
+    /// and hours a real person actually worked during the pilot are not that.
+    /// Under-retention outranks over-retention here — the ZEOR čl. 50 st. 1
+    /// tač. 3 offence is *"ako ne čuva trajno"* — so the register, the frozen
+    /// classification and the table that records what may be purged at all must
+    /// all come through the wipe untouched.
+    #[test]
+    fn go_live_reset_preserves_closed_worktime_periods_and_the_retention_table() {
+        with_state("reset_preserves_worktime_and_retention", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-reset-worktime");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+            seed_trading_data(state);
+            crate::retention::seed_retention_policies(state, "2026-08-01T08:00:00Z")
+                .expect("retention classes should seed");
+
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute_batch(
+                    r#"
+INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+    VALUES (700, 'radnik7', 'Radnik Sedam', 'cashier', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+INSERT INTO work_time_entries (user_id, dan, efektivno_izvrseni_minuta, unio_user_id, created_at, updated_at)
+    VALUES (700, '2026-08-03', 480, 1, '2026-08-03T18:00:00Z', '2026-08-03T18:00:00Z');
+INSERT INTO work_time_periods (user_id, godina, mesec, status, closed_at, closed_by,
+                               klasifikacija_json, created_at, updated_at)
+    VALUES (700, 2026, 8, 'closed', '2026-09-01T08:00:00Z', 1,
+            '{"efektivnoIzvrseniMinuta":480}', '2026-08-01T00:00:00Z', '2026-09-01T08:00:00Z');
+"#,
+                )
+                .expect("worktime rows should seed");
+
+            let classes_before = count(state, "retention_policies");
+            assert_eq!(
+                classes_before,
+                crate::retention::RecordClass::ALL.len() as i64,
+                "the shared retention table carries every declared class — SW-14's \
+                 three and SW-13's three"
+            );
+
+            reset_trading_data(state, "OBRISI PODATKE").expect("reset should succeed");
+
+            // The reset really ran — otherwise the assertions below prove nothing.
+            assert_eq!(count(state, "sales"), 0);
+            assert_eq!(count(state, "kep_entries"), 0);
+
+            assert_eq!(
+                count(state, "work_time_entries"),
+                1,
+                "the ZoR čl. 55 st. 6 register must survive the go-live reset"
+            );
+            assert_eq!(
+                count(state, "work_time_periods"),
+                1,
+                "a closed period carries the frozen Class A classification"
+            );
+            assert_eq!(
+                count(state, "retention_policies"),
+                classes_before,
+                "the table that records what may be purged must not be purgeable"
+            );
+
+            let conn = state.db().open().expect("database should open");
+            let (status, klasifikacija): (String, String) = conn
+                .query_row(
+                    "SELECT status, klasifikacija_json FROM work_time_periods WHERE user_id = 700",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the closed period should still load");
+            assert_eq!(
+                status, "closed",
+                "a reset must not reopen a frozen classification"
+            );
+            assert!(
+                klasifikacija.contains("480"),
+                "the frozen classification must survive verbatim: {klasifikacija}"
+            );
+
+            let minuta: i64 = conn
+                .query_row(
+                    "SELECT efektivno_izvrseni_minuta FROM work_time_entries WHERE user_id = 700",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the register row should still load");
+            assert_eq!(minuta, 480);
+
+            let never_purge: i64 = conn
+                .query_row(
+                    "SELECT never_purge FROM retention_policies
+                     WHERE record_class = 'worktime_classification'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("Class A should still load");
+            assert_eq!(
+                never_purge, 1,
+                "the class that says „ne briši“ must itself survive the wipe"
+            );
+        });
+    }
+
     #[test]
     fn reset_requires_backup_and_tombstone_together() {
         with_state("reset_requires_backup_and_tombstone", |state| {
@@ -1129,6 +1313,8 @@ INSERT INTO campaign_items (campaign_id, product_id, campaign_price_minor, preth
             pdv_obveznik: Some(false),
             distance_selling: Some(false),
             lpfr_in_premises: Some(true),
+            lpfr_carve_out_internet_only: Some(false),
+            lpfr_carve_out_own_used_assets: Some(false),
             esir_elements: Vec::new(),
         }
     }
@@ -1343,6 +1529,99 @@ INSERT INTO kalkulacije (redni_broj, book_year, product_id,
                 )
                 .expect("compliance event should exist");
             assert_eq!(event_type, "backup_restored");
+        });
+    }
+
+    /// SW-14 §4d / req. 18, on the one path where the fence cannot reach.
+    ///
+    /// `restore_backup` replaces the whole database file, so the `trajno`
+    /// register comes back at whatever the snapshot holds — there is no
+    /// transaction for `assert_never_purge_intact` to abort, and a count-based
+    /// refusal would turn away every legitimate rewind rather than only the
+    /// lossy ones: a shop restoring last week's backup loses this week's rows by
+    /// definition, and nothing on that path can tell that apart from data loss.
+    /// So the answer is not a block but an end to the silence — the
+    /// `backup_restored` event carries the never-purge row counts on both sides,
+    /// and a rewind of the ZEOR čl. 25 st. 3 register is readable afterwards
+    /// instead of invisible.
+    #[test]
+    fn restore_records_what_it_rewound_in_the_never_purge_tables() {
+        with_state("restore_records_never_purge_rewind", |state| {
+            sign_in_admin(state);
+            let folder = test_backup_dir("vantumpos-restore-never-purge");
+            save_backup_settings(
+                state,
+                BackupSettingsRequest {
+                    backup_folder: folder.display().to_string(),
+                    automatic_backup_enabled: false,
+                },
+            )
+            .expect("backup folder should save");
+
+            // A snapshot taken before the register had anything in it.
+            let job = create_backup(
+                state,
+                CreateBackupRequest {
+                    backup_folder: Some(folder.display().to_string()),
+                    backup_type: None,
+                },
+            )
+            .expect("backup should succeed");
+
+            // …and a day someone actually worked after it was taken.
+            state
+                .db()
+                .open()
+                .expect("database should open")
+                .execute_batch(
+                    r#"
+INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+    VALUES (702, 'radnik2', 'Radnik Dva', 'cashier', 1, '2026-08-01T08:00:00Z', '2026-08-01T08:00:00Z');
+INSERT INTO work_time_entries (user_id, dan, efektivno_izvrseni_minuta, unio_user_id, created_at, updated_at)
+    VALUES (702, '2026-08-03', 480, 1, '2026-08-03T18:00:00Z', '2026-08-03T18:00:00Z');
+"#,
+                )
+                .expect("a worked day should seed");
+            assert_eq!(count(state, "work_time_entries"), 1);
+
+            restore_backup(
+                state,
+                RestoreBackupRequest {
+                    path: job.path.clone(),
+                    confirmation_text: "VRATI PODATKE".to_string(),
+                    passphrase: None,
+                },
+            )
+            .expect("restore should succeed");
+
+            assert_eq!(
+                count(state, "work_time_entries"),
+                0,
+                "the snapshot predates the worked day, so the restore rewinds the register with \
+                 everything else — this is the loss the notice must stop promising away"
+            );
+
+            let conn = state.db().open().expect("database should open");
+            let detail: String = conn
+                .query_row(
+                    "SELECT detail_json FROM compliance_log
+                     WHERE event_type = 'backup_restored'
+                     ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the restore event should exist");
+            let detail: serde_json::Value =
+                serde_json::from_str(&detail).expect("the event detail should be JSON");
+
+            assert_eq!(
+                detail["never_purge_before"]["work_time_entries"], 1,
+                "the event must record what the register held before the restore: {detail}"
+            );
+            assert_eq!(
+                detail["never_purge_after"]["work_time_entries"], 0,
+                "…and what it holds after, so the rewind is evidenced rather than silent: {detail}"
+            );
         });
     }
 

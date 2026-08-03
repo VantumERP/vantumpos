@@ -57,6 +57,35 @@ function buildAuthServices(overrides: Record<string, unknown> = {}) {
   } as unknown as PosServices;
 }
 
+/**
+ * Services for the shell's EUR-rate readiness signal: a fixed session plus a
+ * stubbed `getEurRate`, so the test can assert both what the shell renders and
+ * whether it asked at all (a cashier session must not).
+ */
+function buildEurRateServices(
+  session: AppSession,
+  getEurRate: ReturnType<typeof vi.fn>,
+) {
+  return buildAuthServices({
+    settings: {
+      getHealth: vi.fn().mockResolvedValue(readyHealth),
+      getCompanySettings: vi.fn().mockResolvedValue(readyCompany),
+      listTaxRates: vi
+        .fn()
+        .mockResolvedValue([
+          { id: 1, name: "PDV 20%", rateBasisPoints: 2000, active: true },
+        ]),
+      seedTaxRates: vi.fn().mockResolvedValue([]),
+      getEurRate,
+    },
+    auth: {
+      getSession: vi.fn().mockResolvedValue(session),
+      login: vi.fn(),
+      logout: vi.fn().mockResolvedValue(undefined),
+    },
+  });
+}
+
 const cashierSession: AppSession = {
   user: {
     id: 2,
@@ -138,6 +167,35 @@ describe("AppShell", () => {
       .toBeInTheDocument();
   });
 
+  it("lets a cashier reach Moji sati without first opening a shift", async () => {
+    // `createMockServices` hands the shell a ready session through
+    // `initialSession`, which short-circuits `getSession` — so the cashier
+    // session goes there.
+    const services = Object.assign(createMockServices(), {
+      initialSession: cashierSession,
+    });
+    const user = userEvent.setup();
+
+    render(<AppShell services={services} />);
+
+    // The shift gate stands in front of every other module, so a cashier who
+    // has not opened a till lands on „Otvori smenu“ first.
+    expect(await screen.findByRole("heading", { name: "Otvori smenu" }))
+      .toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Moji sati" }));
+
+    // ZoR čl. 83 st. 1 / ZZPL čl. 26 are the employee's own rights. They cannot
+    // be conditioned on first opening a till and entering a početno stanje,
+    // which would also fabricate a cash-control record as the price of a
+    // data-subject request.
+    expect(await screen.findByText(/uvid u sopstvene podatke/i))
+      .toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Otvori smenu" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows real signed-in user and shift state in the shell", async () => {
     const services = buildAuthServices({
       auth: {
@@ -187,6 +245,88 @@ describe("AppShell", () => {
     expect(
       await screen.findByRole("button", { name: "Podešavanja" }),
     ).toBeInTheDocument();
+  });
+
+  it("tells an admin in the shell when no EUR rate exists at all", async () => {
+    const getEurRate = vi.fn().mockResolvedValue({
+      rate: null,
+      isStale: true,
+      checkedFor: "2026-07-31",
+    });
+    const services = buildEurRateServices(adminSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    const badge = await screen.findByText("Kurs nije poznat");
+    // The copy has to carry all three facts: the check cannot run, what to do,
+    // and that selling is not blocked. A missing rate is the precondition for
+    // the AML čl. 46 st. 1 check — never itself an offence.
+    const detail = badge.getAttribute("title") ?? "";
+    expect(detail).toContain("Provera dinarskog limita za gotovinu");
+    expect(detail).toContain("Podešavanja → Kurs");
+    expect(detail).toContain("Prodaja nije blokirana");
+    expect(detail).not.toMatch(/kazn|prekršaj/i);
+  });
+
+  it("warns an admin in the shell when the cached EUR rate is stale", async () => {
+    const getEurRate = vi.fn().mockResolvedValue({
+      rate: { rateMinor: 11723, rateDate: "2026-07-30", source: "nbs" },
+      isStale: true,
+      checkedFor: "2026-07-31",
+    });
+    const services = buildEurRateServices(adminSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    const badge = await screen.findByText("Kurs nije od danas");
+    expect(badge.getAttribute("title") ?? "").toContain(
+      "Prodaja nije blokirana",
+    );
+  });
+
+  it("clears the EUR rate signal once a rate for today exists", async () => {
+    const getEurRate = vi.fn().mockResolvedValue({
+      rate: { rateMinor: 11723, rateDate: "2026-07-31", source: "nbs" },
+      isStale: false,
+      checkedFor: "2026-07-31",
+    });
+    const services = buildEurRateServices(adminSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    await screen.findByText("Administrator");
+    await waitFor(() => expect(getEurRate).toHaveBeenCalled());
+
+    expect(screen.queryByText("Kurs nije poznat")).not.toBeInTheDocument();
+    expect(screen.queryByText("Kurs nije od danas")).not.toBeInTheDocument();
+  });
+
+  it("keeps the EUR rate signal away from a cashier session", async () => {
+    const getEurRate = vi.fn().mockResolvedValue({
+      rate: null,
+      isStale: true,
+      checkedFor: "2026-07-31",
+    });
+    const services = buildEurRateServices(cashierSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    await screen.findByRole("heading", { name: "Otvori smenu" });
+
+    expect(screen.queryByText("Kurs nije poznat")).not.toBeInTheDocument();
+    expect(getEurRate).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when the EUR rate cannot be read at all", async () => {
+    const getEurRate = vi.fn().mockRejectedValue(new Error("nedostupno"));
+    const services = buildEurRateServices(adminSession, getEurRate);
+
+    render(<AppShell services={services} />);
+
+    await screen.findByText("Administrator");
+    await waitFor(() => expect(getEurRate).toHaveBeenCalled());
+
+    expect(screen.queryByText("Kurs nije poznat")).not.toBeInTheDocument();
   });
 
   it("shows Serbian login errors without leaking technical messages", async () => {
@@ -345,6 +485,7 @@ describe("AppShell", () => {
         amountMinor: 150000,
         reason: null,
         bankReference: "uplatnica-7",
+        documentedPerPravilnik: null,
       }),
     );
   });
@@ -364,7 +505,96 @@ describe("AppShell", () => {
     ).toBeInTheDocument();
     // The bylaw carve-out is conditional, so the form must not promise the
     // money is out of the deposit base — it says what to check instead.
-    expect(screen.getByText(/Pravilnik\w* 77\/2011/)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/Pravilnik\w* 77\/2011/).length,
+    ).toBeGreaterThan(0);
+  });
+
+  // Pravilnik 77/2011 čl. 5 st. 2 relieves a podizanje from the čl. 3 st. 1
+  // deposit base only where it was paid out per čl. 2 st. 2 or st. 3. The form
+  // must therefore ask, and an unanswered question must leave the money in the
+  // base — a default-on exclusion would shrink the base on the operator's
+  // behalf and could show „izmireno" while the cash sat in the drawer.
+  it("leaves a podizanje in the deposit base unless the operator asserts the Pravilnik documentation", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const shiftCashMovement = vi.spyOn(services.shifts, "shiftCashMovement");
+    render(<AppShell services={services} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+    await user.selectOptions(
+      screen.getByLabelText("Vrsta transakcije"),
+      "bank_withdrawal",
+    );
+    await user.type(screen.getByLabelText("Iznos"), "5000");
+
+    const assertion = screen.getByRole("checkbox", {
+      name: /čl\. 2 st\. 2 ili st\. 3/,
+    });
+    expect(assertion).not.toBeChecked();
+
+    await user.click(
+      screen.getByRole("button", { name: "Podizanje sa računa" }),
+    );
+
+    await waitFor(() =>
+      expect(shiftCashMovement).toHaveBeenCalledWith({
+        direction: "bank_withdrawal",
+        amountMinor: 500000,
+        reason: null,
+        bankReference: null,
+        documentedPerPravilnik: null,
+      }),
+    );
+  });
+
+  it("records the Pravilnik čl. 2 assertion when the operator makes it", async () => {
+    const user = userEvent.setup();
+    const services = createMockServices();
+    const shiftCashMovement = vi.spyOn(services.shifts, "shiftCashMovement");
+    render(<AppShell services={services} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+    await user.selectOptions(
+      screen.getByLabelText("Vrsta transakcije"),
+      "bank_withdrawal",
+    );
+    await user.type(screen.getByLabelText("Iznos"), "5000");
+    await user.click(
+      screen.getByRole("checkbox", { name: /čl\. 2 st\. 2 ili st\. 3/ }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Podizanje sa računa" }),
+    );
+
+    await waitFor(() =>
+      expect(shiftCashMovement).toHaveBeenCalledWith(
+        expect.objectContaining({
+          direction: "bank_withdrawal",
+          documentedPerPravilnik: true,
+        }),
+      ),
+    );
+  });
+
+  // The assertion is about a payout from the shop's own account. A polog is the
+  // opposite direction, so the question must not even be asked there.
+  it("asks the Pravilnik question only for a podizanje sa računa", async () => {
+    const user = userEvent.setup();
+    render(<AppShell services={createMockServices()} />);
+
+    await screen.findByRole("heading", { name: "Kasa" });
+    expect(
+      screen.queryByRole("checkbox", { name: /čl\. 2 st\. 2 ili st\. 3/ }),
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(
+      screen.getByLabelText("Vrsta transakcije"),
+      "bank_deposit",
+    );
+    expect(
+      screen.queryByRole("checkbox", { name: /čl\. 2 st\. 2 ili st\. 3/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the broj uplatnice field out of a plain cash movement", async () => {

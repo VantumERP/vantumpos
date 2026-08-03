@@ -3,14 +3,38 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { ShopProfilePanel } from "./ShopProfilePanel";
-import type { ShopProfile } from "@/services/types";
+import type { LegalNotice, ShopProfile } from "@/services/types";
 
 const unset: ShopProfile = {
   pravnaForma: null,
   pdvObveznik: null,
   distanceSelling: null,
   lpfrInPremises: null,
+  lpfrCarveOutInternetOnly: null,
+  lpfrCarveOutOwnUsedAssets: null,
   esirElements: [],
+};
+
+/**
+ * What `settings_lpfr_notice` returns for a shop whose stored legal form is
+ * *preduzetnik*. The figure is quoted here only because a test has to assert
+ * the panel renders the backend's string verbatim — the panel itself never
+ * derives one, and `src-tauri/src/legal.rs` remains the only place a fine
+ * figure is decided.
+ */
+const preduzetnikLpfrNotice: LegalNotice = {
+  summary:
+    "U svakom poslovnom prostoru i poslovnoj prostoriji mora da radi najmanje " +
+    "jedan lokalni procesor fiskalnih računa (L-PFR).",
+  penalty: "Prekršaj: novčana kazna od 50.000 do 500.000 dinara (čl. 15 st. 3).",
+  citation: "Zakon o fiskalizaciji, čl. 6 st. 4; prekršaj: čl. 15 st. 1 tač. 4.",
+  isLegalDuty: true,
+};
+
+/** The same notice for a shop that has not yet said what it is. */
+const unsetLpfrNotice: LegalNotice = {
+  ...preduzetnikLpfrNotice,
+  penalty: null,
 };
 
 describe("ShopProfilePanel", () => {
@@ -125,6 +149,181 @@ describe("ShopProfilePanel", () => {
         expect.objectContaining({ pravnaForma: "preduzetnik", distanceSelling: true }),
       ),
     );
+  });
+
+  describe("lokalni PFR (ZF čl. 6 st. 4)", () => {
+    it("answers 'ne' with the čl. 6 st. 4 duty instead of silence", async () => {
+      render(
+        <ShopProfilePanel
+          profile={unset}
+          onSave={vi.fn()}
+          lpfrNotice={unsetLpfrNotice}
+        />,
+      );
+
+      expect(
+        screen.queryByText(/mora da radi najmanje jedan lokalni procesor/i),
+      ).not.toBeInTheDocument();
+
+      await userEvent.click(
+        screen.getByRole("radio", { name: /lokalni pfr: ne/i }),
+      );
+
+      expect(
+        screen.getByText(/mora da radi najmanje jedan lokalni procesor/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/čl. 6 st. 4; prekršaj: čl. 15 st. 1 tač. 4/i),
+      ).toBeInTheDocument();
+    });
+
+    it("keeps the duty standing while a carve-out is merely unanswered", async () => {
+      render(
+        <ShopProfilePanel
+          profile={unset}
+          onSave={vi.fn()}
+          lpfrNotice={unsetLpfrNotice}
+        />,
+      );
+
+      await userEvent.click(
+        screen.getByRole("radio", { name: /lokalni pfr: ne/i }),
+      );
+
+      // Both carve-outs are still „bez odgovora“. Silence is not an excuse.
+      expect(
+        screen.getByText(/mora da radi najmanje jedan lokalni procesor/i),
+      ).toBeInTheDocument();
+    });
+
+    it("drops the notice once either čl. 6 st. 4 carve-out applies", async () => {
+      const { unmount } = render(
+        <ShopProfilePanel
+          profile={unset}
+          onSave={vi.fn()}
+          lpfrNotice={unsetLpfrNotice}
+        />,
+      );
+
+      await userEvent.click(
+        screen.getByRole("radio", { name: /lokalni pfr: ne/i }),
+      );
+      await userEvent.click(
+        screen.getByRole("radio", { name: /prodaja isključivo preko interneta: da/i }),
+      );
+
+      expect(
+        screen.queryByText(/mora da radi najmanje jedan lokalni procesor/i),
+      ).not.toBeInTheDocument();
+
+      unmount();
+
+      render(
+        <ShopProfilePanel
+          profile={unset}
+          onSave={vi.fn()}
+          lpfrNotice={unsetLpfrNotice}
+        />,
+      );
+
+      await userEvent.click(
+        screen.getByRole("radio", { name: /lokalni pfr: ne/i }),
+      );
+      await userEvent.click(
+        screen.getByRole("radio", {
+          name: /prodaja sopstvenih korišćenih sredstava: da/i,
+        }),
+      );
+
+      expect(
+        screen.queryByText(/mora da radi najmanje jedan lokalni procesor/i),
+      ).not.toBeInTheDocument();
+    });
+
+    it("quotes the tier the backend resolved, and no figure while the form is unset", async () => {
+      const { unmount } = render(
+        <ShopProfilePanel
+          profile={unset}
+          onSave={vi.fn()}
+          lpfrNotice={unsetLpfrNotice}
+        />,
+      );
+
+      await userEvent.click(
+        screen.getByRole("radio", { name: /lokalni pfr: ne/i }),
+      );
+
+      expect(screen.queryByText(/50\.000 do 500\.000/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/2\.000\.000/)).not.toBeInTheDocument();
+      expect(screen.getByText(/da bi iznos kazne bio prikazan/i)).toBeInTheDocument();
+
+      unmount();
+
+      render(
+        <ShopProfilePanel
+          profile={{ ...unset, pravnaForma: "preduzetnik" }}
+          onSave={vi.fn()}
+          lpfrNotice={preduzetnikLpfrNotice}
+        />,
+      );
+
+      await userEvent.click(
+        screen.getByRole("radio", { name: /lokalni pfr: ne/i }),
+      );
+
+      expect(screen.getByText(/50\.000 do 500\.000/)).toBeInTheDocument();
+      expect(screen.queryByText(/2\.000\.000/)).not.toBeInTheDocument();
+    });
+
+    it("withholds the stored figure while an unsaved legal form contradicts it", async () => {
+      render(
+        <ShopProfilePanel
+          profile={{ ...unset, pravnaForma: "preduzetnik" }}
+          onSave={vi.fn()}
+          lpfrNotice={preduzetnikLpfrNotice}
+        />,
+      );
+
+      await userEvent.click(
+        screen.getByRole("radio", { name: /lokalni pfr: ne/i }),
+      );
+      await userEvent.click(screen.getByRole("radio", { name: /^pravno lice/i }));
+
+      // The notice was resolved for the *stored* preduzetnik tier; the radio now
+      // says pravno lice. Showing the old figure would quote the wrong tier.
+      expect(screen.queryByText(/50\.000 do 500\.000/)).not.toBeInTheDocument();
+      expect(screen.getByText(/da bi iznos kazne bio prikazan/i)).toBeInTheDocument();
+    });
+
+    it("saves both carve-out answers", async () => {
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      render(<ShopProfilePanel profile={unset} onSave={onSave} />);
+
+      await userEvent.click(
+        screen.getByRole("radio", { name: /lokalni pfr: ne/i }),
+      );
+      await userEvent.click(
+        screen.getByRole("radio", { name: /prodaja isključivo preko interneta: ne/i }),
+      );
+      await userEvent.click(
+        screen.getByRole("radio", {
+          name: /prodaja sopstvenih korišćenih sredstava: da/i,
+        }),
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: /sačuvaj profil/i }),
+      );
+
+      await waitFor(() =>
+        expect(onSave).toHaveBeenCalledWith(
+          expect.objectContaining({
+            lpfrInPremises: false,
+            lpfrCarveOutInternetOnly: false,
+            lpfrCarveOutOwnUsedAssets: true,
+          }),
+        ),
+      );
+    });
   });
 
   it("prompts for a re-check when the last ESIR check is more than a year old", () => {

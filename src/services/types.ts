@@ -79,6 +79,15 @@ export interface ShopProfile {
   /** `null` = nije odgovoreno. Never coalesce it to `false` — see §3 req 31 / §5 Q-8. */
   distanceSelling: boolean | null;
   lpfrInPremises: boolean | null;
+  /**
+   * The two ZF čl. 6 st. 4 carve-outs (§3 req 32): retail conducted
+   * exclusively over the internet, and retail of the shop's own used movable
+   * assets. `true` is the LENIENT branch — it excuses the per-premises L-PFR
+   * floor — so `null` must never be read as either answer. An unanswered
+   * carve-out leaves the čl. 6 st. 4 duty standing.
+   */
+  lpfrCarveOutInternetOnly: boolean | null;
+  lpfrCarveOutOwnUsedAssets: boolean | null;
   esirElements: EsirElement[];
 }
 
@@ -89,6 +98,69 @@ export interface LegalNotice {
   isLegalDuty: boolean;
 }
 
+/**
+ * Where the shop has said its cenovnik goes — `commands::cenovnik::
+ * PublishTargetSettings` (SW-12 req. 15).
+ *
+ * `notConfigured` is an honest state, not a failure: the file is still rendered
+ * and archived, and **nothing in the UI may read it as „the shop is in
+ * breach“**. Whether a trader with no website must create one is unresolved
+ * (§2b), and asserting otherwise is the one claim this product may not make.
+ */
+export type CenovnikPublishTarget =
+  | { kind: "notConfigured" }
+  | { kind: "localFolder"; folder: string };
+
+/**
+ * One archived cenovnik as the list shows it — `commands::cenovnik::
+ * CenovnikSnapshotSummary`, without the file itself.
+ *
+ * `publishedAt` is `null` while the file was generated and archived but no
+ * target accepted it. `current` is DERIVED backend-side (newest `generatedAt`,
+ * a same-second tie broken by the larger id) — it is the file čl. 6 st. 4 binds
+ * the shop to today, and nothing on this side recomputes it.
+ */
+export interface CenovnikSnapshot {
+  id: number;
+  prodajnoMesto: string;
+  /** RFC3339, as every instant in this app travels. */
+  generatedAt: string;
+  rowCount: number;
+  contentHash: string;
+  publishedAt: string | null;
+  publishedTarget: string | null;
+  current: boolean;
+}
+
+/** An archived cenovnik together with the file, byte for byte as published. */
+export interface CenovnikSnapshotDetail {
+  snapshot: CenovnikSnapshot;
+  body: string;
+}
+
+/**
+ * One article the till is about to ring above the price its outlet published —
+ * `commands::sales::PriceDivergence` (req. 12).
+ *
+ * Advisory and only advisory: čl. 6 st. 4 binds a trader **who publishes** a
+ * cenovnik to adhere to it, but the register has to be able to record what
+ * actually happened at the counter, so nothing here may block a sale. Below the
+ * published price is silent — a discount is not a breach.
+ */
+export interface PriceDivergence {
+  productId: number;
+  productName: string;
+  productSku: string;
+  /** What the till is about to charge for one unit, in para. */
+  chargedUnitPriceMinor: number;
+  /** What the outlet's current cenovnik says for that article, in para. */
+  publishedUnitPriceMinor: number;
+  /** The snapshot the comparison was made against — the exhibit, never omitted. */
+  snapshotId: number;
+  snapshotGeneratedAt: string;
+  snapshotContentHash: string;
+}
+
 export type RateSource = "nbs" | "manual";
 
 export interface EurRate {
@@ -97,6 +169,22 @@ export interface EurRate {
   /** `YYYY-MM-DD`. A date other than today's makes the check stale. */
   rateDate: string;
   source: RateSource;
+}
+
+/**
+ * `commands::settings::EurRateStatus` — the cached rate plus the staleness
+ * verdict for the day it was judged against.
+ *
+ * An absent `rate` is `isStale: true`, never "fine": the AML čl. 46 st. 1
+ * threshold is derived from the rate, so silence reads as „nepoznato", not as
+ * „kurs nije potreban". `checkedFor` travels with the verdict so the surface
+ * can name *which* day the rate was judged against instead of implying „sada".
+ */
+export interface EurRateStatus {
+  rate: EurRate | null;
+  isStale: boolean;
+  /** `YYYY-MM-DD` — the day `isStale` was judged against. */
+  checkedFor: string;
 }
 
 /**
@@ -152,7 +240,11 @@ export interface CashDepositReport {
   outstandingMinor: number;
   /** Of the outstanding total, the part whose deadline has already passed. */
   overdueMinor: number;
-  /** Cash the Pravilnik 77/2011 čl. 5 st. 2 carve-out kept out of the base. */
+  /**
+   * Cash the Pravilnik 77/2011 čl. 5 st. 2 carve-out kept out of the base —
+   * only those podizanja marked as paid out per čl. 2 st. 2 or st. 3. Any other
+   * withdrawal stays in the base and carries its own rok.
+   */
   excludedFloatMinor: number;
   saturdayIsWorking: boolean;
   calendarHorizonYear: number;
@@ -304,6 +396,48 @@ export interface CashMovementRequest {
    * confirms it must not be blocked.
    */
   bankReference?: string | null;
+  /**
+   * `bank_withdrawal` only: the operator's declaration that this payout was made
+   * per Pravilnik 77/2011 čl. 2 st. 2 (uz originalnu dokumentaciju podnetu banci
+   * na uvid i overu) or čl. 2 st. 3 (dnevni limit od 150.000 dinara) — the sole
+   * condition on which čl. 5 st. 2 keeps the money out of the čl. 3 st. 1
+   * deposit base.
+   *
+   * `null` means nothing was declared and is the default. Only `true` excludes;
+   * `null` and `false` alike leave the podizanje in the base, because a wrongly
+   * excluded amount can show a false „izmireno" state.
+   */
+  documentedPerPravilnik?: boolean | null;
+}
+
+/**
+ * The ZoR čl. 87–91 protection inputs plus the two ZEOR čl. 44 st. 2 codes, as
+ * the Users screen edits them.
+ *
+ * Two absences are deliberate and must stay that way:
+ *
+ * 1. `saglasnostPreraspodelaOd` (ZoR čl. 57 st. 4) is **not** here. It is a
+ *    legally distinct written consent from the čl. 91 one, and neither may be
+ *    read or written for the other's purpose.
+ * 2. No free text. `trudnocaIliDojenje` is a flag and an „od“ date and nothing
+ *    else — the nalaz nadležnog zdravstvenog organa that čl. 90 conditions the
+ *    prohibition on is never entered, attached or described here.
+ *
+ * Neither consent date collects a consent; each records that a written one
+ * exists and from when.
+ */
+export interface EmployeeProfile {
+  datumRodjenja: string | null;
+  datumRodjenjaNajmladjegDeteta: string | null;
+  samohraniRoditelj: boolean | null;
+  deteTezakInvalid: boolean | null;
+  trudnocaIliDojenje: boolean | null;
+  trudnocaIliDojenjeOd: string | null;
+  radiUPreraspodeli: boolean;
+  ugovorenoRadnoVremeMinutaNedeljno: number | null;
+  zanimanjeSifra: string | null;
+  kvalifikacijaSifra: string | null;
+  saglasnostPrekovremeniOd: string | null;
 }
 
 export interface SaveUserRequest {
@@ -313,6 +447,11 @@ export interface SaveUserRequest {
   active: boolean;
   pin?: string | null;
   password?: string | null;
+  /**
+   * Omitted means „this save does not carry the employee profile“ and the
+   * stored čl. 87–91 inputs stay exactly as they are.
+   */
+  profile?: EmployeeProfile | null;
 }
 
 export interface CategorySummary {
@@ -369,6 +508,12 @@ export interface ProductSummary {
   countryOfOrigin?: string | null;
   officialGoodsCode?: string | null;
   barcodeKind?: ProductBarcodeKind | null;
+  /** The measure the jedinična cena is EXPRESSED in — `kg`, `l`, `kom`. Read
+   *  back so a form can round-trip it; see `SaveProductRequest`. */
+  jedinicnaCenaJedinica?: string | null;
+  /** The content of one selling unit in that measure, value × 1000: a 0,75 l
+   *  bottle is `750`. */
+  jedinicnaCenaSadrzajMilli?: number | null;
   externalSource: ProductExternalSource | null;
 }
 
@@ -420,6 +565,23 @@ export interface SaveProductRequest {
   countryOfOrigin?: string | null;
   officialGoodsCode?: string | null;
   barcodeKind?: ProductBarcodeKind | null;
+  /**
+   * The jedinična cena pair the published cenovnik needs (SW-12 req. 10). ZZP
+   * čl. 6 st. 2's second sentence pulls st. 1 into the published file, so a
+   * cenovnik carrying only the prodajna cena does not discharge the duty.
+   *
+   * `jedinicnaCenaJedinica` is the measure the unit price is expressed in
+   * (`kg`, `l`, `kom`); `jedinicnaCenaSadrzajMilli` is the content of one
+   * selling unit in that measure, value × 1000 — a 0,75 l bottle is `750`.
+   * Both nullable: a product priced per piece may legitimately have neither,
+   * and nothing guesses a unit price from a package size nobody entered.
+   *
+   * **This request is a FULL replacement of the row.** A form that reads the
+   * pair but does not send it back clears it on the next ordinary edit, and the
+   * published file then loses the article's jedinična cena.
+   */
+  jedinicnaCenaJedinica?: string | null;
+  jedinicnaCenaSadrzajMilli?: number | null;
   externalSource?: ProductExternalSource | null;
 }
 
@@ -1305,6 +1467,46 @@ export interface BasisDoc {
 }
 
 /**
+ * One scope offered for a nivelacija (price-change) popis — mirrors
+ * `crate::popis::NivelacijaObuhvatOpcija` (serde camelCase).
+ *
+ * `pravniStatus` is a label that must travel with the option wherever it is
+ * rendered: narrowing the count to the repriced articles is a **preporuka** and
+ * never a legal duty (SW-16 req. 33 — neither ZoRač čl. 21 nor PoP čl. 3 scopes
+ * the count, and the narrowing is borrowed from a regime this shop cannot use).
+ * `podrazumevani` marks the offered default; it is a default, not a limit.
+ */
+export interface NivelacijaObuhvatOpcija {
+  obuhvat: "samo_nivelisani" | "ceo_objekat";
+  naziv: string;
+  pravniStatus: string;
+  obrazlozenje: string;
+  podrazumevani: boolean;
+}
+
+/**
+ * What a change of retail selling prices tells the shop about the popis it raises
+ * — mirrors `crate::popis::NivelacijaObavestenje` (serde camelCase).
+ *
+ * A nivelacija carries TWO obligations on one event: the KEP kolona-4 delta
+ * (SW-9b) and the ZoRač čl. 21 / PoP čl. 3 popis. Neither discharges the other.
+ * The app opens no popis on the shop's behalf and `napomena` says so — ZoRač
+ * čl. 20 st. 3 puts the reconciliation confirmation before the popis.
+ */
+export interface NivelacijaObavestenje {
+  obaveza: string;
+  pravniOsnov: string;
+  /**
+   * PoP čl. 13 st. 2, second limb — days after the **popis**, never days after
+   * the price change that raised it.
+   */
+  rokDana: number;
+  rokObjasnjenje: string;
+  obuhvat: NivelacijaObuhvatOpcija[];
+  napomena: string;
+}
+
+/**
  * One kalkulacija list row — mirrors `crate::kep_kalkulacija::KalkulacijaSummary`
  * (serde camelCase). `razlikaUCeniMinor` (element 10, the marža) is derived
  * backward from the catalog price and MAY be negative for a loss-leader.
@@ -1318,4 +1520,818 @@ export interface KalkulacijaSummary {
   razlikaUCeniMinor: number;
   prodajnaVrednostSaPdvMinor: number;
   createdAt: string;
+}
+
+/**
+ * One day's hours in the statutory buckets — mirrors
+ * `crate::commands::worktime::WorkTimeMinutes` (serde camelCase).
+ *
+ * **Integer minutes, never hours and never floating point.** `ukupnoOstvareni`
+ * and `ukupnoNeizvrseni` are DERIVED backend-side from the buckets they
+ * enumerate; nothing on this side may recompute or override them.
+ *
+ * `nocniMinuta` and `radNaPraznikMinuta` are advisory — no Serbian provision
+ * requires either, so every surface tags them `izračunato radi provere
+ * usklađenosti` and never as a statutory field (§4 req. 4).
+ */
+export interface WorkTimeMinutes {
+  moguciMinuta: number;
+  ukupnoOstvareniMinuta: number;
+  efektivnoIzvrseniMinuta: number;
+  casoviCekanjaIZastojaMinuta: number;
+  obustavaRadaStrajkMinuta: number;
+  ukupnoNeizvrseniMinuta: number;
+  godisnjiOdmorMinuta: number;
+  praznikOdmorMinuta: number;
+  odsustvoUzNaknaduMinuta: number;
+  strucnoOsposobljavanjeMinuta: number;
+  sprecenostPoslodavacMinuta: number;
+  naknadaDrugiPoslodavciMinuta: number;
+  sprecenostRfzoMinuta: number;
+  porodiljskoMinuta: number;
+  neplacenoOdsustvoMinuta: number;
+  prekovremeniMinuta: number;
+  nocniMinuta: number;
+  radNaPraznikMinuta: number;
+}
+
+/**
+ * The closed absence vocabulary migration v17's `CHECK` accepts, mirroring
+ * `crate::commands::worktime::KATEGORIJE_ODSUSTVA`. A closed union because
+ * there is no free-text sibling and never will be — a free-text column would
+ * eventually be filled with a diagnosis (§5 item 4).
+ */
+export type AbsenceCategory =
+  | "godisnji_odmor"
+  | "praznik_odmor"
+  | "odsustvo_uz_naknadu"
+  | "strucno_osposobljavanje"
+  | "sprecenost_poslodavac"
+  | "sprecenost_rfzo"
+  | "porodiljsko"
+  | "neplaceno_odsustvo"
+  | "naknada_drugi_poslodavci"
+  | "obustava_rada_strajk";
+
+/** The ZoR čl. 53 st. 1 grounds — `crate::commands::worktime::CAP_OVERRIDE_RAZLOZI`. */
+export type CapOverrideReason =
+  | "visa_sila"
+  | "iznenadno_povecanje_obima_posla"
+  | "neplanirani_posao_u_roku"
+  | "drugo";
+
+/** Correction reasons — `crate::commands::worktime::KOREKCIJA_RAZLOZI`. */
+export type CorrectionReason =
+  | "greska_u_unosu"
+  | "ispravka_sati"
+  | "ispravka_kategorije"
+  | "naknadno_dostavljen_dokument"
+  | "drugo";
+
+/**
+ * One stored version of one day — `crate::commands::worktime::WorkTimeEntryView`.
+ * The whole chain is returned, not just the live row: `zamenjen` marks a version
+ * a later one supersedes, and it is rendered struck through rather than hidden
+ * (§4 req. 6).
+ */
+export interface WorkTimeEntryView {
+  id: number;
+  userId: number;
+  dan: string;
+  verzija: number;
+  zamenjen: boolean;
+  supersedesId: number | null;
+  kategorijaOdsustva: string | null;
+  capOverrideRazlog: string | null;
+  korekcijaRazlog: string | null;
+  unioUserId: number | null;
+  unioIme: string | null;
+  createdAt: string;
+  updatedAt: string;
+  minuti: WorkTimeMinutes;
+}
+
+/** One employee's month — `crate::commands::worktime::WorkTimeMonth`. */
+export interface WorkTimeMonth {
+  userId: number;
+  zaposleni: string;
+  godina: number;
+  mesec: number;
+  zatvoren: boolean;
+  closedAt: string | null;
+  entries: WorkTimeEntryView[];
+  /** Live rows only. */
+  ukupno: WorkTimeMinutes;
+  /** The čl. 55 st. 6 sentence, carried so no surface retypes it. */
+  napomena: string;
+  /** The advisory tag for the two computed columns (§4 req. 4). */
+  advisoryNapomena: string;
+}
+
+/** The frozen Class A classification — `crate::commands::worktime::PeriodClassification`. */
+export interface WorkTimePeriodClassification {
+  userId: number;
+  godina: number;
+  mesec: number;
+  danaSaUnosom: number;
+  minuti: WorkTimeMinutes;
+  izvedenoU: string;
+}
+
+/** A recorded period close — `crate::commands::worktime::ClosedPeriod`. */
+export interface WorkTimeClosedPeriod {
+  userId: number;
+  godina: number;
+  mesec: number;
+  closedAt: string;
+  closedBy: number;
+  klasifikacija: WorkTimePeriodClassification;
+}
+
+/**
+ * One day as the operator enters it — `crate::commands::worktime::SaveEntryRequest`.
+ * The b) and v) totals are absent by design: they are derived backend-side.
+ */
+export interface SaveWorkTimeEntryRequest {
+  userId: number;
+  dan: string;
+  /**
+   * The period the write was made for. `dan` must fall inside it — the backend
+   * refuses the mismatch, which it cannot see unless the request states it.
+   * Never the source of the row's own month: that stays derived from `dan`.
+   */
+  godina: number;
+  mesec: number;
+  moguciMinuta: number;
+  efektivnoIzvrseniMinuta: number;
+  casoviCekanjaIZastojaMinuta: number;
+  prekovremeniMinuta: number;
+  nocniMinuta: number;
+  radNaPraznikMinuta: number;
+  kategorijaOdsustva: AbsenceCategory | null;
+  odsustvoMinuta: number;
+  capOverrideRazlog: CapOverrideReason | null;
+}
+
+/** `crate::commands::worktime::CorrectEntryRequest` — the flattened entry plus a reason. */
+export interface CorrectWorkTimeEntryRequest extends SaveWorkTimeEntryRequest {
+  korekcijaRazlog: CorrectionReason;
+}
+
+/**
+ * The ZoR čl. 53 assessment a write was measured against — mirrors
+ * `crate::worktime::CapAssessment`. Minutes throughout.
+ */
+export interface WorkTimeCapAssessment {
+  weeklyOvertimeMinutes: number;
+  dailyTotalMinutes: number;
+  weeklyTotalMinutes: number;
+  weeklyCapExceeded: boolean;
+  dailyCapExceeded: boolean;
+  preraspodelaWeeklyCapExceeded: boolean;
+  requiresOverride: boolean;
+}
+
+/** `crate::worktime::ProtectionKind`, serde camelCase. */
+export type WorkTimeProtectionKind =
+  | "maloletanPrekovremeni"
+  | "maloletanPreraspodela"
+  | "maloletanDnevniLimit"
+  | "saglasnostRoditelja"
+  | "trudnocaNocniIPrekovremeni"
+  | "neispravanDatumUProfilu";
+
+/**
+ * A čl. 87–91 finding — `crate::worktime::ProtectionBlock`. `blocking` is `true`
+ * only where the statute states the prohibition itself; a čl. 90 finding is
+ * conditional on a nalaz nadležnog zdravstvenog organa the app never holds.
+ */
+export interface WorkTimeProtectionBlock {
+  kind: WorkTimeProtectionKind;
+  blocking: boolean;
+  poruka: string;
+}
+
+/** What a write returns — `crate::commands::worktime::SavedEntry`. */
+export interface SavedWorkTimeEntry {
+  entry: WorkTimeEntryView;
+  caps: WorkTimeCapAssessment;
+  protections: WorkTimeProtectionBlock[];
+}
+
+/**
+ * The ZoR notices the register surfaces, already resolved against the stored
+ * legal form — `crate::commands::worktime::WorkTimeNotices`. Every penalty
+ * figure is authored in `legal.rs` and rides here; this side never composes one.
+ *
+ * `capsExceeded` and `preraspodelaCapsExceeded` are **not** interchangeable.
+ * čl. 58 says hours worked in preraspodela are not prekovremeni rad, so the
+ * čl. 53 caps do not bind such an employee, and the offence is čl. 274 st. 1
+ * tač. 4 rather than tač. 3. The amount is the same under both tačke, so putting
+ * the wrong one on screen ships no wrong figure — only a wrong article and a
+ * rule that does not apply.
+ */
+export interface WorkTimeNotices {
+  recordMissing: LegalNotice;
+  capsExceeded: LegalNotice;
+  preraspodelaCapsExceeded: LegalNotice;
+}
+
+// ---------------------------------------------------------------------------
+// SW-10 / SW-13 / SW-17 — the ZZPL trio
+// ---------------------------------------------------------------------------
+
+/**
+ * One `support_sessions` row — `crate::commands::audit::SupportSession`.
+ *
+ * The row **is** the ZZPL čl. 46 nalog: who authorised the obrađivač, when, for
+ * what obim and until when. `startedAt` is stamped when the support side
+ * actually enters; a nalog closed after entry gets `endedAt`, one withdrawn
+ * before anyone used it gets `revokedAt`, and the two are different facts.
+ */
+export interface SupportSession {
+  id: number;
+  grantedBy: number;
+  grantedByName: string;
+  grantedAt: string;
+  scope: string;
+  expiresAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  revokedAt: string | null;
+}
+
+/**
+ * Req. 8's two axes and no third one — `crate::commands::audit::AuditQuery`.
+ * Both days are `gggg-MM-dd` and both bounds are inclusive; anything that is
+ * not a bare day is refused backend-side rather than silently mis-filtered.
+ */
+export interface AuditQuery {
+  from: string | null;
+  to: string | null;
+  actorUserId: number | null;
+}
+
+/**
+ * One logged row as the operator reads it — `crate::commands::audit::AuditEvent`.
+ *
+ * `actorName` is resolved from `users` at read time and is **not** stored on the
+ * row: the čl. 5 st. 1 t. 3 exclusion list governs `audit_events`, and čl. 48
+ * st. 2's *identitet lica* is answered by the id the table does store.
+ */
+export interface AuditEvent {
+  id: number;
+  at: string;
+  actorUserId: number | null;
+  actorName: string | null;
+  action: string;
+  actionLabel: string;
+  objectType: string;
+  objectTypeLabel: string;
+  objectId: string;
+  reasonCode: string | null;
+  reasonLabel: string | null;
+  recipient: string | null;
+  recipientLabel: string | null;
+  supportSessionId: number | null;
+  prevHash: string;
+  hash: string;
+}
+
+/**
+ * `crate::audit::ChainVerdict`, serde camelCase and externally tagged.
+ * `brokenAt` is a zero-based index into the surviving log.
+ */
+export type ChainVerdict = "intact" | "truncated" | { brokenAt: number };
+
+/**
+ * What the hash chain says about the WHOLE log, never about the filtered slice
+ * — `crate::commands::audit::ChainStatus`. `label` is authored backend-side so
+ * the panel and the izvod can never disagree about the verdict.
+ */
+export interface ChainStatus {
+  verdict: ChainVerdict;
+  intact: boolean;
+  checkedRows: number;
+  label: string;
+}
+
+/** `crate::commands::audit::AuditSearchResult`. */
+export interface AuditSearchResult {
+  events: AuditEvent[];
+  chain: ChainStatus;
+}
+
+/** `crate::commands::breaches::RiskOutcome`, serde snake_case. */
+export type RiskOutcome = "bez_rizika" | "rizik" | "visok_rizik";
+
+/** `crate::commands::breaches::NotifyDecision`, serde snake_case. */
+export type NotifyDecision = "obavestiti" | "ne_obavestiti";
+
+/** The three čl. 53 st. 3 exceptions, closed — `crate::commands::breaches::Cl53Izuzetak`. */
+export type Cl53Izuzetak =
+  | "primenjene_mere_zastite"
+  | "naknadne_mere"
+  | "nesrazmeran_utrosak_vremena_i_sredstava";
+
+/**
+ * What the operator submits for one povreda — `crate::commands::breaches::BreachDraft`.
+ *
+ * `saznanjeAt` rides on the update path too so a client that round-trips the
+ * record cannot silently drop it; the backend compares it against the stored
+ * instant and refuses a change rather than ignoring one.
+ */
+export interface BreachDraft {
+  saznanjeAt: string;
+  occurredAt: string | null;
+  discoveredAt: string | null;
+  obradjivacSaznanjeAt: string | null;
+  rukovalacObavestenAt: string | null;
+  opis: string;
+  posledice: string;
+  mere: string;
+  brojLica: number | null;
+  kategorijePodataka: string | null;
+  riskOutcome: RiskOutcome | null;
+  notifyDecision: NotifyDecision | null;
+  notifyObrazlozenje: string | null;
+  poverenikNotifiedAt: string | null;
+  delayReason: string | null;
+  licaObavestena: boolean | null;
+  licaObavestenaAt: string | null;
+  cl53Izuzetak: Cl53Izuzetak | null;
+  cl53IzuzetakObrazlozenje: string | null;
+}
+
+/**
+ * One stored povreda — `crate::commands::breaches::Breach`: every column, plus
+ * the four answers computed from `now` and therefore never stored.
+ *
+ * `notifiable` is a **derived flag on a row that always exists** (req. 43). It
+ * never decided whether the record was written.
+ */
+export interface Breach extends BreachDraft {
+  id: number;
+  createdAt: string;
+  updatedAt: string;
+  /** Saznanje + 72 h — Pravilnik 40/2019 čl. 3. */
+  rokObavestavanjaIsticeAt: string;
+  notifiable: boolean | null;
+  /** Čl. 52 st. 2 — whether a delay justification is owed as of now. */
+  delayReasonRequired: boolean;
+  /** Čl. 53 st. 1 — whether the affected individuals must be told. */
+  obavestavanjeLicaObavezno: boolean;
+}
+
+/**
+ * `crate::retention::RecordClass`, serde snake_case.
+ *
+ * A hand-maintained mirror: `retention_list_policies` returns one row per Rust
+ * variant and the adapter casts that payload with no runtime check, so a
+ * variant missing here is a contract that lies while everything still renders.
+ * `retention::tests::the_typescript_record_class_union_mirrors_this_enum` is
+ * what compares the two lists — add the variant in both places or that test
+ * fails.
+ */
+export type RecordClass =
+  | "worktime_classification"
+  | "worktime_overtime_log"
+  | "worktime_draft"
+  | "personnel"
+  | "credentials"
+  | "access_log"
+  | "processing_register"
+  | "cenovnik_archive"
+  | "popis_dokumentacija";
+
+/**
+ * One row of the shared retention table — `crate::commands::retention::
+ * RetentionPolicyView`.
+ *
+ * **`adjustable` is not the negation of `neverPurge`.** It answers whether a
+ * registered command can actually move this class's rok
+ * (`crate::commands::retention::AdjustableClass`), which is the only sense in
+ * which a screen may offer the shop a period to change. The two can disagree
+ * only by mistake, and this is the side that has to be true.
+ *
+ * `retainUntil` is the earliest day on which the class may be discarded, not a
+ * day on which anything is discarded. `null` means trajno: the absence of an
+ * end, never „no rule“.
+ */
+export interface RetentionPolicy {
+  recordClass: RecordClass;
+  naziv: string;
+  retainUntil: string | null;
+  legalHold: boolean;
+  neverPurge: boolean;
+  adjustable: boolean;
+  napomena: string;
+  updatedAt: string;
+}
+
+/**
+ * One generated radnja obrade — `crate::cl47::ProcessingActivity`.
+ *
+ * The register is generated from the app's own configured purposes, recipients
+ * and retention rows, never typed by the operator: a register that can be
+ * edited into agreement with whatever the till happens to do documents nothing.
+ */
+export interface ProcessingActivity {
+  id: number;
+  kljuc: string;
+  /** St. 1 t. 1. */
+  rukovalacNaziv: string;
+  rukovalacKontakt: string | null;
+  /** St. 1 t. 2. */
+  svrhaObrade: string;
+  /** St. 1 t. 3. */
+  vrstaLica: string;
+  vrstaPodataka: string;
+  /** St. 1 t. 4. */
+  vrstaPrimalaca: string | null;
+  /** St. 1 t. 5. */
+  prenosUDrugeDrzave: string | null;
+  mereZastitePrenosa: string | null;
+  /** St. 1 t. 6 — the period, per category. */
+  rokCuvanja: string | null;
+  retentionRecordClass: RecordClass | null;
+  /** St. 1 t. 7. */
+  opisMeraZastite: string | null;
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Popis (SW-16, reqs. 29–42)
+// ---------------------------------------------------------------------------
+
+/**
+ * `crate::popis::PopisStatus`, serde snake_case — the six states in the bylaw's
+ * own sequence.
+ *
+ * **The wire spelling is the only spelling.** Backend-side the stored value and
+ * the IPC value are two hand-written lists held equal by test, precisely
+ * because a rename on one side silently changes the other; inventing a third,
+ * camelCased spelling for the UI would put the drift back where those tests
+ * cannot see it.
+ */
+export type PopisStatus =
+  | "draft"
+  | "counting"
+  | "counted_signed"
+  | "computed"
+  | "computed_signed"
+  | "posted";
+
+/** `crate::popis::PopisVrsta` — the two statutory triggers, serde snake_case. */
+export type PopisVrsta = "godisnji" | "nivelacioni";
+
+/** `crate::popis::PopisLista` — the six popisne liste of req. 36, serde snake_case. */
+export type PopisLista =
+  | "roba"
+  | "ostecena"
+  | "van_objekta"
+  | "gotovina"
+  | "potrazivanja"
+  | "konsignacija";
+
+/** The three `popis_commission.uloga` values. `jedno_lice` is PoP čl. 6 st. 1. */
+export type PopisUloga = "predsednik" | "clan" | "jedno_lice";
+
+/** `crate::popis::NivelacijaObuhvat` — the two offered scopes, serde snake_case. */
+export type NivelacijaObuhvatId = "samo_nivelisani" | "ceo_objekat";
+
+/** One named member of the komisija as it is recorded (req. 40 / PoP čl. 5 st. 1). */
+export interface KomisijaClanInput {
+  ime: string;
+  uloga: PopisUloga;
+  /**
+   * Čl. 5 st. 1 — the goods-handling exclusion. It **warns and never blocks**:
+   * the čl. 6 st. 2 shodna primena is unresolved (§6 R-5), so a surface that
+   * refused the popis would enforce a duty nobody has settled.
+   */
+  rukujeImovinom: boolean;
+}
+
+export interface OpenPopisRequest {
+  vrsta: PopisVrsta;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  /** PoP čl. 8 st. 1–2 — the plan rada, stored as it was approved. */
+  planRadaJson: string | null;
+  odlukaRef: string | null;
+  /**
+   * Req. 34 / PoP čl. 9 st. 2. Not free text: a non-empty value is refused
+   * backend-side unless a popis of the same business year, dated earlier, is
+   * already `posted`. The *usvojen* limb is NOT checked — nothing in the schema
+   * records the čl. 14 st. 2 odluka — and any surface offering this field has
+   * to say so rather than imply a check that does not happen.
+   */
+  perpetualOdlukaRef: string | null;
+  /** Req. 39 / ZoRač čl. 20 st. 3 — the popis cannot be opened without it. */
+  uskladjivanjePotvrdjeno: boolean;
+  komisija: KomisijaClanInput[];
+}
+
+/**
+ * One stavka as it is written down — `crate::commands::popis::PopisLineInput`.
+ *
+ * `knjigovodstvenaKolicinaMilli` rides on the wire on purpose: the čl. 11 st. 1
+ * and čl. 12 st. 2 liste have no perpetual record to populate them from, so
+ * their book side is typed by hand — but only once čl. 8 st. 5 has released it.
+ * A payload carrying it earlier is **refused**, never quietly dropped.
+ */
+export interface PopisLineInput {
+  listaVrsta: PopisLista;
+  sifra: string | null;
+  naziv: string;
+  vrsta: string | null;
+  jedinicaMere: string | null;
+  /** PoP čl. 9 st. 1 t. 1 — the natural count, in milli-units. */
+  stvarnaKolicinaMilli: number;
+  bliziOpis: string | null;
+  knjigovodstvenaKolicinaMilli: number | null;
+  /** PoP čl. 9 st. 1 t. 5, integer minor units (para). On the gotovina lista this is the apoen. */
+  cenaMinor: number | null;
+}
+
+export interface KomisijaClanView {
+  id: number;
+  ime: string;
+  uloga: PopisUloga;
+  rukujeImovinom: boolean;
+}
+
+/** One of the two statutory signature events (req. 30). Immutable once written. */
+export interface PopisSignatureView {
+  id: number;
+  /** `a` = čl. 8 st. 5 (the counted state); `b` = čl. 9 st. 3 (the computed liste). */
+  faza: string;
+  potpisnik: string;
+  potpisanoAt: string;
+  snapshotHash: string;
+}
+
+/**
+ * One stavka as it comes back — `crate::commands::popis::PopisLineView`.
+ *
+ * **`knjigovodstvenaKolicinaMilli` and `razlikaMilli` are `null` during Phase A
+ * because nothing was read, not because something read was dropped.** The blind
+ * read does not name the book column, `inventory_balances` or
+ * `inventory_movements` at all, so there is no value in the row for a render, a
+ * log line or a debug print to spill (req. 29 / PoP čl. 8 st. 5).
+ */
+export interface PopisLineView {
+  id: number;
+  listaVrsta: PopisLista;
+  sifra: string | null;
+  naziv: string;
+  vrsta: string | null;
+  jedinicaMere: string | null;
+  stvarnaKolicinaMilli: number;
+  bliziOpis: string | null;
+  knjigovodstvenaKolicinaMilli: number | null;
+  /** PoP čl. 9 st. 1 t. 4 — derived, so it cannot exist before the book quantity does. */
+  razlikaMilli: number | null;
+  cenaMinor: number | null;
+}
+
+/** One of the six liste with what is on it. All six are always reported, empty ones included. */
+export interface ListaPregled {
+  vrsta: PopisLista;
+  naziv: string;
+  pravniOsnov: string;
+  brojStavki: number;
+}
+
+/** The req. 36 readiness report — the declared categories checked against the liste. */
+export interface ProveraListiView {
+  spremno: boolean;
+  nedostaju: ListaPregled[];
+  /** The refusal the izveštaj generator will give, carried as text so there is one wording. */
+  poruka: string | null;
+}
+
+/**
+ * One popis — `crate::commands::popis::PopisSessionView`.
+ *
+ * **`knjigovodstvoDostupno` is the čl. 8 st. 5 answer and the only one a screen
+ * may consult.** It is `book_quantities_released(status, fazaAPotpisana)`,
+ * whose status limb alone is module-private backend-side precisely so nothing
+ * can reach it: `status` is a claim any UPDATE can make, and a session can be
+ * born in `counted_signed` with no potpis behind it.
+ */
+export interface PopisSessionView {
+  id: number;
+  vrsta: PopisVrsta;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  status: PopisStatus;
+  planRadaJson: string | null;
+  odlukaRef: string | null;
+  perpetualOdlukaRef: string | null;
+  uskladjivanjePotvrdjenoAt: string | null;
+  postedAt: string | null;
+  fazaAPotpisana: boolean;
+  fazaBPotpisana: boolean;
+  knjigovodstvoDostupno: boolean;
+  komisija: KomisijaClanView[];
+  potpisi: PopisSignatureView[];
+  linije: PopisLineView[];
+  liste: ListaPregled[];
+  /** PoP čl. 2 st. 6 — the day a signed copy of the konsignaciona lista is owed to its owner. */
+  konsignacijaRok: string | null;
+  /** Req. 40 warnings and the čl. 2 st. 6 reminder. Warnings, never blocks. */
+  upozorenja: string[];
+}
+
+export interface PopisSummary {
+  id: number;
+  vrsta: PopisVrsta;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  status: PopisStatus;
+  postedAt: string | null;
+  brojLinija: number;
+}
+
+/**
+ * `crate::commands::popis::PopisPodesavanja`.
+ *
+ * `rokPredajeFi` is configuration and not a constant: ZoRač čl. 44 st. 1 sets
+ * 31 March *„osim ako posebnim zakonom nije drukčije uređeno“*, so the date is
+ * not the app's to own. Unset, the **annual** izveštaj is refused by name
+ * rather than dated with a guess.
+ */
+export interface PopisPodesavanja {
+  rokPredajeFi: string | null;
+}
+
+/** The eight PoP čl. 13 st. 1 content elements — `crate::popis::IzvestajElement`. */
+export type IzvestajElementId =
+  | "stvarno_stanje"
+  | "knjigovodstveno_stanje"
+  | "razlike"
+  | "uzroci_neslaganja"
+  | "predlozi_za_likvidaciju_razlika"
+  | "nacin_knjizenja"
+  | "primedbe_lica_koja_rukuju_vrednostima"
+  | "ostale_primedbe_i_predlozi";
+
+/**
+ * The five čl. 13 st. 1 elements the commission writes — `crate::popis::
+ * IzvestajNarativ`. Named fields rather than a map, because req. 37 wants a
+ * structured template with required fields and a map admits an izveštaj that
+ * simply omits an element. Every one is refused **by name** when empty.
+ */
+export interface IzvestajNarativ {
+  uzrociNeslaganja: string;
+  predloziZaLikvidacijuRazlika: string;
+  nacinKnjizenja: string;
+  primedbeLicaKojaRukujuVrednostima: string;
+  ostalePrimedbeIPredlozi: string;
+}
+
+/**
+ * `crate::commands::popis::IzvestajRequest`.
+ *
+ * `prijavljeneListe` is **required on the wire**, exactly as
+ * `popis_provera_listi` requires it: the req. 36 gate refuses a *declared*
+ * lista that is empty, so a request that omitted the field would satisfy it
+ * vacuously. An explicit `[]` says „ništa nije prijavljeno“; an absent field
+ * says nothing.
+ */
+export interface IzvestajRequest {
+  prijavljeneListe: PopisLista[];
+  narativ: IzvestajNarativ;
+}
+
+export interface IzvestajElementView {
+  element: IzvestajElementId;
+  naziv: string;
+  pravniOsnov: string;
+  uputstvo: string;
+  /** `null` for the three the popis itself answers — their content is the figures. */
+  tekst: string | null;
+}
+
+/**
+ * The čl. 9 st. 1 t. 4 and t. 6 figures over one lista or the whole popis.
+ *
+ * **No natural total is reported, and that is deliberate.** Stavke on one lista
+ * can be in komadima, metrima and kilogramima at once, so a summed količina
+ * across them would be a number with no unit — the naturalna razlika stays per
+ * stavka on the popisna lista, where čl. 9 st. 1 t. 4 puts it. The three counts
+ * beside the three amounts are not decoration: an unvalued or unbooked stavka
+ * is reported, never zeroed.
+ */
+export interface IzvestajZbir {
+  brojStavki: number;
+  stavkeBezCene: number;
+  stavkeBezKnjigovodstvenogStanja: number;
+  stavkeSaViskom: number;
+  stavkeSaManjkom: number;
+  vrednostPoPopisuMinor: number;
+  vrednostPoKnjigamaMinor: number;
+  /** Negative is a manjak. */
+  vrednosnaRazlikaMinor: number;
+  potpuno: boolean;
+}
+
+export interface IzvestajListaPregled {
+  vrsta: PopisLista;
+  naziv: string;
+  pravniOsnov: string;
+  zbir: IzvestajZbir;
+}
+
+/**
+ * PoP čl. 14 st. 2 — the odluka o usvajanju izveštaja, surfaced **with** the
+ * izveštaj as one milestone (req. 38): the article gives it the rok „iz člana
+ * 13. stav 2“, so it is the same date and not a second deadline.
+ */
+export interface OdlukaOUsvajanjuView {
+  rok: string;
+  pravniOsnov: string;
+  donosilac: string;
+  /** What this application does NOT do with the decision. */
+  napomena: string;
+}
+
+/**
+ * The izveštaj o popisu (req. 37) — **composed, not stored.** Nothing in this
+ * schema records one: the document is assembled when it is asked for, and
+ * `upozorenja` says so, because a shop that typed five paragraphs and closed
+ * the screen would otherwise lose them without being told.
+ */
+export interface IzvestajView {
+  sessionId: number;
+  vrsta: PopisVrsta;
+  status: PopisStatus;
+  obveznik: string;
+  pib: string;
+  maticniBroj: string;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  komisija: KomisijaClanView[];
+  potpisi: PopisSignatureView[];
+  /** All eight čl. 13 st. 1 elements, in the article's order. */
+  elementi: IzvestajElementView[];
+  /** All six liste, the empty ones included. */
+  liste: IzvestajListaPregled[];
+  ukupno: IzvestajZbir;
+  /** PoP čl. 13 st. 2, computed — never tabulated. */
+  rok: string;
+  rokPravniOsnov: string;
+  odlukaOUsvajanju: OdlukaOUsvajanjuView;
+  upozorenja: string[];
+}
+
+/**
+ * One article as PoP čl. 8 st. 4 hands it to the commission — and **no quantity
+ * among the four fields.** The scope list is read before anything is counted,
+ * so a perpetual stanje beside each article here would hand over the book
+ * quantities at the very start of the count (req. 29).
+ */
+export interface NivelacijaArtikalView {
+  sifra: string | null;
+  naziv: string;
+  vrsta: string | null;
+  jedinicaMere: string | null;
+}
+
+export interface NivelacijaPokriceView {
+  sessionId: number;
+  status: PopisStatus;
+  datumPopisa: string;
+}
+
+/** One outstanding čl. 21 obligation: a day retail prices moved, and for what. */
+export interface NivelacijaObavezaView {
+  datum: string;
+  brojArtikala: number;
+  artikli: NivelacijaArtikalView[];
+  /** A nivelacija popis opened for it and not yet posted; `null` means nothing started. */
+  popisUToku: NivelacijaPokriceView | null;
+}
+
+export interface NivelacijaPregledView {
+  obaveze: NivelacijaObavezaView[];
+  obavestenje: NivelacijaObavestenje;
+  /** Exactly which recorded price moves this report is built from — stated, never implied. */
+  izvor: string;
+}
+
+export interface NivelacijaObuhvatView {
+  sessionId: number;
+  datumPopisa: string;
+  obuhvat: NivelacijaObuhvatId;
+  obavestenje: NivelacijaObavestenje;
+  artikli: NivelacijaArtikalView[];
+  vecNaListama: number;
 }

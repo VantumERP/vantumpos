@@ -12,6 +12,7 @@ import type {
   KepEntryView,
   KepLedger,
   KepStatus,
+  NivelacijaObavestenje,
   ProductSummary,
 } from "@/services/types";
 
@@ -243,13 +244,46 @@ describe("KepModule adjustments", () => {
     );
   });
 
+  /**
+   * SW-16 req. 33 — what `kep_nivelacija` answers with: the popis obligation the
+   * same price change raises. The narrowed scope carries its own `pravniStatus`,
+   * which is the label design §7 t. 8 requires travel with it.
+   */
+  const popisObavestenje: NivelacijaObavestenje = {
+    obaveza:
+      "Promena prodajnih cena proizvoda i robe u maloprodajnom objektu traži popis i usklađivanje stanja (ZoRač čl. 21, PoP čl. 3).",
+    pravniOsnov: "ZoRač čl. 21, PoP čl. 3",
+    rokDana: 30,
+    rokObjasnjenje:
+      "Izveštaj o popisu po nivelaciji sastavlja se najkasnije 30 dana po izvršenom popisu (PoP čl. 13 st. 2) — rok teče od dana popisa, ne od dana promene cene.",
+    obuhvat: [
+      {
+        obuhvat: "samo_nivelisani",
+        naziv: "samo artikli obuhvaćeni nivelacijom",
+        pravniStatus: "preporuka — nije zakonska obaveza",
+        obrazlozenje:
+          "Sužavanje popisa na artikle kojima je promenjena cena je preporuka i nije zakonska obaveza.",
+        podrazumevani: true,
+      },
+      {
+        obuhvat: "ceo_objekat",
+        naziv: "ceo maloprodajni objekat",
+        pravniStatus: "najšire tumačenje — ni ono nije propisano",
+        obrazlozenje: "Popis celog maloprodajnog objekta ne izostavlja ništa.",
+        podrazumevani: false,
+      },
+    ],
+    napomena:
+      "Aplikacija ne otvara popis umesto vas: popis se otvara tek kada potvrdite da su knjige usklađene (ZoRač čl. 20 st. 3).",
+  };
+
   it("shows the new-price field for a nivelacija and posts via nivelacija", async () => {
     const user = userEvent.setup();
     const services = servicesWith(ledger);
     spyProductSearch(services);
     const nivSpy = vi
       .spyOn(services.kep, "nivelacija")
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(popisObavestenje);
     const postSpy = vi
       .spyOn(services.kep, "postAdjustment")
       .mockResolvedValue(undefined);
@@ -297,6 +331,65 @@ describe("KepModule adjustments", () => {
       }),
     );
     expect(postSpy).not.toHaveBeenCalled();
+
+    // Req. 33 — the price change raises a popis obligation as well as the KEP Δ,
+    // and the shop is told at the one moment it is certain to be looking.
+    const obavestenje = await screen.findByRole("status", {
+      name: "Popis po nivelaciji",
+    });
+    expect(obavestenje).toHaveTextContent("ZoRač čl. 21");
+    expect(obavestenje).toHaveTextContent("30 dana po izvršenom popisu");
+    // Design §7 t. 8 — the narrowing is offered as a preporuka and is never
+    // presented as required, and the wider scope stays on the table.
+    expect(obavestenje).toHaveTextContent("preporuka — nije zakonska obaveza");
+    expect(obavestenje).toHaveTextContent("ceo maloprodajni objekat");
+    // Req. 39 — the app opened nothing, and says so.
+    expect(obavestenje).toHaveTextContent("ne otvara popis umesto vas");
+  });
+
+  it("raises no popis notice for a storno that changes no price", async () => {
+    const user = userEvent.setup();
+    const services = servicesWith(ledger);
+    spyProductSearch(services);
+    vi.spyOn(services.kep, "postAdjustment").mockResolvedValue(undefined);
+
+    render(
+      <>
+        <KepModule services={services} />
+        <Toaster />
+      </>,
+    );
+
+    await screen.findByText("Prijem robe");
+
+    fireEvent.change(screen.getByLabelText("Vrsta izmene"), {
+      target: { value: "otpis" },
+    });
+    await user.click(
+      await screen.findByRole("button", { name: "Izaberi Test artikal" }),
+    );
+    fireEvent.change(screen.getByLabelText("Količina"), {
+      target: { value: "35" },
+    });
+    fireEvent.change(screen.getByLabelText("Naziv dokumenta"), {
+      target: { value: "Zapisnik o otpisu" },
+    });
+    fireEvent.change(screen.getByLabelText("Broj dokumenta"), {
+      target: { value: "7" },
+    });
+    fireEvent.change(screen.getByLabelText("Datum dokumenta"), {
+      target: { value: "2026-07-20" },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Proknjiži izmenu" }));
+
+    await screen.findByText("Izmena je proknjižena.");
+    // ZoRač čl. 21 attaches to a change of selling prices. An otpis moves stock,
+    // not a price, and inventing a popis duty for it would be this module
+    // imposing an obligation the law does not.
+    expect(
+      screen.queryByRole("status", { name: "Popis po nivelaciji" }),
+    ).not.toBeInTheDocument();
   });
 
   it("corrects a ledger entry via the Ispravi stavku dialog", async () => {

@@ -109,7 +109,10 @@ export function CashDepositReport({
             value={formatRsd(report.overdueMinor)}
           />
           <SummaryTile
-            label="Izuzeto (podizanja sa računa)"
+            // Only a podizanje the operator marked as isplaćeno per Pravilnik
+            // 77/2011 čl. 2 st. 2/st. 3 is excluded, so the tile must not read
+            // as „sva podizanja" — the rest are in the base, with a rok.
+            label="Izuzeto (dokumentovana podizanja)"
             value={formatRsd(report.excludedFloatMinor)}
           />
         </div>
@@ -193,7 +196,7 @@ export function CashDepositReport({
             {report.saturdayIsWorking
               ? "Subota se računa kao radni dan."
               : "Subota se ne računa kao radni dan."}{" "}
-            „Radni dan" nije definisan ni u Zakonu 68/2015 ni u Pravilniku
+            „Radni dan“ nije definisan ni u Zakonu 68/2015 ni u Pravilniku
             77/2011 — pretpostavka se menja u Podešavanjima.
           </p>
           {report.beyondSeededCalendar ? (

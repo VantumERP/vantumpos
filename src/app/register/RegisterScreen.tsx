@@ -62,6 +62,7 @@ import type {
   CompletedSale,
   DiscountDraft,
   SalePaymentDraft,
+  PriceDivergence,
   ProductSummary,
   SaleDraftItem,
   SalePreview,
@@ -73,6 +74,13 @@ import type {
  * money changes hands.
  */
 const AML_ASSESS_DEBOUNCE_MS = 200;
+
+/**
+ * The published-price check runs against the whole draft, so it fires on every
+ * quantity keystroke as well as on every scan. Same budget as the AML one: the
+ * warning has to be on screen before „Završi prodaju“ is pressed.
+ */
+const PRICE_INTEGRITY_DEBOUNCE_MS = 200;
 
 interface RegisterScreenProps {
   services: PosServices;
@@ -107,8 +115,20 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   const [bankTransferInput, setBankTransferInput] = useState("");
   const [assessment, setAssessment] = useState<AmlAssessment | null>(null);
   const [assessFailed, setAssessFailed] = useState(false);
+  // The cash line `assessment`/`assessFailed` actually describe. The verdict is
+  // debounced, so without this the till cannot tell a verdict for the tender in
+  // the field from one for the tender before last — and a soft block that
+  // consults a stale verdict is a soft block a fast operator walks straight
+  // through.
+  const [assessedCashMinor, setAssessedCashMinor] = useState<number | null>(
+    null,
+  );
   const [amlReason, setAmlReason] = useState("");
   const [amlReasonError, setAmlReasonError] = useState<string | null>(null);
+  // Req. 12 / ZZP čl. 6 st. 4: articles in the draft priced above what the
+  // outlet's current cenovnik publishes. Advisory — nothing here gates the sale.
+  const [divergences, setDivergences] = useState<PriceDivergence[]>([]);
+  const [priceCheckFailed, setPriceCheckFailed] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [isCompleting, setIsCompleting] = useState(false);
   const [overrideOpen, setOverrideOpen] = useState(false);
@@ -165,6 +185,49 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
     };
   }, [draft, services]);
 
+  // ZZP čl. 6 st. 4 binds a trader WHO PUBLISHES a cenovnik to adhere to the
+  // prices in it, so the till measures the cart against the outlet's current
+  // published file while it is being built — the operator learns about a
+  // divergence before the money changes hands rather than from a log afterwards.
+  //
+  // Warn, never block: `sales_complete` accepts the sale either way and writes
+  // the divergence into the same never-deleted trail. A shop that has published
+  // nothing has made no st. 4 promise to depart from and gets an empty answer.
+  useEffect(() => {
+    if (draft.items.length === 0) {
+      setDivergences([]);
+      setPriceCheckFailed(false);
+      return;
+    }
+
+    let active = true;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const found = await services.sales.assessPriceIntegrity(draft);
+
+          if (active) {
+            setDivergences(found);
+            setPriceCheckFailed(false);
+          }
+        } catch {
+          // A check that could not run is NOT a check that passed — the same
+          // reading the AML branch above takes. Rendering nothing here would put
+          // a silent pass in front of the cashier, who reads it as an all-clear.
+          if (active) {
+            setDivergences([]);
+            setPriceCheckFailed(true);
+          }
+        }
+      })();
+    }, PRICE_INTEGRITY_DEBOUNCE_MS);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [draft, services]);
+
   const preview =
     previewState.status === "ready" ? previewState.preview : undefined;
   const previewTotalMinor = preview?.totalMinor;
@@ -208,6 +271,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
     if (retainedCashMinor <= 0) {
       setAssessment(null);
       setAssessFailed(false);
+      setAssessedCashMinor(null);
       return;
     }
 
@@ -221,6 +285,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
           if (active) {
             setAssessment(verdict);
             setAssessFailed(false);
+            setAssessedCashMinor(retainedCashMinor);
           }
         } catch {
           if (active) {
@@ -234,6 +299,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
             // any amount rather than only past the stand-in cap.
             setAssessment(null);
             setAssessFailed(true);
+            setAssessedCashMinor(retainedCashMinor);
           }
         }
       })();
@@ -245,6 +311,12 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
     };
   }, [retainedCashMinor, services]);
 
+  // True from the keystroke until the verdict for THAT cash line lands: the
+  // debounce timer, the in-flight call, and the stretch where a settled verdict
+  // still belongs to an older tender. Nothing may read `amlBreached` as final
+  // while this holds.
+  const amlAssessmentPending =
+    retainedCashMinor > 0 && assessedCashMinor !== retainedCashMinor;
   const amlBreached = assessment?.breached ?? false;
   const amlWarns = amlBreached || (assessment?.nearThreshold ?? false);
   // A cached rate is missing on every fresh install, so saying so on a 200 RSD
@@ -387,19 +459,48 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       return;
     }
 
+    setMessage(null);
+
+    // The rendered verdict is debounced, so between the last keystroke and the
+    // assessment landing it describes the tender before this one. Deciding the
+    // soft block on it would let a breach through to anyone who types and
+    // clicks inside that window — settle the verdict for the cash line that is
+    // actually about to be booked before deciding anything.
+    let verdict = assessment;
+
+    if (amlAssessmentPending) {
+      setIsCompleting(true);
+
+      try {
+        verdict = await services.sales.assessCashPayment(retainedCashMinor);
+        setAssessment(verdict);
+        setAssessFailed(false);
+      } catch {
+        // Same degradation as the debounced path: a check that could not run is
+        // not a check that passed, but it must not hold the till hostage
+        // either.
+        verdict = null;
+        setAssessment(null);
+        setAssessFailed(true);
+      }
+
+      setAssessedCashMinor(retainedCashMinor);
+    }
+
+    const breached = verdict?.breached ?? false;
     const reason = amlReason.trim();
 
     // A soft block: the sale is lawful to record either way, but a breach of
     // čl. 46 st. 1 must not go into the books unexplained.
-    if (amlBreached && !reason) {
+    if (breached && !reason) {
       setAmlReasonError(
         "Unesite razlog prijema gotovine pre nego što završite prodaju.",
       );
+      setIsCompleting(false);
       return;
     }
 
     setAmlReasonError(null);
-    setMessage(null);
     setIsCompleting(true);
 
     const payments: SalePaymentDraft[] = [
@@ -421,7 +522,7 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
         ...(allowStockOverride ? { allowStockOverride: true } : {}),
         // Only a breach is ever acknowledged — the reason field is the only
         // place a reason can be typed, and it only renders on a breach.
-        ...(amlBreached && reason ? { amlAckReason: reason } : {}),
+        ...(breached && reason ? { amlAckReason: reason } : {}),
       });
       setCompletedSale(sale);
       setCart([]);
@@ -432,6 +533,9 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
       setBankTransferInput("");
       setAssessment(null);
       setAssessFailed(false);
+      // Without this the NEXT sale for the same cash figure would look already
+      // assessed while `assessment` is null — the bypass again, one sale later.
+      setAssessedCashMinor(null);
       setAmlReason("");
       setReceiptDiscountInput("");
       setOverrideOpen(false);
@@ -699,6 +803,18 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
             </Field>
           </FieldGroup>
 
+          {divergences.length > 0 && (
+            <PublishedPriceNotice divergences={divergences} />
+          )}
+          {priceCheckFailed && (
+            <Alert>
+              <AlertTitle>Provera objavljenih cena nije izvršena</AlertTitle>
+              <AlertDescription>
+                Program nije uspeo da uporedi cene sa objavljenim cenovnikom.
+                Prodaja se može završiti.
+              </AlertDescription>
+            </Alert>
+          )}
           {assessFailed && (
             <Alert>
               <AlertTitle>Provera limita gotovine nije izvršena</AlertTitle>
@@ -873,6 +989,67 @@ export function RegisterScreen({ services }: RegisterScreenProps) {
   );
 }
 
+/**
+ * The till-side rendering of the published-price guard (SW-12 req. 12).
+ *
+ * ZZP čl. 6 st. 4 binds a trader **who publishes** a cenovnik to adhere to the
+ * prices in it. Three things this notice must keep straight:
+ *
+ * - **It warns, it does not block.** „Završi prodaju“ stays enabled and nothing
+ *   here is a precondition of it. The register has to be able to record what
+ *   actually happened at the counter.
+ * - **It names the file.** An outlet's archive holds many publications and st. 4
+ *   binds the shop only to the one in force, so the snapshot's own stamp travels
+ *   with the warning — a divergence with no exhibit is an accusation with none.
+ * - **It states only what the code does.** The divergence is written to the
+ *   sale's own audit trail by `sales_complete`; nothing is sent anywhere, and no
+ *   figure is quoted — the čl. 210 sum belongs to the Cenovnik panel, resolved
+ *   against the shop's stored legal form.
+ */
+function PublishedPriceNotice({
+  divergences,
+}: {
+  divergences: PriceDivergence[];
+}) {
+  return (
+    <Alert variant="destructive" aria-labelledby="cenovnik-divergence-title">
+      <AlertTitle id="cenovnik-divergence-title">
+        Cena je iznad objavljenog cenovnika
+      </AlertTitle>
+      <AlertDescription>
+        <div className="flex flex-col gap-2">
+          <ul className="flex flex-col gap-1">
+            {divergences.map((row) => (
+              <li key={row.productId}>
+                <span className="font-medium">{row.productName}</span>
+                {" — naplaćuje se "}
+                <span className="font-medium">
+                  {formatRsd(row.chargedUnitPriceMinor)}
+                </span>
+                {", a objavljeno je "}
+                <span className="font-medium">
+                  {formatRsd(row.publishedUnitPriceMinor)}
+                </span>
+                .
+              </li>
+            ))}
+          </ul>
+          <p>
+            Upoređeno sa cenovnikom prodajnog objekta napravljenim{" "}
+            {formatInstant(divergences[0].snapshotGeneratedAt)}.
+          </p>
+          <p>
+            Prodaja se može završiti. Odstupanje se upisuje uz račun u trag koji
+            se ne briše. Ako je cena namerno promenjena, cenovnik se sam ponovo
+            objavljuje čim se nova cena sačuva — u šifarniku, kroz akciju, kroz
+            uvoz ili nivelacijom.
+          </p>
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 interface AmlNoticeProps {
   assessment: AmlAssessment;
   reason: string;
@@ -899,8 +1076,8 @@ function AmlNotice({
       <Alert>
         <AlertTitle>Provera limita gotovine nije izvršena</AlertTitle>
         <AlertDescription>
-          Provera nije mogla da se izvrši — unesite kurs u Podešavanjima.
-          Prodaja se može završiti.
+          Kurs evra nije poznat, pa provera nije mogla da se izvrši. Unesite ili
+          osvežite kurs u Podešavanja → Kurs. Prodaja se može završiti.
         </AlertDescription>
       </Alert>
     );
@@ -931,12 +1108,25 @@ function AmlNotice({
               prikazana.
             </p>
           )}
+          {/*
+            Verified-rules §3 req 5. The verdict above is per-sale and that is
+            the whole of what the software computes — there is no buyer tag and
+            no rolling 365-day total. čl. 46 st. 1 reaches linked cash
+            transactions and contracts inside one year anyway, so a cashier who
+            reads one cleared sale as clearance for the buyer is reading more
+            into the check than it does.
+          */}
+          <p className="text-xs">
+            Zabrana obuhvata i više međusobno povezanih gotovinskih transakcija,
+            kao i ugovore u periodu od godinu dana. Program proverava samo ovu
+            prodaju i ne sabira ranije uplate istog kupca.
+          </p>
           <p className="text-xs">{assessment.notice.citation}</p>
           {stale && assessment.rate && (
             <p className="text-xs">
               Upozorenje: primenjen je kurs od{" "}
               {formatRateDate(assessment.rate.rateDate)}, a ne današnji.
-              Osvežite kurs u Podešavanjima.
+              Osvežite kurs u Podešavanja → Kurs.
             </p>
           )}
           {assessment.breached && (
@@ -1055,6 +1245,24 @@ function parseQuantityInput(input: string) {
 
 function formatQuantity(quantityMilli: number) {
   return (quantityMilli / 1000).toString().replace(".", ",");
+}
+
+/**
+ * The instant a published cenovnik was made, as a Serbian operator reads it.
+ * Display only — the archive's identity is the stamp the backend recorded, and
+ * nothing here decides anything from the formatted string.
+ */
+function formatInstant(value: string) {
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("sr-Latn-RS", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(parsed);
 }
 
 function errorMessage(error: unknown) {

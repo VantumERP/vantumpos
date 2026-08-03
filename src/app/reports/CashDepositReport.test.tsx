@@ -5,14 +5,19 @@ import type { CashDepositReport as CashDepositReportDto } from "@/services/types
 
 import { CashDepositReport } from "./CashDepositReport";
 
+// Mirrors the Rust `report_footer` constants in src-tauri/src/cash_deposit.rs.
+// Kept verbatim on purpose: the footer is the module's honesty surface, so a
+// silent drift between the two is worth failing a test over.
 const FOOTER =
   "Zbir po danu prometa je konvencija ove aplikacije, a ne zakonska kategorija: rok teče od " +
   "prijema gotovine, a ni Zakon 68/2015 ni Pravilnik 77/2011 ne poznaju dnevni izveštaj. " +
-  "Gotovina podignuta sa tekućeg računa radnje izuzeta je iz osnovice po Pravilniku 77/2011 " +
-  "čl. 5 st. 2, ali samo ako je isplata izvršena u skladu sa čl. 2 st. 2 ili st. 3 tog " +
-  "pravilnika — proverite dokumentaciju za svaki izuzeti iznos. To je olakšica na nivou " +
-  "podzakonskog akta; sam zakon („po bilo kom osnovu“) i kazna iz čl. 7 ne sadrže nijedan " +
-  "izuzetak. Izveštaj je informativan: nadzor vrši Poreska uprava, a rok ne blokira prodaju, " +
+  "Iz osnovice je izuzeta samo ona gotovina podignuta sa tekućeg računa radnje za koju je " +
+  "zabeleženo da je isplaćena u skladu sa Pravilnikom 77/2011 čl. 2 st. 2 (uz originalnu " +
+  "dokumentaciju podnetu banci na uvid i overu) ili čl. 2 st. 3 (dnevni limit od 150.000 " +
+  "dinara bez dokumentacije). Podizanja bez te potvrde ostaju u osnovici i imaju rok za polog. " +
+  "Izuzeće je olakšica na nivou podzakonskog akta — sam zakon („po bilo kom osnovu“) i kazna " +
+  "iz čl. 7 ne sadrže nijedan izuzetak. " +
+  "Izveštaj je informativan: nadzor vrši Poreska uprava, a rok ne blokira prodaju, " +
   "zatvaranje smene ni fiskalizaciju.";
 
 const notice: CashDepositReportDto["notice"] = {

@@ -3,11 +3,15 @@ import {
   ArchiveIcon,
   BarChart3Icon,
   BookIcon,
+  CalendarClockIcon,
+  ClipboardListIcon,
+  ClockIcon,
   FileSpreadsheetIcon,
   MessageSquareWarningIcon,
   PackageIcon,
   ReceiptTextIcon,
   SettingsIcon,
+  ShieldCheckIcon,
   ShoppingCartIcon,
   TagIcon,
   UploadIcon,
@@ -53,6 +57,32 @@ export const navigationItems = [
     icon: BookIcon,
     adminOnly: true,
   },
+  // Admin-only, and every `popis_*` command behind it is admin-gated backend
+  // side too. The popis releases the knjigovodstveno stanje to the commission
+  // (PoP čl. 8 st. 5), records who signed for the counted state, and books the
+  // result — none of that is a kasir's to do, and the komisija rows name people.
+  {
+    id: "popis",
+    label: "Popis",
+    icon: ClipboardListIcon,
+    adminOnly: true,
+  },
+  {
+    id: "worktime",
+    label: "Radno vreme",
+    icon: ClockIcon,
+    adminOnly: true,
+  },
+  // Deliberately NOT adminOnly: ZoR čl. 83 st. 1 and ZZPL čl. 26 are the
+  // employee's own rights, so the surface that discharges them must be
+  // reachable by the employee. `worktime_my_hours` is session-gated and
+  // returns own rows only, so there is nothing here an admin gate would
+  // protect.
+  {
+    id: "moji-sati",
+    label: "Moji sati",
+    icon: CalendarClockIcon,
+  },
   {
     id: "campaigns",
     label: "Kampanje",
@@ -63,6 +93,17 @@ export const navigationItems = [
     id: "reports",
     label: "Izveštaji",
     icon: BarChart3Icon,
+    adminOnly: true,
+  },
+  // Admin-only, and every command behind it is admin-gated backend-side as
+  // well. ZZPL čl. 48 st. 4 puts the evidencija pristupa in the rukovalac's
+  // hands, the breach file very often describes a colleague in a shop this
+  // size, and the čl. 46 nalog is the rukovalac's to issue — none of the three
+  // is a kasir's to read, let alone to sign.
+  {
+    id: "privatnost",
+    label: "Privatnost",
+    icon: ShieldCheckIcon,
     adminOnly: true,
   },
   {

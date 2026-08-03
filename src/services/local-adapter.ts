@@ -5,8 +5,10 @@ import type { PosServices } from "./ports";
 import type {
   AmlAssessment,
   AppHealth,
+  AuditSearchResult,
   AuthSession,
   BackupJob,
+  Breach,
   BackupSettings,
   BackupStatus,
   CampaignSummary,
@@ -17,27 +19,44 @@ import type {
   CashierTurnoverReport,
   CategorySummary,
   CategorySalesReport,
+  CenovnikPublishTarget,
+  CenovnikSnapshot,
+  CenovnikSnapshotDetail,
   CompanySettings,
   CorrectionReport,
   CompletedSale,
   DailyTurnoverReport,
   DeclarationGapRow,
+  EmployeeProfile,
+  EurRateStatus,
   ExportedFile,
   ImportHeaders,
   ImportJob,
   ImportJobDetail,
   ImportValidationResult,
   InventoryAdjustmentResult,
+  IzvestajView,
+  NivelacijaObuhvatView,
+  NivelacijaPregledView,
+  PopisPodesavanja,
+  PopisSessionView,
+  PopisSummary,
+  ProveraListiView,
   KalkulacijaSummary,
+  NivelacijaObavestenje,
   KepClosePreview,
   KepClosure,
   KepClosureView,
   KepEntryView,
   KepLedger,
   KepStatus,
+  LegalNotice,
   LowStockReport,
   PaymentMethodReport,
   PrethodnaCenaDto,
+  PriceDivergence,
+  ProcessingActivity,
+  RetentionPolicy,
   ProductLedger,
   ProductListResult,
   ProductLookupSuggestion,
@@ -55,8 +74,13 @@ import type {
   ShiftSummary,
   ShopProfile,
   StockListResult,
+  SupportSession,
   TaxRate,
   UserAccount,
+  SavedWorkTimeEntry,
+  WorkTimeClosedPeriod,
+  WorkTimeMonth,
+  WorkTimeNotices,
 } from "./types";
 
 export type InvokeFn = <T>(
@@ -87,6 +111,14 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       getShopProfile: () => invoke<ShopProfile>("settings_get_shop_profile"),
       updateShopProfile: (request) =>
         invoke<ShopProfile>("settings_update_shop_profile", { request }),
+      getLpfrNotice: () => invoke<LegalNotice>("settings_lpfr_notice"),
+      getEurRate: () => invoke<EurRateStatus>("settings_get_eur_rate"),
+      refreshEurRate: () => invoke<EurRateStatus>("settings_refresh_eur_rate"),
+      setManualEurRate: (rateMinor, rateDate) =>
+        invoke<EurRateStatus>("settings_set_manual_eur_rate", {
+          rateMinor,
+          rateDate,
+        }),
       getCashDepositCalendar: () =>
         invoke<CashDepositCalendar>("cash_deposit_calendar"),
       setSaturdayIsWorking: (counts) =>
@@ -128,6 +160,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       updateUser: (id, request) =>
         invoke<UserAccount>("users_update", { id, request }),
       deactivateUser: (id) => invoke<void>("users_deactivate", { id }),
+      getEmployeeProfile: (id) =>
+        invoke<EmployeeProfile>("users_employee_profile", { id }),
     },
     shifts: {
       getCurrentShift: () => invoke<ShiftSummary | null>("shift_get_current"),
@@ -169,6 +203,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<CompletedSale>("sales_complete", { request }),
       assessCashPayment: (cashMinor) =>
         invoke<AmlAssessment>("sales_assess_cash_payment", { cashMinor }),
+      assessPriceIntegrity: (request) =>
+        invoke<PriceDivergence[]>("sales_assess_price_integrity", { request }),
     },
     inventory: {
       listStock: (query) => invoke<StockListResult>("inventory_list_stock", { query }),
@@ -302,7 +338,11 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       exportKalkulacija: (id) =>
         invoke<ExportedFile>("kep_export_kalkulacija", { id }),
       nivelacija: (productId, newSalePriceMinor, basis) =>
-        invoke<void>("kep_nivelacija", { productId, newSalePriceMinor, basis }),
+        invoke<NivelacijaObavestenje>("kep_nivelacija", {
+          productId,
+          newSalePriceMinor,
+          basis,
+        }),
       postAdjustment: (cause, productId, quantityMilli, basis) =>
         invoke<void>("kep_post_adjustment", {
           cause,
@@ -326,6 +366,115 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<ExportedFile>("kep_export_close", { bookYear }),
       exportBook: (bookYear) =>
         invoke<ExportedFile>("kep_export_book", { bookYear }),
+    },
+    worktime: {
+      listMonth: (userId, godina, mesec) =>
+        invoke<WorkTimeMonth>("worktime_list_month", { userId, godina, mesec }),
+      saveEntry: (request) =>
+        invoke<SavedWorkTimeEntry>("worktime_save_entry", { request }),
+      correctEntry: (request) =>
+        invoke<SavedWorkTimeEntry>("worktime_correct_entry", { request }),
+      closePeriod: (userId, godina, mesec) =>
+        invoke<WorkTimeClosedPeriod>("worktime_close_period", {
+          userId,
+          godina,
+          mesec,
+        }),
+      exportCsv: (userId, godina, mesec) =>
+        invoke<ExportedFile>("worktime_export_csv", { userId, godina, mesec }),
+      myHours: (godina, mesec) =>
+        invoke<WorkTimeMonth>("worktime_my_hours", { godina, mesec }),
+      notices: () => invoke<WorkTimeNotices>("worktime_notices"),
+    },
+    privacy: {
+      grantSupportAccess: (scope, durationMinutes) =>
+        invoke<SupportSession>("support_grant_access", {
+          request: { scope, durationMinutes },
+        }),
+      enterSupportSession: () =>
+        invoke<SupportSession>("support_request_access"),
+      endSupportSession: () => invoke<SupportSession>("support_end_session"),
+      activeSupportSession: () =>
+        invoke<SupportSession | null>("support_active_session"),
+      searchAudit: (query) =>
+        invoke<AuditSearchResult>("audit_search", { query }),
+      exportAuditCsv: (query) =>
+        invoke<ExportedFile>("audit_export_csv", { query }),
+      listBreaches: () => invoke<Breach[]>("breaches_list"),
+      recordBreach: (draft) => invoke<Breach>("breaches_record", { draft }),
+      updateBreach: (id, draft) =>
+        invoke<Breach>("breaches_update", { id, draft }),
+      breachNotice: () => invoke<LegalNotice>("breaches_notice"),
+      exportBreachObrazac: (id) =>
+        invoke<ExportedFile>("breaches_export_obrazac", { id }),
+      listProcessingActivities: () =>
+        invoke<ProcessingActivity[]>("cl47_list"),
+      generateProcessingActivities: () =>
+        invoke<ProcessingActivity[]>("cl47_generate"),
+      exportProcessingActivities: () => invoke<ExportedFile>("cl47_export"),
+    },
+    retention: {
+      listPolicies: () => invoke<RetentionPolicy[]>("retention_list_policies"),
+      extendPolicy: (recordClass, retainUntil) =>
+        invoke<RetentionPolicy>("retention_extend_policy", {
+          recordClass,
+          retainUntil,
+        }),
+    },
+    cenovnik: {
+      listSnapshots: () =>
+        invoke<CenovnikSnapshot[]>("cenovnik_list_snapshots"),
+      getSnapshot: (snapshotId) =>
+        invoke<CenovnikSnapshotDetail | null>("cenovnik_get_snapshot", {
+          snapshotId,
+        }),
+      getOutlet: () => invoke<string | null>("cenovnik_get_outlet"),
+      getPublishTarget: () =>
+        invoke<CenovnikPublishTarget>("cenovnik_get_publish_target"),
+      setPublishTarget: (request) =>
+        invoke<CenovnikPublishTarget>("cenovnik_set_publish_target", {
+          request,
+        }),
+      getNotice: () => invoke<LegalNotice>("cenovnik_get_notice"),
+    },
+    popis: {
+      list: () => invoke<PopisSummary[]>("popis_list"),
+      get: (id) => invoke<PopisSessionView>("popis_get", { id }),
+      proveraListi: (id, prijavljene) =>
+        invoke<ProveraListiView>("popis_provera_listi", { id, prijavljene }),
+      open: (request) =>
+        invoke<PopisSessionView>("popis_open", { request }),
+      // The payload is forwarded unchanged, `knjigovodstvenaKolicinaMilli`
+      // included. It is refused **at the backend boundary** while čl. 8 st. 5
+      // withholds it, and that refusal is the point: an adapter that dropped
+      // the field would leave a caller believing it had stored book data, and
+      // one that defaulted it would refuse every blind count.
+      saveLine: (sessionId, lineId, input) =>
+        invoke<PopisSessionView>("popis_save_line", {
+          sessionId,
+          lineId,
+          input,
+        }),
+      startCount: (id) => invoke<PopisSessionView>("popis_start_count", { id }),
+      signPhaseA: (id, potpisnici) =>
+        invoke<PopisSessionView>("popis_sign_phase_a", { id, potpisnici }),
+      compute: (id) => invoke<PopisSessionView>("popis_compute", { id }),
+      signPhaseB: (id, potpisnici) =>
+        invoke<PopisSessionView>("popis_sign_phase_b", { id, potpisnici }),
+      post: (id) => invoke<PopisSessionView>("popis_post", { id }),
+      getPodesavanja: () =>
+        invoke<PopisPodesavanja>("popis_podesavanja_get"),
+      setPodesavanja: (podesavanja) =>
+        invoke<PopisPodesavanja>("popis_podesavanja_set", { podesavanja }),
+      nivelacijaPregled: () =>
+        invoke<NivelacijaPregledView>("popis_nivelacija_pregled"),
+      nivelacijaObuhvat: (id, obuhvat) =>
+        invoke<NivelacijaObuhvatView>("popis_nivelacija_obuhvat", {
+          id,
+          obuhvat,
+        }),
+      izvestaj: (id, request) =>
+        invoke<IzvestajView>("popis_izvestaj", { id, request }),
     },
     print: {
       openForPrint: (path) => openPath(path),

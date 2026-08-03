@@ -53,6 +53,18 @@ pub struct CashMovementRequest {
     /// that records the polog before the bank confirms it must not be blocked.
     #[serde(default)]
     pub bank_reference: Option<String>,
+    /// `bank_withdrawal` only: the operator's assertion that this payout was
+    /// made per Pravilnik 77/2011 čl. 2 st. 2 (against the original
+    /// documentation submitted to the bank na uvid i overu) or čl. 2 st. 3 (the
+    /// 150.000 RSD/day undocumented lane) — the sole condition on which čl. 5
+    /// st. 2 keeps the money out of the čl. 3 st. 1 deposit base.
+    ///
+    /// `None` is "the operator asserted nothing" and is the default, because the
+    /// exclusion shrinks the base: asserting on the operator's behalf could
+    /// produce a false „izmireno" state. `None` is stored as SQL NULL rather
+    /// than collapsed to 0 so the ledger keeps saying which it was.
+    #[serde(default)]
+    pub documented_per_pravilnik: Option<bool>,
 }
 
 /// The four movement types `cash_movements.movement_type` accepts (migration
@@ -133,19 +145,30 @@ pub fn record_cash_movement(
     let now = utc_now().map_err(CommandError::from)?;
     let note = normalized_note(request.reason);
     let bank_reference = normalized_note(request.bank_reference);
+    // The Pravilnik 77/2011 čl. 2 st. 2/st. 3 assertion is about a payout from
+    // the shop's own account, so it is meaningless on any other direction and is
+    // dropped there rather than stored as a 1 some later reader could key an
+    // exclusion off. `None` stays NULL: "nothing asserted", which
+    // `cash_deposit::load_cash_inflows` treats as still subject to the duty.
+    let documented_per_pravilnik = if request.direction == "bank_withdrawal" {
+        request.documented_per_pravilnik.map(i64::from)
+    } else {
+        None
+    };
     state
         .db()
         .open()
         .map_err(CommandError::from)?
         .execute(
-            "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, reason, bank_reference, user_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO cash_movements (shift_id, movement_type, amount_minor, reason, bank_reference, documented_per_pravilnik, user_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 summary.id,
                 request.direction,
                 request.amount_minor,
                 note,
                 bank_reference,
+                documented_per_pravilnik,
                 user_id,
                 now
             ],
@@ -866,6 +889,7 @@ mod tests {
                     amount_minor: 5000,
                     reason: Some("Sitan novac".to_string()),
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("pay_in should record");
@@ -878,6 +902,7 @@ mod tests {
                     amount_minor: 2000,
                     reason: None,
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("pay_out should record");
@@ -914,6 +939,7 @@ mod tests {
                     amount_minor: 5000,
                     reason: None,
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect_err("cash movement without an open shift should fail");
@@ -946,6 +972,7 @@ mod tests {
                         amount_minor: 0,
                         reason: None,
                         bank_reference: None,
+                        documented_per_pravilnik: None,
                     },
                 )
                 .expect_err("non-positive amount should fail");
@@ -977,6 +1004,7 @@ mod tests {
                     amount_minor: 1000,
                     reason: None,
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect_err("unknown direction should fail");
@@ -1009,6 +1037,7 @@ mod tests {
                     amount_minor: 3000,
                     reason: Some("Sitan novac".to_string()),
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("pay_in should record");
@@ -1021,6 +1050,7 @@ mod tests {
                     amount_minor: 1000,
                     reason: Some("Isplata dobavljaču".to_string()),
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("pay_out should record");
@@ -1061,6 +1091,7 @@ mod tests {
                     amount_minor: 20_000,
                     reason: Some("Kusur".to_string()),
                     bank_reference: Some("izvod-7".to_string()),
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("withdrawal should record");
@@ -1073,6 +1104,7 @@ mod tests {
                     amount_minor: 50_000,
                     reason: Some("Polog pazara".to_string()),
                     bank_reference: Some("uplatnica-3".to_string()),
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("deposit should record");
@@ -1140,6 +1172,7 @@ mod tests {
                     amount_minor: 10_000,
                     reason: Some("Polog pazara".to_string()),
                     bank_reference: Some("   ".to_string()),
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("deposit should record");
@@ -1156,6 +1189,115 @@ mod tests {
             assert_eq!(
                 stored, None,
                 "prazan broj uplatnice mora biti NULL, ne razmak"
+            );
+        });
+    }
+
+    /// Pravilnik 77/2011 čl. 5 st. 2 relieves a withdrawal from the čl. 3 st. 1
+    /// deposit base only where it was paid out per čl. 2 st. 2 or st. 3, so the
+    /// assertion has to be recorded per movement — and its absence must land as
+    /// SQL NULL, never as a 0/1 the operator never made. `cash_deposit.rs` reads
+    /// NULL and 0 alike as "still subject"; a request that silently defaulted to
+    /// 1 would shrink the base on the operator's behalf.
+    #[test]
+    fn the_pravilnik_assertion_is_recorded_per_withdrawal_and_defaults_to_null() {
+        with_state("withdrawal_documented_flag", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 0,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            for (amount_minor, documented) in [
+                (10_000_i64, None),
+                (20_000, Some(true)),
+                (30_000, Some(false)),
+            ] {
+                record_cash_movement(
+                    state,
+                    cashier_id,
+                    CashMovementRequest {
+                        direction: "bank_withdrawal".to_string(),
+                        amount_minor,
+                        reason: Some("Kusur".to_string()),
+                        bank_reference: None,
+                        documented_per_pravilnik: documented,
+                    },
+                )
+                .expect("withdrawal should record");
+            }
+
+            let connection = state.db().open().expect("database should open");
+            let stored = |amount_minor: i64| -> Option<i64> {
+                connection
+                    .query_row(
+                        "SELECT documented_per_pravilnik FROM cash_movements
+                         WHERE shift_id = ?1 AND amount_minor = ?2",
+                        params![opened.id, amount_minor],
+                        |row| row.get(0),
+                    )
+                    .expect("cash movement should query")
+            };
+
+            assert_eq!(
+                stored(10_000),
+                None,
+                "neizjašnjeno podizanje mora ostati NULL, ne 0/1"
+            );
+            assert_eq!(stored(20_000), Some(1), "potvrđena isplata po pravilniku");
+            assert_eq!(stored(30_000), Some(0), "izričito nepotvrđena isplata");
+        });
+    }
+
+    /// The flag means one thing only: "this payout was made per Pravilnik
+    /// 77/2011 čl. 2 st. 2 or st. 3". A pay_in, a pay_out and a polog are not
+    /// payouts from the shop's own account at all, so an assertion attached to
+    /// one is meaningless and must not be persisted — a stored 1 there would be
+    /// a standing invitation for a later reader to key an exclusion off it.
+    #[test]
+    fn the_pravilnik_assertion_is_dropped_outside_a_bank_withdrawal() {
+        with_state("documented_flag_only_on_withdrawal", |state| {
+            let cashier_id = seed_cashier(state);
+            let opened = open_shift_for_user(
+                state,
+                cashier_id,
+                OpenShiftRequest {
+                    opening_cash_minor: 100_000,
+                    note: None,
+                },
+            )
+            .expect("shift should open");
+
+            record_cash_movement(
+                state,
+                cashier_id,
+                CashMovementRequest {
+                    direction: "bank_deposit".to_string(),
+                    amount_minor: 40_000,
+                    reason: Some("Polog pazara".to_string()),
+                    bank_reference: None,
+                    documented_per_pravilnik: Some(true),
+                },
+            )
+            .expect("deposit should record");
+
+            let connection = state.db().open().expect("database should open");
+            let stored: Option<i64> = connection
+                .query_row(
+                    "SELECT documented_per_pravilnik FROM cash_movements WHERE shift_id = ?1",
+                    params![opened.id],
+                    |row| row.get(0),
+                )
+                .expect("cash movement should query");
+
+            assert_eq!(
+                stored, None,
+                "potvrda po pravilniku ima smisla samo uz podizanje sa računa"
             );
         });
     }
@@ -1184,6 +1326,7 @@ mod tests {
                     amount_minor: 3000,
                     reason: None,
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("pay_in should record");
@@ -1196,6 +1339,7 @@ mod tests {
                     amount_minor: 1000,
                     reason: None,
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("pay_out should record");
@@ -1244,6 +1388,7 @@ mod tests {
                     amount_minor: 3000,
                     reason: None,
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("pay_in should record");
@@ -1256,6 +1401,7 @@ mod tests {
                     amount_minor: 1000,
                     reason: None,
                     bank_reference: None,
+                    documented_per_pravilnik: None,
                 },
             )
             .expect("pay_out should record");

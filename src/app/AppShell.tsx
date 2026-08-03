@@ -1,5 +1,6 @@
 import {
   AlertCircleIcon,
+  CoinsIcon,
   DatabaseBackupIcon,
   LogInIcon,
   LogOutIcon,
@@ -20,12 +21,16 @@ import { FirstRunTaxSetup } from "@/app/FirstRunTaxSetup";
 import { ImportWizard } from "@/app/import/ImportWizard";
 import { InventoryScreen } from "@/app/inventory/InventoryScreen";
 import { KepModule } from "@/app/kep/KepModule";
+import { PopisModule } from "@/app/popis/PopisModule";
 import {
   foundationCards,
   navigationItems,
   type NavigationItemId,
 } from "@/app/navigation";
+import { PrivacyModule } from "@/app/privacy/PrivacyModule";
 import { ReklamacijeModule } from "@/app/reklamacije/ReklamacijeModule";
+import { MyHoursScreen } from "@/app/worktime/MyHoursPanel";
+import { WorkTimeModule } from "@/app/worktime/WorkTimeModule";
 import { ReportsScreen } from "@/app/reports/ReportsScreen";
 import { ReceiptsScreen } from "@/app/ReceiptsScreen";
 import { RegisterScreen } from "@/app/register/RegisterScreen";
@@ -51,6 +56,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -61,6 +67,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   Field,
+  FieldContent,
   FieldDescription,
   FieldError,
   FieldGroup,
@@ -104,6 +111,8 @@ import type {
   BackupStatus,
   CashMovementDirection,
   CommandError,
+  EmployeeProfile,
+  EurRateStatus,
   SaveUserRequest,
   ShiftSummary,
   UserAccount,
@@ -123,6 +132,9 @@ const ROLE_LABELS: Record<UserRole, string> = {
   admin: "Admin",
   cashier: "Kasir",
 };
+
+/** How often the shell re-reads the EUR rate readiness state. */
+const EUR_RATE_POLL_INTERVAL_MS = 60_000;
 
 export function AppShell({ services }: AppShellProps) {
   const [activeId, setActiveId] = useState<NavigationItemId>("register");
@@ -329,6 +341,7 @@ export function AppShell({ services }: AppShellProps) {
             <Badge variant={session.currentShift ? "secondary" : "outline"}>
               {shiftBadge}
             </Badge>
+            <ShellEurRateStatus services={services} role={session.user.role} />
             <ShellBackupStatus services={services} />
             <BackendStatus services={services} />
           </header>
@@ -372,7 +385,19 @@ function renderModule({
   onOpenProductLedger: (productId: number) => void;
   onInventoryLedgerOpened: () => void;
 }) {
-  if (session.user.role === "cashier" && !session.currentShift) {
+  // A cashier with no open shift is sent to „Otvori smenu“ before anything
+  // else — with one exception. „Moji sati“ discharges the employee's *own*
+  // rights (ZoR čl. 83 st. 1, ZZPL čl. 26), and a right of access cannot be
+  // conditioned on first opening a till: that would both withhold the data
+  // from an off-shift employee and fabricate a cash-control record as the
+  // price of a data-subject request. The surface is session-gated backend-side
+  // (`worktime_my_hours` returns own rows only), so nothing here rests on the
+  // shift gate. Every other module stays behind it.
+  if (
+    activeId !== "moji-sati" &&
+    session.user.role === "cashier" &&
+    !session.currentShift
+  ) {
     return (
       <OpenShiftScreen
         services={services}
@@ -472,6 +497,22 @@ function renderModule({
     return <KepModule services={services} />;
   }
 
+  if (activeId === "popis") {
+    return <PopisModule services={services} />;
+  }
+
+  if (activeId === "worktime") {
+    return <WorkTimeModule services={services} currentUser={session.user} />;
+  }
+
+  if (activeId === "moji-sati") {
+    return <MyHoursScreen services={services} />;
+  }
+
+  if (activeId === "privatnost") {
+    return <PrivacyModule services={services} />;
+  }
+
   if (activeId === "campaigns") {
     return <CampaignsModule services={services} />;
   }
@@ -481,6 +522,97 @@ function renderModule({
   }
 
   return null;
+}
+
+/**
+ * "Can the cash-limit check run at all?" answered in the shell status strip,
+ * next to the DB, backup and shift state.
+ *
+ * The AML čl. 46 st. 1 check is derived from the NBS middle rate. With no rate
+ * cached the check silently does not run, and until now nothing said so outside
+ * Podešavanja → Kurs — an admin had to go looking. This is the readiness signal
+ * that ends the scavenger hunt.
+ *
+ * Three things it must not get wrong. **Obtaining the rate is not itself a
+ * statutory duty** — it is the precondition for a check the shop *is* bound by,
+ * so the copy names an unrun check, never an offence, and carries no penalty
+ * figure (those live only in `src-tauri/src/legal.rs`). **Selling is never
+ * blocked**, so the copy says so out loud rather than letting a red badge imply
+ * the till is stuck. And it is **admin-only**: a cashier can do nothing about
+ * the rate — the Kurs tab is admin-gated — so telling them would be noise, and
+ * the shell does not even ask on their behalf.
+ *
+ * A failed read is silence, not an error badge: a readiness hint that itself
+ * turns into an alarm is worse than no hint.
+ */
+function ShellEurRateStatus({
+  services,
+  role,
+}: {
+  services: PosServices;
+  role: UserRole;
+}) {
+  const settingsService = (services as Partial<PosServices>).settings;
+  const [status, setStatus] = useState<EurRateStatus | null>(null);
+
+  useEffect(() => {
+    if (
+      role !== "admin" ||
+      !settingsService ||
+      typeof settingsService.getEurRate !== "function"
+    ) {
+      return;
+    }
+
+    let ignore = false;
+    const read = () => {
+      settingsService.getEurRate().then(
+        (next) => {
+          if (!ignore) {
+            setStatus(next);
+          }
+        },
+        () => {
+          // Deliberately silent — see the note above.
+        },
+      );
+    };
+
+    read();
+    // Re-read on a slow tick rather than only on mount. Two things land after
+    // the first read and both have to clear the badge on their own: the
+    // opportunistic NBS refresh, which login kicks off detached and which
+    // finishes a second or two later, and the admin fixing the rate by hand in
+    // Podešavanja → Kurs. A badge still claiming „kurs nije poznat“ after the
+    // operator has just set one is worse than no badge. It is one local SQLite
+    // read a minute.
+    const timer = window.setInterval(read, EUR_RATE_POLL_INTERVAL_MS);
+
+    return () => {
+      ignore = true;
+      window.clearInterval(timer);
+    };
+  }, [settingsService, role]);
+
+  if (!status || (status.rate !== null && !status.isStale)) {
+    return null;
+  }
+
+  const missing = status.rate === null;
+
+  return (
+    <Badge
+      variant={missing ? "destructive" : "outline"}
+      title={
+        missing
+          ? "Provera dinarskog limita za gotovinu ne može da se izvrši dok kurs evra nije poznat. Prodaja nije blokirana — račun se može završiti i bez kursa. Otvorite Podešavanja → Kurs i osvežite kurs sa NBS-a ili ga unesite ručno."
+          : "Provera dinarskog limita za gotovinu se računa po starijem kursu jer sačuvani kurs evra nije od današnjeg dana. Prodaja nije blokirana. Otvorite Podešavanja → Kurs i osvežite kurs sa NBS-a ili unesite današnji kurs ručno."
+      }
+    >
+      <CoinsIcon data-icon="inline-start" />
+      {missing ? "Kurs nije poznat" : "Kurs nije od danas"}
+    </Badge>
+  );
 }
 
 function ShellBackupStatus({ services }: { services: PosServices }) {
@@ -976,6 +1108,23 @@ const BANK_DIRECTION_NOTES: Record<"bank_deposit" | "bank_withdrawal", string> =
       "samo ako je isplata izvršena u skladu sa čl. 2 st. 2 ili st. 3 tog pravilnika — sačuvajte dokumentaciju.",
   };
 
+/**
+ * The one question that decides whether Pravilnik 77/2011 čl. 5 st. 2 reaches
+ * this podizanje at all. It is phrased as a declaration about the payout, not as
+ * a preference: the exclusion shrinks the čl. 3 st. 1 deposit base, so a wrong
+ * „da“ can show the shop „izmireno“ while the cash is still in the drawer.
+ * Unticked therefore leaves the money in the base — the safe direction — and the
+ * description says so, so nobody reads the empty box as a missing convenience.
+ */
+const WITHDRAWAL_PRAVILNIK_LABEL =
+  "Isplata je izvršena u skladu sa Pravilnikom 77/2011 čl. 2 st. 2 ili st. 3";
+
+const WITHDRAWAL_PRAVILNIK_DESCRIPTION =
+  "Označite samo ako je gotovina isplaćena uz originalnu dokumentaciju podnetu banci na uvid i " +
+  "overu (čl. 2 st. 2) ili u okviru dnevnog limita od 150.000 dinara bez dokumentacije " +
+  "(čl. 2 st. 3). Ovo je izjava o dokumentaciji, a ne podešavanje: bez nje iznos ostaje u " +
+  "osnovici za polog i ima rok od sedam radnih dana.";
+
 function isBankDirection(
   direction: CashMovementDirection,
 ): direction is "bank_deposit" | "bank_withdrawal" {
@@ -993,9 +1142,11 @@ function CashMovementForm({
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
   const [bankReference, setBankReference] = useState("");
+  const [pravilnikDocumented, setPravilnikDocumented] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const bankDirection = isBankDirection(direction);
+  const withdrawal = direction === "bank_withdrawal";
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1021,11 +1172,16 @@ function CashMovementForm({
         // A shop that records the polog before the bank confirms it must not be
         // blocked, so the reference stays optional — blank means „not yet".
         bankReference: bankDirection ? bankReference.trim() || null : null,
+        // An unticked box is „ništa nije izjavljeno", which is `null` — not an
+        // explicit „ne". Both keep the money in the čl. 3 st. 1 base, but only
+        // `null` refrains from putting a declaration in the operator's mouth.
+        documentedPerPravilnik: withdrawal && pravilnikDocumented ? true : null,
       });
       onShiftUpdate(updated);
       setAmount("");
       setReason("");
       setBankReference("");
+      setPravilnikDocumented(false);
       toast.success(CASH_MOVEMENT_DONE[direction]);
     } catch (movementError) {
       setError(errorMessage(movementError, "Transakcija nije izvršena."));
@@ -1051,9 +1207,12 @@ function CashMovementForm({
             id="cash-movement-direction"
             value={direction}
             className="w-full"
-            onChange={(event) =>
-              setDirection(event.target.value as CashMovementDirection)
-            }
+            onChange={(event) => {
+              setDirection(event.target.value as CashMovementDirection);
+              // The declaration belongs to one payout. Switching the movement
+              // type must not carry a tick made for a different one.
+              setPravilnikDocumented(false);
+            }}
           >
             <NativeSelectOption value="pay_in">
               {CASH_MOVEMENT_LABELS.pay_in}
@@ -1092,6 +1251,28 @@ function CashMovementForm({
             <FieldDescription>
               {BANK_DIRECTION_NOTES[direction]}
             </FieldDescription>
+          </Field>
+        ) : null}
+        {withdrawal ? (
+          <Field orientation="horizontal">
+            <Checkbox
+              id="cash-movement-pravilnik-documented"
+              checked={pravilnikDocumented}
+              onCheckedChange={(checked) =>
+                setPravilnikDocumented(Boolean(checked))
+              }
+            />
+            <FieldContent>
+              <FieldLabel
+                htmlFor="cash-movement-pravilnik-documented"
+                className="font-normal"
+              >
+                {WITHDRAWAL_PRAVILNIK_LABEL}
+              </FieldLabel>
+              <FieldDescription>
+                {WITHDRAWAL_PRAVILNIK_DESCRIPTION}
+              </FieldDescription>
+            </FieldContent>
           </Field>
         ) : null}
         <Field>
@@ -1276,7 +1457,7 @@ function AdminForceCloseShiftPanel({
   );
 }
 
-function UsersScreen({
+export function UsersScreen({
   services,
   currentUser,
 }: {
@@ -1287,6 +1468,11 @@ function UsersScreen({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
+  // Fetched only when an admin opens one employee's account. The čl. 90 flag is
+  // health data, so it never rides along with the list that draws the table.
+  const [editingProfile, setEditingProfile] = useState<EmployeeProfile | null>(
+    null,
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
 
   useEffect(() => {
@@ -1336,11 +1522,26 @@ function UsersScreen({
           <p className="text-xs text-muted-foreground">
             Lokalni nalozi za administratore i kasire.
           </p>
+          {/*
+            ZZPL req. 24. The lifecycle here ends at deactivation and there is
+            no delete affordance anywhere — not in this table, not in the
+            employee dialog, not behind a menu. The ZEOR čl. 5 register is a
+            physically separate store kept trajno under čl. 7 st. 2, its foreign
+            key carries no cascade, and this line says so out loud so nobody
+            goes looking for the button that is missing on purpose.
+          */}
+          <p className="text-xs text-muted-foreground">
+            Deaktivacija ne briše evidenciju o zaposlenom: ta evidencija se vodi
+            odvojeno od naloga i čuva se trajno po posebnom propisu (ZEOR čl. 7
+            st. 2), pa program nema radnju koja briše zaposlenog. Korisničko ime
+            se posle deaktivacije ne dodeljuje ponovo.
+          </p>
         </div>
         <Button
           type="button"
           onClick={() => {
             setEditingUser(null);
+            setEditingProfile(null);
             setDialogOpen(true);
           }}
         >
@@ -1401,8 +1602,22 @@ function UsersScreen({
                           variant="outline"
                           size="sm"
                           onClick={() => {
-                            setEditingUser(user);
-                            setDialogOpen(true);
+                            void services.users
+                              .getEmployeeProfile(user.id)
+                              .then((profile) => {
+                                setEditingUser(user);
+                                setEditingProfile(profile);
+                                setError(null);
+                                setDialogOpen(true);
+                              })
+                              .catch((profileError) =>
+                                setError(
+                                  errorMessage(
+                                    profileError,
+                                    "Profil zaposlenog nije učitan.",
+                                  ),
+                                ),
+                              );
                           }}
                         >
                           Uredi
@@ -1450,6 +1665,7 @@ function UsersScreen({
       <UserDialog
         open={dialogOpen}
         user={editingUser}
+        profile={editingProfile}
         onOpenChange={setDialogOpen}
         onSave={async (request) => {
           const saved = editingUser
@@ -1468,14 +1684,39 @@ function UsersScreen({
   );
 }
 
-function UserDialog({
+/**
+ * „Nije upisano“ is a third state, not a false: v17 leaves every čl. 91 flag
+ * nullable because an employee nobody has profiled yet is not an employee whose
+ * child does not exist.
+ */
+type ProfileFlag = "" | "da" | "ne";
+
+function flagValue(value: boolean | null): ProfileFlag {
+  if (value === null) {
+    return "";
+  }
+
+  return value ? "da" : "ne";
+}
+
+function flagFromValue(value: ProfileFlag): boolean | null {
+  if (value === "") {
+    return null;
+  }
+
+  return value === "da";
+}
+
+export function UserDialog({
   open,
   user,
+  profile,
   onOpenChange,
   onSave,
 }: {
   open: boolean;
   user: UserAccount | null;
+  profile: EmployeeProfile | null;
   onOpenChange: (open: boolean) => void;
   onSave: (request: SaveUserRequest) => Promise<void>;
 }) {
@@ -1485,8 +1726,27 @@ function UserDialog({
   const [active, setActive] = useState(true);
   const [pin, setPin] = useState("");
   const [password, setPassword] = useState("");
+  const [datumRodjenja, setDatumRodjenja] = useState("");
+  const [datumRodjenjaDeteta, setDatumRodjenjaDeteta] = useState("");
+  const [samohraniRoditelj, setSamohraniRoditelj] = useState<ProfileFlag>("");
+  const [deteTezakInvalid, setDeteTezakInvalid] = useState<ProfileFlag>("");
+  const [trudnocaIliDojenje, setTrudnocaIliDojenje] = useState<ProfileFlag>("");
+  const [trudnocaIliDojenjeOd, setTrudnocaIliDojenjeOd] = useState("");
+  const [radiUPreraspodeli, setRadiUPreraspodeli] = useState(false);
+  const [ugovorenoRadnoVreme, setUgovorenoRadnoVreme] = useState("");
+  const [zanimanjeSifra, setZanimanjeSifra] = useState("");
+  const [kvalifikacijaSifra, setKvalifikacijaSifra] = useState("");
+  const [saglasnostPrekovremeniOd, setSaglasnostPrekovremeniOd] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  /**
+   * ZZPL req. 24 — deaktivacija bez ponovnog dodeljivanja imena. Ime se menja
+   * samo dok je postojeći nalog aktivan i takav ostaje: preimenovanje pri
+   * deaktivaciji oslobodilo bi ime otišlog zaposlenog za novi nalog. Novi nalog
+   * nema šta da zamrzne.
+   */
+  const imeZamrznuto = user !== null && (!user.active || !active);
 
   useEffect(() => {
     if (!open) {
@@ -1499,8 +1759,24 @@ function UserDialog({
     setActive(user?.active ?? true);
     setPin("");
     setPassword("");
+    setDatumRodjenja(profile?.datumRodjenja ?? "");
+    setDatumRodjenjaDeteta(profile?.datumRodjenjaNajmladjegDeteta ?? "");
+    setSamohraniRoditelj(flagValue(profile?.samohraniRoditelj ?? null));
+    setDeteTezakInvalid(flagValue(profile?.deteTezakInvalid ?? null));
+    setTrudnocaIliDojenje(flagValue(profile?.trudnocaIliDojenje ?? null));
+    setTrudnocaIliDojenjeOd(profile?.trudnocaIliDojenjeOd ?? "");
+    setRadiUPreraspodeli(profile?.radiUPreraspodeli ?? false);
+    setUgovorenoRadnoVreme(
+      profile?.ugovorenoRadnoVremeMinutaNedeljno === null ||
+        profile?.ugovorenoRadnoVremeMinutaNedeljno === undefined
+        ? ""
+        : String(profile.ugovorenoRadnoVremeMinutaNedeljno),
+    );
+    setZanimanjeSifra(profile?.zanimanjeSifra ?? "");
+    setKvalifikacijaSifra(profile?.kvalifikacijaSifra ?? "");
+    setSaglasnostPrekovremeniOd(profile?.saglasnostPrekovremeniOd ?? "");
     setError(null);
-  }, [open, user]);
+  }, [open, user, profile]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1521,6 +1797,12 @@ function UserDialog({
       return;
     }
 
+    const ugovoreno = Number(ugovorenoRadnoVreme.trim());
+    if (ugovorenoRadnoVreme.trim() && !Number.isInteger(ugovoreno)) {
+      setError("Ugovoreno radno vreme se unosi u celim minutima.");
+      return;
+    }
+
     setSubmitting(true);
     try {
       await onSave({
@@ -1530,6 +1812,21 @@ function UserDialog({
         active,
         pin: pin.trim() || null,
         password: password.trim() || null,
+        profile: {
+          datumRodjenja: datumRodjenja.trim() || null,
+          datumRodjenjaNajmladjegDeteta: datumRodjenjaDeteta.trim() || null,
+          samohraniRoditelj: flagFromValue(samohraniRoditelj),
+          deteTezakInvalid: flagFromValue(deteTezakInvalid),
+          trudnocaIliDojenje: flagFromValue(trudnocaIliDojenje),
+          trudnocaIliDojenjeOd: trudnocaIliDojenjeOd.trim() || null,
+          radiUPreraspodeli,
+          ugovorenoRadnoVremeMinutaNedeljno: ugovorenoRadnoVreme.trim()
+            ? ugovoreno
+            : null,
+          zanimanjeSifra: zanimanjeSifra.trim() || null,
+          kvalifikacijaSifra: kvalifikacijaSifra.trim() || null,
+          saglasnostPrekovremeniOd: saglasnostPrekovremeniOd.trim() || null,
+        },
       });
     } catch (saveError) {
       setError(errorMessage(saveError, "Korisnik nije sačuvan."));
@@ -1540,7 +1837,13 @@ function UserDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      {/*
+        Profil zaposlenog je dugačak: sedamnaest polja sa objašnjenjima preraste
+        visinu ekrana na kasi. Osnovni DialogContent je fiksiran i centriran, bez
+        ograničenja visine i bez skrolovanja, pa bi DialogFooter ostao van dohvata
+        i profil se ne bi mogao sačuvati. Isti obrazac koristi i CampaignWizard.
+      */}
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{user ? "Uredi korisnika" : "Novi korisnik"}</DialogTitle>
           <DialogDescription>
@@ -1552,11 +1855,25 @@ function UserDialog({
             {error ? <FieldError>{error}</FieldError> : null}
             <Field>
               <FieldLabel htmlFor="user-username">Korisničko ime</FieldLabel>
+              {/*
+                ZZPL req. 24. Deaktivirani nalog zadržava svoje korisničko ime da
+                se ono ne bi dodelilo ponovo; preimenovanje bi ga oslobodilo i
+                poništilo pravilo koje ekran Korisnici saopštava operateru. Ime
+                se menja samo dok je nalog aktivan i takav ostaje — isto pravilo
+                odbija i `update_user`, pa ovo polje samo saopštava zašto.
+              */}
               <Input
                 id="user-username"
                 value={username}
+                disabled={imeZamrznuto}
                 onChange={(event) => setUsername(event.target.value)}
               />
+              {imeZamrznuto ? (
+                <FieldDescription>
+                  Korisničko ime deaktiviranog naloga ostaje zauzeto, pa se više
+                  ne menja.
+                </FieldDescription>
+              ) : null}
             </Field>
             <Field>
               <FieldLabel htmlFor="user-display-name">Ime za prikaz</FieldLabel>
@@ -1584,7 +1901,16 @@ function UserDialog({
                 id="user-active"
                 value={active ? "active" : "inactive"}
                 className="w-full"
-                onChange={(event) => setActive(event.target.value === "active")}
+                onChange={(event) => {
+                  const sledeci = event.target.value === "active";
+                  setActive(sledeci);
+                  // ZZPL req. 24: preimenovanje ne prolazi kroz deaktivaciju.
+                  // Ime se vraća na sačuvano čim status pređe u „Neaktivan“, pa
+                  // se čuvanje ne odbija zbog vrednosti koja je već otkucana.
+                  if (!sledeci && user) {
+                    setUsername(user.username);
+                  }
+                }}
               >
                 <NativeSelectOption value="active">Aktivan</NativeSelectOption>
                 <NativeSelectOption value="inactive">Neaktivan</NativeSelectOption>
@@ -1607,6 +1933,232 @@ function UserDialog({
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
               />
+            </Field>
+          </FieldGroup>
+
+          <Separator />
+
+          <FieldGroup>
+            <div className="flex flex-col gap-1">
+              <h3 className="text-sm font-semibold">
+                Evidencija radnog vremena — profil zaposlenog
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Iz ovih podataka se izvode provere ZoR čl. 87–91 nad dnevnim
+                unosom radnog vremena. Popunjava ih poslodavac iz ugovora o radu
+                i dokumentacije koju već čuva; zaposleni ih ne unosi i ništa u
+                ovoj aplikaciji ne potpisuje.
+              </p>
+            </div>
+
+            <Field>
+              <FieldLabel htmlFor="user-datum-rodjenja">Datum rođenja</FieldLabel>
+              <Input
+                id="user-datum-rodjenja"
+                type="date"
+                value={datumRodjenja}
+                onChange={(event) => setDatumRodjenja(event.target.value)}
+              />
+              <FieldDescription>
+                ZoR čl. 87 i ZoR čl. 88 st. 1 — zaposleni mlađi od 18 godina
+                života ne radi duže od osam časova dnevno, a prekovremeni rad i
+                preraspodela radnog vremena su mu zabranjeni.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-datum-deteta">
+                Datum rođenja najmlađeg deteta
+              </FieldLabel>
+              <Input
+                id="user-datum-deteta"
+                type="date"
+                value={datumRodjenjaDeteta}
+                onChange={(event) => setDatumRodjenjaDeteta(event.target.value)}
+              />
+              <FieldDescription>
+                ZoR čl. 91 st. 1 — roditelj deteta do tri godine života radi
+                prekovremeno samo uz svoju pisanu saglasnost.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-samohrani">Samohrani roditelj</FieldLabel>
+              <NativeSelect
+                id="user-samohrani"
+                value={samohraniRoditelj}
+                className="w-full"
+                onChange={(event) =>
+                  setSamohraniRoditelj(event.target.value as ProfileFlag)
+                }
+              >
+                <NativeSelectOption value="">Nije upisano</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>
+                ZoR čl. 91 st. 2 — kod samohranog roditelja granica je dete do
+                sedam godina života.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-dete-invalid">
+                Dete je težak invalid
+              </FieldLabel>
+              <NativeSelect
+                id="user-dete-invalid"
+                value={deteTezakInvalid}
+                className="w-full"
+                onChange={(event) =>
+                  setDeteTezakInvalid(event.target.value as ProfileFlag)
+                }
+              >
+                <NativeSelectOption value="">Nije upisano</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>
+                Druga alternativa iz ZoR čl. 91 st. 2, koja nema starosne
+                granice — pisana saglasnost se traži i kada je dete starije od
+                sedam godina. Čl. 91 st. 2 i u ovoj alternativi govori o
+                samohranom roditelju, pa provera radi samo uz „Samohrani
+                roditelj: Da“.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-trudnoca">Trudnoća ili dojenje</FieldLabel>
+              <NativeSelect
+                id="user-trudnoca"
+                value={trudnocaIliDojenje}
+                className="w-full"
+                onChange={(event) => {
+                  const izbor = event.target.value as ProfileFlag;
+                  setTrudnocaIliDojenje(izbor);
+                  // Datum bez oznake pravilo uparivanja iz ZoR čl. 90 odbija, pa
+                  // bi zaostali datum onemogućio prestanak evidencije: oznaka se
+                  // vraća na „Ne“, a čuvanje puca. Povlačenje oznake povlači datum.
+                  if (izbor !== "da") {
+                    setTrudnocaIliDojenjeOd("");
+                  }
+                }}
+              >
+                <NativeSelectOption value="">Nije upisano</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>
+                ZoR čl. 90 — ocenu daje nadležni zdravstveni organ, ne
+                aplikacija. Evidentira se samo da nalaz postoji i od kog datuma
+                važi; sam nalaz, dijagnoza i medicinska dokumentacija se ne unose
+                niti prilažu.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-trudnoca-od">Nalaz važi od</FieldLabel>
+              <Input
+                id="user-trudnoca-od"
+                type="date"
+                value={trudnocaIliDojenjeOd}
+                disabled={trudnocaIliDojenje !== "da"}
+                onChange={(event) => setTrudnocaIliDojenjeOd(event.target.value)}
+              />
+              <FieldDescription>
+                Datum od kog važi nalaz nadležnog zdravstvenog organa (ZoR čl.
+                90). Unosi se samo uz „Trudnoća ili dojenje: Da“; kada se oznaka
+                povuče, datum se briše.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-preraspodela">
+                Preraspodela radnog vremena
+              </FieldLabel>
+              <NativeSelect
+                id="user-preraspodela"
+                value={radiUPreraspodeli ? "da" : "ne"}
+                className="w-full"
+                onChange={(event) =>
+                  setRadiUPreraspodeli(event.target.value === "da")
+                }
+              >
+                <NativeSelectOption value="ne">Ne</NativeSelectOption>
+                <NativeSelectOption value="da">Da</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>
+                ZoR čl. 58 — u preraspodeli radnog vremena časovi preko punog
+                radnog vremena se ne izvode automatski kao prekovremeni rad.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-ugovoreno">
+                Ugovoreno radno vreme (minuta nedeljno)
+              </FieldLabel>
+              <Input
+                id="user-ugovoreno"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={2400}
+                step={1}
+                value={ugovorenoRadnoVreme}
+                onChange={(event) => setUgovorenoRadnoVreme(event.target.value)}
+              />
+              <FieldDescription>
+                ZoR čl. 51 st. 1 — puno radno vreme je 40 časova, odnosno 2400
+                minuta nedeljno. Nepuno radno vreme se upisuje kao manji broj
+                minuta.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-zanimanje">Šifra zanimanja</FieldLabel>
+              <Input
+                id="user-zanimanje"
+                value={zanimanjeSifra}
+                onChange={(event) => setZanimanjeSifra(event.target.value)}
+              />
+              <FieldDescription>
+                ZEOR čl. 44 st. 2 — upisuje se šifra iz Jedinstvenog kodeksa
+                šifara, ne opis posla.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-kvalifikacija">
+                Šifra kvalifikacije (nivo i vrsta)
+              </FieldLabel>
+              <Input
+                id="user-kvalifikacija"
+                value={kvalifikacijaSifra}
+                onChange={(event) => setKvalifikacijaSifra(event.target.value)}
+              />
+              <FieldDescription>
+                ZEOR čl. 44 st. 2 — šifra nivoa i vrste kvalifikacije iz istog
+                kodeksa.
+              </FieldDescription>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="user-saglasnost">
+                Pisana saglasnost za prekovremeni rad — datum
+              </FieldLabel>
+              <Input
+                id="user-saglasnost"
+                type="date"
+                value={saglasnostPrekovremeniOd}
+                onChange={(event) =>
+                  setSaglasnostPrekovremeniOd(event.target.value)
+                }
+              />
+              <FieldDescription>
+                ZoR čl. 91 — upisuje se datum od kog postoji pisana saglasnost
+                zaposlenog. Aplikacija tu saglasnost ne prikuplja i ne zamenjuje;
+                dokument se čuva izvan aplikacije.
+              </FieldDescription>
             </Field>
           </FieldGroup>
           <DialogFooter>

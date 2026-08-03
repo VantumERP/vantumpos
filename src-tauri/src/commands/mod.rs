@@ -1,20 +1,27 @@
+pub mod audit;
 pub mod auth;
 pub mod backup;
 pub mod backup_crypto;
+pub mod breaches;
 pub mod campaigns;
 pub mod cash_deposit;
 pub mod catalog;
+pub mod cenovnik;
 pub mod health;
 pub mod imports;
 pub mod inventory;
 pub mod kep;
+pub mod personnel;
+pub mod popis;
 pub mod receipts;
 pub mod reklamacije;
 pub mod reports;
+pub mod retention;
 pub mod sales;
 pub mod settings;
 pub mod shifts;
 pub mod users;
+pub mod worktime;
 
 #[cfg(test)]
 mod auth_shift_tests {

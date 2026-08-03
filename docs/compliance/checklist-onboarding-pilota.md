@@ -18,7 +18,7 @@ Provera u [Registru odobrenih elemenata EFU](https://www.purs.gov.rs/sr/eFiskali
 - [ ] **Pravni oblik:** `[ ] preduzetnik   [ ] d.o.o.`  → (d.o.o. je u obuhvatu Zakona o arhivskoj građi; v. F-9)
 - [ ] **PDV status:** `[ ] u sistemu PDV   [ ] nije u sistemu PDV`  → (PDV obveznik: retencioni prag 10 godina; izloženost SEF / e-otpremnici)
 
-## 3. Obuka „ESIR prvo, VantumPOS drugo"
+## 3. Obuka „ESIR prvo, VantumPOS drugo“
 
 - [ ] Objašnjeno: **svaka prodaja se prvo evidentira na odobrenom ESIR-u prodavnice**, pa se onda vodi u VantumPOS-u.
 - [ ] Objašnjen rizik **provokativne kupovine** (mystery-shopping / probna kupovina inspekcije) i posledice neizdavanja fiskalnog računa: prekršaj ([ZF čl. 15](https://www.paragraf.rs/propisi/zakon-o-fiskalizaciji-republike-srbije.html)) + zabrana vršenja delatnosti 15/90/365 dana ([ZF čl. 12](https://www.paragraf.rs/propisi/zakon-o-fiskalizaciji-republike-srbije.html)).
@@ -27,9 +27,9 @@ Provera u [Registru odobrenih elemenata EFU](https://www.purs.gov.rs/sr/eFiskali
 
 - [ ] Objašnjeno da prodaja **imaocima korporacijskih kartica** i kupcima iz javnog sektora (na zahtev u roku od 7 dana) povlači izdavanje **e-fakture preko SEF-a — pored (nikada pre) fiskalnog računa** ([ZEF čl. 3 st. 2 tač. 1, st. 3](https://www.parlament.gov.rs/upload/archive/files/lat/pdf/zakoni/14_saziv/2166-25-LAT..pdf)).
 
-## 5. Dokumentovano odbijanje „preskoči ESIR" zahteva
+## 5. Dokumentovano odbijanje „preskoči ESIR“ zahteva
 
-- [ ] Svaki zahtev za „**preskoči ESIR** za male prodaje" ili slično **odbija se pisano**; odbijanje se evidentira. (Držanje/upotreba softvera za izbegavanje evidentiranja prometa je krivično delo — [ZPPPA čl. 175b](https://www.paragraf.rs/propisi/zakon_o_poreskom_postupku_i_poreskoj_administraciji.html); v. `memo-uskladjenost-fiskalizacije.md`.)
+- [ ] Svaki zahtev za „**preskoči ESIR** za male prodaje“ ili slično **odbija se pisano**; odbijanje se evidentira. (Držanje/upotreba softvera za izbegavanje evidentiranja prometa je krivično delo — [ZPPPA čl. 175b](https://www.paragraf.rs/propisi/zakon_o_poreskom_postupku_i_poreskoj_administraciji.html); v. `memo-uskladjenost-fiskalizacije.md`.)
 
 ## 6. Lozinka (passphrase) rezervnih kopija (SW-2)
 

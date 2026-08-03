@@ -153,7 +153,8 @@ const cashDepositReport: CashDepositReport = {
   },
   footer:
     "Zbir po danu prometa je konvencija ove aplikacije, a ne zakonska kategorija. " +
-    "Gotovina podignuta sa tekućeg računa radnje izuzeta je iz osnovice po Pravilniku 77/2011 čl. 5 st. 2. " +
+    "Iz osnovice je izuzeta samo ona gotovina podignuta sa tekućeg računa radnje za koju je " +
+    "zabeleženo da je isplaćena u skladu sa Pravilnikom 77/2011 čl. 2 st. 2 ili čl. 2 st. 3. " +
     "Izveštaj je informativan: nadzor vrši Poreska uprava, a rok ne blokira prodaju, zatvaranje smene ni fiskalizaciju.",
 };
 
@@ -163,6 +164,7 @@ function buildUsersService(): UsersService {
     createUser: vi.fn(),
     updateUser: vi.fn(),
     deactivateUser: vi.fn(),
+    getEmployeeProfile: vi.fn(),
   };
 }
 
@@ -324,6 +326,65 @@ describe("ReportsScreen", () => {
     expect(
       within(metricCard as HTMLElement).getByText("700,00 RSD"),
     ).toBeInTheDocument();
+  });
+
+  it("breaks bank transfer out of shift turnover instead of swallowing it", async () => {
+    const reports = buildReportsService();
+    reports.getShiftTurnover = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          shiftId: 1,
+          openedAt: "2026-07-31T07:30:00Z",
+          closedAt: null,
+          cashierName: "Mira Kasir",
+          receiptCount: 3,
+          cashMinor: 10000,
+          cardMinor: 20000,
+          bankTransferMinor: 70000,
+          totalMinor: 100000,
+        },
+      ],
+    });
+    renderReports(reports);
+
+    const shiftsCard = (await screen.findByText("Smene")).closest(
+      "[data-slot='card']",
+    );
+    expect(shiftsCard).not.toBeNull();
+
+    // The shift row must show every tender its total is made of, otherwise a
+    // bank-transfer sale inflates "Ukupno" with nothing on the row to explain
+    // it: 100,00 + 200,00 + 700,00 = 1.000,00. Both lists are asserted in order
+    // so a value bound under the wrong heading fails rather than passing on
+    // mere presence.
+    expect(
+      within(shiftsCard as HTMLElement)
+        .getAllByRole("columnheader")
+        .map((header) => header.textContent),
+    ).toEqual([
+      "Smena",
+      "Kasir",
+      "Gotovina",
+      "Kartica",
+      "Prenos na račun",
+      "Ukupno",
+    ]);
+
+    const shiftRow = within(shiftsCard as HTMLElement).getByRole("row", {
+      name: /#1/,
+    });
+    expect(
+      within(shiftRow)
+        .getAllByRole("cell")
+        .map((cell) => cell.textContent),
+    ).toEqual([
+      "#1",
+      "Mira Kasir",
+      "100,00 RSD",
+      "200,00 RSD",
+      "700,00 RSD",
+      "1.000,00 RSD",
+    ]);
   });
 
   it("applies date filters through the reports service", async () => {

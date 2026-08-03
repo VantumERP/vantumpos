@@ -10,6 +10,7 @@ import type {
   CompletedSale,
   ProductSearchQuery,
   ProductSummary,
+  PriceDivergence,
   SaleDraftRequest,
   SalePreview,
 } from "@/services/types";
@@ -79,8 +80,34 @@ function createRegisterServices(
       // non-AML test, which is exactly the failure the till must not swallow.
       assessCashPayment: async (cashMinor: number) =>
         buildAmlAssessment(cashMinor, 100, todayIso(), amlPreduzetnikPenalty),
+      // The ordinary answer: the till rings what the outlet published. Every
+      // render asks, so the base double has to answer or the guard's own
+      // failure branch would fire on every unrelated test.
+      assessPriceIntegrity: async () => [],
     },
   } as unknown as PosServices;
+}
+
+/**
+ * One article rung above the published price — `commands::sales::
+ * PriceDivergence`. The snapshot fields are the exhibit: čl. 6 st. 4 binds the
+ * shop only to the file in force, so a divergence that named no file would be an
+ * accusation with none.
+ */
+function divergence(
+  overrides: Partial<PriceDivergence> = {},
+): PriceDivergence {
+  return {
+    productId: product.id,
+    productName: product.name,
+    productSku: product.sku,
+    chargedUnitPriceMinor: 15999,
+    publishedUnitPriceMinor: 14999,
+    snapshotId: 7,
+    snapshotGeneratedAt: "2026-06-18T09:45:00Z",
+    snapshotContentHash: "ff00ee11dd22cc33",
+    ...overrides,
+  };
 }
 
 function createSalePreview(
@@ -650,6 +677,54 @@ describe("RegisterScreen", () => {
     expect(completeSale).not.toHaveBeenCalled();
   }, AML_TEST_TIMEOUT_MS);
 
+  it("does not let a click inside the assessment window skip the reason", async () => {
+    const user = userEvent.setup();
+    const completeSale = vi.fn(createCompletedSale);
+    const services = createAmlServices({ eurRateMinor: 100, completeSale });
+    // The till debounces the assessment, so there is always a window in which
+    // no verdict — or the verdict for the PREVIOUS tender — is what the screen
+    // holds. Holding every assessment open reproduces that window
+    // deterministically; waiting on the 200 ms timer would race a starved box.
+    let releaseAssessment!: () => void;
+    const assessmentGate = new Promise<void>((resolve) => {
+      releaseAssessment = resolve;
+    });
+    services.sales.assessCashPayment = vi.fn(async (cashMinor: number) => {
+      await assessmentGate;
+
+      return buildAmlAssessment(cashMinor, 100, todayIso(), amlPreduzetnikPenalty);
+    });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    // 10.000,00 RSD in cash — a breach of čl. 46 st. 1 — but the verdict that
+    // would say so has not landed yet.
+    await awaitCashPrefill("10000.00");
+    expect(
+      screen.queryByLabelText(/razlog prijema gotovine/i),
+      "the window this test exercises is the one before the verdict lands",
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Završi prodaju" }));
+
+    expect(
+      completeSale,
+      "an unassessed cash line may not be booked while the verdict is pending",
+    ).not.toHaveBeenCalled();
+
+    releaseAssessment();
+
+    expect(
+      await screen.findByText(/unesite razlog/i, undefined, {
+        timeout: AML_WAIT_MS,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      completeSale,
+      "a breach may never be recorded with aml_ack_reason left NULL",
+    ).not.toHaveBeenCalled();
+  }, AML_TEST_TIMEOUT_MS);
+
   it("warns near the cap without demanding a reason", async () => {
     const user = userEvent.setup();
     const completeSale = vi.fn(createCompletedSale);
@@ -730,6 +805,29 @@ describe("RegisterScreen", () => {
     );
   }, AML_TEST_TIMEOUT_MS);
 
+  /**
+   * Verified-rules §3 req 5. The per-sale check is the whole of what the till
+   * computes; čl. 46 st. 1 also reaches linked cash transactions and contracts
+   * inside one year. A cashier who reads one cleared sale as clearance for the
+   * buyer is exactly the misreading this line exists to prevent.
+   */
+  it("says the ban also covers linked payments the program cannot see", async () => {
+    const user = userEvent.setup();
+    const services = createAmlServices({ eurRateMinor: 100 });
+
+    render(<RegisterScreen services={services} />);
+    await addCapPricedItem(user);
+    await tenderCash(user, "10000");
+
+    const line = await screen.findByText(
+      /više međusobno povezanih gotovinskih transakcija/i,
+      undefined,
+      { timeout: AML_WAIT_MS },
+    );
+    expect(line).toHaveTextContent(/u periodu od godinu dana/i);
+    expect(line).toHaveTextContent(/ne sabira ranije uplate istog kupca/i);
+  }, AML_TEST_TIMEOUT_MS);
+
   it("shows a staleness warning when the rate is not today's", async () => {
     const user = userEvent.setup();
     const services = createAmlServices({
@@ -764,7 +862,9 @@ describe("RegisterScreen", () => {
     await awaitCashPrefill("1000000.00");
 
     expect(
-      await screen.findByText(/unesite kurs u podešavanjima/i, undefined, {
+      // The copy must name a control that exists — `SettingsScreen`'s „Kurs"
+      // tab — not a vague „Podešavanja".
+      await screen.findByText(/osvežite kurs u podešavanja → kurs/i, undefined, {
         timeout: AML_WAIT_MS,
       }),
     ).toBeInTheDocument();
@@ -934,6 +1034,114 @@ describe("RegisterScreen", () => {
         }),
       ),
     );
+  }, AML_TEST_TIMEOUT_MS);
+
+  /**
+   * SW-12 req. 12 / ZZP čl. 6 st. 4. A trader who publishes a cenovnik is bound
+   * to adhere to the prices in it, so the till says so before the money changes
+   * hands — and only warns: the register has to be able to record what actually
+   * happened at the counter, and a hard block over a stale snapshot would be
+   * worse than the exposure it prevents.
+   */
+  it("warns when an article is rung above the published cenovnik", async () => {
+    const user = userEvent.setup();
+    const services = createRegisterServices();
+    services.sales.assessPriceIntegrity = vi.fn(async () => [divergence()]);
+    render(<RegisterScreen services={services} />);
+
+    await user.type(
+      screen.getByRole("searchbox", {
+        name: "Skeniraj barkod ili pretraži artikal",
+      }),
+      "8600000000010{enter}",
+    );
+
+    const warning = await screen.findByRole("alert", {
+      name: /iznad objavljenog cenovnika/i,
+    });
+    expect(within(warning).getByText(/Mleko 1 l/)).toBeInTheDocument();
+    expect(within(warning).getByText(/159,99 RSD/)).toBeInTheDocument();
+    expect(within(warning).getByText(/149,99 RSD/)).toBeInTheDocument();
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("names the published cenovnik the comparison was made against", async () => {
+    const user = userEvent.setup();
+    const services = createRegisterServices();
+    services.sales.assessPriceIntegrity = vi.fn(async () => [divergence()]);
+    render(<RegisterScreen services={services} />);
+
+    await user.type(
+      screen.getByRole("searchbox", {
+        name: "Skeniraj barkod ili pretraži artikal",
+      }),
+      "8600000000010{enter}",
+    );
+
+    // The exhibit. An outlet's archive holds many files and čl. 6 st. 4 binds
+    // the shop only to the one in force at the time.
+    const warning = await screen.findByRole("alert", {
+      name: /iznad objavljenog cenovnika/i,
+    });
+    expect(within(warning).getByText(/2026/)).toBeInTheDocument();
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("never blocks the sale over a divergence", async () => {
+    const user = userEvent.setup();
+    const completeSale = vi.fn(createCompletedSale);
+    const services = createRegisterServices(completeSale);
+    services.sales.assessPriceIntegrity = vi.fn(async () => [divergence()]);
+    render(<RegisterScreen services={services} />);
+
+    await user.type(
+      screen.getByRole("searchbox", {
+        name: "Skeniraj barkod ili pretraži artikal",
+      }),
+      "8600000000010{enter}",
+    );
+    await screen.findByRole("alert", { name: /iznad objavljenog cenovnika/i });
+
+    const complete = screen.getByRole("button", { name: "Završi prodaju" });
+    expect(complete).toBeEnabled();
+    await user.click(complete);
+
+    await waitFor(() => expect(completeSale).toHaveBeenCalled());
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("stays silent when the till rings what the outlet published", async () => {
+    const user = userEvent.setup();
+
+    await addProductToCart(user);
+
+    // A price at or below the published one is adherence or a discount, and a
+    // guard that spoke on either would train the cashier to dismiss it on sight.
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/iznad objavljenog cenovnika/i),
+      ).not.toBeInTheDocument(),
+    );
+  }, AML_TEST_TIMEOUT_MS);
+
+  it("says the cenovnik check could not run rather than passing it silently", async () => {
+    const user = userEvent.setup();
+    const services = createRegisterServices();
+    services.sales.assessPriceIntegrity = vi.fn(async () => {
+      throw new Error("provera nije izvršena");
+    });
+    render(<RegisterScreen services={services} />);
+
+    await user.type(
+      screen.getByRole("searchbox", {
+        name: "Skeniraj barkod ili pretraži artikal",
+      }),
+      "8600000000010{enter}",
+    );
+
+    expect(
+      await screen.findByText(/provera objavljenih cena nije izvršena/i),
+    ).toBeInTheDocument();
+    // A check that could not run is not a check that passed — and it is still
+    // not a reason the shop cannot sell.
+    expect(screen.getByRole("button", { name: "Završi prodaju" })).toBeEnabled();
   }, AML_TEST_TIMEOUT_MS);
 
   it("reports when nothing matches", async () => {

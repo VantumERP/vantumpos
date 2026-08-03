@@ -1264,6 +1264,11 @@ fn load_input(conn: &Connection, id: i64) -> Result<CampaignInput, AppError> {
 /// Nothing in this module may touch `products.sale_price_minor` without going
 /// through here: a price the till charges but the log does not carry destroys
 /// the evidence that čl. 37 st. 3–4 requires the shop to keep.
+///
+/// Returns the before-state and whether what the shop offers actually moved.
+/// The second half is SW-12 req. 11's trigger (ZZP čl. 6 st. 3): a sniženje that
+/// lowers the shelf price has to reach the published cenovnik too, and it is the
+/// log's own answer rather than a second comparison that could drift from it.
 fn move_offered_price(
     tx: &Transaction<'_>,
     product_id: i64,
@@ -1272,14 +1277,14 @@ fn move_offered_price(
     source: &str,
     acting_user_id: i64,
     now: &str,
-) -> Result<OfferingState, AppError> {
+) -> Result<(OfferingState, bool), AppError> {
     let before =
         load_offering_state(tx, product_id)?.ok_or_else(|| AppError::not_found(MSG_H14F))?;
     tx.execute(
         "UPDATE products SET sale_price_minor = ?2, active = ?3, updated_at = ?4 WHERE id = ?1",
         params![product_id, price_minor, i64::from(active), now],
     )?;
-    record_offered_price_change(
+    let offer_changed = record_offered_price_change(
         tx,
         product_id,
         Some(before),
@@ -1292,7 +1297,7 @@ fn move_offered_price(
         now,
     )?;
 
-    Ok(before)
+    Ok((before, offer_changed))
 }
 
 /// Announces the campaign: re-validates, then moves every item's till price in
@@ -1317,10 +1322,11 @@ pub fn activate_campaign(
     // Validates only — the returned snapshot is deliberately discarded.
     validated_anchors(&tx, &input, Some(id))?;
 
+    let mut prices_moved = false;
     for item in &input.items {
         // Promotivna items go active here — activation IS the first offering
         // (čl. 36 st. 9). Sniženje items are already active (h13b).
-        let before = move_offered_price(
+        let (before, offer_changed) = move_offered_price(
             &tx,
             item.product_id,
             item.campaign_price_minor,
@@ -1329,6 +1335,7 @@ pub fn activate_campaign(
             acting_user_id,
             now,
         )?;
+        prices_moved |= offer_changed;
         // What `end_campaign` returns the price to, absent an override.
         tx.execute(
             "UPDATE campaign_items SET pre_campaign_price_minor = ?3
@@ -1342,8 +1349,21 @@ pub fn activate_campaign(
         params![id, now],
     )?;
     tx.commit()?;
+    republish_cenovnik(conn, prices_moved, now);
 
     get_campaign(conn, id, now)
+}
+
+/// SW-12 req. 11 — ZZP čl. 6 st. 3 wants the published cenovnik to match the
+/// outlet's current prices *„u realnom vremenu“*, and a campaign moves exactly
+/// those. After the commit, never before it: čl. 6 st. 4 binds the shop to what
+/// it published, so a target must not be handed a price that could still roll
+/// back. A publish failure never fails the campaign — the prices are already
+/// durable and the till is already charging them.
+fn republish_cenovnik(conn: &Connection, prices_moved: bool, now: &str) {
+    if prices_moved {
+        crate::commands::cenovnik::republish_after_price_move(conn, now);
+    }
 }
 
 /// A markdown step on a running campaign (memo §2.7 worked example (b)).
@@ -1392,7 +1412,7 @@ pub fn adjust_item_price(
         }
     }
 
-    move_offered_price(
+    let (_, prices_moved) = move_offered_price(
         &tx,
         product_id,
         new_price_minor,
@@ -1407,6 +1427,7 @@ pub fn adjust_item_price(
         params![campaign_id, product_id, new_price_minor],
     )?;
     tx.commit()?;
+    republish_cenovnik(conn, prices_moved, now);
 
     get_campaign(conn, campaign_id, now)
 }
@@ -1451,6 +1472,7 @@ pub fn end_campaign(
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
 
+    let mut prices_moved = false;
     for (product_id, future_regular_price_minor, pre_campaign_price_minor) in items {
         let return_price_minor = overrides
             .iter()
@@ -1463,7 +1485,7 @@ pub fn end_campaign(
             })
             .ok_or_else(|| AppError::business("invalid_state", MSG_NO_RETURN_PRICE))?;
 
-        move_offered_price(
+        let (_, offer_changed) = move_offered_price(
             &tx,
             product_id,
             return_price_minor,
@@ -1472,6 +1494,7 @@ pub fn end_campaign(
             acting_user_id,
             now,
         )?;
+        prices_moved |= offer_changed;
     }
 
     tx.execute(
@@ -1479,6 +1502,7 @@ pub fn end_campaign(
         params![id, now],
     )?;
     tx.commit()?;
+    republish_cenovnik(conn, prices_moved, now);
 
     get_campaign(conn, id, now)
 }
@@ -2418,6 +2442,80 @@ mod tests {
                 .expect("count");
             assert_eq!(starts, 0, "activation must be all-or-nothing");
         });
+    }
+
+    /// Identifies the prodajni objekat so the SW-12 publish path has an archive
+    /// lineage to key on; without it nothing is published at all.
+    fn seed_outlet(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO settings (key, value_json, updated_at)
+             VALUES ('company', ?1, '2026-01-01T00:00:00Z')",
+            params![serde_json::json!({
+                "shopName": "Butik Ana",
+                "address": "Bulevar oslobođenja 1, Novi Sad",
+                "pib": "",
+                "registrationNumber": "",
+                "phone": "",
+                "logoPath": null,
+                "currency": "RSD",
+            })
+            .to_string()],
+        )
+        .expect("company settings should seed");
+    }
+
+    fn published_bodies(conn: &Connection) -> Vec<String> {
+        let mut statement = conn
+            .prepare("SELECT body FROM cenovnik_snapshots ORDER BY id")
+            .expect("snapshot query should prepare");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("snapshot query should run");
+        rows.collect::<Result<Vec<_>, _>>()
+            .expect("snapshot rows should read")
+    }
+
+    /// SW-12 req. 11 — ZZP čl. 6 st. 3 obliges the published cenovnik to match
+    /// the outlet's current prices „u realnom vremenu“. A sniženje that lowers
+    /// the shelf price while the published file still shows the old one is
+    /// exactly the mismatch st. 3 targets; a campaign ENDING is the same defect
+    /// in the other direction, and it additionally leaves the till guard
+    /// comparing every sale against a stale lower published price.
+    #[test]
+    fn activating_and_ending_a_campaign_each_republish_the_cenovnik() {
+        with_campaign_db_mut(
+            "activating_and_ending_a_campaign_each_republish_the_cenovnik",
+            |conn| {
+                seed_product(conn, 1, 1_000_000, true, "2026-01-01T00:00:00Z");
+                seed_outlet(conn);
+                let mut input = base_input(TYPE_AKCIJSKA);
+                input.items[0].campaign_price_minor = 900_000;
+                let created =
+                    create_campaign(conn, &input, 1, "2026-07-01T00:00:00Z").expect("create");
+                assert!(
+                    published_bodies(conn).is_empty(),
+                    "a draft moves no price and publishes nothing"
+                );
+
+                activate_campaign(conn, created.id, 1, "2026-07-05T00:00:00Z").expect("activate");
+                let after_activation = published_bodies(conn);
+                assert_eq!(after_activation.len(), 1, "{after_activation:?}");
+                assert!(
+                    after_activation[0].contains("9000.00"),
+                    "the sniženje price must reach the published file: {:?}",
+                    after_activation[0]
+                );
+
+                end_campaign(conn, created.id, &[], 1, "2026-07-20T00:00:00Z").expect("end");
+                let after_end = published_bodies(conn);
+                assert_eq!(after_end.len(), 2, "{after_end:?}");
+                assert!(
+                    after_end[1].contains("10000.00"),
+                    "the price the campaign returned to must be republished: {:?}",
+                    after_end[1]
+                );
+            },
+        );
     }
 
     // ---- Warnings W1–W6 -------------------------------------------------

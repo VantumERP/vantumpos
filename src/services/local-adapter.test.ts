@@ -5,10 +5,40 @@ import { createMockServices } from "./mock-adapter";
 import type {
   AnswerInput,
   BasisDoc,
+  BreachDraft,
   CampaignInput,
+  IzvestajNarativ,
+  PopisLineInput,
   ReklamacijaInput,
   ShopProfile,
 } from "./types";
+
+/**
+ * The three ZZPL čl. 52 st. 6 elements plus the immutable saznanje anchor, and
+ * every optional column left unanswered — the shape `breaches_record` is called
+ * with when a povreda is logged before anyone has assessed its risk (req. 43).
+ */
+const draft: BreachDraft = {
+  saznanjeAt: "2026-08-01T09:00:00Z",
+  occurredAt: null,
+  discoveredAt: null,
+  obradjivacSaznanjeAt: null,
+  rukovalacObavestenAt: null,
+  opis: "Nestao je papirni spisak zaposlenih iz kancelarije.",
+  posledice: "Podaci o troje zaposlenih su mogli da budu pročitani.",
+  mere: "Brava je zamenjena, spisak se više ne štampa.",
+  brojLica: 3,
+  kategorijePodataka: null,
+  riskOutcome: null,
+  notifyDecision: null,
+  notifyObrazlozenje: null,
+  poverenikNotifiedAt: null,
+  delayReason: null,
+  licaObavestena: null,
+  licaObavestenaAt: null,
+  cl53Izuzetak: null,
+  cl53IzuzetakObrazlozenje: null,
+};
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
@@ -261,6 +291,8 @@ describe("local service adapter", () => {
       pdvObveznik: null,
       distanceSelling: null,
       lpfrInPremises: null,
+      lpfrCarveOutInternetOnly: null,
+      lpfrCarveOutOwnUsedAssets: null,
       esirElements: [],
     };
     const invoke = vi.fn().mockResolvedValue(profile);
@@ -280,6 +312,88 @@ describe("local service adapter", () => {
         distanceSelling: true,
       }),
     });
+  });
+
+  // The ZF čl. 6 st. 4 figure is resolved in `legal.rs` and travels to the
+  // panel over this command — the frontend must never derive one.
+  it("maps the L-PFR notice to settings_lpfr_notice", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      summary: "…",
+      penalty: null,
+      citation: "Zakon o fiskalizaciji, čl. 6 st. 4; prekršaj: čl. 15 st. 1 tač. 4.",
+      isLegalDuty: true,
+    });
+    const services = createLocalServices(invoke);
+
+    await services.settings.getLpfrNotice();
+
+    expect(invoke).toHaveBeenCalledWith("settings_lpfr_notice");
+  });
+
+  it("maps the EUR rate surface to stable Tauri command names", async () => {
+    const status = {
+      rate: { rateMinor: 11_723, rateDate: "2026-07-31", source: "nbs" },
+      isStale: false,
+      checkedFor: "2026-07-31",
+    };
+    const invoke = vi.fn().mockResolvedValue(status);
+    const services = createLocalServices(invoke);
+
+    await services.settings.getEurRate();
+    await services.settings.refreshEurRate();
+    await services.settings.setManualEurRate(11_723, "2026-07-31");
+
+    expect(invoke).toHaveBeenCalledWith("settings_get_eur_rate");
+    expect(invoke).toHaveBeenCalledWith("settings_refresh_eur_rate");
+    // Flat args, not `{ request }` — `settings_set_manual_eur_rate` takes
+    // `rate_minor` and `rate_date` as two parameters.
+    expect(invoke).toHaveBeenCalledWith("settings_set_manual_eur_rate", {
+      rateMinor: 11_723,
+      rateDate: "2026-07-31",
+    });
+  });
+
+  it("round-trips the mock EUR rate instead of freezing one constant", async () => {
+    const services = createMockServices();
+
+    // A fresh install has no rate at all: the AML check cannot run, and the
+    // double has to be able to express that, not only the happy path.
+    await services.settings.setManualEurRate(20_000, "2026-06-01");
+    const stale = await services.settings.getEurRate();
+
+    expect(stale.rate).toEqual({
+      rateMinor: 20_000,
+      rateDate: "2026-06-01",
+      source: "manual",
+    });
+    expect(
+      stale.isStale,
+      "a rate carrying a past date is stale even right after it was entered",
+    ).toBe(true);
+
+    // The threshold the till warns on must follow the stored rate, not the
+    // seeded demo one: 10.000 EUR x 200,00 RSD/EUR.
+    const assessment = await services.sales.assessCashPayment(200_000_000);
+    expect(assessment.thresholdMinor).toBe(200_000_000);
+    expect(assessment.rateUnavailable).toBe(false);
+    expect(assessment.breached).toBe(true);
+
+    const fresh = await services.settings.setManualEurRate(11_723, "2026-06-18");
+    expect(fresh.isStale).toBe(false);
+    expect(fresh.checkedFor).toBe("2026-06-18");
+  });
+
+  it("refuses a mock manual rate outside the typo-guard band", async () => {
+    const services = createMockServices();
+
+    // 1.172,30 RSD/EUR — a tenfold typo. Accepting it would multiply the AML
+    // čl. 46 st. 1 dinar threshold by ten and let an unlawful cash amount pass.
+    await expect(
+      services.settings.setManualEurRate(117_230, "2026-06-18"),
+    ).rejects.toMatchObject({ code: "validation_error" });
+    await expect(
+      services.settings.setManualEurRate(11_723, "18.06.2026"),
+    ).rejects.toMatchObject({ code: "validation_error" });
   });
 
   it("seeds the mock shop profile as fully unset", async () => {
@@ -931,6 +1045,313 @@ describe("local service adapter", () => {
     });
   });
 
+  it("maps the ZZPL privacy surface to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "audit_search":
+          return Promise.resolve({
+            events: [],
+            chain: {
+              verdict: "intact",
+              intact: true,
+              checkedRows: 0,
+              label: "Potvrđena — lanac otisaka je neprekinut.",
+            },
+          });
+        case "breaches_list":
+        case "cl47_list":
+        case "cl47_generate":
+          return Promise.resolve([]);
+        case "support_active_session":
+          return Promise.resolve(null);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    await services.privacy.grantSupportAccess("Pregled greške na štampi", 60);
+    await services.privacy.enterSupportSession();
+    await services.privacy.endSupportSession();
+    await services.privacy.activeSupportSession();
+    await services.privacy.searchAudit({
+      from: "2026-08-01",
+      to: "2026-08-31",
+      actorUserId: 3,
+    });
+    await services.privacy.exportAuditCsv({
+      from: null,
+      to: null,
+      actorUserId: null,
+    });
+    await services.privacy.listBreaches();
+    await services.privacy.recordBreach(draft);
+    await services.privacy.updateBreach(4, draft);
+    await services.privacy.breachNotice();
+    await services.privacy.exportBreachObrazac(4);
+    await services.privacy.listProcessingActivities();
+    await services.privacy.generateProcessingActivities();
+    await services.privacy.exportProcessingActivities();
+
+    // The nalog travels as one request object, so its obim and its trajanje
+    // cannot be sent apart from each other.
+    expect(invoke).toHaveBeenNthCalledWith(1, "support_grant_access", {
+      request: { scope: "Pregled greške na štampi", durationMinutes: 60 },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "support_request_access");
+    expect(invoke).toHaveBeenNthCalledWith(3, "support_end_session");
+    expect(invoke).toHaveBeenNthCalledWith(4, "support_active_session");
+    expect(invoke).toHaveBeenCalledWith("audit_search", {
+      query: { from: "2026-08-01", to: "2026-08-31", actorUserId: 3 },
+    });
+    expect(invoke).toHaveBeenCalledWith("audit_export_csv", {
+      query: { from: null, to: null, actorUserId: null },
+    });
+    expect(invoke).toHaveBeenCalledWith("breaches_list");
+    expect(invoke).toHaveBeenCalledWith("breaches_record", { draft });
+    expect(invoke).toHaveBeenCalledWith("breaches_update", { id: 4, draft });
+    expect(invoke).toHaveBeenCalledWith("breaches_notice");
+    expect(invoke).toHaveBeenCalledWith("breaches_export_obrazac", { id: 4 });
+    expect(invoke).toHaveBeenCalledWith("cl47_list");
+    expect(invoke).toHaveBeenCalledWith("cl47_generate");
+    expect(invoke).toHaveBeenCalledWith("cl47_export");
+
+    // Req. 7: there is no write verb on the evidencija pristupa to map. The
+    // assertion is over the PORT SURFACE, not over the calls this test happened
+    // to make — a fourteenth method added later is invisible to the call log but
+    // shows up here the moment it is named. The log is only the source of the
+    // instant this list is read from; the guarantee is the shape of the object.
+    const auditMethods = Object.keys(services.privacy)
+      .filter((name) => /audit/i.test(name))
+      .sort();
+    expect(auditMethods).toEqual(["exportAuditCsv", "searchAudit"]);
+  });
+
+  it("maps the retention setting to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "retention_list_policies":
+          return Promise.resolve([]);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    await services.retention.listPolicies();
+    await services.retention.extendPolicy("access_log", "2031-03-01");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "retention_list_policies");
+    expect(invoke).toHaveBeenNthCalledWith(2, "retention_extend_policy", {
+      recordClass: "access_log",
+      retainUntil: "2031-03-01",
+    });
+
+    // Req. 6/22 give the shop one verb and it moves the rok forward. A
+    // `shortenPolicy`, a `clearPolicy` or a `setPolicy` on this surface would be
+    // the shortening path the backend refuses, arriving through the port
+    // instead — so the assertion is over the SHAPE of the object, not over the
+    // two calls this test happened to make.
+    expect(Object.keys(services.retention).sort()).toEqual([
+      "extendPolicy",
+      "listPolicies",
+    ]);
+  });
+
+  it("maps the cenovnik surface to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "cenovnik_list_snapshots":
+          return Promise.resolve([]);
+        case "cenovnik_get_publish_target":
+          return Promise.resolve({ kind: "notConfigured" });
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+
+    await services.cenovnik.listSnapshots();
+    await services.cenovnik.getSnapshot(7);
+    await services.cenovnik.getPublishTarget();
+    await services.cenovnik.setPublishTarget({
+      kind: "localFolder",
+      folder: "/Users/ana/sajt/cenovnik",
+    });
+    await services.cenovnik.getNotice();
+    await services.cenovnik.getOutlet();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "cenovnik_list_snapshots");
+    expect(invoke).toHaveBeenNthCalledWith(2, "cenovnik_get_snapshot", {
+      snapshotId: 7,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "cenovnik_get_publish_target");
+    expect(invoke).toHaveBeenNthCalledWith(4, "cenovnik_set_publish_target", {
+      request: { kind: "localFolder", folder: "/Users/ana/sajt/cenovnik" },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, "cenovnik_get_notice");
+    expect(invoke).toHaveBeenNthCalledWith(6, "cenovnik_get_outlet");
+
+    // Čl. 6 st. 3 wants the published file to match the outlet's current prices
+    // „u realnom vremenu“, so publication rides on the write that moved a price
+    // (req. 11). A `publishNow` on this surface would be a second answer to
+    // „when did the shop last publish“ — the assertion is over the SHAPE of the
+    // object, not over the five calls this test happened to make.
+    expect(Object.keys(services.cenovnik).sort()).toEqual([
+      "getNotice",
+      "getOutlet",
+      "getPublishTarget",
+      "getSnapshot",
+      "listSnapshots",
+      "setPublishTarget",
+    ]);
+  });
+
+  it("maps the popis surface to stable Tauri command names", async () => {
+    const invoke = vi.fn().mockImplementation((command: string) => {
+      switch (command) {
+        case "popis_list":
+          return Promise.resolve([]);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    const services = createLocalServices(invoke);
+    const narativ: IzvestajNarativ = {
+      uzrociNeslaganja: "Kalo i lom.",
+      predloziZaLikvidacijuRazlika: "Manjak na teret radnje.",
+      nacinKnjizenja: "Kroz KEP i glavnu knjigu.",
+      primedbeLicaKojaRukujuVrednostima: "Nema primedbi.",
+      ostalePrimedbeIPredlozi: "Nema.",
+    };
+
+    await services.popis.list();
+    await services.popis.get(4);
+    await services.popis.proveraListi(4, ["gotovina"]);
+    await services.popis.startCount(4);
+    await services.popis.signPhaseA(4, ["Amina Hodžić"]);
+    await services.popis.compute(4);
+    await services.popis.signPhaseB(4, ["Amina Hodžić"]);
+    await services.popis.post(4);
+    await services.popis.getPodesavanja();
+    await services.popis.setPodesavanja({ rokPredajeFi: "2027-03-31" });
+    await services.popis.nivelacijaPregled();
+    await services.popis.nivelacijaObuhvat(4, "ceo_objekat");
+    await services.popis.izvestaj(4, { prijavljeneListe: [], narativ });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "popis_list");
+    expect(invoke).toHaveBeenNthCalledWith(2, "popis_get", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(3, "popis_provera_listi", {
+      id: 4,
+      prijavljene: ["gotovina"],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "popis_start_count", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(5, "popis_sign_phase_a", {
+      id: 4,
+      potpisnici: ["Amina Hodžić"],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(6, "popis_compute", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(7, "popis_sign_phase_b", {
+      id: 4,
+      potpisnici: ["Amina Hodžić"],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(8, "popis_post", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(9, "popis_podesavanja_get");
+    expect(invoke).toHaveBeenNthCalledWith(10, "popis_podesavanja_set", {
+      podesavanja: { rokPredajeFi: "2027-03-31" },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(11, "popis_nivelacija_pregled");
+    expect(invoke).toHaveBeenNthCalledWith(12, "popis_nivelacija_obuhvat", {
+      id: 4,
+      obuhvat: "ceo_objekat",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(13, "popis_izvestaj", {
+      id: 4,
+      request: { prijavljeneListe: [], narativ },
+    });
+
+    // Req. 41 at the port, asserted over the SHAPE and not over the calls this
+    // test happened to make. Once the result is knjižen (PoP čl. 14 st. 3) the
+    // popis is closed and a correction is a NEW document (ZoRač čl. 8 st. 4) —
+    // so an `update`, a `delete` or a `reopen` here would be the write the
+    // backend refuses, arriving through the port instead. The req. 42 retention
+    // purge is not a verb on this surface either.
+    expect(Object.keys(services.popis).sort()).toEqual([
+      "compute",
+      "get",
+      "getPodesavanja",
+      "izvestaj",
+      "list",
+      "nivelacijaObuhvat",
+      "nivelacijaPregled",
+      "open",
+      "post",
+      "proveraListi",
+      "saveLine",
+      "setPodesavanja",
+      "signPhaseA",
+      "signPhaseB",
+      "startCount",
+    ]);
+  });
+
+  /**
+   * Req. 29 at the port. A Phase A line write that carried a book quantity is
+   * refused *at the backend boundary* (`popis_knjigovodstvo_pre_potpisa`) — so
+   * the field has to reach it. What the port must never do is invent one: the
+   * adapter forwards the caller's payload unchanged, and this asserts the two
+   * halves separately, because an adapter that defaulted the field to `0`
+   * would turn every blind count into a refused write and an adapter that
+   * dropped it would silence a breach the backend exists to name.
+   */
+  it("forwards a popis line write without inventing or dropping the book quantity", async () => {
+    const invoke = vi.fn().mockResolvedValue(null);
+    const services = createLocalServices(invoke);
+    const blind: PopisLineInput = {
+      listaVrsta: "roba",
+      sifra: "KOS-1",
+      naziv: "Košulja",
+      vrsta: "roba",
+      jedinicaMere: "kom",
+      stvarnaKolicinaMilli: 7000,
+      bliziOpis: null,
+      knjigovodstvenaKolicinaMilli: null,
+      cenaMinor: null,
+    };
+
+    await services.popis.saveLine(4, null, blind);
+    await services.popis.saveLine(4, 9, {
+      ...blind,
+      knjigovodstvenaKolicinaMilli: 8000,
+    });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "popis_save_line", {
+      sessionId: 4,
+      lineId: null,
+      input: blind,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "popis_save_line", {
+      sessionId: 4,
+      lineId: 9,
+      input: { ...blind, knjigovodstvenaKolicinaMilli: 8000 },
+    });
+  });
+
+  it("maps the till price-integrity check to sales_assess_price_integrity", async () => {
+    const invoke = vi.fn().mockResolvedValue([]);
+    const services = createLocalServices(invoke);
+    const draft = {
+      items: [{ productId: 1, quantityMilli: 1000 }],
+      receiptDiscount: null,
+    };
+
+    await services.sales.assessPriceIntegrity(draft);
+
+    expect(invoke).toHaveBeenCalledWith("sales_assess_price_integrity", {
+      request: draft,
+    });
+  });
+
   it("opens an exported document for printing through the opener plugin", async () => {
     const { openPath } = await import("@tauri-apps/plugin-opener");
     const services = createLocalServices(vi.fn());
@@ -947,6 +1368,105 @@ describe("local service adapter", () => {
 });
 
 describe("mock service adapter", () => {
+  /**
+   * Req. 11. A double that did not republish on the price write would warn at
+   * the till after every ordinary price raise, where the real backend stays
+   * silent because it republished first — the exact failure the AML double's
+   * „must not warn where the real backend would stay silent“ rule guards
+   * against, one law over.
+   */
+  it("republishes the cenovnik on a price write and stays silent at the till", async () => {
+    const services = createMockServices();
+    const before = await services.cenovnik.listSnapshots();
+
+    const product = (await services.catalog.getProduct(1))!;
+    await services.catalog.updateProduct(1, {
+      ...product,
+      salePriceMinor: 19_999,
+    });
+
+    const after = await services.cenovnik.listSnapshots();
+    expect(after.length).toBe(before.length + 1);
+    expect(after[0].current).toBe(true);
+    expect(after[1].current).toBe(false);
+
+    const detail = await services.cenovnik.getSnapshot(after[0].id);
+    expect(detail?.body).toContain("199.99");
+
+    await expect(
+      services.sales.assessPriceIntegrity({
+        items: [{ productId: 1, quantityMilli: 1000 }],
+        receiptDiscount: null,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("does not republish for an edit that moves no published price", async () => {
+    const services = createMockServices();
+    const before = await services.cenovnik.listSnapshots();
+
+    const product = (await services.catalog.getProduct(1))!;
+    await services.catalog.updateProduct(1, {
+      ...product,
+      minimumStockMilli: 9_000,
+    });
+
+    expect((await services.cenovnik.listSnapshots()).length).toBe(
+      before.length,
+    );
+  });
+
+  /**
+   * Req. 12 / čl. 6 st. 4. The mock's only way to reach a stale published file
+   * is the one the backend also has: the archive says one price while the
+   * catalog says another. Below the published price stays silent — a discount
+   * is not a breach.
+   */
+  it("warns only for an article priced above what the archive publishes", async () => {
+    const services = createMockServices();
+    const draft = {
+      items: [{ productId: 1, quantityMilli: 1000 }],
+      receiptDiscount: null,
+    };
+
+    // The seeded current file publishes MLEKO-1L at 159,99 — the catalog price.
+    await expect(services.sales.assessPriceIntegrity(draft)).resolves.toEqual(
+      [],
+    );
+
+    const product = (await services.catalog.getProduct(1))!;
+    // Move the catalog price without letting the file follow, which is what a
+    // crash between the commit and the publish leaves behind.
+    product.salePriceMinor = 19_999;
+
+    const [divergence] = await services.sales.assessPriceIntegrity(draft);
+    expect(divergence.productSku).toBe("MLEKO-1L");
+    expect(divergence.chargedUnitPriceMinor).toBe(19_999);
+    expect(divergence.publishedUnitPriceMinor).toBe(15_999);
+    // The exhibit: čl. 6 st. 4 binds the shop only to the file in force.
+    expect(divergence.snapshotId).toBeGreaterThan(0);
+
+    product.salePriceMinor = 9_999;
+    await expect(services.sales.assessPriceIntegrity(draft)).resolves.toEqual(
+      [],
+    );
+  });
+
+  it("refuses a relative publish folder and keeps the target unchanged", async () => {
+    const services = createMockServices();
+    await services.auth.login({ username: "admin", credential: "1234" });
+
+    await expect(
+      services.cenovnik.setPublishTarget({
+        kind: "localFolder",
+        folder: "cenovnik",
+      }),
+    ).rejects.toMatchObject({ message: expect.stringMatching(/puna putanja/) });
+    await expect(services.cenovnik.getPublishTarget()).resolves.toEqual({
+      kind: "notConfigured",
+    });
+  });
+
   it("returns deterministic health for UI tests", async () => {
     const services = createMockServices();
     const health = await services.settings.getHealth();
@@ -1260,9 +1780,20 @@ describe("mock service adapter", () => {
       fileName: "kalkulacija-5.html",
       mimeType: "text/html",
     });
+    // SW-16 req. 33 — a nivelacija answers with the popis obligation the same
+    // price change raises, and the narrowed scope reaches the caller labelled a
+    // preporuka. The double keeps the shape; the wording a shop reads is the
+    // backend's (`crate::popis::nivelacija_obavestenje`).
     await expect(
       services.kep.nivelacija(1, 17600, basis),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      pravniOsnov: "ZoRač čl. 21, PoP čl. 3",
+      rokDana: 30,
+      obuhvat: [
+        { obuhvat: "samo_nivelisani", podrazumevani: true },
+        { obuhvat: "ceo_objekat", podrazumevani: false },
+      ],
+    });
     await expect(
       services.kep.postAdjustment("otpis", 1, 35000, basis),
     ).resolves.toBeUndefined();

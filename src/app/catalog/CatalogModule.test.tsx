@@ -366,6 +366,341 @@ describe("CatalogModule", () => {
     });
   });
 
+  /**
+   * SW-12 req. 10 `[LEGAL]`. ZZP čl. 6 st. 2's second sentence pulls st. 1 into
+   * the published cenovnik, so the file has to carry a jedinična cena — and it
+   * can only carry one if the form captures the measure and the package content
+   * the backend divides by. Without this the published file's jedinična cena is
+   * empty for every article.
+   *
+   * A 0,75 l bottle at 279,00 RSD is 372,00 RSD per litar; the division itself
+   * is asserted in `src-tauri/src/cenovnik.rs`, and what this test owns is that
+   * the pair the division needs actually leaves the form.
+   */
+  describe("jedinična cena (ZZP čl. 6 st. 1/st. 2)", () => {
+    it("sends the measure and the package content on save", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      const price = await screen.findByLabelText("Prodajna cena sa PDV");
+      await user.clear(price);
+      await user.type(price, "279");
+      await user.type(
+        screen.getByLabelText("Jedinica za jediničnu cenu"),
+        "l",
+      );
+      await user.type(
+        screen.getByLabelText("Sadržaj pakovanja"),
+        "0,75",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({
+            salePriceMinor: 27_900,
+            jedinicnaCenaJedinica: "l",
+            // The schema-wide milli scale: value × 1000, so 0,75 l is 750. A
+            // renderer that assumed any other scale would publish a jedinična
+            // cena wrong by three orders of magnitude.
+            jedinicnaCenaSadrzajMilli: 750,
+          }),
+        );
+      });
+    });
+
+    /**
+     * `SaveProductRequest` is a FULL replacement of the row, so a form that
+     * reads the pair but does not send it back clears it on the next ordinary
+     * edit — and the published file silently loses that article's jedinična
+     * cena.
+     */
+    it("round-trips the pair through an edit that touches neither field", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Jedinica za jediničnu cenu"),
+        "l",
+      );
+      await user.type(screen.getByLabelText("Sadržaj pakovanja"), "1");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
+
+      // Reopen and save again, touching only the name.
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      expect(await screen.findByLabelText("Jedinica za jediničnu cenu")).toHaveValue(
+        "l",
+      );
+      expect(screen.getByLabelText("Sadržaj pakovanja")).toHaveValue("1");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenLastCalledWith(
+          1,
+          expect.objectContaining({
+            jedinicnaCenaJedinica: "l",
+            jedinicnaCenaSadrzajMilli: 1000,
+          }),
+        );
+      });
+    });
+
+    /**
+     * The same round trip at the thousand, where `toLocaleString("sr-RS")`
+     * starts grouping: a 1 kg bag entered in grams reads back as „1.000“, and
+     * `parseQuantityInput` takes that dot for a decimal point and saves 1000
+     * milli — one gram. Nothing downstream catches it, because one gram is a
+     * perfectly valid sadržaj, and `CenovnikRow::jedinicna_cena_minor` then
+     * publishes a jedinična cena a thousand times too high as fact under čl. 6
+     * st. 4. The read-back has to carry no group separator at all.
+     */
+    it("round-trips a package content of a thousand units without collapsing it", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Jedinica za jediničnu cenu"),
+        "g",
+      );
+      await user.type(screen.getByLabelText("Sadržaj pakovanja"), "1000");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() =>
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({ jedinicnaCenaSadrzajMilli: 1_000_000 }),
+        ),
+      );
+
+      // Reopen and save again, touching neither field.
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      expect(await screen.findByLabelText("Sadržaj pakovanja")).toHaveValue(
+        "1000",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenLastCalledWith(
+          1,
+          expect.objectContaining({
+            jedinicnaCenaJedinica: "g",
+            jedinicnaCenaSadrzajMilli: 1_000_000,
+          }),
+        );
+      });
+    });
+
+    /** The same defect one grouped value up: a 1,5 l bottle entered in ml. */
+    it("round-trips a package content above the thousand without collapsing it", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Jedinica za jediničnu cenu"),
+        "ml",
+      );
+      await user.type(screen.getByLabelText("Sadržaj pakovanja"), "1500");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      expect(await screen.findByLabelText("Sadržaj pakovanja")).toHaveValue(
+        "1500",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenLastCalledWith(
+          1,
+          expect.objectContaining({ jedinicnaCenaSadrzajMilli: 1_500_000 }),
+        );
+      });
+    });
+
+    /**
+     * A sadržaj without its measure divides by nothing, so it can state no
+     * jedinična cena at all — the Rust side refuses that pairing and the form
+     * says so before the round trip rather than after it.
+     */
+    it("refuses a package content with no measure to express it in", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.type(
+        await screen.findByLabelText("Sadržaj pakovanja"),
+        "0,75",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      expect(
+        await screen.findByText(
+          "Uz sadržaj pakovanja izaberite i jedinicu za jediničnu cenu.",
+        ),
+      ).toBeInTheDocument();
+      expect(updateProduct).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Nothing guesses a unit price from a package size nobody entered: an
+     * article priced per piece may legitimately have neither field, and the
+     * published cell is then empty — a visible gap, not a fabricated figure.
+     */
+    it("sends both as null when the operator says nothing", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({
+            jedinicnaCenaJedinica: null,
+            jedinicnaCenaSadrzajMilli: null,
+          }),
+        );
+      });
+    });
+
+    /**
+     * The half-configured pair: „l“ typed into the measure with the package
+     * content left blank. `CenovnikRow::jedinicna_cena_minor` then publishes
+     * the sale price AS the jedinična cena — 279,00 per litre for a 0,75 l
+     * bottle whose true figure is 372,00 — and čl. 6 st. 4 makes the shop
+     * answer for that published number. The form must say so beside the input
+     * rather than let the file carry it.
+     */
+    it("refuses a measure that differs from the unit of measure with no package content", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      // „Mleko 1 l“ is sold po komadu, so „l“ here is a different measure.
+      await user.type(
+        await screen.findByLabelText("Jedinica za jediničnu cenu"),
+        "l",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      expect(
+        await screen.findByText(
+          "Jedinica za jediničnu cenu se razlikuje od jedinice mere — unesite sadržaj pakovanja. Prazan sadržaj znači da je jedna prodajna jedinica jednaka jednoj jedinici mere (na primer 1 kom = 1 l).",
+        ),
+      ).toBeInTheDocument();
+      expect(updateProduct).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The v19 convention stays expressible: goods sold by the kilogram whose
+     * jedinična cena is per kilogram need no package content at all, and the
+     * refusal above must not reach them.
+     */
+    it("saves a blank package content when the two measures agree", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      const updateProduct = vi.spyOn(services.catalog, "updateProduct");
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+      const unit = await screen.findByLabelText("Jedinica mere");
+      await user.clear(unit);
+      await user.type(unit, "kg");
+      await user.type(
+        screen.getByLabelText("Jedinica za jediničnu cenu"),
+        "kg",
+      );
+      await user.click(screen.getByRole("button", { name: "Sačuvaj artikal" }));
+
+      await waitFor(() => {
+        expect(updateProduct).toHaveBeenCalledWith(
+          1,
+          expect.objectContaining({
+            unitOfMeasure: "kg",
+            jedinicnaCenaJedinica: "kg",
+            jedinicnaCenaSadrzajMilli: null,
+          }),
+        );
+      });
+    });
+
+    /**
+     * The convention that makes a blank sadržaj legitimate — one selling unit
+     * IS one unit of the measure — lived only in the v19 comment and in the
+     * tests. An operator reading „program sam deli prodajnu cenu“ beside an
+     * empty field cannot tell a deliberate blank from a forgotten one.
+     */
+    it("states the blank-content convention in the field help", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+
+      render(<CatalogModule services={services} onOpenInventory={() => {}} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Izmeni Mleko 1 l" }),
+      );
+
+      expect(
+        await screen.findByText(
+          /ostavite sadržaj prazan — jedinična cena je tada jednaka prodajnoj ceni/i,
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
   // ZoT čl. 34 st. 5 — the Rust gate refuses every create/update from a
   // distance-selling shop that carries no proizvođač and no zemlja proizvodnje.
   // Without these fields on the sheet that shop cannot save a single article.
@@ -377,6 +712,8 @@ describe("CatalogModule", () => {
         pdvObveznik: false,
         distanceSelling,
         lpfrInPremises: true,
+        lpfrCarveOutInternetOnly: false,
+        lpfrCarveOutOwnUsedAssets: false,
         esirElements: [],
       });
       return services;

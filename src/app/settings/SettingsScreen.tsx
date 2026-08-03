@@ -56,18 +56,23 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { formatRsd, parseRsdInput } from "@/lib/money";
 import type { PosServices, SettingsService } from "@/services/ports";
 import type {
   BackupJob,
   BackupStatus,
   CashDepositCalendar,
   CompanySettings,
+  EurRateStatus,
+  LegalNotice,
   ReceiptSettings,
   SalesSettings,
   ShopProfile,
   TaxRate,
 } from "@/services/types";
 
+import { CenovnikPanel } from "./CenovnikPanel";
+import { RetentionPanel } from "./RetentionPanel";
 import { ShopProfilePanel } from "./ShopProfilePanel";
 
 interface SettingsScreenProps {
@@ -84,6 +89,12 @@ type LoadState =
       receipt: ReceiptSettings;
       sales: SalesSettings;
       shopProfile: ShopProfile;
+      /**
+       * `settings_lpfr_notice` — the ZF čl. 6 st. 4 duty with its penalty
+       * resolved against the stored legal form. Refetched after every profile
+       * save, so the tier on screen can never lag the tier on record.
+       */
+      lpfrNotice: LegalNotice;
       backupStatus: BackupStatus;
       backupJobs: BackupJob[];
     }
@@ -94,8 +105,11 @@ type SettingsTab =
   | "profile"
   | "vat"
   | "receipts"
+  | "rate"
   | "calendar"
   | "users"
+  | "rokovi"
+  | "cenovnik"
   | "backup";
 
 export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
@@ -110,6 +124,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       services.settings.getReceiptSettings(),
       services.settings.getSalesSettings(),
       services.settings.getShopProfile(),
+      services.settings.getLpfrNotice(),
       services.backup.getBackupStatus(),
       services.backup.listBackupJobs(),
     ])
@@ -120,6 +135,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           receipt,
           sales,
           shopProfile,
+          lpfrNotice,
           backupStatus,
           backupJobs,
         ]) => {
@@ -130,6 +146,7 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
             receipt,
             sales,
             shopProfile,
+            lpfrNotice,
             backupStatus,
             backupJobs,
           });
@@ -199,6 +216,12 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           Računi
         </SettingsTabButton>
         <SettingsTabButton
+          active={activeTab === "rate"}
+          onSelect={() => setActiveTab("rate")}
+        >
+          Kurs
+        </SettingsTabButton>
+        <SettingsTabButton
           active={activeTab === "calendar"}
           onSelect={() => setActiveTab("calendar")}
         >
@@ -209,6 +232,18 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
           onSelect={() => setActiveTab("users")}
         >
           Korisnici
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "rokovi"}
+          onSelect={() => setActiveTab("rokovi")}
+        >
+          Rokovi čuvanja
+        </SettingsTabButton>
+        <SettingsTabButton
+          active={activeTab === "cenovnik"}
+          onSelect={() => setActiveTab("cenovnik")}
+        >
+          Cenovnik
         </SettingsTabButton>
         <SettingsTabButton
           active={activeTab === "backup"}
@@ -234,11 +269,17 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
       {activeTab === "profile" ? (
         <ShopProfilePanel
           profile={state.shopProfile}
+          lpfrNotice={state.lpfrNotice}
           onOpenRegistry={(url) => services.print.openExternalUrl(url)}
           onSave={async (request) => {
             const shopProfile = await services.settings.updateShopProfile(request);
+            // The saved legal form may have changed the tier the čl. 6 st. 4
+            // figure is resolved at, so the notice is refetched with it.
+            const lpfrNotice = await services.settings.getLpfrNotice();
             setState((current) =>
-              current.status === "ready" ? { ...current, shopProfile } : current,
+              current.status === "ready"
+                ? { ...current, shopProfile, lpfrNotice }
+                : current,
             );
             toast.success("Profil radnje je sačuvan.");
           }}
@@ -306,11 +347,64 @@ export function SettingsScreen({ services, usersPanel }: SettingsScreenProps) {
         </div>
       ) : null}
 
+      {activeTab === "rate" ? (
+        <div className="flex flex-col gap-4">
+          <EurRatePanel settings={services.settings} />
+          <AmlAggregationDisclosure />
+        </div>
+      ) : null}
+
       {activeTab === "calendar" ? (
         <DepositCalendarPanel settings={services.settings} />
       ) : null}
 
-      {activeTab === "users" ? usersPanel : null}
+      {activeTab === "users" ? (
+        <div className="flex flex-col gap-4">
+          {usersPanel}
+          {/*
+            The ZZPL surfaces are one click away from the accounts they describe,
+            but they are NOT in Podešavanja: the čl. 46 nalog, the čl. 48
+            evidencija pristupa and the čl. 52 evidencija povreda are records the
+            rukovalac keeps, not settings anybody adjusts, and filing them under
+            „Podešavanja“ would suggest they can be turned off.
+          */}
+          <Alert>
+            <AlertTitle>Zaštita podataka o ličnosti</AlertTitle>
+            <AlertDescription>
+              Nalog za pristup tehničke podrške, evidencija pristupa podacima,
+              evidencija povreda podataka i evidencija radnji obrade nalaze se u
+              odeljku „Privatnost“ u glavnom meniju. To su evidencije koje
+              rukovalac vodi, a ne podešavanja. Rok čuvanja tih evidencija jeste
+              podešavanje i nalazi se na kartici „Rokovi čuvanja“.
+            </AlertDescription>
+          </Alert>
+        </div>
+      ) : null}
+
+      {/*
+        The rok IS a podešavanje, and that is why it sits here rather than under
+        „Privatnost“ beside the evidencije. The alert on the Korisnici tab draws
+        the line: the čl. 46 nalog, the čl. 48 evidencija pristupa and the čl. 52
+        evidencija povreda are records the rukovalac keeps and nothing may turn
+        them off, while ZZPL čl. 5 st. 1 tač. 5 leaves the *period* to the shop —
+        the shortest defensible default, lengthened when the shop needs longer.
+        Req. 6 and req. 22 ask for exactly that to be exposed.
+      */}
+      {activeTab === "rokovi" ? (
+        <RetentionPanel retention={services.retention} />
+      ) : null}
+
+      {/*
+        Where the published cenovnik goes IS a podešavanje (ZZP čl. 6 st. 2, req.
+        15), and it is the only part of SW-12 that is: the file itself is
+        republished by the write that moved a price, and the archive is a record
+        the shop keeps, not something anybody switches off. The panel loads its
+        own data — a shop that has published on every price move for a year has a
+        long archive, and no other tab needs it.
+      */}
+      {activeTab === "cenovnik" ? (
+        <CenovnikPanel cenovnik={services.cenovnik} />
+      ) : null}
 
       {activeTab === "backup" ? (
         <BackupPanel
@@ -836,6 +930,303 @@ function ReceiptSettingsPanel({
 }
 
 /**
+ * The NBS middle rate the AML čl. 46 st. 1 dinar threshold is derived from.
+ *
+ * This panel is the control the till points at. When no rate has ever been
+ * cached, `sales_assess_cash_payment` reports `rateUnavailable` and every AML
+ * column on the sale stays NULL — so the operator must be able to *fix* that
+ * here, not merely be told about it.
+ *
+ * Three things it has to keep straight. First, **an unknown rate is an unrun
+ * check, never a breach** — the copy says the sale is not blocked, because a
+ * dead NBS must not read as something the cashier has to clear before selling.
+ * Second, **the statute names neither the rate nor the conversion day**: čl. 46
+ * is silent and the "zvanični srednji kurs NBS on the transaction date" rule is
+ * imported from čl. 8 st. 1 tač. 2, so it is presented as the reading applied,
+ * not as a quoted rule. Third, the manual entry is band-checked backend-side —
+ * a tenfold typo would multiply the threshold by ten and silently pass an
+ * unlawful cash amount — and this panel never second-guesses that verdict, it
+ * renders it.
+ *
+ * No fine figure appears here. Penalties live in `src-tauri/src/legal.rs`.
+ */
+function EurRatePanel({ settings }: { settings: SettingsService }) {
+  const [status, setStatus] = useState<EurRateStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [rateInput, setRateInput] = useState("");
+  const [dateInput, setDateInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    settings.getEurRate().then(
+      (loaded) => {
+        if (active) {
+          setStatus(loaded);
+        }
+      },
+      (loadError) => {
+        if (active) {
+          setError(errorMessage(loadError, "Kurs nije učitan."));
+        }
+      },
+    );
+
+    return () => {
+      active = false;
+    };
+  }, [settings]);
+
+  async function run(
+    action: () => Promise<EurRateStatus>,
+    success: string,
+    failure: string,
+  ) {
+    setBusy(true);
+    try {
+      setStatus(await action());
+      setError(null);
+      toast.success(success);
+    } catch (actionError) {
+      setError(errorMessage(actionError, failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveManual(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    let rateMinor: number;
+    try {
+      rateMinor = parseRsdInput(rateInput);
+    } catch {
+      setError("Unesite kurs u obliku 117,23.");
+      return;
+    }
+    if (!dateInput) {
+      setError("Unesite datum kursa.");
+      return;
+    }
+
+    await run(
+      () => settings.setManualEurRate(rateMinor, dateInput),
+      "Ručni kurs je sačuvan.",
+      "Ručni kurs nije sačuvan.",
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          <h2>Kurs evra za proveru gotovine</h2>
+        </CardTitle>
+        <CardDescription>
+          Kurs se koristi samo da bi se izračunao dinarski limit za prijem
+          gotovine. Zakon o sprečavanju pranja novca i finansiranja terorizma,
+          čl. 46 st. 1; nadzor: tržišna inspekcija (čl. 110 st. 6). Sam čl. 46
+          ne imenuje ni kurs ni dan preračuna — primenjuje se zvanični srednji
+          kurs Narodne banke Srbije na dan transakcije, po definiciji iz čl. 8
+          st. 1 tač. 2 istog zakona.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {error ? (
+          <Alert variant="destructive">
+            <ShieldAlertIcon aria-hidden="true" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        <p className="text-xs text-muted-foreground">
+          Neuspešno osvežavanje kursa ne blokira prodaju. Račun se može završiti
+          i kada kurs nije poznat — u tom slučaju se provera limita gotovine ne
+          izvršava i to piše na kasi.
+        </p>
+
+        {status === null ? (
+          <Badge variant="outline" className="w-fit">
+            <Spinner data-icon="inline-start" aria-hidden="true" />
+            Učitavanje kursa
+          </Badge>
+        ) : (
+          <>
+            {status.rate === null ? (
+              <Alert>
+                <AlertTitle>Kurs nije poznat</AlertTitle>
+                <AlertDescription>
+                  Provera limita gotovine ne može da se izvrši dok kurs nije
+                  poznat. Osvežite kurs sa NBS-a ili ga unesite ručno. Prodaja
+                  nije blokirana.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <div className="flex flex-col gap-1 rounded-md border p-4 text-sm">
+                <span className="font-medium">
+                  {formatRsd(status.rate.rateMinor)} za 1 EUR
+                </span>
+                <span className="text-muted-foreground">
+                  Datum kursa: {formatRateDate(status.rate.rateDate)}
+                </span>
+                <span className="text-muted-foreground">
+                  Izvor: {status.rate.source === "nbs" ? "NBS" : "ručno"}
+                </span>
+              </div>
+            )}
+
+            {status.rate !== null && status.isStale ? (
+              <Alert>
+                <AlertTitle>Kurs nije od današnjeg dana</AlertTitle>
+                <AlertDescription>
+                  Provera je izvršena za {formatRateDate(status.checkedFor)}, a
+                  sačuvani kurs nosi datum{" "}
+                  {formatRateDate(status.rate.rateDate)}. Osvežite ga sa NBS-a
+                  ili unesite današnji kurs ručno; do tada se limit gotovine
+                  računa po starijem kursu.
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            <div>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() =>
+                  void run(
+                    () => settings.refreshEurRate(),
+                    "Kurs je osvežen.",
+                    "Kurs nije osvežen.",
+                  )
+                }
+              >
+                <RotateCcwIcon data-icon="inline-start" />
+                Osveži kurs sa NBS-a
+              </Button>
+            </div>
+
+            <Separator />
+
+            <form className="flex flex-col gap-4" onSubmit={saveManual}>
+              <FieldGroup className="grid gap-3 md:grid-cols-[12rem_12rem_auto] md:items-end">
+                <Field>
+                  <FieldLabel htmlFor="manual-eur-rate">
+                    Kurs (RSD za 1 EUR)
+                  </FieldLabel>
+                  <Input
+                    id="manual-eur-rate"
+                    inputMode="decimal"
+                    value={rateInput}
+                    onChange={(event) => setRateInput(event.target.value)}
+                  />
+                  <FieldDescription>
+                    Unesite zvanični srednji kurs, na primer 117,23.
+                  </FieldDescription>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="manual-eur-rate-date">
+                    Datum kursa
+                  </FieldLabel>
+                  <Input
+                    id="manual-eur-rate-date"
+                    type="date"
+                    value={dateInput}
+                    onChange={(event) => setDateInput(event.target.value)}
+                  />
+                </Field>
+                <Field>
+                  <Button type="submit" disabled={busy}>
+                    <SaveIcon data-icon="inline-start" />
+                    Sačuvaj ručni kurs
+                  </Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** `2026-07-01` -> `01.07.2026`, without going through a Date (no TZ shift). */
+function formatRateDate(value: string): string {
+  const [year, month, day] = value.split("-");
+
+  return year && month && day ? `${day}.${month}.${year}` : value;
+}
+
+/**
+ * The written disclosure the one-year aggregation limb needs
+ * (`docs/SW11-SW15-VERIFIED-RULES.md` §3 req 5).
+ *
+ * čl. 46 st. 1 bans the cash acceptance „bez obzira na to da li se radi o
+ * jednoj ili više međusobno povezanih gotovinskih transakcija ili jednom ili
+ * više ugovora u periodu od godinu dana“. The till only ever sees the sale in
+ * front of it: there is no customers table, no buyer tag and no rolling
+ * 365-day total, and a customer-identity store without a lawful ZZPL basis
+ * would be its own exposure (§5 Q-3). So the gap is **stated in writing** here
+ * instead of being left for the owner to discover — the duty binds the shop
+ * whether or not the software can compute it.
+ *
+ * Two things this copy must not do. It must not read as a feature: nothing
+ * here may suggest the program watches a buyer over a year, because an owner
+ * who believes that stops watching himself. And it must carry no fine figure —
+ * penalties live in `src-tauri/src/legal.rs` and are rendered from the
+ * backend's `LegalNotice`, so that a preduzetnik is never shown a pravno-lice
+ * tier.
+ */
+function AmlAggregationDisclosure() {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle role="heading" aria-level={2}>
+          Šta provera gotovine ne obuhvata
+        </CardTitle>
+        <CardDescription>
+          Pročitajte pre nego što se oslonite na proveru koja se prikazuje na
+          kasi.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Alert>
+          <ShieldAlertIcon aria-hidden="true" />
+          <AlertTitle>Program ne sabira uplate istog kupca</AlertTitle>
+          <AlertDescription>
+            <div className="flex flex-col gap-2">
+              <p>
+                Zabrana prijema gotovine ne odnosi se samo na jednu uplatu. Ona
+                važi i kada se radi o više međusobno povezanih gotovinskih
+                transakcija, kao i o jednom ili više ugovora u periodu od
+                godinu dana.
+              </p>
+              <p>
+                Program proverava isključivo pojedinačnu prodaju koja je u tom
+                trenutku na kasi. On ne vodi evidenciju kupaca i ne sabira
+                ranije uplate istog kupca, pa povezane uplate ne može ni da
+                prepozna ni da ih prikaže.
+              </p>
+              <p>
+                Zakonska obaveza važi za radnju i onda kada je program ne
+                proverava. Procenu da li su uplate međusobno povezane donosi
+                radnja sama; kod većih iznosa kupcu ponudite uplatu na tekući
+                račun.
+              </p>
+              <p className="text-xs">
+                Član 46. stav 1. Zakona o sprečavanju pranja novca i
+                finansiranja terorizma.
+              </p>
+            </div>
+          </AlertDescription>
+        </Alert>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
  * The calendar the seven-working-day deposit deadline (Zakon 68/2015, čl. 3
  * st. 1) is counted against.
  *
@@ -947,7 +1338,7 @@ function DepositCalendarPanel({ settings }: { settings: SettingsService }) {
               <div className="flex flex-col gap-1">
                 <span className="text-sm font-medium">Subota je radni dan</span>
                 <span className="text-xs text-muted-foreground">
-                  „Radni dan" nije definisan ni u Zakonu 68/2015 ni u Pravilniku
+                  „Radni dan“ nije definisan ni u Zakonu 68/2015 ni u Pravilniku
                   77/2011. Podrazumevano se subota računa, jer tako rok pada
                   ranije.
                 </span>
@@ -1443,6 +1834,20 @@ function GoLiveResetCard({
               čl. 47). Pre brisanja se obavezno pravi rezervna kopija — čuvajte je
               trajno. Pravna lica ne smeju uništavati dokumentarni materijal bez
               pismenog odobrenja arhiva.
+            </p>
+            {/*
+              `reset_trading_data` also runs DELETE FROM kalkulacije. The
+              kalkulacija is the isprava behind a receipt zaduženje and is
+              numbered per poslovna godina, exactly like the KEP it feeds — so
+              it is a numbered book the owner is losing, not a by-product of
+              „obriši probne račune“, and it gets its own sentence.
+            */}
+            <p className="text-sm text-muted-foreground">
+              Briše se i knjiga kalkulacija. Kalkulacija je isprava koja se
+              numeriše po poslovnoj godini, pa bi uz zadržane probne kalkulacije
+              prva prava kalkulacija dobila redni broj veći od 1. Zajedno sa njom
+              briše se i KEP (evidencija prometa) sa zaključenjima poslovnih
+              godina, da probna knjiženja ne bi ušla u pravu knjigu.
             </p>
             <Input
               aria-label="Potvrda brisanja"

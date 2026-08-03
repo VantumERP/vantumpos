@@ -84,24 +84,893 @@ at `docs/SW11-SW15-VERIFIED-RULES.md`). Register rows 21, 27, 28 and 29 in
 | SW-15 onboarding profile | `settings.rs::ShopProfile` — `pravna_forma` / `pdv_obveznik` / `distance_selling`, all tri-state and **never inferred**; `EsirElement` rows kept as an *interna beleška o proveri*, never an *evidencija* |
 | Tier-resolved legal copy | `legal.rs` — the only module allowed to hold a fine figure; every SW-11/SW-15 figure resolves through it, and a test pins that "privredni prestup" is unreachable under the preduzetnik regime. The SW-7 reklamacija amounts followed on 31.07.2026: `legal.rs::reklamacija_breach` is regime-versioned as well as tier-resolved, rides on `ReklamacijaView.notice`, and the frontend renders it without deriving a figure of its own. Its summary was widened on 02.08.2026 — čl. 210 st. 1 tač. 24 penalises the čl. 63 st. 3 fee ban too, so "u propisanim rokovima" understated what the figure sanctions |
 | SW-11a AML cash cap | `aml.rs` (inclusive `>=`, subject is the cash line of the tender) + `nbs_rate.rs` (zvanični srednji kurs, manual fallback, no silent pass); asked via `sales_assess_cash_payment`, re-evaluated and persisted by `sales_complete`; `bank_transfer` tender ships the statute's own remedy |
-| SW-11b polog aging | `cash_deposit.rs` — working-day arithmetic over a seeded, operator-editable `non_working_days` table, FIFO buckets clocked from **receipt**, deadline as a date, `bank_withdrawal` excluded from the subject base. Advisory only, no hard block |
+| SW-11b polog aging | `cash_deposit.rs` — working-day arithmetic over a seeded, operator-editable `non_working_days` table, FIFO buckets clocked from **receipt**, deadline as a date, and (narrowed 01.08.2026, migration v16) only a `bank_withdrawal` the operator asserts as `documented_per_pravilnik` leaves the subject base. Advisory only, no hard block |
 | SW-11c deklaracija | declaration columns on `products` (v15) + `catalog.rs::validate_declaration` (mandatory **iff** `distance_selling`), `catalog_declaration_gaps` report, goods-receipt warnings in `inventory.rs` |
 | Go-live reset | preserves configuration (`shop_profile`, `eur_rate`, `non_working_days`), clears compliance state, and discloses the deklaracija wipe |
 
-**Verification gates (all green at HEAD):**
+**Verification gates at the end of the 22-task plan (`f96df45`):** bun 274 passed / 19 files,
+cargo 456 passed, build + clippy + fmt + `git diff --check` clean.
+
+### SW-11 / SW-15 fix batch (2026-08-01)
+
+A post-ship adversarial review of the module against `docs/SW11-SW15-VERIFIED-RULES.md` found six
+defects (D1, D3, D5, D6–D8) plus four documentation errors. All are now closed on `master`.
+
+| Defect | What was wrong | Fixed by |
+|---|---|---|
+| **D1 — blocking** | `settings_get_eur_rate` / `settings_refresh_eur_rate` / `settings_set_manual_eur_rate` existed in Rust but were absent from `PosServices`, so a **real install had no way to obtain a rate at all**. `sales_assess_cash_payment` therefore always returned `rateUnavailable` and the AML čl. 46 st. 1 check could never run outside the mock adapter | `2b586ee` — the three commands added to `ports.ts` / `local-adapter.ts`, registered in `lib.rs`, and surfaced as the admin **„Kurs“** tab (`SettingsScreen.tsx::EurRatePanel`): NBS refresh, band-checked manual fallback, staleness verdict |
+| **D3** | The till's AML verdict is debounced; between the last keystroke and the verdict landing, „Završi prodaju“ decided the soft block on the *previous* tender — a fast operator walked straight through a breach | `5fc0390` — `RegisterScreen` tracks `assessedCashMinor` and re-asks `assessCashPayment` for the exact cash line about to be booked before deciding |
+| **D5** | Answering **„ne“** to the L-PFR question surfaced nothing. §3 req 32 requires the ZF čl. 6 st. 4 duty **and** its čl. 15 st. 1 tač. 4 penalty at the shop's own tier, unless one of the two statutory carve-outs is claimed | `3c724c0` — `legal.rs::lpfr_required` (tier-resolved, enumerated in the `all_notices` guard), `settings_lpfr_notice`, and the two carve-out tri-states (`lpfrCarveOutInternetOnly`, `lpfrCarveOutOwnUsedAssets`) on `ShopProfilePanel` |
+| **D6–D8** | The per-sale verdict read as clearance for the buyer; čl. 46 st. 1 also reaches linked cash transactions and contracts inside one year, which the software cannot compute (§3 req 5 requires that limitation be stated **in writing**) | `848dcb4` — disclosure on the till's AML notice and an `AmlAggregationDisclosure` panel beside the rate settings |
+| Docs | Gate baselines, the `legal.rs` exclusivity claim, register row 27 and the retention citation were overstated; the `reset_trading_data` tombstone still cited **ZPDV čl. 47** as the general retention floor | `9fa88b8` + `backup.rs` — the tombstone now cites **ZoRač čl. 28 st. 4 + ZPPPA čl. 114ž**, with a test that bars `ZPDV` from that string |
+
+**Verification gates (all green at HEAD, `848dcb4`):**
 
 | Gate | Result |
 |---|---|
-| `bun run test` | **274 passed** / 0 failed, 19 files (was 211, 17 files at plan base `10ba510`) |
+| `bun run test` | **296 passed** / 0 failed, 19 files (was 274 pre-batch) |
 | `bun run build` | pass (tsc + vite, 2732 modules) |
-| `cargo test -- --test-threads=1` | **456 passed** / 0 failed (was 349 at plan base `10ba510`) |
+| `cargo test -- --test-threads=1` | **460 passed** / 0 failed (was 456 pre-batch) |
 | `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
 | `cargo fmt --check` | clean |
 | `git diff --check` | clean |
 
-**Known remaining gap:** the general upward-only `retain_until` engine (register row 21) is still open —
-only the onboarding half of the retention item shipped. The KEP book carries its own 5-year floor in
-`kep_close.rs::retention_floor`.
+**Still open after that batch** — superseded by the residuals batch below, which closed D2, D4 and the
+D1 residual. (Requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3.)
+
+- **Req 39 / §4 item 8 — false archive duty still on screen.** `src/app/settings/SettingsScreen.tsx:1773`
+  tells the operator „Pravna lica ne smeju uništavati dokumentarni materijal bez pismenog odobrenja
+  arhiva.“ ZAG čl. 16 st. 2 confines prior written archive approval to the **public sector**; the memo
+  (§1 row 5) requires that claim removed. Pre-existing (SW-3, `062250d`), not introduced by this batch.
+- **Req 35–38, 42, 43 — retention engine.** No `retention_class`, `retain_until`, `legal_hold` or
+  upward-only extension exists anywhere in the schema; the čl. 32 objekti/ulaganja register (req 37) and
+  the documented plain-text archival export (req 43) are not built. The KEP book carries its own 5-year
+  floor in `kep_close.rs::retention_floor`. The same screen line (`SettingsScreen.tsx:1771`) still
+  attributes the 10-year floor to **ZPDV čl. 47** — the miscitation corrected in `backup.rs` was not
+  carried into the UI copy.
+- **Req 5(b)(c) — one-year aggregation.** The limitation is now disclosed, but the optional buyer tag and
+  the rolling 365-day running total are not built. `[PRUDENTIAL]` mechanism; blocked on §5 Q-3 (lawful
+  ZZPL basis for a customer-identity store).
+- **Req 17 — polog evidence trail.** The „Izveštaj o nedeponovanom gotovom novcu“ renders on screen; no
+  printable/CSV export for the knjigovođa.
+- **Req 29 — preduzetnik constant lint** (>500.000 range / >150.000 fixed) is not implemented; the
+  `legal.rs` guard covers the forbidden substrings and the UNSET case only.
+- **Req 40 — SEF / e-otpremnica copy** does not exist yet, so the korporacijska-kartica and
+  public-sector-buyer exceptions have nowhere to be stated.
+- **`legal.rs` exclusivity, known exception:** `src/app/reklamacije/ReklamacijeModule.tsx:128` still
+  hard-codes the regime-versioned reklamacija amounts — an SW-7 follow-up.
+
+### SW-11 residuals batch — migration v16, D4, D2, D1-residual (2026-08-01)
+
+The three defects the previous batch left open. `src-tauri/src/legal.rs` is **untouched** by this batch
+(`git diff 891d40a..HEAD --name-only` returns no `legal.rs`), and the only Serbian-formatted figure it
+introduces is **150.000** — the Pravilnik 77/2011 čl. 2 st. 3 daily undocumented-withdrawal lane, a
+statutory threshold, not a fine.
+
+| Defect | What was wrong | Fixed by |
+|---|---|---|
+| **Schema** | `compliance_log.event_type` admitted only `('trading_data_reset','backup_restored')`, so the AML audit row had nowhere to land; `cash_movements` had no way to record the Pravilnik čl. 2 st. 2/st. 3 assertion | `4068727` — **migration v16**. Table rebuild widens the CHECK to admit `aml_cash_threshold` (`migrations.rs:579`); `ALTER TABLE cash_movements ADD COLUMN documented_per_pravilnik INTEGER CHECK (… IS NULL OR … IN (0,1))` (`migrations.rs:593`), nullable and **deliberately not backfilled** |
+| **D4 — req 8** `[PRUDENTIAL]` | The čl. 46 st. 1 soft block captured a reason but wrote no immutable audit entry, so an inspection could not reproduce the decision from the log alone | `d92cca6` — `sales.rs::insert_aml_breach_event` (`sales.rs:679`) writes one `aml_cash_threshold` row **on the sale's own transaction** (`sales.rs:297–313`), carrying sale id, local receipt number, cash in para, threshold, rate + date + source, and the operator's reason. Stamped with the sale's `created_at`, never `datetime('now')`. A `near_threshold` warning writes nothing — nothing below the cap is unlawful |
+| **D2 — req 14** `[LEGAL]` | `load_cash_inflows` carried **every** `bank_withdrawal` with `subject = false`. Pravilnik 77/2011 čl. 5 st. 2 relieves only dinars paid out per čl. 2 st. 2 or st. 3; req 14 says in terms *do not exclude all bank withdrawals*. Shrinking the subject base hands the owner the false „izmireno“ state req 10 forbids, and a withdraw-then-redeposit float cycle under-reported twice | `b0adfe6` — the `bank_withdrawal` arm is split in two (`cash_deposit.rs:664–676`): only `documented_per_pravilnik = 1` returns `subject = 0`; `NULL` and `0` are **both** subject, written as an explicit arm because `= 1` and `<> 1` do not partition rows in SQL. Recorded per movement (`shifts.rs:153–157`), dropped on any direction other than a podizanje. Report footer, CSV, summary tile and module docs now state the narrowed rule and still name it bylaw-level relief |
+| **D1 residual** | Podešavanja → Kurs gave the rate an operator surface, but nothing ever fetched it. On a fresh install `load_eur_rate()` stayed `None`, so the čl. 46 st. 1 check silently did not run until an admin happened to find the tab | `25168ba` — `settings.rs::auto_refresh_eur_rate_if_due` (`settings.rs:620`) attempts one NBS fetch on the first **admin** session of a calendar day, kicked off detached from `auth_login` (`auth.rs:68–74`) so it can never delay a login, sale or shift. The last **attempt** is persisted (`settings.rs:651`), not the last success, so an offline shop pays the 8 s timeout once a day. Plus an admin-only readiness badge in the shell status strip (`AppShell.tsx:515–583`) that names the unrun check, says selling is not blocked, and carries no penalty figure |
+
+**Verification gates (all six green at HEAD, `25168ba`; every command exited `0`):**
+
+| Gate | Result |
+|---|---|
+| `bun run test` | **304 passed** / 0 failed, 19 files (was 296) |
+| `bun run build` | pass — tsc + vite, 2732 modules transformed |
+| `cargo test -- --test-threads=1` | **476 passed** / 0 failed, 0 ignored (was 460) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `git diff --check` | clean |
+
+Latest migration: **v16**.
+
+**Still open after this batch** (requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3):
+
+- **Req 39 / §4 item 8 — false archive duty still on screen.** `src/app/settings/SettingsScreen.tsx:1773`
+  still tells the operator „Pravna lica ne smeju uništavati dokumentarni materijal bez pismenog odobrenja
+  arhiva.“ ZAG čl. 16 st. 2 confines prior written archive approval to the public sector. Pre-existing
+  (SW-3, `062250d`); untouched by this batch.
+- **Req 35–38, 42, 43 — retention engine.** No `retention_class`, `retain_until`, `legal_hold` or
+  upward-only extension in the schema; no čl. 32 objekti/ulaganja register (req 37); no documented
+  plain-text archival export (req 43). `SettingsScreen.tsx:1771` still attributes the 10-year floor to
+  **ZPDV čl. 47** — the miscitation corrected in `backup.rs` was never carried into the UI copy.
+- **Req 5(b)(c) — one-year aggregation.** Disclosed in writing, but the optional buyer tag and the rolling
+  365-day running total are not built. `[PRUDENTIAL]`; blocked on §5 Q-3.
+- **Req 15, second half — the 3-day advance announcement** for withdrawals over 1.500.000 RSD
+  (Pravilnik čl. 3 st. 1) is not surfaced anywhere. The 150.000 RSD/day lane now is. `[PRUDENTIAL]`.
+- **Req 17 — polog evidence trail: CSV ships, print does not.** *Correcting the previous batch's entry* —
+  the CSV export exists end to end (`commands/cash_deposit.rs:41` → `ports.ts:360` →
+  `CashDepositReport.tsx:95` „Izvezi CSV“). Only the printable view for the knjigovođa is missing.
+- **Req 29 — preduzetnik constant lint** (>500.000 range / >150.000 fixed) is not implemented; the
+  `legal.rs` guard covers the forbidden substrings and the UNSET case only.
+- **Req 34 — ESIR re-confirmation prompt** (annual, or on any reported ESIR update) is not built; the
+  registry check is still one-time.
+- **Req 40 — SEF / e-otpremnica copy** does not exist yet, so the korporacijska-kartica and
+  public-sector-buyer exceptions have nowhere to be stated.
+- **Req 9 — rule-version date gating** is conditional on a historical/retrospective AML report, which is
+  not built. Not a gap today; a precondition on that report.
+- **`legal.rs` exclusivity, known exception:** `src/app/reklamacije/ReklamacijeModule.tsx:128` still
+  hard-codes the regime-versioned reklamacija amounts — an SW-7 follow-up, in flight separately.
+
+---
+
+### SW-14 — Evidencija radnog vremena (2026-08-01)
+
+The ZoR čl. 55 st. 6 daily overtime register, the čl. 53 caps that carry the larger fine, the čl. 87–91
+protection guards and a two-class retention model, shipped as a ten-task TDD plan
+(`docs/superpowers/plans/2026-08-01-sw14-radno-vreme.md`) against the verified rule set in
+`docs/SW14-VERIFIED-RULES.md` §4. Baseline at plan time was `907017c` — cargo **476**, bun **304**,
+migration **v16**.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — schema | **Migration v17**: `work_time_entries` (one row per employee/day, the 15 ZEOR čl. 24 tač. 1 minute buckets, versioned append-only correction chain, a partial unique index giving one live row per day), `work_time_periods`, `retention_policies`, employee-profile columns on `users`. Absence category is a closed `CHECK` enum with **zero free-text columns**, and the bucket column is **derived** from the category (`{kategorija}_minuta`), enforced by a test that parses the live `CHECK` | `4265190`, `6f9de79`, `6b41c43` |
+| 2 — caps | `worktime.rs::assess_caps` — čl. 53 st. 2 (≤ 8 h prekovremenog per **calendar week, Monday-based**) and st. 3 (≤ 12 h daily total incl. overtime); civil-date arithmetic reused from `cash_deposit.rs` rather than re-derived. The stored version of the day under assessment is not double-counted | `d5ad982`, `b3a2d4c` |
+| 3 — penalty copy | `legal.rs::overtime_record_missing` (čl. 276 st. 1 u vezi sa tač. 1a) and `overtime_caps_exceeded` (čl. 274 st. 1 tač. 3), both tier-resolved from `pravna_forma`; the čl. 276 st. 2 odgovorno-lice line is suppressed for a preduzetnik. A test guards that **no ZEOR figure** is reachable anywhere, and three previously vacuous guards were closed | `6ae257e`, `c0fc959` |
+| 4 — protection | `worktime.rs::check_protection` — čl. 87 (8 h/day for a minor; the 35 h/week leg is not checked), **čl. 88 st. 1 bans prekovremeni *and* preraspodela**, čl. 91 st. 1 (dete do 3) and st. 2 (**samohrani roditelj — threshold SEVEN**, plus `dete_tezak_invalid` with no age limit) require a stored written consent **dated before the day worked**, čl. 90 warns rather than blocks. `derives_overtime_automatically` returns `false` under preraspodela — čl. 58 hours are not overtime | `defcecf`, `8c04a05` |
+| 5 — commands | `commands/worktime.rs`: `worktime_list_month`, `save_entry`, `correct_entry`, `close_period`, `export_csv`, `my_hours`, `notices`. Not one `UPDATE` against `work_time_entries`; a correction is a new `verzija` row carrying who/when/why. `require_admin` is the **first statement of the domain function**, not of the `#[tauri::command]` wrapper. A cap breach records the day and asks for a čl. 53 st. 1 ground; a čl. 87–91 block refuses the row. Preraspodela is branched onto the čl. 57 st. 5 60 h/week ceiling, and a month cannot close before it ends | `5a87e4a`, `93c95e7` |
+| 6 — retention | `retention.rs` — the single shared table SW11-SW15 §3 req. 42 mandates. `WorktimeClassification` = `trajno` + `never_purge`, unreachable by the go-live reset (`assert_never_purge_intact` runs **inside** that transaction in `backup.rs`) — **restore is not fenced and cannot be**: `restore_backup` replaces the database file, so the register returns as the snapshot holds it, the `pre_restore` safety copy is the only protection on that path, and the `backup_restored` event records the never-purge counts on both sides; a count-based refusal cannot tell a legitimately older backup from data loss and would leave a shop unable to restore at all. A backup-prune path **does not exist** in the crate, so that limb guards nothing; `WorktimeOvertimeLog` carries an upward-only **3-year** floor applied to each record's own `dan`, with a fail-safe that refuses to purge when no floor is stored; `WorktimeDraft` is bounded by the period close | `ee7fcca`, `0c96a6a` |
+| 7 — Radno vreme UI | `src/app/worktime/WorkTimeModule.tsx` — monthly grid, cap warnings with the override ground, period close, CSV export, and the absence category behind `canSeeAbsenceReason`. Non-blocking čl. 87–91 findings are surfaced rather than swallowed, and the recorded day is guarded | `6807309`, `2f576d7` |
+| 8 — Moji sati | `src/app/worktime/MyHoursPanel.tsx` — read-only own-month view resolved from the server-side session, **no employee picker and no export control** (ZoR čl. 83 st. 1 + ZZPL čl. 26 in one surface). Reachable off-shift | `c57b9bd`, `ae9c00d` |
+| 9 — employee profile | `commands/users.rs` — the čl. 87–91 flags plus ZEOR čl. 44 st. 2 `zanimanje_sifra` / `kvalifikacija_sifra` as codes. **No consent UI**: `saglasnost_prekovremeni_od` records that a written consent exists and when. `trudnoca_ili_dojenje` is a boolean + date, never free text, and is kept out of `users_list` | `f796de3`, `a69f1b0` |
+
+**Verification gates (all six green at HEAD; every command exited `0`):**
+
+| Gate | Result |
+|---|---|
+| `bun run test` | **355 passed** / 0 failed, 22 files (was 304 / 19) |
+| `bun run build` | pass — tsc + vite |
+| `cargo test -- --test-threads=1` | **549 passed** / 0 failed, 0 ignored (was 476) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `git diff --check` | clean |
+
+New tests: 29 in `worktime.rs`, 14 in `commands/worktime.rs`, 9 in `retention.rs`, plus additions in
+`legal.rs`, `db/migrations.rs`, `commands/users.rs` and `commands/backup.rs`; 50 frontend tests across
+`WorkTimeModule.test.tsx`, `MyHoursPanel.test.tsx` and `UserDialog.test.tsx`.
+
+**Review fix (01.08.2026).** Four claims in this file and in `SERBIAN-LAW-COMPLIANCE.md` described legs
+the code does not have: the čl. 87 weekly cap credited to `check_protection`, the čl. 57 st. 5 ceiling
+credited to `assess_caps` rather than to its caller, an unqualified "no fine figure outside `legal.rs`",
+and — in the notice handed to employees — ZZPL čl. 95 st. 1 **tač. 20** where the čl. 23 offence is
+**tač. 8**. All four are corrected above, and the defect class now has a guard:
+`src-tauri/src/docs_guard.rs` (test-only) reads the three documents and fails when a compliance row
+claims more than the code delivers. `worktime.rs::the_cl_87_weekly_leg_is_not_checked` pins the gap in
+behaviour — six eight-hour days raise nothing — so building the leg breaks the test and forces the prose
+to be re-stated in the same commit.
+
+Latest migration: **v17**.
+
+**Deliberately not built** (`docs/SW14-VERIFIED-RULES.md` §5) — read these as decisions, not as gaps:
+payroll of any kind (čl. 24 tačke 2–3 are the accountant's), an obračun zarade, the čl. 108 uplifts,
+any free-text/diagnosis/doznaka field on an absence row, biometric clock-in, an annual overtime counter,
+a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export, and any consent UI.
+
+**Still open after this batch** (requirement numbers are `docs/SW14-VERIFIED-RULES.md` §4):
+
+- **Req 12, weekly leg — the čl. 87 cap of 35 časova nedeljno for an employee under 18 is not checked.**
+  `check_protection` enforces only the 8 h/day leg (`MINOR_DAILY_CAP_MINUTES`); the weekly leg needs the
+  employee's week, which that signature does not carry, and no caller supplies it. The under-18 čl. 88 st. 1
+  bans on prekovremeni and preraspodela *are* enforced, so a minor cannot accumulate the week through
+  overtime — but a minor scheduled 7 h a day across six days raises nothing.
+- **Req 18, restore leg — the trajno classes are fenced against the go-live reset, not against a restore.**
+  `assert_never_purge_intact` runs inside the `reset_trading_data` transaction. `restore_backup` replaces the
+  database file, so `work_time_entries`, `work_time_periods` and `retention_policies` come back exactly as the
+  restored snapshot holds them. Asserting over the counts there is **not** the fix: a snapshot older than the
+  newest worked day holds fewer rows *because it is older*, so a refusal would turn away routine disaster
+  recovery and leave a shop with any register rows at all unable to restore — and the file is already replaced
+  by the time anything can be counted, so the only „abort“ is a second overwrite from the safety copy. What
+  ships instead: the `pre_restore` safety copy stays mandatory, and `backup_restored` records the never-purge
+  row counts on both sides so a rewind of the ZEOR čl. 25 st. 3 register is evidenced rather than silent. A
+  real fix is a merge that carries the trajno rows across, and it needs to tell one database's `user_id` from
+  another's before it can be trusted. The čl. 23 notice, the register row and the stored `napomena` were
+  restated to claim only this, and `docs_guard.rs` pins them.
+- **Req 16 — the holiday calendar is not encoded.** `rad_na_praznik_minuta` is an operator-entered,
+  advisory-tagged bucket; the Zakon o državnim i drugim praznicima čl. 1/1a/2/3a rules and the čl. 3/čl. 5
+  working-holiday exclusion set are not in code, so nothing derives the čl. 108 st. 1 tač. 1 flag.
+- **Req 15 `[PRUDENTIAL]` — rest-period checks** (čl. 64, 66, 67) and their preraspodela variants are not
+  implemented.
+- **Req 10 — the 9-month reference period** behind `kolektivni_ugovor_postoji`, and the čl. 61
+  mid-period-termination choice, are not surfaced.
+- **Req 14 — the čl. 62 st. 2 night threshold** advisory flag is not computed. Consequently the
+  *„odnosno noću“* leg of čl. 90 and čl. 91 is **not** enforced either: `nocni_minuta` is an
+  operator-entered advisory bucket and is not visible in `DayHours`, so `check_protection` draws those
+  guards on the overtime leg alone. A protected employee scheduled at night with no overtime raises
+  nothing.
+- **Req 26, second half — the activation gate.** The čl. 23 notice now carries the posebne-vrste row, the
+  named recipients and the two-class retention statement, but the module does **not** yet refuse to
+  activate for an employee until a re-delivery acknowledgement dated on/after this feature is recorded.
+- **Req 27 — the čl. 47 evidencija as a generated artefact** is still a hand-maintained document
+  (`docs/compliance/evidencija-obrade-cl47.md`); it is not driven off the configured purposes, recipients
+  and `retention_policies` rows.
+- **Req 28 — remote-support masking** of the absence-reason column, with the unmask logged, is not built
+  (depends on SW-10).
+- **Req 21, print half — CSV ships, the per-employee monthly print sheet does not.** Mirrors the polog
+  report's open item.
+- **W-1 remains open** (`docs/SW14-VERIFIED-RULES.md` §6): whether ZEOR čl. 51 reaches a preduzetnik at
+  all. Until a lawyer answers, no ZEOR figure is rendered — the `legal.rs` guard enforces it.
+
+### SW-14 write-path guards — future day, wrong period, period naming (2026-08-02)
+
+Three defects in the one write path, `commands/worktime.rs::write_entry`, and so in both
+`worktime_save_entry` and `worktime_correct_entry` at once. **No schema change — v17 is untouched**, and
+`legal.rs` is not in the diff. Baseline before the batch: cargo **556**, bun **355**.
+
+| Defect | What was wrong | Fixed by |
+|---|---|---|
+| **D1 — §4 req. 6 + req. 17** `[LEGAL]` | `write_entry` parsed `dan` and checked the closed-period freeze, but never compared the day against the `now` already threaded through it: `2028-03-04` recorded as `verzija 1`. Hours nobody has worked yet are a forecast, not the „dnevna evidencija“ ZoR čl. 55 st. 6 asks for — the thing that makes a register look invented, which is the čl. 276 st. 1 tač. 1a exposure the module exists to remove. `close_period` had `guard_period_has_ended` from the start; the write path had no equivalent one day at a time, and the log is append-only, so a mistyped year lands a permanent row that can only be superseded — a correction entry about a day that never happened | `f1cee97` — `guard_day_has_happened` (`commands/worktime.rs:1184`), first check in `write_entry` (`:571`). Decides off the `now` **parameter**, never a wall clock of its own, so the day is a caller's statement and the guard is testable. The day **in progress** stays writable: req. 17 wants a contemporaneous write, so the boundary is the calendar day of `now`, not the day before it. An unreadable `now` refuses with its own message rather than guessing — the row is permanent and would carry that same unreadable stamp as its `created_at`. Sits ahead of the live-row lookup, so a correction aimed at a future day is told why instead of „nema unosa za taj dan“ |
+| **D2 — write integrity** | `SaveEntryRequest` carried only `user_id` and `dan`, and the month was derived from that day, so the backend could not see the mismatch the Datum field already refuses: a septembar day typed while avgust is on screen is a valid date and every backend check passed it. `list_month` filters by period, so the operator is told „Dan je evidentiran“ about a row that is not on the screen they are looking at and, in an append-only log, cannot be withdrawn — only superseded from a month they have to know to open. It also slips the closed-period freeze they would have hit: that check runs on the **day's own** month, so a stray day walks into a neighbouring month that may be open when the one on screen is shut | `55a54dc` — `godina`/`mesec` on `SaveEntryRequest` (`:253`), deliberately **not** `#[serde(default)]` (a default would let the caller the guard exists for drop it silently), and `guard_day_is_in_period` (`:1222`) at `:575`. The pair is an assertion *about* the write, never the source of the row's own month, which stays derived from `dan`. `validate_month` runs on the stated period first, so month 13 says so instead of reporting a mismatch against „13/2026“. Frontend: `toRequest` already had the selected period in hand and now sends it |
+| **D3 — operator copy** | The three period refusals in the module disagreed with each other and with the screen: the new one named the month, `period_closed_error` and `guard_period_has_ended` numbered it („Period 08/2026“) while the operator had picked that month from a list of names. Neither of the two older messages had any test on its text — only on `code()` | `085e18a`, `3a36d0f` — `MESECI` and `naziv_perioda` (`:1255`, `:1279`); all three call sites read the name and write the Serbian ordinal dot themselves. Both older messages are now pinned, the „još nije završen“ case for **decembar** as well as avgust so the name has to come out of the table by index. Frontend: `MESECI` moves out of `WorkTimeModule.tsx` into `src/lib/period.ts` beside a mirroring `nazivPerioda`, and `WorkTimeModule`, `MyHoursPanel` and `mock-adapter` — which held two hard-coded copies of the `period_closed` message that would have been left numbering the month — all read it from there. Three frontend copies of the month list become one |
+
+**Verification gates (all six green at HEAD, `3a36d0f`; every command exited `0`):**
+
+| Gate | Result |
+|---|---|
+| `bun run test` | **359 passed** / 0 failed, 23 files (was 355 / 22) |
+| `bun run build` | pass — tsc + vite |
+| `cargo test -- --test-threads=1` | **559 passed** / 0 failed, 0 ignored (was 556) |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | clean |
+| `cargo fmt --check` | clean |
+| `git diff --check` | clean |
+
+New tests: 3 in `commands/worktime.rs` (`a_day_that_has_not_happened_cannot_be_recorded`,
+`a_day_outside_the_stated_period_is_refused`, `the_period_is_named_in_serbian`), plus message assertions
+added to the two pre-existing period tests, which had asserted only `code()`; 4 frontend (1 in
+`WorkTimeModule.test.tsx`, 3 in the new `src/lib/period.test.ts`).
+
+Latest migration: **v17** — unchanged by this batch.
+
+**Residuals this batch leaves:**
+
+- **The month names now exist twice, once per language** — `crate::commands::worktime::MESECI` and
+  `src/lib/period.ts`. The backend has to be able to name a period it is refusing a write for without
+  being handed the name by the caller it is refusing, and the frontend has to fill a `<select>` without
+  asking the backend, so neither copy can be deleted. Both are pinned string by string
+  (`the_period_is_named_in_serbian`, `period.test.ts`) and each test spells the twelve names out rather
+  than reading the table it is checking — that pair of tests is the whole defence against a silent
+  divergence in what the operator is told.
+- **`godina`/`mesec` are now required on every write.** Any future caller of `worktime_save_entry` or
+  `worktime_correct_entry` must state the period; a payload without them fails deserialization rather
+  than defaulting to a period nobody chose. That is the intent, and it is the one breaking change in the
+  batch.
+
+---
+
+### SW-14 fix batch — D2, D3, D4 and the prose guards (2026-08-01)
+
+Four defects found by review of the shipped SW-14 work. None of them changed a fine *amount*, which is
+why the amount guards could not see any of them: two were wrong prose about what the code does, one was
+a wrong statutory citation on a correct figure, and one was a save that succeeded when it should have
+been refused.
+
+| Commit | Defect | What shipped |
+|---|---|---|
+| `b495425` | Three compliance rows credited the code with legs it does not have — the čl. 87 weekly cap, the čl. 57 st. 5 ceiling attributed to `assess_caps` rather than to its caller, and an unqualified „no fine figure outside `legal.rs`“ | The rows were re-stated, and the defect class got a guard: **`src-tauri/src/docs_guard.rs`** (test-only, `#[cfg(test)]` in `lib.rs`) embeds `SERBIAN-LAW-COMPLIANCE.md`, `PROGRESS.md`, both `docs/compliance/` templates **and** the `retention.rs` `napomena` strings, and fails when a line claims more than the code delivers |
+| `66636a3` | The čl. 23 notice told the employee the trajno classification could not be reached by a restore or by backup pruning. `assert_never_purge_intact` runs only inside the `reset_trading_data` transaction; `restore_backup` swaps the database file, and no backup-prune path exists in the crate at all | The notice, the register row and the stored `napomena` now claim only what is true — the `pre_restore` safety copy is the protection on that path, `backup_restored` records the never-purge row counts on both sides, and automatic cleanup of old backups „ne postoji“. Two `docs_guard` tests pin both halves |
+| `1c33bf1` (D2) | `docs/compliance/evidencija-obrade-cl47.md` — the document SW-14 req. 27 names — printed a „fiksna kazna 100.000 RSD“ (the čl. 95 st. 2 *pravno-lice* tier, double the pilot's real exposure) in a record shown to the Poverenik, headed the obrađivač record „čl. 47 **st. 2**“ (the disapplication for nadležni organi; the obrađivač record is **st. 4**), and invoked only one limb of čl. 47 st. 9 | Preduzetnik tier **fiksna 50.000 (čl. 95 st. 6)**, st. 4 heading, **both** st. 9 limbs (tač. 2 — obrada nije povremena; tač. 3 — posebne vrste podataka). Three new `docs_guard` tests |
+| `1216194` (D3, D4) | **D3** — a preraspodela day refused on the čl. 57 st. 5 60 h weekly ceiling appended `capsExceeded`, whose summary states the čl. 53 8 h/12 h caps that čl. 58 makes **inapplicable** to that employee and whose citation is čl. 274 st. 1 tač. 3. Preraspodela is **tač. 4**. Both tačke resolve through the same st. 2 for a preduzetnik, so no wrong figure ever shipped. **D4** — a 13 h preraspodela day saved without the čl. 53 st. 1 ground being asked for | `legal::preraspodela_caps_exceeded` — duty čl. 57 st. 5, preduzetnik čl. 274 st. 1 tač. 4 u vezi sa st. 2 — is the **eighth** notice, enumerated in `all_notices`, in the duplicated inline list in `every_notice_function_is_enumerated_in_the_guard`, and the asserted count is bumped to **8** |
+
+**Verification gates — all six run from the repo root at `1216194`, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **359 passed** / 0 failed, 22 files (was 355) | `0` |
+| `bun run build` | 2734 modules transformed, built in 3.64s | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **558 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 549) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+9 cargo / +4 bun** over the SW-14 baseline. Latest migration: **v17** (unchanged — this batch adds
+no schema).
+
+**Found by the closing audit of this batch, and NOT yet fixed** — both are the same defect class the
+batch was created to eliminate, in the one file it did not reach:
+
+- **`docs/compliance/obavestenje-zaposlenima.md:10` still prints the pravno-lice fine band.** The line
+  reads *„50.000–2.000.000 RSD za pravno lice … odnosno 20.000–500.000 RSD za preduzetnika“*. SW-14 §1
+  row 15 was closed only in its *tačka* half (tač. 20 → tač. 8); the tier half was answered by adding the
+  preduzetnik band beside the pravno-lice one rather than by removing it. `evidencija-obrade-cl47.md`
+  received the opposite and correct treatment in `1c33bf1` — the preduzetnik figure printed, the
+  pravno-lice stav cited without an amount — and `docs_guard.rs` has a test pinning that file
+  (`the_cl_47_record_prints_only_the_preduzetnik_fine_tier`) with **no counterpart for the čl. 23
+  notice**. This is the only pravno-lice figure left anywhere under `docs/compliance/`.
+- **`docs/compliance/obavestenje-zaposlenima.md:84` promises a deletion the code never performs.** The
+  Class B retention row tells the employee that drafts and helper time data *„Brišu se pošto je mesec
+  zaključen“*. **No purge path exists in the crate**: `retention::draft_purge_eligible`,
+  `overtime_log_purge_eligible` and `is_purgeable` are predicates with no production caller — every call
+  site is inside `retention.rs`'s own test module. The `WorktimeDraft` `napomena` was written correctly
+  (*„Brišu se **tek** pošto je period zatvoren“* — a not-before bound, not a promise), and the notice was
+  not brought into line with it.
+
+**Also open, and missing from the list above** (`docs/SW14-VERIFIED-RULES.md` §4):
+
+- **Req 24, privacy-screen half.** The three basis strings (čl. 12 st. 1 tač. 3, tač. 2, čl. 17 st. 2
+  tač. 2) are constants that must surface in the app's privacy screen *and* in the čl. 47 generator so
+  they cannot drift. Neither exists — a grep for `čl. 12 st. 1` / `17 st. 2` across `src/` and
+  `src-tauri/src/` returns no basis string, and there is no privacy screen under `src/app/`. The
+  generator half is already tracked as Req 27. The *„build no consent UI“* half of Req 24 **is** honoured.
+
+---
+
+### SW-10 + SW-13 + SW-17 — ZZPL trio (2026-08-02)
+
+The prudential evidencija pristupa and the čl. 46 remote-support nalog (**SW-10**), the three-class
+employee lifecycle with a time-driven purge (**SW-13**), the internal breach record with the
+Pravilnik 40/2019 obrazac (**SW-17**), and the generated čl. 47 evidencija radnji obrade that SW-17
+depends on, shipped as a ten-task TDD plan (`docs/superpowers/plans/2026-08-01-zzpl-trio.md`, design at
+`docs/superpowers/specs/2026-08-01-zzpl-trio-design.md`) against the verified rule set in
+`docs/REMAINING-SW-VERIFIED-RULES.md` §4. Baseline at plan time was `1216194` — cargo **558**,
+bun **359**, migration **v17**.
+
+**The headline is a reclassification, not a feature.** SW-10 was on the roadmap as a čl. 50 duty and is
+not one: čl. 48 and čl. 51 confine their logging duties to a *nadležni organ … u posebne svrhe*, and
+čl. 50 appears nowhere in čl. 95, so **no prekršaj is prescribed for not having this log at all**. It
+ships as a prudential/evidential control on čl. 5 st. 2 and čl. 41 st. 1, with čl. 48 st. 2 borrowed as
+the design template. Nothing in the app, the register or the čl. 23 notice tells the operator that the
+law requires it — and nothing says *"no consequence"* either, because the Poverenik's opomena and
+obavezujući nalog are live. The one **legal** duty in SW-10 is čl. 46, and it is the nalog, not the log.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — schema | **Migration v18**, five stores: `support_sessions` (the čl. 46 nalog); `audit_events` — closed `CHECK` on the čl. 48 st. 1 verbs, actor as an **FK to `users`** rather than a name column, closed enums for `reason_code` / `recipient` / `object_type`, `prev_hash` + `hash` NOT NULL, **no `updated_at`**, and a `BEFORE UPDATE` trigger; `personnel_records` — the 25 ZEOR čl. 5 tačke, `REFERENCES users(id)` **without `ON DELETE CASCADE`** (req. 24) plus a `BEFORE DELETE` trigger; `data_breaches` — `saznanje_at` NOT NULL with an immutability trigger, `occurred_at` / `discovered_at` separate and nullable; `processing_activities` — the čl. 47 st. 1 items with a retention column per category (t. 6) | `372ab53`, `0550654` |
+| 2 — `audit.rs` | SHA-256 `chain_hash` / `verify_chain_anchored`: tail truncation is reported rather than silently accepted, and the chain still verifies across a purge through a stored anchor. `reject_forbidden_content` is the **write-boundary** filter req. 4 asks for — the object id must match a whitelisted opaque-id grammar, so a JMBG, a card PAN, an address, a phone, a free-text note or a **search string** cannot enter the table even from a caller that means well. Pure: no clock, no connection, no state | `76fc5af`, `2a75be0` |
+| 3 — support nalog | `grant_access` (admin-gated, explicit obim and expiry, hard-bounded at **24 h**), `request_access` (gated by the **nalog** and not by a role — čl. 46 makes the nalog the condition, and the obrađivač has no account on this till), `end_session` (`ended_at` if the session was entered, `revoked_at` if it never was), `active_session` | `38e6cba`, `d2bcefc` |
+| 4 — write path + izvod | `record_audit`, the single door every feature writes through; `search`, admin-only — **reading the log is deliberately not logged**, the export is; `export_csv`, the izvod modelled on **čl. 48 st. 4** and handed over on the **čl. 49** osnov, rendering offline from the till with the period, the filter, the row count, the chain verdict and both hashes per row so the recipient can recompute the chain. Req. 7 leaves the module with three verbs and no fourth: nothing edits or removes a logged row | `a6a436a`, `ed7878b` |
+| 5 — three-class split | `commands/personnel.rs`: class A in `personnel_records`, class B as the surrogate `users.id` already on the ledger (ZoRač čl. 8 st. 4), class C as the credential hashes and `audit_events`. `purge_expired_classes` is **time-driven** (launch + a 6-hourly timer in `lib.rs`, never a command an operator presses) and takes a `PurgeableClass` with exactly two variants, **neither of which is class A** — reaching the ZEOR register is a type error, not a review catch — with the whole sweep inside one transaction fenced by `assert_never_purge_intact`. Credentials go **at deactivation** (req. 21), the access log on its 2-year class, and the purge line records *which class* was discarded, never a discarded value | `f1776c0`, `8abb945` |
+| 6 — breach record | `commands/breaches.rs`: every povreda is logged first and notifiability is a **derived flag on a row that always persists** (req. 43); beyond the three st. 6 elements the row carries the immutable `saznanje_at`, the separate occurred/discovered instants, the risk outcome, the notify decision **with reasoning**, the Poverenik-notified stamp, a st. 2 delay reason that becomes **mandatory once 72 h have elapsed**, and the čl. 53 block. `legal.rs::breach_notification_missing` is the **ninth** notice — in `all_notices`, in the duplicated inline list, with the asserted count bumped to **9** | `bdd4f37`, `421ed9c` |
+| 7 — obrazac | `breaches_export_obrazac` renders the **Pravilnik 40/2019** obrazac in its five prescribed sections, down to the mesto/datum + Ime i prezime + Potpis block and the „Prilog:“ slot. Print/scan only — **no submission API exists** — and the countdown is the flat **72 h of Pravilnik čl. 3**. The export is a disclosure and is logged as one, so a rendered obrazac never outlives its čl. 48 st. 2 line | `497c95c`, `fb3b4a7` |
+| 8 — čl. 47 register | `cl47.rs` generates the evidencija radnji obrade at every launch and on demand (`cl47_generate` / `cl47_export`). Every rok is read out of `retention_policies` **at generation time**, so the register cannot print a period the till does not apply; `trajno` is printed for this register alone (čl. 47 st. 7) and for neither log, which is a test rather than a comment | `31fa18a`, `db814ef` |
+| 9 — Privatnost | `src/app/privacy/` — four panels (Daljinska podrška, Evidencija pristupa, Povrede podataka, Radnje obrade), **admin-only in the nav and admin-gated behind every command**, with Daljinska podrška first so the module's one legal duty is its first surface. The čl. 50 copy reads „nije propisan prekršaj“ and names the opomena and the obavezujući nalog that *are* consequences | `a9ff1f7`, `546987f` |
+| 10 — docs + gates | This section; register rows 8, 9, 10, 11 and 12 re-stated; SW-10, SW-13 and SW-17 flipped to shipped with SW-10 kept labelled **prudential** and SW-17 re-worded per req. 50 (*provides the record required by* čl. 52 st. 6–7 — never *satisfies* the article); and the čl. 23 notice's new evidencija-pristupa section (req. 9). The review of this task caught the notice's class-B retention row promising a deletion nothing performs; the row now states the not-before bound its stored `napomena` states and says that automatic deletion of the class „ne postoji“, pinned by two new `docs_guard` tests | this commit |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **400 passed** / 0 failed, 27 files (was 359 / 22) | `0` |
+| `bun run build` | tsc + vite, 2740 modules transformed | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **661 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 558) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+103 cargo / +41 bun** over the plan baseline. Latest migration: **v18**.
+
+New Rust tests: 22 in `audit.rs`, 29 in `commands/audit.rs`, 13 in `commands/personnel.rs`, 14 in
+`commands/breaches.rs`, 13 in `cl47.rs`, 2 in `docs_guard.rs`, plus additions in `db/migrations.rs`,
+`retention.rs` and `legal.rs`; 37 frontend tests across the five `src/app/privacy/*.test.tsx` files.
+
+**Deliberately not built** (`docs/REMAINING-SW-VERIFIED-RULES.md` §5 items 1–6, 14, 15, 22, 23, 24, 30)
+— read these as decisions, not as gaps: no claim anywhere that ZZPL requires an audit log, and no
+*„nema posledice“* either; no per-cashier aggregates or productivity view on top of the log (a new
+purpose under čl. 5 st. 1 t. 2, and it walks into the SW-14 §6 W-4 *sistem za praćenje rada* gate); no
+owner-editable or owner-deletable log; no `trajno` on either log — čl. 47 st. 7 governs the register
+alone; no „Obriši zaposlenog“ affordance and no cascade at the personnel record; no employee name or
+JMBG on a transaction row; no risk gate in front of the breach record; no invented breach form and **no
+Poverenik submission API**; no fine printed for a documentation-only breach-log failure (unresolved
+under ZoP čl. 3, §6 R-2); and no headcount gate or plan-tier upsell on any of the three.
+
+**Still open after this batch:**
+
+- **Req. 47 — the processor→controller breach leg is not built.** If Actaer is ever an obrađivač, the
+  vendor→merchant notification artefact with its own timestamp — feeding the merchant's `saznanje` so the
+  72 h clock is anchored to evidence rather than memory — is a separate path. The record can hold both
+  instants today; nothing produces the vendor-side one. §6 R-3 is the question behind it.
+- **Req. 49, redaction half — expiry deletes nothing yet for the breach log.** The requirement is to
+  **redact or pseudonymise** the personal-data-bearing fields on expiry rather than drop the row, keeping
+  the čl. 52 st. 7 skeleton. No breach-log retention class and no redaction path exists; the row is kept.
+- **SW-14 req. 28 — remote-support masking** of the absence-reason column, with the unmask logged, is
+  still not built. SW-10 was its stated dependency and has now landed, so nothing blocks it.
+- **One of the two SW-14 defects found by the previous batch's closing audit is still open.**
+  `docs/compliance/obavestenje-zaposlenima.md` still prints the pravno-lice fine band in its header;
+  `the_cl_47_record_prints_only_the_preduzetnik_fine_tier` guards that shape for the sibling document and
+  has no counterpart for the čl. 23 notice. **The other is fixed.** The class-B retention row no longer
+  promises a deletion no code performs: it now states the not-before bound the stored `napomena` already
+  stated (*„Brišu se **tek** pošto je mesec zaključen i klasifikacija izvedena“*) and says on the same
+  line that automatic deletion of that class *„ne postoji“*, date-stamped. `draft_purge_eligible` and
+  `overtime_log_purge_eligible` remain gates with no production caller, and SW-13's sweep still does not
+  touch the class — the row now says exactly that. Two `docs_guard` tests pin both halves:
+  `no_retention_row_promises_a_purge_no_job_performs` clears a deletion promise in the notice's
+  retention table only against an **exhaustive** match on `commands::personnel::PurgeableClass`, so a new
+  promise costs a new variant and a new variant costs a real sweep; and
+  `the_class_b_retention_row_says_no_automatic_purge_exists_for_it` keeps a bound with no sweep behind it
+  from being softened into what reads like a schedule.
+- **Backup encryption is opt-in.** `backup_crypto.rs` encrypts only once an admin sets a passphrase, so
+  the čl. 50 st. 2 tač. 1 measure is available rather than in force. Register row 8 now says so; SW-2
+  remains the action.
+- **§6 R-9 stays open** — which article of the ZZPL nadzor chapter carries the opomena and the nalog.
+  The copy is written so that only the verified half (*no prekršaj*) is asserted.
+
+---
+
+### SW-10 req. 6 + SW-13 req. 22 — the rok is now a setting (2026-08-02)
+
+The closing audit of the batch above found the third document in a row promising behaviour the code
+lacked, and the čl. 23 notice was again the carrier. **Four strings** said the retention period was
+adjustable and moved only forward: two rows of `docs/compliance/obavestenje-zaposlenima.md`, the
+`napomena` stored beside `RecordClass::AccessLog`, and the `rok_osnov` the čl. 47 register prints for
+the Poverenik. `retention::extend_retain_until` had the arithmetic and the upward-only rule, but every
+call site was inside a `#[cfg(test)]` module: no command, no `invoke_handler` entry, no screen.
+
+Req. 6 asks for *configurable retention with a documented default* and req. 22 for three things —
+*ship a default, expose the setting, record the chosen value in the čl. 47 register*. **The setting was
+built rather than the strings re-stated**, so all four now say what the program does.
+
+| Shipped | Where |
+|---|---|
+| `AdjustableClass` — the classes a registered command can move, exhaustively. Four variants, none of them `trajno`: the ZEOR čl. 5 evidencija, the frozen monthly classification and the čl. 47 register have no variant, so reaching them is a compile error rather than a review catch — the same shape `personnel::PurgeableClass` uses for the purge | `commands/retention.rs` |
+| `retention_list_policies` / `retention_extend_policy` — admin-gated **inside the domain function**, not in the wrapper. The list carries every class, `trajno` ones included, because *„rok se ne podešava“* is the answer to a question the operator would otherwise ask by trying. There is **no shortening verb and no clearing verb**: an earlier date is refused, never clamped, and the refusal is prose the operator can act on | `commands/retention.rs`, `lib.rs` |
+| The čl. 48 line. Moving a rok decides how long the evidencija pristupa itself survives, so it is a `menjanje` on `retention_policy` carrying the row id and nothing else (req. 4), in the same transaction as the write | `commands/retention.rs` |
+| Req. 22's third limb. The command regenerates the čl. 47 register in the same call, so the chosen value reaches st. 1 t. 6 immediately rather than at the next launch | `commands/retention.rs` → `cl47::generate` |
+| „Rokovi čuvanja“ in Podešavanja — the rok in force per class, its `napomena`, and a date field only where a command can actually move it. It sits under Podešavanja and not under Privatnost on purpose: the evidencije are records the rukovalac keeps and nothing may switch off, while ZZPL čl. 5 st. 1 tač. 5 leaves the *period* to the shop | `src/app/settings/RetentionPanel.tsx` |
+| Two `docs_guard` tests. `no_stored_retention_note_claims_a_period_no_command_can_move` is exact — the class each string belongs to is known — and covers both the stored `napomena` and the register's `rok_osnov`; `no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move` reads the čl. 23 notice by subject against an **exhaustive** match on `AdjustableClass`, so a class added without a command fails the guard | `docs_guard.rs` |
+
+**What the setting does and does not do, stated once.** `retain_until` is the earliest day on which a
+class may be discarded, not a day on which anything is discarded — the sweep is gated by it, so pushing
+it forward keeps every row of that class until at least that day. The screen and the register both say
+it in those words (*„ništa se ne briše pre …“*), and nothing anywhere offers to shorten it.
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **407 passed** / 0 failed, 28 files (was 400 / 27) | `0` |
+| `bun run build` | tsc + vite | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **670 passed**; 0 failed, 0 ignored (was 661) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+9 cargo / +7 bun**. Latest migration: **v18** — this batch adds none.
+
+---
+
+### ZZPL fix batch — final gate run and closing audit (2026-08-02)
+
+`4fbe147` (D2–D4) landed without a gate table, so the counts recorded immediately above are two cargo
+tests behind the tree. This section carries the true figures and the closing audit of the whole ZZPL
+effort — SW-10, SW-13, SW-17 and the generated čl. 47 evidencija radnji obrade that SW-17 depends on.
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **407 passed** / 0 failed, 28 files | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **672 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 670 — `4fbe147` added two) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Against the ZZPL-trio plan baseline (`1216194` — cargo **558**, bun **359**, migration **v17**) the whole
+effort is net **+114 cargo / +48 bun**. Latest migration: **v18**, and the fix batch adds none.
+
+**What the fix batch closed.** Four defects, each one a document asserting behaviour the code did not
+have, and in each case a guard that could not see it because nothing read that line.
+
+| # | Closed | Commit |
+|---|---|---|
+| D1 | Req. 6 and req. 22 — the rok čuvanja is a **setting**, not a promise. `AdjustableClass` + `retention_list_policies` / `retention_extend_policy` + „Rokovi čuvanja“ in Podešavanja, with the čl. 47 register regenerated in the same call so req. 22's third limb lands immediately | `0ca0f90` |
+| D2 | The register re-introduced the wrong offence tačka for `legal.rs::preraspodela_caps_exceeded`. čl. 57 and čl. 60 sit in **čl. 274 st. 1 tač. 4**; tač. 3 is the čl. 53 offence. The preduzetnik amount is identical either way, so no figure guard could ever have caught it | `4fbe147` |
+| D3 | 26 Serbian quotations in the register opened with „ and closed with an ASCII mark. All closed, and `no_compliance_prose_closes_a_serbian_quotation_with_an_ascii_quote` now reads every document this crate embeds plus the stored `napomena` strings | `4fbe147` |
+| D4 | The register asserted SW-14's raw punch events are purged on period close. `draft_purge_eligible` is a **gate, not a sweep**, with no production caller; the row now says so, and `no_retention_row_promises_a_purge_no_job_performs` reads the register as well as the čl. 23 notice | `4fbe147` |
+| — | Earlier in the same effort: the čl. 23 notice's class-B retention row, which promised a deletion nothing performs | `0604420` |
+
+**Closing audit — findings, honestly stated.**
+
+1. **`legal.rs` guard integrity: intact.** Nine `pub fn … -> LegalNotice` functions exist and no
+   `LegalNotice` is constructed anywhere else in the crate. All nine appear in `all_notices`, all nine
+   appear in the duplicated hand-written list inside
+   `every_notice_function_is_enumerated_in_the_guard`, and the asserted count is **9**. The forbidden-
+   substring, UNSET and ZEOR guards therefore reach every notice.
+2. **One operator- or employee-facing document still prints a pravno-lice fine band.**
+   `docs/compliance/obavestenje-zaposlenima.md` header. It is mitigated — the preduzetnik tier is printed
+   beside it with the correct stav, and the sentence says the amount depends on the employer's legal form
+   — but it remains the only such document with no guard, while its sibling
+   `evidencija-obrade-cl47.md` is pinned by `the_cl_47_record_prints_only_the_preduzetnik_fine_tier`.
+   Already disclosed above; restated here because the closing audit confirmed it is the **only** one.
+3. **The generated čl. 47 register does not over-claim.** `cl47::mere_zastite` reads the backup settings
+   and states in both directions whether encryption and automatic copies are actually in force;
+   `cl47::rok_cuvanja` reads `retention_policies` at generation time, so the register cannot print a
+   period the till does not apply; the two `prenos` prompts deliberately refuse a flat *„ne“* the program
+   cannot verify. `evidencija_povreda` and `tehnicka_podrska` both say plainly that no rok is configured
+   and that nothing is discarded until one is.
+
+**Still open — by requirement number in `docs/REMAINING-SW-VERIFIED-RULES.md` §4.**
+
+Previously disclosed, unchanged:
+
+- **Req. 47 (SW-17)** — the obrađivač→rukovalac breach leg is not built. The row can hold both instants;
+  nothing produces the vendor-side one. §6 R-3 is the question behind it.
+- **Req. 49 (SW-17)** — neither half is built: there is no breach-log retention class in
+  `RecordClass` and no redaction path, so the row is simply kept. The heading above called this „the
+  redaction half“; both halves are open.
+- **SW-14 req. 28** — remote-support masking of the absence-reason column. Its stated dependency
+  (SW-10) has landed, so nothing blocks it.
+- **SW-2** — backup encryption is opt-in, so the čl. 50 st. 2 tač. 1 measure is available rather than in
+  force. Register row 8 and `cl47::mere_zastite` both say so.
+- **§6 R-9** — which article of the ZZPL nadzor chapter carries the opomena and the nalog. Only the
+  verified half (*no prekršaj is prescribed for čl. 50*) is asserted anywhere.
+
+Found by this closing audit and **not previously disclosed**:
+
+- **Req. 26 (SW-13), ledger half.** Per-category retention floors are enforced in code for the seven
+  `RecordClass` variants, and personnel correctly has no configurable period at all — but **no variant
+  covers the ledger categories**, so the ZoRač čl. 28 floors and the st. 5 / st. 9 clock split the
+  requirement calls out are not enforced by the shared table. Register row 21 discloses the same gap as
+  „a general upward-only `retain_until` engine over trading data“; PROGRESS.md did not. SW-3 is the
+  action.
+- **Req. 48 (SW-17), encryption-at-rest limb.** Admin-only RBAC ✓, own čl. 47 entry ✓, exclusion from
+  routine exports and support bundles ✓ — but the database is **plaintext on disk**: `rusqlite` is built
+  with `bundled` / `backup` / `functions` and no `sqlcipher` feature. The requirement asks for encryption
+  at rest for this store specifically; that limb is unbuilt, and it is a different question from SW-2,
+  which concerns the backup file.
+- **Req. 1 (SW-10), middle row of the three-row penalty cell.** The čl. 42 row lives in register row 12
+  and the *čl. 50 → no prekršaj prescribed* row in register row 8, but the **čl. 46 → čl. 95 st. 1
+  t. 23** row exists only in code doc-comments (`commands/audit.rs`, `db/migrations.rs`) and never in the
+  compliance matrix itself.
+- **Req. 5 (SW-10), fourth limb.** The čl. 23 notice adopts all four purposes of čl. 48 st. 3 verbatim;
+  the čl. 47 register's `evidencija_pristupa` svrha carries three of them. čl. 47 st. 1 t. 2 is what the
+  Poverenik reads, so the two documents should not differ on the stated purpose.
+- **Two compliance templates sit outside `docs_guard::prose_sources`.**
+  `docs/compliance/runbook-povreda-podataka.md` and `docs/compliance/ugovor-o-obradi-nacrt.md` are not
+  embedded, and both still describe SW-10 and SW-17 as future work („budući ekran“, „budući modul …
+  do njegovog uvođenja obrađivač vodi ručnu evidenciju sesija“) although both shipped on 02.08.2026.
+  The runbook additionally cites **čl. 53 st. 1** for the controller→Poverenik 72 h clock; the clock is
+  **čl. 52 st. 1**, which is what `commands/breaches.rs` and register row 10 both cite, and čl. 53 is the
+  duty toward the affected individuals.
+- **`evidencija-obrade-cl47.md` A.7 lists kriptozaštita rezervnih kopija as an applied čl. 50 measure**
+  without the opt-in caveat. The generated register states the same measure conditionally, in both
+  directions; the hand-kept narrative version does not, and it is the copy handed over on request.
+- **The čl. 23 notice §4 asserts flatly that there is no cross-border transfer**, where the generated
+  register deliberately refuses that flat assertion because the program cannot check it and §6.5 / R-5 is
+  unresolved. The notice carries a bracketed reconciliation note, but the assertion is made first.
+- **`cl47::Template::mere` is the one behaviour-claim column of the generated register that no guard
+  reads.** `retention_prose()` exposes `kljuc`, the retention class and `rok_osnov`; the per-radnja
+  measures string is a claim about what the program does and reaches the Poverenik unguarded.
+
+Nothing above regressed a gate: all six are green at 407 bun / 672 cargo, and migration **v18** is
+unchanged.
+
+---
+
+### SW-12 — Mašinski čitljiv cenovnik (2026-08-02)
+
+The published cenovnik, the archive of every version of it, the till guard that keeps the shop to the
+prices it published, and the folder the file lands in, shipped as a nine-task TDD plan
+(`docs/superpowers/plans/2026-08-01-sw12-cenovnik.md`, design at
+`docs/superpowers/specs/2026-08-01-sw12-cenovnik-design.md`) against the verified rule set in
+`docs/REMAINING-SW-VERIFIED-RULES.md` §2b, §3 V2 and §4 reqs. 10–18. Baseline at plan time was
+`0920ac6` — cargo **672**, bun **407**, migration **v18**.
+
+**What is deliberately not in it, stated first because the register would otherwise read as a closed
+item.** ZZP čl. 6 st. 2 requires publication *„na svojoj internet stranici“*. This cycle builds
+everything up to and including writing the file into a folder the shop nominates — it does **not** put
+that folder on the internet, because a hosted endpoint means Actaer running a public service carrying
+its customers' prices, with its own uptime, cost and liability, and čl. 6 st. 4 binds the shop to
+whatever that service serves. That is a founder decision and it is now **F-13** in the register's §4.
+Čl. 6 **st. 6**'s account on the Nacionalni portal otvorenih podataka is not built either, and could
+not be: st. 6 keys the format to a standard *„propisan podzakonskim aktom“*, and that bylaw does not
+exist (§6 items 4 and 12).
+
+**And what the product must never say.** Whether a trader **without** a website must create one is
+**unresolved** — st. 2's possessive presupposes a site, no ZZP provision obliges any trader to have
+one, and extending a prekršaj to an unwritten duty runs into lex certa (ZoP čl. 3). So no screen and no
+document says the pilot is in breach today; the panel's strongest sentence is *„nije podešeno mesto
+objave“*. Nor does anything date the exposure to 1 May 2026: čl. 6 is in the čl. 220 carve-out, **čl. 210
+is not**.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — schema | **Migration v19**: `cenovnik_snapshots` — immutable, **no `updated_at`**, a `BEFORE UPDATE` trigger covering every identity and content column (**`id` included**, because it is both the current-row tie-break and the handle a divergence record names) and a second trigger letting `published_at` / `published_target` be written exactly once — and `products.jedinicna_cena_jedinica` / `jedinicna_cena_sadrzaj_milli` on the schema-wide milli scale (a 0,75 l bottle is `750`). An outlet's **current** cenovnik is derived, `ORDER BY generated_at DESC, id DESC LIMIT 1`, so there is no pointer two writers could desynchronise. `DELETE` is deliberately left open so the čl. 213 purge in Task 4 can reach an expired row | `3e4da52`, `1b13f76` |
+| 2 — the render | `cenovnik.rs`, pure: no database, no clock, no filesystem. `render_csv` emits the de facto data.gov.rs shape — **UTF-8 with BOM, `;` separator, DD-MM-YYYY, two decimals from integer para at the boundary, 13-digit barcode quoted as text** — in `sifra` order, so the same catalog always renders the same bytes and therefore the same `content_hash` (SHA-256). `published_prices` is the exact inverse and finds its columns **by name out of the file's own header**. Eight columns, not six: `jedinicna_cena` and `jedinica_za_jedinicnu_cenu` are req. 10, because čl. 6 st. 2's second sentence pulls st. 1 into the published file | `f2592fb`, `87da10f` |
+| 3 — republish on write | Čl. 6 st. 3 says *„ažurira u realnom vremenu“*, so publication rides the write that moved a price — a nightly batch is a defect against st. 3, not a simplification. **Four paths**: `commands::catalog`, `campaigns` (activation, markdown step, ending), `importer` (**once per batch**, since the file is the whole catalog) and `kep_storno::post_nivelacija` — whose returned verdict `commands::kep` republishes on, after its own commit — each threading `record_offered_price_change`'s own answer instead of re-deciding what a price move is; the catalog path adds the jedinična cena, the one published price that log does not watch. It runs **after `tx.commit()`** — a publish failure is logged and the price stands. Plain `INSERT` only, **never `INSERT OR REPLACE`**, with its own assertion: a REPLACE is a DELETE plus an INSERT no trigger sees. The archive key is minted once and frozen in `settings.cenovnik_prodajno_mesto`, derived from settings and never taken from the frontend | `5f11623`, `47b0148` |
+| 4 — archive + retention | Čl. 6 st. 5 asks the trader to enable a comparison of *„prethodno objavljenih cena“* with the realtime ones, so a publication is never overwritten: `list_snapshots` reads an outlet's lineage newest-first and `read_snapshot` returns the body byte for byte. `RecordClass::CenovnikArchive` joins the shared retention table with the **two-year floor of the čl. 213 zastarelost**, upward-only — and it is the one class in that table holding **no personal data**, which is what keeps it out of the čl. 47 register. `purge_expired_snapshots` runs at launch and on the 6-hourly timer in `lib.rs`, never touches an outlet's current file however old it is, and a test scans the crate to prove it is the **only** code that deletes from the table — no trigger can tell a purge from a cover-up, so the constraint is a property of the code | `58df8fa`, `376cf0f` |
+| 5 — till guard | `sales_assess_price_integrity` runs against the draft cart, so the operator learns before the money moves. It **warns and never blocks** — „Završi prodaju“ stays enabled — fires only in the above-published direction (a discount is not a breach, which is also what keeps it to one comparison), and names the snapshot it was measured against, because čl. 6 st. 4 binds the shop to the file in force and not to the catalog that file was rendered from. `sales_complete` writes a `cenovnik_price_divergence` row into the never-deleted `compliance_log`. **No file a target accepted means no guard and no block** — the comparison reads the newest snapshot whose `published_at` is set, so an archive of files that went nowhere (the `NotConfigured` default) arms nothing, and čl. 6 st. 4 is never cited against a trader who has published nothing; a check that could not run says so rather than reading as an all-clear | `62504b8` |
+| 6 — čl. 210 notice | `legal.rs::cenovnik_not_published` — the **tenth** notice, in `all_notices`, in the duplicated inline list, asserted count bumped to **10**. Preduzetnik: **fixed 100.000 (čl. 210 st. 3)**, halved to 50.000 on payment within eight days of a prekršajni nalog (ZoP čl. 173 st. 1). The citation carries the escalation ladder that actually matters — čl. 207 t. 1 → čl. 206 st. 1 zapisnik → st. 4 rešenje → st. 5 privremena zabrana prometa → čl. 209 st. 1 t. 40 — and the čl. 213 limitation. Req. 18's guard makes the pravno-lice **200.000 unreachable under the preduzetnik profile**, and `51e923d` widened it from this one notice to the blanket check | `2edf93e`, `51e923d` |
+| 7 — publish targets | `PublishTarget` with `LocalFolderTarget` and a `NotConfigured` default that is a **state, not an error**: the snapshot is still rendered and archived, and a price save never fails because the hosting question is open. Req. 13's seven fetchability rules — no login, no CAPTCHA or bot-fight rule, no JS-rendering requirement, no `robots.txt` disallow, no aggressive rate limit, a stable URL per prodajni objekat, `text/csv; charset=utf-8` — are written into the trait's doc comment as a **contract on any future implementation**, because čl. 6 st. 5 is a duty to *enable* and bot protection would manufacture a breach for our own customer. The local write stages through a per-publish temporary so a reader never sees a half-written cenovnik | `e1e4f99`, `c6baf79` |
+| 8 — frontend | Podešavanja → **Cenovnik** (self-loading, the RetentionPanel pattern): the duty, the state of the publishing target, the outlet's archive newest-first, any prior file openable byte for byte. `cenovnik_get_notice` resolves čl. 210 against the **stored** legal form and an unset form answers `penalty: null` rather than letting a screen pick a tier. The till warning. And the product sheet's unit-price pair, sent on **every** save because `SaveProductRequest` replaces the whole row. **No „objavi sada“ button**: publication rides the price write, and a second answer to *„when did this shop last publish“* is the one thing an operator could believe wrongly. The review caught two live defects — the package content collapsing by a thousand through `toLocaleString("sr-RS")`'s dot separator, and the panel promising a file a fresh install never makes because `publish_current` archives nothing until the prodajni objekat is identified | `47de099`, `0ce4756` |
+| 9 — docs + gates | This section; register row 25 and the SW-12 row in §3 re-stated; **F-13** opened for the hosting decision; §6 items 4 and 12 carry the čl. 6 st. 7 bylaw's verified absence, the **quarterly Sl. glasnik RS monitoring trigger for *cenovnik* / *zaštita potrošača* through the čl. 216 deadline of 01.05.2027**, and the *practice, not law* label on the data.gov.rs shape (req. 17) | this commit |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **447 passed** / 0 failed, 30 files (was 407 / 28) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **781 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 672) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+109 cargo / +40 bun** over the plan baseline. Latest migration: **v19**.
+
+**Whose tests those are, honestly split.** SW-12 itself contributes **+105 cargo** — 37 in `cenovnik.rs`,
+43 in `commands/cenovnik.rs`, 10 in `commands/sales.rs`, 5 in `legal.rs`, 4 in `db/migrations.rs`, 3
+in `retention.rs`, 2 in `importer.rs`, 1 in `campaigns.rs` — and **+35 bun**: 17 in
+`src/app/settings/CenovnikPanel.test.tsx`, 6 in `CatalogModule.test.tsx`, 6 in
+`src/services/local-adapter.test.ts`, 5 in `RegisterScreen.test.tsx`, 1 in `SettingsScreen.test.tsx`.
+The remaining **+4 cargo / +5 bun** are two SW-14 fix commits that landed in the same window
+(`3a36d0f`, `a18d9fe`) and are not SW-12's.
+
+**Deliberately not built** — read these as decisions, not as gaps. No hosted endpoint and no public URL
+(**F-13**). No čl. 6 st. 6 open-data-portal upload while the standard it is keyed to does not exist. No
+„objavi sada“ button, and no nightly regeneration job — both would be second answers to *when did this
+shop last publish*. No hard block at the till: čl. 6 st. 4 is a duty to adhere to published prices, not
+a reason a sale cannot complete, and a POS that refuses to sell is a POS the shop stops using. No
+guessed jedinična cena — an article whose measure and package content the shop has not entered
+publishes an **empty** cell, because a missing cell is a visible gap and an inferred one is a false
+statement the shop answers for under čl. 6 st. 4. No claim of breach anywhere, and no exposure dated to
+1 May 2026.
+
+**Still open after this batch.**
+
+- **Req. 15 — the hosted endpoint.** The trait, its seven-rule contract and the archive are ready for
+  it; the decision is F-13. Until it lands, a shop with a website complies by pointing the local folder
+  at what that site serves, and a shop without one is in the unresolved §2b position.
+- **Čl. 6 st. 6 — the Nacionalni portal otvorenih podataka account**, blocked on the missing čl. 6 st. 7
+  bylaw rather than on engineering. The monitoring trigger is §6 item 12.
+- **Req. 16's *„column mapping in configuration“* is only half true.** `cenovnik::COLUMNS` is a
+  constant, not a setting — a schema swap is a code change and a release, not something the shop can do.
+  That is the right trade while no format is prescribed, but the requirement's wording is stronger than
+  the code, and this is the disclosure rather than a claim that it was met.
+- **A publish failure is visible only in the log.** `republish_after_price_move` logs and returns; the
+  Cenovnik panel shows the archive and the configured target, so an operator can infer staleness from a
+  missing recent snapshot, but nothing raises the failure at the moment it happens.
+- **`docs_guard::no_retention_row_promises_a_purge_no_job_performs` was cleared against the wrong list
+  for the register**, and this task fixed it. `commands::personnel::PurgeableClass` is exhaustive for
+  the čl. 23 notice, which is only ever about an employee's data; it stopped being the whole answer for
+  the register when Task 4 shipped a second sweep, `commands::cenovnik::purge_expired_snapshots`, for a
+  class that holds no personal data and could never have a `PurgeableClass` variant. The register arm
+  now matches exhaustively on `retention::RecordClass`, each variant naming either the sweep that
+  discards it or the reason there is none.
+- **The till guard armed off files nobody had published**, and the Task 9 review caught it in the one
+  place it matters — the row above said *„no published snapshot means no guard“* while
+  `current_published_cenovnik` selected the outlet's newest snapshot with no filter on `published_at`.
+  Since `PublishTargetSettings::NotConfigured` is the `#[default]` and `publish_current` archives with
+  `published_at = NULL`, that is not a corner case but the **pilot's own expected state while F-13 is
+  open**: an identified outlet, no mesto objave, a snapshot per price write and not one of them
+  fetchable. The consequence was operator-facing and permanent — a destructive
+  „Cena je iznad objavljenog cenovnika“ at the till and a never-deleted `compliance_log` row citing
+  čl. 6 st. 4 against a trader who had published nothing, on a provision that reaches only
+  *„Trgovac koji objavi cenovnik iz stava 2“*. **The code was changed, not the sentence**: the lookup
+  now takes the newest snapshot whose `published_at` is set. So „current“ for the guard is deliberately
+  *not* „current“ for the archive list and the purge — those answer *which file did this outlet render
+  last*, this answers *which file can the public still fetch*, and a newer body no target accepted has
+  displaced nothing anywhere a consumer can look. **One consequence, disclosed rather than fixed:**
+  the čl. 213 purge fences an outlet's *newest* snapshot, not its newest *published* one, so a shop
+  whose last publication is over two years old and which has archived something since loses the guard's
+  exhibit and the guard falls silent. That errs toward saying nothing rather than toward accusing, which
+  is the safe direction, and it is the only direction this trade is allowed to fail in.
+
+---
+
+### SW-12 fix batch — the guard's published-file filter and the half-configured jedinična cena (2026-08-02)
+
+Two review passes over the surface SW-12 had just shipped. **In both, the code was changed and not the
+sentence that described it** — which is the direction this project has got wrong five times, every one
+of them in something a shop owner actually reads.
+
+| # | Defect | Fix |
+|---|---|---|
+| Task 9 review | `current_published_cenovnik` took the outlet's newest snapshot with **no filter on `published_at`**, while the register and this section both said *„no published snapshot means no guard and no block“*. Since `PublishTargetSettings::NotConfigured` is the `#[default]` and `publish_current` archives with `published_at = NULL`, that is not a corner case but **the pilot's own expected state while F-13 is open**. The consequence was operator-facing and permanent: a destructive „Cena je iznad objavljenog cenovnika“ at the till and a never-deleted `compliance_log` row citing čl. 6 st. 4 against a trader who had published nothing — on a provision reaching only *„Trgovac koji objavi cenovnik iz stava 2“* | `7577d80` — the lookup now takes the newest snapshot whose `published_at` is set, so „current“ for the guard is deliberately **not** „current“ for the archive list and the čl. 213 purge. Three tests, each failing without the filter; `seed_published_till` now publishes through an accepting target so the existing till tests still exercise the fired path for the right reason |
+| **D2 — the mirror half-state** `[LEGAL]` | `normalize_product_request` rejected only a *sadržaj with no jedinica*. The mirror — **a jedinica with no sadržaj** — passed, and `CenovnikRow::jedinicna_cena_minor` then published the sale price **as** the jedinična cena. A 0,75 l bottle at 279,00 whose operator typed „l“ and left the package content blank published `279.00;l` where the figure is `372.00` — a wrong **published** jedinična cena the shop answers for under ZZP čl. 6 st. 1 and st. 4, with no warning at any layer | `7399559` — both layers now refuse that pair when the measure differs from the jedinica mere (case-insensitively), which is the only combination where the v19 NULL-sadržaj convention is *provably* wrong; a shop that really sells one litre per piece still says so with a sadržaj of 1. The convention itself now appears in the field help, so a deliberate blank reads as deliberate. +3 cargo, +3 bun |
+| **D1 — doc overstated the code** `[ACCURACY]` | The SW-12 clause in `docs/SERBIAN-LAW-COMPLIANCE.md` said the column mapping *„is configuration and a schema swap is a routine release“*. It is the constant `cenovnik::COLUMNS`: swapping it is a **code change and a release we ship**, not something the shop can do | `7399559` |
+| **D3 — comment overstated the schema** `[ACCURACY]` | The comment above the pair's validation claimed the v19 CHECK *„refuses both half-states“*. It refuses one — `sadrzaj_milli IS NULL OR (>0 AND jedinica IS NOT NULL)` — and the permitted one is exactly what made D2 possible | `7399559` |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **450 passed** / 0 failed, 30 files (was 447) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **784 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 781) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+3 cargo / +3 bun** over the Task 9 baseline. Latest migration: **v19**, unchanged and frozen.
+
+**Where reqs. 10–18 stand after this batch, stated as status and not as achievement.**
+
+| Req. | State |
+|---|---|
+| **10** — jedinična cena + jedinica mere in the file | **Built.** The eight columns ship, the unconfigured article publishes an empty cell rather than a guessed one, and both writers of `products` — the catalog form and the CSV import — now refuse a wrong figure through **one** validator, `cenovnik::validate_jedinicna_cena` (D2, then D4 below) |
+| **11** — publish rides the write | **Built.** Four paths, each threading `record_offered_price_change`'s own answer; the catalog path adds the jedinična cena, the one published price that log does not watch |
+| **12** — till guard | **Built.** Warns and never blocks, above-published direction only, names its exhibit, logs a `cenovnik_price_divergence` row; arms only off a file a target accepted |
+| **13** — anonymously fetchable endpoint | **NOT built and disclosed.** There is no endpoint. The seven fetchability rules ship as a contract in `PublishTarget`'s doc comment with a test that keeps them there; the acceptance criteria are F-13 (b) |
+| **14** — published-price archive | **Built.** Immutable dated snapshots, current derived not stored, čl. 213 two-year floor, purge that never reaches an outlet's current file |
+| **15** — hosted cenovnik endpoint | **NOT built and disclosed.** Founder decision **F-13**. A shop with a website discharges čl. 6 st. 2 today by pointing the local folder at what that site serves |
+| **16** — CSV default, mapping in configuration | **Half met and disclosed.** The shape ships; `cenovnik::COLUMNS` is a constant, so a swap is a release. D1 removed the doc sentence that said otherwise |
+| **17** — document that the čl. 6 st. 6 standard does not exist | **Done.** §6 items 4 and 12 carry the verified absence, the quarterly Sl. glasnik RS trigger through 01.05.2027, and the *practice, not law* label |
+| **18** — 100.000 preduzetnik, `200.000` unreachable | **Done.** `legal.rs::cenovnik_not_published`, and the blanket guard on the fixed-sum phrasing *„200.000 dinara“* — the bare literal cannot be the needle, because ZoR čl. 274 st. 2 legitimately fines a preduzetnik *„od 200.000 do 400.000“* elsewhere in the product |
+
+**D4 — the import path clobbered the jedinica mere and could publish a wrong jedinična cena. FIXED
+02.08.2026.** `[LEGAL]` D2 closed the catalog form. It did **not** close `importer.rs`, which writes
+`products` with its own `UPDATE`/`INSERT` and never called `normalize_product_request`. Both legs were
+reproduced as failing tests before either was fixed:
+
+- **The measure was rewritten from a column nobody mapped.** `unit_of_measure` is `required: false` in
+  the mapping step (`ImportWizard.tsx:109`), and when unmapped `optional_value` returned `""`, which
+  the importer substituted with **`"kom"`**. A routine price-update import therefore silently rewrote
+  the jedinica mere of every article it matched. **Fix:** `supplied_unit_of_measure` returns `None` for
+  an unmapped column *and* for a blank cell in a mapped one — both are „not supplied“, neither is a
+  measure — and the UPDATE writes `unit_of_measure = COALESCE(?5, unit_of_measure)`, so a file that
+  says nothing about the measure leaves the shop's own configuration standing. A **CREATE** still
+  defaults to `"kom"`: a new row has no prior truth to destroy, and the code says so at the parameter.
+  `required: false` on the mapping step is now correct rather than dangerous — unmapped genuinely means
+  unsupplied.
+- **The clobbered measure then orphaned the jedinična cena pair.** `jedinicna_cena_jedinica` /
+  `jedinicna_cena_sadrzaj_milli` are untouched by that UPDATE, and the v19 CHECK constrains only the
+  pair against itself, never against `unit_of_measure`. So an article legitimately configured under the
+  NULL-sadržaj convention — `unit_of_measure = 'l'`, jedinica `'l'`, sadržaj blank, which is exactly
+  what D2's gate *accepts* — came out of an import as `unit_of_measure = 'kom'` with jedinica still
+  `'l'`, and the batch's own republish published the D2 figure verbatim: the archived body read
+  `SKU-1;;Hleb;kom;372.00;372.00;l;02-08-2026` — *372,00 RSD po litru* for goods the same row says are
+  sold **po komadu**. **Fix:** the D2 rule moved out of `commands::catalog` into
+  `cenovnik::validate_jedinicna_cena`, and **both** writers now call it — the form maps the returned
+  `JedinicnaCenaDefect` to its Serbian field error, the importer to a **row** error, so a refused row
+  surfaces in the per-row report the operator already reads instead of failing the file wholesale. The
+  importer judges the state the row would *leave* the product in: the measure the file supplies, or the
+  stored one when it supplies none, against the product's own pair. One rule, one home — the defect
+  existed precisely because there were two write paths and only one guard. A CREATE needs no check: the
+  import stores no pair, so a new row has nothing to orphan.
+
+**Also open, and smaller.** Nothing previews the computed jedinična cena at the point of entry: the
+product sheet takes the measure and the package content and shows no derived figure, so a sadržaj typed
+as `0,075` instead of `0,75` publishes 3.720,00 per litre and the only place that figure is legible is
+the archived file in Podešavanja → Cenovnik, after publication. And `unit_of_measure` is a **published
+column** (`jedinica_mere`) that no path republishes on: `republish_cenovnik` fires on
+`offer_changed || unit_price_changed`, so a catalog edit that changes only the measure leaves the
+published file carrying the old one until the next price move. That is the deliberate čl. 6 st. 3
+reading — *„trenutnim cenama“* — and it is recorded here as a consequence of it, not as a defect.
+
+Everything listed under *Still open after this batch* in the section above stands unchanged: the hosted
+endpoint (F-13), the čl. 6 st. 6 portal account, req. 16's constant, a publish failure that is visible
+only in the log, and the purge fence that can leave the guard silent rather than wrong.
+
+---
+
+### SW-16 — Popis (2026-08-03)
+
+The godišnji and the nivelacioni popis shipped as a ten-task TDD plan
+(`docs/superpowers/plans/2026-08-01-sw16-popis.md`, design at
+`docs/superpowers/specs/2026-08-01-sw16-popis-design.md`) against the verified rule set in
+`docs/REMAINING-SW-VERIFIED-RULES.md` §2c, §3 V5 and §4 reqs. 29–42. Baseline at plan time was
+`841ee23` — cargo **792**, bun **450**, migration **v19**. *(The task brief quoted 784; that is the
+count at `7399559`/`72797f0`, two commits earlier — `841ee23`, the last SW-12 fix, added eight before
+SW-16 started. The +107 below is measured from `841ee23` and is entirely SW-16's, because every commit
+after it is a popis commit.)*
+
+**What is deliberately not in it, stated first because the register would otherwise read as a closed
+item. There is no print and no export for a popisna lista.** PoP čl. 9 st. 3 authorises the computer
+for the obračun *„uz štampanje“* popisnih lista koje potpisuju članovi komisije — printing is express in
+the bylaw — and this cycle ships no renderer for one. The count sheet, the liste and the izveštaj are
+screens; the shop has to produce the paper the members sign outside this application. Req. 32's header
+block (obveznik,
+PIB/MB, maloprodajni objekat, broj liste), the per-stavka vrednost columns and the **editable default
+template** go with it: `PopisLineView` carries no vrednost, so that half is not frontend-only work.
+No task in this plan owned it and none of the copy pretends otherwise — the signature step says the
+liste are printed and signed by the members and that recording the potpis here **does not replace the
+one on paper**.
+
+**And the constraint the whole module is shaped around.** PoP čl. 8 st. 5 forbids releasing book
+quantities to the komisija before the counted state is written and signed, so the blindness is enforced
+at the **query layer** and anchored on the `faza = 'a'` potpis — never on `status`, which is a claim any
+`UPDATE` can make. The v20 write guard protects `popis_lines.knjigovodstvena_kolicina_milli`; the duty
+is wider, because the perpetual stanje also sits in `inventory_balances` and is derivable from
+`inventory_movements` with no trigger in the way. Every blind read is therefore asserted against a
+**seeded perpetual balance that must appear nowhere in the serialized response**, so the withheld half
+cannot pass vacuously, and adding an „očekivano“ column by joining `inventory_balances` fails exactly
+those tests and nothing else.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — schema | **Migration v20** (`popis_stores_blind_count_and_posting_lock`): `popis_sessions`, `popis_lines`, `popis_signatures`, `popis_commission`. Two module invariants live in the engine because migrations are append-only and neither could be added later without a second migration — the čl. 8 st. 5 blind count as a **write guard** anchored on the potpis, and the req. 41 **posting lock** over the session, its stavke, its komisija and any new potpis, with `popis_signatures` immutable from the moment each signature is taken. No popis table is written with `INSERT OR REPLACE`: a REPLACE is a DELETE plus an INSERT no `BEFORE UPDATE` trigger sees. `DELETE` stays open for the req. 42 purge, as v18 and v19 each reasoned. Deviations: identifiers and stored enum values are ASCII-folded per the schema-wide convention (`uskladjivanje_potvrdjeno_at`, `ostecena`, `potrazivanja`), and `popis_commission.uloga` is a closed enum (`predsednik / clan / jedno_lice`) so the čl. 6 st. 1 one-person popis is expressible rather than implied | `3e39197`, `75cc299` |
+| 2 — state machine | `popis.rs`: `draft → counting → counted_signed → computed → computed_signed → posted`, with **all thirty (status, event) pairs swept exhaustively** and the error *code* asserted rather than a bare `is_err`. The čl. 8 st. 5 predicate is split on purpose — `book_quantities_visible(status)` is only the status limb and is **module-private**, so „call the whole condition“ is a compile error rather than a doc comment, and `book_quantities_released(status, phase_a_signed)` is what a query layer consults. The enums are pinned to the v20 `CHECK` read back off `sqlite_master` **and** to their own IPC wire form, because serde derives the wire name from the variant identifier while `as_db_str` is a hand-written literal | `d92181b`, `1b74804` |
+| 3 — deadline engine | `izvestaj_due`: `rok za predaju FI − 60 dana` for the godišnji popis, `datum popisa + 30 dana` for the nivelacioni. FY2026 → 30.01.2027, FY2027 → **31.01.2028 (the leap case a hardcoded table gets wrong)**, FY2028 → 30.01.2029. The annual rok does not move when the count date does (čl. 13 st. 2 anchors it on the rok za dostavljanje) and the nivelacija limb does not read the filing deadline at all. **One test asserts the source rather than an answer** — no behavioural test can tell a computed 30.01.2027 from a hardcoded one — so the module is scanned for a `gggg-MM-dd` literal and for every wall-clock reader `src/clock.rs` actually exports; the review found the first version of that guard missed `crate::clock::utc_now`, this repository's own canonical reader with 47 call sites. Deviations: the function returns `Result` (it parses two dates it does not own) and takes `Option<&str>` for the filing deadline (čl. 13 st. 2's second limb does not read one) | `a337b54`, `5d043cf` |
+| 4 — commands | `commands/popis.rs`, admin-gated. `popis_open` refuses without the **čl. 20 st. 3** usklađivanje confirmation (req. 39). A Phase A payload carrying a book quantity is **refused by name**, never silently dropped. `read_lines` is **two statements rather than one and a filter**: while the data is withheld the query names neither the column nor `inventory_balances`/`inventory_movements`, so there is no value in the row for a refactor or a log line to spill. `popis_sign_phase_a` writes potpis → state → book quantities, and the order is behaviourally proven — reversing it fails five tests because the v20 guard aborts a book quantity written before its potpis. A šifra that resolves to nothing keeps its NULL rather than a zero: gotovina and potraživanja have no perpetual record behind them and a fabricated zero would report a manjak the shop does not have. The review pinned the **identity** of a signed stavka, not only its količina (čl. 8 st. 4 + čl. 9 st. 1 t. 1 — seven fields, refused by name when moved), and implemented the **req. 34 gate**: a `perpetual_odluka_ref` is refused unless a same-year, earlier, `posted` popis exists | `fbfc24d`, `349cc79` |
+| 5 — the six liste | `PopisLista`, `konsignacija_rok`, `nedostajuce_liste`, `ensure_liste_kompletne` + the per-lista rules. **Presence is a parameter, not a stored declaration** — nothing in this database says that part of the stock is damaged or that a rail belongs to somebody else, and v20 is spent — so the person taking the popis declares it and the declaration becomes binding. The apoen is `cena_minor` in whole notes and coins (čl. 11 st. 1 is exactly a signed integer minor amount) and the čl. 8 st. 5 potpis freezes it, since a signed „5 × 1.000“ that became „5 × 5.000“ in the obračun would leave the potpis attesting to a cash count nobody took. **No denomination whitelist** — that would present a prudential narrowing as čl. 11 st. 1 and refuse a lawful count of devize. The čl. 2 st. 6 reminder is derived from the liste, carries `datum popisa + 10 dana` and says the app does not deliver the lista | `314db22`, `392c425` |
+| 6 — the izveštaj | The eight čl. 13 st. 1 elements as a **closed enum**, five written by the komisija and three computed so nobody is asked to retype the stanje they have just counted. **Composed on demand and stored nowhere** — `compose_izvestaj` is read-only end to end, asserted by a fingerprint over `updated_at`, every line's three figures and the potpis count — and the copy says so, because a shop that typed five paragraphs and closed the screen would otherwise lose them silently. Čl. 8 st. 5 gates it too: a document carrying the knjigovodstveno stanje hands the komisija through prose what a hidden column keeps back. Task 3's open contract closed here — the filing deadline is the `settings.popis` → `rokPredajeFi` key, validated where it is written, and an unset one refuses the annual izveštaj by name rather than presuming 31 March. Valuation is `količina × cena ÷ 1000` in `i128`, rounded **away from zero** so a manjak is never quietly made smaller, refused rather than wrapped. **No natural totals** — mixed units on one lista sum to a number with no unit. The review found the čl. 2 st. 6 limb uncovered, two uputstvo strings promising naturalne količine the payload does not carry, and `#[serde(default)]` making the req. 36 gate opt-in from the wire | `40f8a85`, `5f13bc4` |
+| 7 — nivelacija + KEP hook | The čl. 21 duty and the scope narrowing are **two strings**, and the guard is mechanical: no obuhvat string may contain a duty word (`morate`, `dužni ste`, `dužan je`, `obavezno`, `obavezan je`, `nalaže` — „obaveza“ deliberately excluded, since the copy must be able to deny one). The obligation is derived from **`price_history`, not `kep_entries`** — SW-9b writes no ledger row when on-hand is 0, and an obligation derived from the ledger would lose exactly that repricing silently — is **reported, never auto-created** (an app-opened session would assert a čl. 20 st. 3 usklađivanje nobody performed), and only a **`posted`** nivelacija popis discharges it. The scope list is the čl. 8 st. 4 artefact: four fields, **no količina from any source**, and `CeoObjekat` is `products.active = 1` because filtering on what the books say we have leaks stock through the presence of a line. `kep_nivelacija` returns the notice and `KepModule` renders it as a persistent block, so the duty has one wording; posting a nivelacija popis leaves the ledger fingerprint byte-identical | `ffde4af`, `f564631` |
+| 8 — legal + retention | `legal.rs::popis_not_conducted` — the **eleventh** notice, in `all_notices`, in the duplicated inline list, asserted count bumped to **11** — printing the preduzetnik **čl. 58, 100.000 do 500.000**. The plan's conditional did not fire: §3 V5 does state a preduzetnik figure, so no tier renders `None`. What the memo warns about is the other direction — **čl. 57 st. 1 tač. 12) is a *privredni prestup*** that ZPP čl. 6 st. 1 confines to a pravno lice, so its 100.000–3.000.000 band would overstate the pilot's ceiling roughly sixfold; **„3.000.000“ is now a blanket needle** in `FORBIDDEN_TO_A_PREDUZETNIK`. Retention is `RecordClass::PopisDokumentacija` on the shared table with the **5-year floor of ZoRač čl. 28 st. 7**, counted by a new clock: `business_year_floor` resolves every day of one business year to the same 31 December per **st. 9**, so a nivelacija counted on 14 May 2026 and the godišnji popis of 31.12.2026 expire together instead of the first going seven months early. The class **holds personal data** — `popis_commission` names each popisivač — hence the twelfth čl. 47 radnja, `popis_imovine`. The plan's „panic-safe floor pattern from SW-9c“ is taken as the **fail-safe**, not as the later-of-two-anchors shape: the popis has one statutory clock, and a `posted_at` limb would have added a year to the ordinary case. The test found a real underflow before the implementation shipped — `{:04}` renders year −4 as `-004`, a success-shaped wrong answer | `dd1940d` |
+| 9 — frontend | `src/app/popis/{CountSheet,IzvestajPanel,PopisModule}.tsx` + the `PopisService` port, fifteen wire types, the local adapter, an in-memory double that enforces the same gates, and Popis in the shell. Keyed on the backend's `knjigovodstvoDostupno` — **never on `status`** — and asserted against a payload that carries the book figures anyway, which no real backend sends. Every edit affordance mirrors a write the backend accepts; the three closed states give three different reasons. **`CountSheet` takes `session`, not `status` + `lines`** — the plan's snippet spells the status `countedSigned`, a camelCase form that exists nowhere on the wire. The review moved the req. 36 declaration **out of the izveštaj and onto the count sheet**, where it can still be acted on: asked at the izveštaj it could only fire after the čl. 8 st. 5 potpis, when the only remedy is a whole new popis. It also rendered all six liste including the empty ones, and fixed a negative knjigovodstvena količina making a stavka unsavable | `8760a3a`, `94d1337`, `f41615b` |
+| 10 — docs + gates | This section; register row 19 and the SW-16 row in §3 re-stated, both carrying the **missing print/export** and the three open items **R-5**, **R-6**, **R-7** | this commit |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **503 passed** / 0 failed, 33 files (was 450 / 30) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **899 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 792) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+107 cargo / +53 bun** over the plan baseline. Latest migration: **v20**.
+
+**Whose tests those are.** All of them are SW-16's — every commit after `841ee23` is a popis commit.
+Cargo: **61** in `commands/popis.rs`, **36** in `popis.rs`, **4** in `db/migrations.rs`, **3** in
+`retention.rs`, **2** in `legal.rs`, **1** in `commands/kep.rs`. Bun: **22** in
+`src/app/popis/PopisModule.test.tsx`, **18** in `CountSheet.test.tsx`, **10** in
+`IzvestajPanel.test.tsx`, **2** in `src/services/local-adapter.test.ts`, **1** in
+`src/app/kep/KepModule.test.tsx`.
+
+**Deliberately not built** — read these as decisions, not as gaps, except the first, which is a gap and
+is labelled one. **No print and no export for a popisna lista** (above) — a real hole against čl. 9
+st. 3, disclosed rather than dressed up. No stored izveštaj: the document is composed when asked for,
+which is why req. 42's retention floor reaches the liste, which are rows, and not the izveštaj, which
+lives on paper. No auto-created nivelacija popis. No seeded popisne liste from the nivelacija scope —
+`stvarna_kolicina_milli` is NOT NULL, so a seeded stavka would carry a count of zero that nothing
+distinguishes from a counted zero, i.e. a manjak of the whole stanje on a document that is evidence. No
+denomination whitelist on the gotovina lista. No invented required fields on the other four liste —
+nothing in čl. 2 st. 5, čl. 10 st. 3–4 or čl. 12 st. 2 prescribes one, and a refusal there would block a
+lawful count in the name of a duty that does not exist. No summed naturalna količina. No `update`,
+`delete` or `reopen` verb on the port: čl. 14 st. 3 with ZoRač čl. 8 st. 4 makes a correction a new
+document. No automatic deletion of popis documentation — `popis_purge_eligible` is a gate, like the two
+beside it, and the stored napomena says so.
+
+**Residuals batch (03.08.2026).** Three defects and two undisclosed gaps, none of which changes a
+statutory answer; the gates run at **cargo 901 / bun 505**, migration still **v20**.
+
+| Defect | Fixed |
+|---|---|
+| **The sixth false-promise artefact**, and the first to reach an inspector-facing document. `retention.rs`'s stored napomena, the `cl47.rs` čl. 47 register entry and `commands/popis.rs`'s own izveštaj warning all said the izveštaj *„sastavlja se i štampa na zahtev“* / *„odštampajte ga“*. **There is no print and no export anywhere in the popis module** — `PopisService` has fifteen methods and none exports, and no popis screen calls `PrintService.openForPrint`. All three now say the izveštaj is assembled on demand and **shown on screen**, that the program neither prints nor exports it, and that the printed and signed copy is the obveznik's own to make and keep. The existing retention test pinned only the neighbouring sentence, which is why nothing caught it: it now pins the *„ne štampa“* half **and** asserts the withdrawn clause cannot come back |
+| **The čl. 8 st. 5 signature step cited čl. 9 st. 3.** `PopisModule` printed *„…ne zamenjuje potpis na papiru (PoP čl. 9 st. 3)“* under **every** `korak.potpis`, including `counting`, whose own `pravniOsnov` is čl. 8 st. 5 — two different articles for one act, and čl. 9 st. 3's *„uz štampanje“* governs the liste printed **after** the natural count, not the čl. 8 st. 5 potpis. The article is now `korak.pravniOsnov`, never a literal, and the test asserts both phases and that neither shows the other's article. The same sentence now also says the program does not print the liste |
+| **The čl. 12 st. 2 iznos was write-only during the count.** The blind read carved `cena_minor` out for `gotovina` only, on the ground that elsewhere it is an obračun figure — which does not hold for nedokumentovana potraživanja i obaveze, whose iznos is the commission's **own** figure, has no perpetual record behind it, and is the only substantive figure that lista carries. The till offered the field, the row came back „—“, the edit form reopened empty, and the Phase A `snapshot_hash` — taken from that same blind read — recorded the amount as absent under a potpis the commission had given over it. **Chosen fix: extend the carve-out**, on the identical čl. 11 st. 1 reasoning; withholding the input instead would have left the čl. 12 st. 2 lista with no amount on the document the commission signs, which is worse evidence, not better. The freeze follows the read — what the blind read carries, the potpis freezes — so a moved iznos is refused in the obračun by name (`popis_prebrojani_iznos_potpisan`; the shipped `popis_apoen_potpisan` code is unchanged), the obračun's „what you may still fill in“ string no longer offers a cena that lista does not have, and the count sheet calls the column **Iznos** with its own article and disables it in the obračun. The four liste where the cena really is the čl. 9 st. 1 t. 5 figure are untouched, asserted as the negative control |
+
+**Still open after this batch.**
+
+- **Req. 31/32 — the printed popisna lista.** The single largest hole. Čl. 9 st. 3's *„uz štampanje“*
+  is express, SW-8 shipped a printing stack, and no task in this plan wired the two together. Until it
+  lands the shop prints the liste from somewhere else, and the register row says exactly that. **The
+  izveštaj o popisu is inside this hole and was not disclosed as such** — `PopisService` has no
+  exporting method and no popis screen calls `PrintService.openForPrint`, which reklamacije, KEP and
+  the čl. 47 register all do, so the izveštaj is a screen and nothing more. Corrected 03.08.2026: the
+  retention napomena, the čl. 47 register entry and the izveštaj's own warning had all said it
+  *„sastavlja se i štampa na zahtev“*.
+- **Req. 35 — the plan rada and the odluka o popisu are essentially uncoded.** `plan_rada_json` and
+  `odluka_ref` are free text captured once at `open_popis` and echoed back; nothing parses, validates
+  or even trims them. **Nothing generates a plan rada and nothing generates the odluka o popisu i
+  obrazovanju komisije**, and — the limb that matters — **no approval is recorded**: PoP čl. 8 st. 2
+  requires the plan to be *approved* by the lice iz čl. 4 st. 2, for a preduzetnik the owner
+  personally, and there is no column, no command and no screen for who approved it or when. The v20
+  comment at `db/migrations.rs:1169` names that approval as the column's whole purpose, which is what
+  makes the gap a discrepancy rather than a decision. Closing it needs a schema v20 does not have.
+- **Req. 40's second limb has no code.** The first limb is present and correct — popisivači are named
+  persons, `popis_commission.rukuje_imovinom` carries the čl. 5 st. 1 flag, and the warning never
+  blocks. *„Reuse the flag for ZoRač čl. 10 st. 5 (control of računovodstvene isprave)“* has **zero
+  occurrences in the crate**: `rukuje_imovinom` is read in exactly one place, `komisija_upozorenja`,
+  and no code path anywhere consults it when računovodstvene isprave are controlled.
+- **`perpetual_odluka_ref` validates itself and is then never consumed.** `ensure_perpetual_shortcut`
+  refuses a reference with no posted in-year popis behind it (req. 34), and after that the column is
+  only read back into the view. **No code path shortens or skips the count**, so čl. 9 st. 2's *„the
+  exception excuses step 2) only“* is not modelled at all — the natural count of t. 1 is what the
+  module always requires. The direction is the conservative one and nothing is unsound, but the field
+  today buys a gate and no behaviour.
+- **Čl. 9 st. 2's *usvojen* limb is still unchecked.** Req. 34's gate verifies that an in-year popis was
+  *izvršen i proknjižen*; the čl. 14 st. 2 odluka o usvajanju has no stored fact to check, so the
+  module states that it does not record the decision instead of implying that it does.
+- **Presence of a category is a declaration, not a fact the books hold.** `ensure_liste_kompletne`
+  refuses a *declared* lista that is empty; it cannot know about a damaged carton nobody declared.
+  Closing that would need a schema for the fact, which v20 does not have.
+- **The čl. 2 st. 6 consignment copy is a reminder, not a delivery.** The app computes the ten-day rok
+  and says in the same sentence that it does not send the lista to the owner.
+- **R-5, R-6, R-7 are unresolved law**, not engineering. R-5 (goods-handler exclusion *shodno* to a
+  one-person popis) is handled as warn-never-block; R-6 (purely electronic potpis under čl. 9 st. 3) is
+  handled by defaulting to print-and-sign and saying the recorded potpis does not replace the paper
+  one; R-7 (no provision names popisne liste expressly) is handled by carrying the five years as the
+  inference they are, in the napomena the shop reads. Full text in
+  `docs/REMAINING-SW-VERIFIED-RULES.md` §6.
+- **The komisija class holds employee data when the shop appoints an employee to it**, and
+  `docs/compliance/obavestenje-zaposlenima.md` has no row about it. The čl. 23 notice belongs to SW-13;
+  `docs_guard` records what such a row would have to be called („popisne liste“) rather than inventing
+  one here.
 
 ---
 

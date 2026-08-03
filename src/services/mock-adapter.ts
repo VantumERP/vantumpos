@@ -1,29 +1,54 @@
+import { nazivPerioda } from "@/lib/period";
+
 import type { PosServices } from "./ports";
 import type {
   AmlAssessment,
+  AuditEvent,
+  AuditQuery,
+  AuditSearchResult,
   AuthSession,
   BackupJob,
   BackupSettings,
+  Breach,
+  BreachDraft,
   CampaignInput,
   CampaignItemView,
   CampaignView,
   CashDepositCalendar,
   CashDepositReport,
   CategorySummary,
+  CenovnikPublishTarget,
+  CenovnikSnapshot,
   CompanySettings,
   CreateBackupRequest,
   DeclarationGapReason,
   DeclarationGapRow,
   DeclarationWarning,
   DepositBucket,
+  EmployeeProfile,
   EurRate,
+  EurRateStatus,
   ImportJob,
+  IzvestajElementId,
+  IzvestajNarativ,
+  IzvestajZbir,
+  KomisijaClanView,
   LegalNotice,
   InventoryAdjustmentRequest,
   KepClosure,
   KepClosureView,
   KepEntryView,
+  NivelacijaObavestenje,
+  PopisLineView,
+  PopisLista,
+  PopisPodesavanja,
+  PopisSessionView,
+  PopisSignatureView,
+  PopisStatus,
+  PopisVrsta,
   PrethodnaCenaDto,
+  PriceDivergence,
+  ProcessingActivity,
   ProductLedgerMovement,
   ProductListQuery,
   ProductLookupSuggestion,
@@ -34,17 +59,45 @@ import type {
   ReklamacijaRegime,
   ReklamacijaView,
   RestoreBackupRequest,
+  RetentionPolicy,
   SaleDraftRequest,
   SalePreview,
   ShiftSummary,
   ShopProfile,
   StockListItem,
+  SupportSession,
   TaxRate,
   UserAccount,
   TaxRateSummary,
+  AbsenceCategory,
+  SaveWorkTimeEntryRequest,
+  WorkTimeEntryView,
+  WorkTimeMinutes,
+  WorkTimeMonth,
 } from "./types";
 
 const now = "2026-06-18T10:00:00Z";
+/**
+ * The day this double judges rate staleness against. Frozen to `now` rather
+ * than read off the wall clock so `isStale` is reproducible — the real backend
+ * uses `commands::settings::today_utc`.
+ */
+const MOCK_TODAY = now.slice(0, 10);
+
+/** An employee nobody has profiled yet — every čl. 87–91 input unset. */
+const prazanProfilZaposlenog: EmployeeProfile = {
+  datumRodjenja: null,
+  datumRodjenjaNajmladjegDeteta: null,
+  samohraniRoditelj: null,
+  deteTezakInvalid: null,
+  trudnocaIliDojenje: null,
+  trudnocaIliDojenjeOd: null,
+  radiUPreraspodeli: false,
+  ugovorenoRadnoVremeMinutaNedeljno: null,
+  zanimanjeSifra: null,
+  kvalifikacijaSifra: null,
+  saglasnostPrekovremeniOd: null,
+};
 
 const AML_CAP_EUR = 10_000;
 const AML_SOFT_RATIO_PERCENT = 80;
@@ -52,11 +105,207 @@ const AML_SOFT_RATIO_PERCENT = 80;
 const AML_FALLBACK_RATE_MINOR = 10_000;
 
 /** The demo rate, dated to `now` so the till shows no staleness warning. */
-const mockEurRate: EurRate = {
+const DEFAULT_MOCK_EUR_RATE: EurRate = {
   rateMinor: 11723,
-  rateDate: "2026-06-18",
+  rateDate: MOCK_TODAY,
   source: "nbs",
 };
+
+/**
+ * `commands::settings::MANUAL_RATE_BAND_PARA` — 50–500 RSD/EUR in para. A typo
+ * guard, **not a legal figure**: no statute names it. It catches the extra
+ * digit, which is the dangerous direction, because a tenfold rate multiplies
+ * the AML čl. 46 st. 1 dinar threshold by ten and lets an unlawful cash amount
+ * through unwarned.
+ */
+const MANUAL_RATE_MIN_PARA = 5_000;
+const MANUAL_RATE_MAX_PARA = 50_000;
+
+/**
+ * A test double, not demo copy: the wording a shop actually reads is composed
+ * by `crate::popis::nivelacija_obavestenje`. What is kept here is the shape
+ * plus the two facts a UI test may assert on — that the popis duty rides back
+ * with the price change (SW-16 req. 33) and that the narrowed scope is labelled
+ * a **preporuka**, never an obaveza.
+ *
+ * One constant and not two copies: the KEP hook and the popis module read the
+ * same object, exactly as they read one backend string.
+ */
+const MOCK_NIVELACIJA_OBAVESTENJE: NivelacijaObavestenje = {
+  obaveza:
+    "Promena prodajnih cena u maloprodajnom objektu traži popis (ZoRač čl. 21, PoP čl. 3).",
+  pravniOsnov: "ZoRač čl. 21, PoP čl. 3",
+  rokDana: 30,
+  rokObjasnjenje:
+    "Izveštaj o popisu po nivelaciji sastavlja se najkasnije 30 dana po izvršenom popisu (PoP čl. 13 st. 2).",
+  obuhvat: [
+    {
+      obuhvat: "samo_nivelisani",
+      naziv: "samo artikli obuhvaćeni nivelacijom",
+      pravniStatus: "preporuka — nije zakonska obaveza",
+      obrazlozenje:
+        "Sužavanje obima je preporuka i nije zakonska obaveza — obim slobodno proširite.",
+      podrazumevani: true,
+    },
+    {
+      obuhvat: "ceo_objekat",
+      naziv: "ceo maloprodajni objekat",
+      pravniStatus: "najšire tumačenje — ni ono nije propisano",
+      obrazlozenje: "Popis celog objekta ne izostavlja ništa.",
+      podrazumevani: false,
+    },
+  ],
+  napomena: "Aplikacija ne otvara popis umesto vas (ZoRač čl. 20 st. 3).",
+};
+
+/** One popis as this double stores it, before the čl. 8 st. 5 filter runs. */
+interface MockPopis {
+  id: number;
+  vrsta: PopisVrsta;
+  prodajnoMesto: string;
+  datumPopisa: string;
+  periodFrom: string | null;
+  periodTo: string | null;
+  status: PopisStatus;
+  planRadaJson: string | null;
+  odlukaRef: string | null;
+  perpetualOdlukaRef: string | null;
+  uskladjivanjePotvrdjenoAt: string | null;
+  postedAt: string | null;
+  komisija: KomisijaClanView[];
+  potpisi: PopisSignatureView[];
+  linije: PopisLineView[];
+}
+
+/** The six req. 36 liste with the provision that requires each. */
+const POPIS_LISTE: { vrsta: PopisLista; naziv: string; pravniOsnov: string }[] = [
+  { vrsta: "roba", naziv: "roba u objektu", pravniOsnov: "PoP čl. 9 st. 1 t. 1" },
+  {
+    vrsta: "ostecena",
+    naziv: "oštećena, zastarela i neupotrebljiva roba",
+    pravniOsnov: "PoP čl. 10 st. 3",
+  },
+  {
+    vrsta: "van_objekta",
+    naziv: "roba van objekta (na popravci i kod trećeg lica)",
+    pravniOsnov: "PoP čl. 10 st. 4",
+  },
+  { vrsta: "gotovina", naziv: "gotovina po apoenima", pravniOsnov: "PoP čl. 11 st. 1" },
+  {
+    vrsta: "potrazivanja",
+    naziv: "nedokumentovana potraživanja i obaveze",
+    pravniOsnov: "PoP čl. 12 st. 2",
+  },
+  {
+    vrsta: "konsignacija",
+    naziv: "konsignaciona i druga tuđa roba",
+    pravniOsnov: "PoP čl. 2 st. 5",
+  },
+];
+
+/**
+ * The eight PoP čl. 13 st. 1 elements. `polje` is empty for the three the popis
+ * itself answers — they are read out of the liste and never typed.
+ */
+const POPIS_IZVESTAJ_ELEMENTI: {
+  element: IzvestajElementId;
+  naziv: string;
+  pravniOsnov: string;
+  uputstvo: string;
+  narativni: boolean;
+  polje: string;
+}[] = [
+  {
+    element: "stvarno_stanje",
+    naziv: "stvarno stanje utvrđeno popisom",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Iz popisnih listi. Izveštaj iskazuje vrednost prebrojanog stanja i broj stavki; prebrojane količine stoje po stavkama na popisnim listama.",
+    narativni: false,
+    polje: "",
+  },
+  {
+    element: "knjigovodstveno_stanje",
+    naziv: "knjigovodstveno stanje",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Iz knjiga, tek posle potpisa stvarnog stanja (PoP čl. 8 st. 5). Izveštaj iskazuje vrednost knjigovodstvenog stanja; knjigovodstvene količine stoje po stavkama na popisnim listama.",
+    narativni: false,
+    polje: "",
+  },
+  {
+    element: "razlike",
+    naziv: "razlike između stvarnog i knjigovodstvenog stanja",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Iz obračuna. Izveštaj iskazuje vrednosnu razliku i broj stavki sa viškom odnosno manjkom; naturalne razlike stoje po stavkama na popisnim listama.",
+    narativni: false,
+    polje: "",
+  },
+  {
+    element: "uzroci_neslaganja",
+    naziv: "uzroci neslaganja stvarnog i knjigovodstvenog stanja",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo: "Navedite zbog čega se stvarno i knjigovodstveno stanje razlikuju.",
+    narativni: true,
+    polje: "uzrociNeslaganja",
+  },
+  {
+    element: "predlozi_za_likvidaciju_razlika",
+    naziv: "predlozi za likvidaciju utvrđenih razlika",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Obuhvata prebijanje manjkova i viškova po osnovu zamena, način naknađivanja manjkova i prihodovanja viškova, otpis zastarelih potraživanja i prihodovanje zastarelih obaveza.",
+    narativni: true,
+    polje: "predloziZaLikvidacijuRazlika",
+  },
+  {
+    element: "nacin_knjizenja",
+    naziv: "način knjiženja razlika",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo: "Navedite kako se utvrđene razlike knjiže.",
+    narativni: true,
+    polje: "nacinKnjizenja",
+  },
+  {
+    element: "primedbe_lica_koja_rukuju_vrednostima",
+    naziv: "primedbe i objašnjenja lica koja rukuju vrednostima",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo:
+      "Unesite primedbe i objašnjenja lica koja rukuju vrednostima. Ako ih nema, upišite i to.",
+    narativni: true,
+    polje: "primedbeLicaKojaRukujuVrednostima",
+  },
+  {
+    element: "ostale_primedbe_i_predlozi",
+    naziv: "ostale primedbe i predlozi",
+    pravniOsnov: "PoP čl. 13 st. 1",
+    uputstvo: "Ostale primedbe i predlozi. Ako ih nema, upišite i to.",
+    narativni: true,
+    polje: "ostalePrimedbeIPredlozi",
+  },
+];
+
+/** `crate::popis::konsignacija_rok` — čl. 2 st. 6, ten calendar days. */
+function popisPlusDana(datum: string, dana: number): string {
+  const parsed = Date.parse(`${datum}T00:00:00Z`);
+  if (Number.isNaN(parsed)) {
+    return datum;
+  }
+  return new Date(parsed + dana * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** `nbs_rate::is_iso_date` — `YYYY-MM-DD`, month 1–12, day 1–31. */
+function isIsoDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) {
+    return false;
+  }
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
 
 /** Verbatim `commands::inventory::DECLARATION_ADVISORY`. One sentence, one
  *  wording: two copies would let one surface soften what the other hardened. */
@@ -73,6 +322,25 @@ const DECLARATION_ADVISORY =
  * copy in this double could silently drift out of tier. A `null` penalty is the
  * one answer that can never be the wrong one.
  */
+/**
+ * Mirrors `legal::lpfr_required` in wording and citation only.
+ *
+ * `penalty` is `null` whatever the legal form, for the same reason it is null
+ * in every other double here: `src-tauri/src/legal.rs` is the only place a fine
+ * figure may be decided, and a second copy could silently drift out of tier.
+ */
+const lpfrRequiredNotice: LegalNotice = {
+  summary:
+    "U svakom poslovnom prostoru i poslovnoj prostoriji mora da radi najmanje " +
+    "jedan lokalni procesor fiskalnih računa (L-PFR) — uređaj koji izdaje račun " +
+    "i bez interneta. Zakon izuzima samo obveznika koji promet na malo obavlja " +
+    "isključivo putem interneta i obveznika koji obavlja promet na malo " +
+    "sopstvenih korišćenih pokretnih materijalnih sredstava.",
+  penalty: null,
+  citation: "Zakon o fiskalizaciji, čl. 6 st. 4; prekršaj: čl. 15 st. 1 tač. 4.",
+  isLegalDuty: true,
+};
+
 const declarationMissingNotice: LegalNotice = {
   summary:
     "Prodaja robe bez deklaracije. Deklaraciju obezbeđuje proizvođač, " +
@@ -81,6 +349,176 @@ const declarationMissingNotice: LegalNotice = {
   citation: "Zakon o trgovini, čl. 34 st. 1–2, čl. 68 st. 1 tač. 9.",
   isLegalDuty: true,
 };
+
+/** Mirrors `legal::overtime_record_missing`. `penalty` null for the same reason. */
+const overtimeRecordMissingNotice: LegalNotice = {
+  summary:
+    "Poslodavac je dužan da vodi dnevnu evidenciju o prekovremenom radu zaposlenih.",
+  penalty: null,
+  citation:
+    "Zakon o radu, čl. 55 st. 6. Nadzor: inspektor rada. " +
+    "Ovi članovi ne propisuju zaštitnu meru.",
+  isLegalDuty: true,
+};
+
+/** Mirrors `legal::overtime_caps_exceeded`. `penalty` null for the same reason. */
+const overtimeCapsExceededNotice: LegalNotice = {
+  summary:
+    "Prekovremeni rad ne može trajati duže od osam časova nedeljno, " +
+    "niti ukupno radno vreme sa prekovremenim duže od 12 časova dnevno.",
+  penalty: null,
+  citation:
+    "Zakon o radu, čl. 53 st. 2 i st. 3. Nadzor: inspektor rada. " +
+    "Ovi članovi ne propisuju zaštitnu meru.",
+  isLegalDuty: true,
+};
+
+/** Mirrors `legal::preraspodela_caps_exceeded`. `penalty` null for the same reason. */
+const preraspodelaCapsExceededNotice: LegalNotice = {
+  summary:
+    "U slučaju preraspodele radnog vremena, radno vreme ne može da traje duže " +
+    "od 60 časova nedeljno. Časovi ostvareni u preraspodeli ne smatraju se " +
+    "prekovremenim radom (čl. 58).",
+  penalty: null,
+  citation:
+    "Zakon o radu, čl. 57 st. 5. Nadzor: inspektor rada. " +
+    "Ovi članovi ne propisuju zaštitnu meru.",
+  isLegalDuty: true,
+};
+
+/**
+ * Mirrors `legal::breach_notification_missing` at the preduzetnik tier — the
+ * **notification** exposure, never a figure for the documentation-only failure
+ * under čl. 52 st. 6 (req. 50).
+ */
+const breachNotificationNotice: LegalNotice = {
+  summary:
+    "Rukovalac je dužan da o povredi podataka o ličnosti koja može da proizvede rizik po " +
+    "prava i slobode fizičkih lica obavesti Poverenika bez nepotrebnog odlaganja, a " +
+    "najkasnije u roku od 72 časa od saznanja za povredu. Ako ne postupi u tom roku, dužan " +
+    "je da obrazloži zašto.",
+  penalty:
+    "Prekršaj: novčana kazna od 20.000 do 500.000 dinara " +
+    "(čl. 95 st. 1 tač. 24 u vezi sa st. 4).",
+  citation:
+    "Zakon o zaštiti podataka o ličnosti, čl. 52 st. 1 i st. 2; interna dokumentacija: " +
+    "čl. 52 st. 6 i st. 7. Rok i obrazac: Pravilnik 40/2019, čl. 3 i čl. 2. " +
+    "Nadzor: Poverenik.",
+  isLegalDuty: true,
+};
+
+/** `crate::commands::worktime::EVIDENCIJA_ZAGLAVLJE`, verbatim (§4 req. 22). */
+const EVIDENCIJA_ZAGLAVLJE =
+  "Evidencija prekovremenog rada — ZoR čl. 55 st. 6. Zakon ne propisuje obrazac.";
+
+/** `crate::commands::worktime::ADVISORY_TAG` (§4 req. 4). */
+const ADVISORY_TAG = "izračunato radi provere usklađenosti";
+
+/** `crate::worktime::WEEKLY_OVERTIME_CAP_MINUTES` / `DAILY_TOTAL_CAP_MINUTES`. */
+const WEEKLY_OVERTIME_CAP_MINUTES = 8 * 60;
+const DAILY_TOTAL_CAP_MINUTES = 12 * 60;
+
+function emptyMinutes(): WorkTimeMinutes {
+  return {
+    moguciMinuta: 0,
+    ukupnoOstvareniMinuta: 0,
+    efektivnoIzvrseniMinuta: 0,
+    casoviCekanjaIZastojaMinuta: 0,
+    obustavaRadaStrajkMinuta: 0,
+    ukupnoNeizvrseniMinuta: 0,
+    godisnjiOdmorMinuta: 0,
+    praznikOdmorMinuta: 0,
+    odsustvoUzNaknaduMinuta: 0,
+    strucnoOsposobljavanjeMinuta: 0,
+    sprecenostPoslodavacMinuta: 0,
+    naknadaDrugiPoslodavciMinuta: 0,
+    sprecenostRfzoMinuta: 0,
+    porodiljskoMinuta: 0,
+    neplacenoOdsustvoMinuta: 0,
+    prekovremeniMinuta: 0,
+    nocniMinuta: 0,
+    radNaPraznikMinuta: 0,
+  };
+}
+
+/**
+ * `kategorija_odsustva` → its own minute bucket, DERIVED from the category name
+ * exactly as `crate::commands::worktime::book_absence` derives it. A
+ * hand-maintained map is the rejected design: one wrong line would post an
+ * absence into the wrong statutory letter with nothing able to notice.
+ */
+function absenceBucket(kategorija: AbsenceCategory): keyof WorkTimeMinutes {
+  const parts = kategorija.split("_");
+  const camel = parts
+    .map((part, index) =>
+      index === 0 ? part : part.charAt(0).toUpperCase() + part.slice(1),
+    )
+    .join("");
+  return `${camel}Minuta` as keyof WorkTimeMinutes;
+}
+
+/** `crate::commands::worktime::derive_totals` — b) and v) are sums of their indents. */
+function deriveTotals(minuti: WorkTimeMinutes): void {
+  minuti.ukupnoOstvareniMinuta =
+    minuti.efektivnoIzvrseniMinuta +
+    minuti.casoviCekanjaIZastojaMinuta +
+    minuti.obustavaRadaStrajkMinuta;
+  minuti.ukupnoNeizvrseniMinuta =
+    minuti.godisnjiOdmorMinuta +
+    minuti.praznikOdmorMinuta +
+    minuti.odsustvoUzNaknaduMinuta +
+    minuti.strucnoOsposobljavanjeMinuta +
+    minuti.sprecenostPoslodavacMinuta +
+    minuti.naknadaDrugiPoslodavciMinuta +
+    minuti.sprecenostRfzoMinuta +
+    minuti.porodiljskoMinuta +
+    minuti.neplacenoOdsustvoMinuta;
+}
+
+function buildWorkTimeMinutes(
+  request: SaveWorkTimeEntryRequest,
+): WorkTimeMinutes {
+  const minuti = emptyMinutes();
+  minuti.moguciMinuta = request.moguciMinuta;
+  minuti.efektivnoIzvrseniMinuta = request.efektivnoIzvrseniMinuta;
+  minuti.casoviCekanjaIZastojaMinuta = request.casoviCekanjaIZastojaMinuta;
+  minuti.prekovremeniMinuta = request.prekovremeniMinuta;
+  minuti.nocniMinuta = request.nocniMinuta;
+  minuti.radNaPraznikMinuta = request.radNaPraznikMinuta;
+
+  if (request.kategorijaOdsustva) {
+    minuti[absenceBucket(request.kategorijaOdsustva)] = request.odsustvoMinuta;
+  }
+
+  deriveTotals(minuti);
+  return minuti;
+}
+
+/** The Monday of `dan`'s calendar week, as `YYYY-MM-DD`. */
+function mondayOf(dan: string): string {
+  const date = new Date(`${dan}T00:00:00Z`);
+
+  if (Number.isNaN(date.getTime())) {
+    return dan;
+  }
+
+  const weekday = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - weekday);
+  return date.toISOString().slice(0, 10);
+}
+
+/** Marks every row a later `verzija` for the same day supersedes. */
+function withSupersedes(entries: WorkTimeEntryView[]): WorkTimeEntryView[] {
+  return entries.map((entry) => ({
+    ...entry,
+    zamenjen: entries.some(
+      (other) =>
+        other.userId === entry.userId &&
+        other.dan === entry.dan &&
+        other.verzija > entry.verzija,
+    ),
+  }));
+}
 
 /** `catalog::is_valid_gtin` — modulo-10 over GTIN-8/12/13/14. Runs only for a
  *  code the shop asserted to be a GTIN. */
@@ -241,6 +679,12 @@ export function createMockServices(): PosServices {
     },
   ];
   const kepClosures: KepClosureView[] = [];
+  // Mock fidelity only: the real register is `work_time_entries`, append-only,
+  // with the live row for a day being MAX(verzija). This double keeps the same
+  // shape in memory — a correction appends, it never mutates.
+  const workTimeEntries: WorkTimeEntryView[] = [];
+  const workTimePeriods: { userId: number; godina: number; mesec: number; closedAt: string }[] =
+    [];
   const receipt = createReceiptDetail();
   let users: UserAccount[] = [
     {
@@ -262,6 +706,184 @@ export function createMockServices(): PosServices {
       createdAt: now,
       updatedAt: now,
       lastLoginAt: null,
+    },
+  ];
+  // Every čl. 87–91 input starts empty: an employee nobody has profiled yet is
+  // not an employee with no protections, and the guards read it that way.
+  const employeeProfiles = new Map<number, EmployeeProfile>();
+  // The ZZPL trio. The double keeps the shapes and the ordering honest; the
+  // hash chain itself is the backend's business, so the fixture rows carry
+  // plausible digests rather than computed ones and the verdict is stated, not
+  // derived — exactly as the real panel receives it.
+  let supportSessions: SupportSession[] = [];
+  let auditEvents: AuditEvent[] = [
+    {
+      id: 1,
+      at: "2026-06-18T09:30:00Z",
+      actorUserId: 1,
+      actorName: "Administrator",
+      action: "uvid",
+      actionLabel: "Uvid",
+      objectType: "personnel_record",
+      objectTypeLabel: "Evidencija o zaposlenom",
+      objectId: "2",
+      reasonCode: "interni_nadzor",
+      reasonLabel: "Interni nadzor",
+      recipient: null,
+      recipientLabel: null,
+      supportSessionId: null,
+      prevHash: "0".repeat(64),
+      hash: "1".repeat(64),
+    },
+  ];
+  let breaches: Breach[] = [];
+  let processingActivities: ProcessingActivity[] = [
+    {
+      id: 1,
+      kljuc: "evidencija_zaposlenih",
+      rukovalacNaziv: "Vantum Market",
+      rukovalacKontakt: "Bulevar 1, Beograd",
+      svrhaObrade:
+        "Vođenje evidencije o zaposlenim licima i ispunjenje obaveza iz radnog zakonodavstva.",
+      vrstaLica: "Zaposleni i radno angažovana lica kod rukovaoca.",
+      vrstaPodataka: "Identitet i matični broj, radno mesto, radno vreme.",
+      vrstaPrimalaca: "Nadležni državni organi kada zakon to nalaže; knjigovođa.",
+      prenosUDrugeDrzave:
+        "Nije utvrđen prenos u druge države ni u međunarodne organizacije.",
+      mereZastitePrenosa: null,
+      rokCuvanja: "Podaci se čuvaju trajno. Rok se ne podešava.",
+      retentionRecordClass: "personnel",
+      opisMeraZastite:
+        "Evidencija je u zasebnoj tabeli, odvojenoj od naloga za prijavu.",
+      updatedAt: now,
+    },
+  ];
+  /**
+   * The shared retention table as `crate::retention::seed_retention_policies`
+   * writes it on the day this mock's clock stands at: the trajno classes with no
+   * end date, the bounded ones with the seeding day plus their documented
+   * default (three years for the standalone overtime register, two for the
+   * evidencija pristupa, the seeding day itself where the discarding event is
+   * not a calendar one).
+   *
+   * `napomena` is abridged here — the shipped strings live in `retention.rs` and
+   * are guarded there; a second copy of a legal sentence is a second thing to
+   * get wrong.
+   */
+  const retentionPolicies: RetentionPolicy[] = [
+    {
+      recordClass: "worktime_classification",
+      naziv: "Izvedena mesečna klasifikacija časova",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Izvedena mesečna klasifikacija časova. Čuva se trajno (ZEOR čl. 7 st. 2 i čl. 25 st. 3).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "worktime_overtime_log",
+      naziv: "Samostalna evidencija prekovremenog rada",
+      retainUntil: "2029-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Samostalna evidencija prekovremenog rada (ZoR čl. 55 st. 6). Zakon ne propisuje rok; " +
+        "primenjuje se odbrambeni minimum od tri godine, koji se pomera samo unapred.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "worktime_draft",
+      naziv: "Radne verzije unosa i pomoćni podaci o vremenu",
+      retainUntil: "2026-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Radne verzije unosa i pomoćni podaci o vremenu. Brišu se tek pošto je period zatvoren " +
+        "i klasifikacija izvedena (ZZPL čl. 5 st. 1 tač. 5).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "personnel",
+      naziv: "Evidencija o zaposlenim licima",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Evidencija o zaposlenim licima (ZEOR čl. 5). Čuva se trajno (ZEOR čl. 7 st. 2) i rok " +
+        "se ne podešava.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "credentials",
+      naziv: "PIN i lozinka (heš vrednosti)",
+      retainUntil: "2026-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "PIN i lozinka (samo heš vrednosti). Uklanjaju se danom prestanka radnog odnosa, a ne " +
+        "po isteku roka (ZZPL čl. 5 st. 1 tač. 5 i čl. 42 st. 2).",
+      updatedAt: now,
+    },
+    {
+      recordClass: "access_log",
+      naziv: "Evidencija pristupa podacima o ličnosti",
+      retainUntil: "2028-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Evidencija pristupa podacima o ličnosti, koju rukovalac vodi kao sopstvenu meru. " +
+        "Zakon ne propisuje rok; primenjuje se podrazumevani rok od dve godine. Rok se pomera " +
+        "samo unapred. Ova evidencija se ne čuva trajno.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "processing_register",
+      naziv: "Evidencija o radnjama obrade",
+      retainUntil: null,
+      legalHold: false,
+      neverPurge: true,
+      adjustable: false,
+      napomena:
+        "Evidencija o radnjama obrade (ZZPL čl. 47 st. 1). Čuva se trajno (čl. 47 st. 7) i rok " +
+        "se ne podešava.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "cenovnik_archive",
+      naziv: "Arhiva objavljenih cenovnika",
+      retainUntil: "2028-06-18",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Arhiva objavljenih cenovnika (ZZP čl. 6 st. 5). Podrazumevani rok je dve godine — " +
+        "zastarelost prekršajnog gonjenja iz ZZP čl. 213; rok se pomera samo unapred. " +
+        "Automatsko čišćenje nikada ne uklanja važeći cenovnik prodajnog objekta.",
+      updatedAt: now,
+    },
+    {
+      recordClass: "popis_dokumentacija",
+      naziv: "Popisne liste i dokumentacija o popisu",
+      // The one class on the business-year clock (ZoRač čl. 28 st. 9), so the
+      // seeded floor is 31 December of the mock's year plus five — not the
+      // seeding day's anniversary the way every other bounded row above is.
+      retainUntil: "2031-12-31",
+      legalHold: false,
+      neverPurge: false,
+      adjustable: true,
+      napomena:
+        "Popisne liste, sastav komisije i potpisi. Rok čuvanja je pet godina, računato od " +
+        "poslednjeg dana poslovne godine na koju se popis odnosi (ZoRač čl. 28 st. 7 i st. 9); " +
+        "rok se pomera samo unapred. Izveštaj o popisu se ne čuva u aplikaciji — štampa se na " +
+        "zahtev. Automatsko brisanje popisne dokumentacije ne postoji.",
+      updatedAt: now,
     },
   ];
   let currentShift: ShiftSummary | null = {
@@ -307,6 +929,25 @@ export function createMockServices(): PosServices {
     logoPath: null,
     currency: "RSD",
   };
+  /**
+   * Where the shop has said its cenovnik goes. A fresh install has said nothing,
+   * and that is an honest state — never „the shop is in breach“ (§2b).
+   */
+  let cenovnikTarget: CenovnikPublishTarget = { kind: "notConfigured" };
+  /**
+   * The outlet's archive (ZZP čl. 6 st. 5), newest LAST in this array and
+   * reversed on read, exactly as `cenovnik_list_snapshots` orders it. Two
+   * publications are seeded so the archive surface has a prior file to compare
+   * the current one against, which is the whole point of st. 5.
+   *
+   * Bodies are the real rendered shape — BOM, `;`, CRLF, prices with a dot —
+   * because a double that published a prettier file than the backend would let
+   * a reader-side defect through.
+   */
+  const cenovnikArchive: { snapshot: CenovnikSnapshot; body: string }[] = [
+    mockSnapshot(1, "2026-06-17T08:30:00Z", 15499),
+    mockSnapshot(2, "2026-06-18T09:45:00Z", 15999),
+  ];
   let receiptSettings: ReceiptSettings = {
     prefix: "VP-",
     nextSequenceNumber: 1,
@@ -320,8 +961,17 @@ export function createMockServices(): PosServices {
     pdvObveznik: null,
     distanceSelling: null,
     lpfrInPremises: null,
+    lpfrCarveOutInternetOnly: null,
+    lpfrCarveOutOwnUsedAssets: null,
     esirElements: [],
   };
+  /**
+   * The cached EUR middle rate — mutable, so a test can drive the whole
+   * round trip (absent -> manual -> fresh) instead of reading one frozen
+   * constant. `null` is the real shape of a fresh install: no rate has ever
+   * been fetched, so the AML check cannot run at all.
+   */
+  let eurRate: EurRate | null = { ...DEFAULT_MOCK_EUR_RATE };
   // Saturday counts by default: „radni dan" is statutorily undefined and
   // counting Saturdays yields the earlier, conservative deadline.
   let cashDepositCalendar: CashDepositCalendar = {
@@ -345,6 +995,21 @@ export function createMockServices(): PosServices {
     automaticBackupEnabled: true,
   };
   let backupJobs: BackupJob[] = [];
+  const popisSessions: MockPopis[] = [];
+  let popisPodesavanja: PopisPodesavanja = { rokPredajeFi: null };
+
+  /**
+   * Mirrors `commands::settings::eur_rate_status`. An absent rate is stale —
+   * never "fine" — because the AML threshold is derived from it, so silence
+   * has to read as „nepoznato".
+   */
+  function eurRateStatus(): EurRateStatus {
+    return {
+      rate: eurRate === null ? null : { ...eurRate },
+      isStale: eurRate === null || eurRate.rateDate !== MOCK_TODAY,
+      checkedFor: MOCK_TODAY,
+    };
+  }
 
   /** Mirrors `commands::auth::require_admin` — the only admin gate. */
   function requireAdmin() {
@@ -501,6 +1166,9 @@ export function createMockServices(): PosServices {
       async getShopProfile() {
         return shopProfile;
       },
+      async getLpfrNotice() {
+        return lpfrRequiredNotice;
+      },
       async updateShopProfile(request) {
         if (session?.user.role !== "admin") {
           throw {
@@ -528,6 +1196,44 @@ export function createMockServices(): PosServices {
           })),
         };
         return shopProfile;
+      },
+      async getEurRate() {
+        return eurRateStatus();
+      },
+      async refreshEurRate() {
+        requireAdmin();
+        // A reachable NBS. An unreachable one is modelled by overriding this
+        // method in the test — it must resolve with the cached rate, never
+        // reject, because a dead network may not block the till.
+        eurRate = { ...DEFAULT_MOCK_EUR_RATE };
+        return eurRateStatus();
+      },
+      async setManualEurRate(rateMinor, rateDate) {
+        requireAdmin();
+        // `settings_set_manual_eur_rate` trims before validating.
+        const trimmedDate = rateDate.trim();
+
+        if (!Number.isInteger(rateMinor) || rateMinor <= 0) {
+          throw {
+            code: "validation_error",
+            message: "Kurs mora biti veći od nule.",
+          };
+        }
+        if (rateMinor < MANUAL_RATE_MIN_PARA || rateMinor > MANUAL_RATE_MAX_PARA) {
+          throw {
+            code: "validation_error",
+            message: "Kurs mora biti između 50 i 500 dinara za 1 evro.",
+          };
+        }
+        if (!isIsoDate(trimmedDate)) {
+          throw {
+            code: "validation_error",
+            message: "Datum kursa mora biti u obliku GGGG-MM-DD.",
+          };
+        }
+
+        eurRate = { rateMinor, rateDate: trimmedDate, source: "manual" };
+        return eurRateStatus();
       },
       async getCashDepositCalendar() {
         requireAdmin();
@@ -679,6 +1385,9 @@ export function createMockServices(): PosServices {
           lastLoginAt: null,
         };
         users = [...users, user];
+        if (request.profile) {
+          employeeProfiles.set(user.id, request.profile);
+        }
         return user;
       },
       async updateUser(id, request) {
@@ -697,12 +1406,24 @@ export function createMockServices(): PosServices {
           updatedAt: now,
         };
         users = users.map((user) => (user.id === id ? updated : user));
+        // A save that carries no profile leaves the čl. 87–91 inputs alone —
+        // the same rule the command enforces.
+        if (request.profile) {
+          employeeProfiles.set(id, request.profile);
+        }
         return updated;
       },
       async deactivateUser(id) {
         users = users.map((user) =>
           user.id === id ? { ...user, active: false, updatedAt: now } : user,
         );
+      },
+      async getEmployeeProfile(id) {
+        if (!users.some((user) => user.id === id)) {
+          throw { code: "not_found", message: "Korisnik nije pronađen." };
+        }
+
+        return employeeProfiles.get(id) ?? { ...prazanProfilZaposlenog };
       },
     },
     shifts: {
@@ -864,6 +1585,7 @@ export function createMockServices(): PosServices {
           externalSource: request.externalSource ?? null,
         };
         products.push(product);
+        republishCenovnik();
         return product;
       },
       async updateProduct(id, request) {
@@ -882,12 +1604,22 @@ export function createMockServices(): PosServices {
           currentStockMilli: products[index]?.currentStockMilli ?? 0,
           externalSource: request.externalSource ?? null,
         };
+        const before = products[index];
         products[index] = product;
+        if (movesAPublishedPrice(before, product)) {
+          republishCenovnik();
+        }
         return product;
       },
       async setProductActive(id, active) {
         const product = findProduct(id);
+        const changed = product.active !== active;
         product.active = active;
+        // An article going off the shelf, or coming back, changes what the shop
+        // offers — the same reading `record_offered_price_change` takes.
+        if (changed) {
+          republishCenovnik();
+        }
         return product;
       },
       async lookupProductByBarcode(barcode) {
@@ -963,7 +1695,54 @@ export function createMockServices(): PosServices {
         };
       },
       async assessCashPayment(cashMinor) {
-        return assessCashPayment(cashMinor, mockEurRate, shopProfile);
+        return assessCashPayment(cashMinor, eurRate, shopProfile);
+      },
+      /**
+       * Mirrors `commands::sales::assess_price_integrity`: the comparison is
+       * against the **unit price the article is offered at**, never the line
+       * total after a discount — a discount is a reduction granted on the
+       * prodajna cena, not a different price for the article, and a discount
+       * that cancelled the warning would be the obvious way to ring above the
+       * published cenovnik unremarked. Only above matters; one entry per
+       * article; no published file means no guard and never a blocked sale.
+       */
+      async assessPriceIntegrity(request) {
+        const published = currentCenovnik();
+        if (!published) {
+          return [];
+        }
+
+        const prices = publishedPrices(published.body);
+        const divergences: PriceDivergence[] = [];
+        for (const item of request.items) {
+          const product = products.find(
+            (candidate) => candidate.id === item.productId,
+          );
+          if (!product) {
+            continue;
+          }
+          const publishedUnitPriceMinor = prices.get(product.sku);
+          if (
+            publishedUnitPriceMinor === undefined ||
+            product.salePriceMinor <= publishedUnitPriceMinor ||
+            divergences.some((row) => row.productId === product.id)
+          ) {
+            continue;
+          }
+
+          divergences.push({
+            productId: product.id,
+            productName: product.name,
+            productSku: product.sku,
+            chargedUnitPriceMinor: product.salePriceMinor,
+            publishedUnitPriceMinor,
+            snapshotId: published.snapshot.id,
+            snapshotGeneratedAt: published.snapshot.generatedAt,
+            snapshotContentHash: published.snapshot.contentHash,
+          });
+        }
+
+        return divergences;
       },
     },
     inventory: {
@@ -1577,7 +2356,13 @@ export function createMockServices(): PosServices {
           rowCount: 1,
         };
       },
-      async nivelacija() {},
+      // The KEP hook and the popis module read ONE notice
+      // (`MOCK_NIVELACIJA_OBAVESTENJE`) for the reason the backend composes one:
+      // the duty has a single wording, and two copies would let one surface
+      // soften what the other hardened.
+      async nivelacija() {
+        return MOCK_NIVELACIJA_OBAVESTENJE;
+      },
       async postAdjustment() {},
       async correctEntry() {},
       async closePreview(bookYear) {
@@ -1642,11 +2427,1149 @@ export function createMockServices(): PosServices {
         };
       },
     },
+    // Mock fidelity only: `crate::commands::worktime` is the source of truth.
+    // Reproduced here because the register's UI turns on behaviour a naive stub
+    // would flatten — a cap breach that ASKS for a ground instead of refusing,
+    // and a correction that appends a new verzija instead of overwriting.
+    worktime: {
+      async listMonth(userId, godina, mesec) {
+        return buildMonth(userId, godina, mesec);
+      },
+      async saveEntry(request) {
+        return writeWorkTimeEntry(request, null);
+      },
+      async correctEntry(request) {
+        const { korekcijaRazlog, ...entry } = request;
+        return writeWorkTimeEntry(entry, korekcijaRazlog);
+      },
+      async closePeriod(userId, godina, mesec) {
+        if (
+          workTimePeriods.some(
+            (period) =>
+              period.userId === userId &&
+              period.godina === godina &&
+              period.mesec === mesec,
+          )
+        ) {
+          throw {
+            code: "period_closed",
+            message: `Period ${nazivPerioda(godina, mesec)}. je zaključen i više se ne može menjati. Zaključenje je konačno.`,
+          };
+        }
+
+        workTimePeriods.push({ userId, godina, mesec, closedAt: now });
+        const month = buildMonth(userId, godina, mesec);
+
+        return {
+          userId,
+          godina,
+          mesec,
+          closedAt: now,
+          closedBy: session?.user.id ?? 1,
+          klasifikacija: {
+            userId,
+            godina,
+            mesec,
+            danaSaUnosom: month.entries.filter((entry) => !entry.zamenjen).length,
+            minuti: month.ukupno,
+            izvedenoU: now,
+          },
+        };
+      },
+      async exportCsv(userId, godina, mesec) {
+        const month = buildMonth(userId, godina, mesec);
+        const fileName = `evidencija-radnog-vremena-${userId}-${godina}-${String(mesec).padStart(2, "0")}.csv`;
+
+        return {
+          fileName,
+          path: `mock://exports/${fileName}`,
+          mimeType: "text/csv" as const,
+          rowCount: month.entries.filter((entry) => !entry.zamenjen).length,
+        };
+      },
+      async myHours(godina, mesec) {
+        return buildMonth(session?.user.id ?? 1, godina, mesec);
+      },
+      async notices() {
+        return {
+          recordMissing: overtimeRecordMissingNotice,
+          capsExceeded: overtimeCapsExceededNotice,
+          preraspodelaCapsExceeded: preraspodelaCapsExceededNotice,
+        };
+      },
+    },
+    privacy: {
+      async grantSupportAccess(scope, durationMinutes) {
+        const obim = scope.trim();
+        if (!obim) {
+          throw {
+            code: "validation_error",
+            message:
+              "Nalog mora da navede obim pristupa koji se odobrava (ZZPL čl. 46).",
+          };
+        }
+        if (!Number.isInteger(durationMinutes) || durationMinutes <= 0) {
+          throw {
+            code: "validation_error",
+            message:
+              "Trajanje naloga mora da bude izraženo u punim minutima i veće od nule.",
+          };
+        }
+
+        const granted: SupportSession = {
+          id: supportSessions.length + 1,
+          grantedBy: session?.user.id ?? 1,
+          grantedByName: session?.user.displayName ?? "Administrator",
+          grantedAt: now,
+          scope: obim,
+          expiresAt: plusMinutes(now, durationMinutes),
+          startedAt: null,
+          endedAt: null,
+          revokedAt: null,
+        };
+        supportSessions = [...supportSessions, granted];
+        return granted;
+      },
+      async enterSupportSession() {
+        const live = liveSupportSession();
+        if (!live) {
+          throw {
+            code: "support_bez_naloga",
+            message:
+              "Pristup tehničke podrške nije odobren. Vlasnik mora prvo da izda nalog " +
+              "sa obimom i rokom (ZZPL čl. 46).",
+          };
+        }
+        live.startedAt = live.startedAt ?? now;
+        return { ...live };
+      },
+      async endSupportSession() {
+        const live = liveSupportSession();
+        if (!live) {
+          throw {
+            code: "support_nema_sesije",
+            message: "Nema otvorenog naloga za pristup tehničke podrške.",
+          };
+        }
+        // A nalog that was entered is ended; one that never was is revoked.
+        if (live.startedAt) {
+          live.endedAt = now;
+        } else {
+          live.revokedAt = now;
+        }
+        return { ...live };
+      },
+      async activeSupportSession() {
+        const live = liveSupportSession();
+        return live ? { ...live } : null;
+      },
+      async searchAudit(query) {
+        const events = filterAudit(query);
+        return {
+          events,
+          chain: {
+            verdict: "intact",
+            intact: true,
+            // The verdict covers the whole log, never the filtered slice.
+            checkedRows: auditEvents.length,
+            label: "Potvrđena — lanac otisaka je neprekinut.",
+          },
+        } satisfies AuditSearchResult;
+      },
+      async exportAuditCsv(query) {
+        const events = filterAudit(query);
+        const fileName = "izvod-evidencija-pristupa.csv";
+
+        return {
+          fileName,
+          path: `mock://exports/${fileName}`,
+          mimeType: "text/csv" as const,
+          rowCount: events.length,
+        };
+      },
+      async listBreaches() {
+        return breaches
+          .map((breach) => ({ ...breach }))
+          .sort((left, right) => right.saznanjeAt.localeCompare(left.saznanjeAt));
+      },
+      async recordBreach(draft) {
+        const recorded = derivedBreach(
+          { ...draft, id: breaches.length + 1, createdAt: now, updatedAt: now },
+        );
+        breaches = [...breaches, recorded];
+        return { ...recorded };
+      },
+      async updateBreach(id, draft) {
+        const existing = breaches.find((breach) => breach.id === id);
+        if (!existing) {
+          throw { code: "not_found", message: "Povreda nije pronađena." };
+        }
+        if (draft.saznanjeAt !== existing.saznanjeAt) {
+          throw {
+            code: "povreda_saznanje_nepromenljivo",
+            message:
+              "Vreme saznanja za povredu je nepromenljivo — od njega teče rok od 72 časa " +
+              "(ZZPL čl. 52 st. 1). Ako je uneto pogrešno, evidentirajte novu povredu.",
+          };
+        }
+
+        const updated = derivedBreach({
+          ...draft,
+          id,
+          createdAt: existing.createdAt,
+          updatedAt: now,
+        });
+        breaches = breaches.map((breach) => (breach.id === id ? updated : breach));
+        return { ...updated };
+      },
+      async breachNotice() {
+        return breachNotificationNotice;
+      },
+      async exportBreachObrazac(id) {
+        const fileName = `obrazac-povreda-podataka-${id}.html`;
+
+        return {
+          fileName,
+          path: `mock://exports/${fileName}`,
+          mimeType: "text/html" as const,
+          rowCount: 1,
+        };
+      },
+      async listProcessingActivities() {
+        return processingActivities.map((activity) => ({ ...activity }));
+      },
+      async generateProcessingActivities() {
+        processingActivities = processingActivities.map((activity) => ({
+          ...activity,
+          updatedAt: now,
+        }));
+        return processingActivities.map((activity) => ({ ...activity }));
+      },
+      async exportProcessingActivities() {
+        const fileName = "evidencija-radnji-obrade.html";
+
+        return {
+          fileName,
+          path: `mock://exports/${fileName}`,
+          mimeType: "text/html" as const,
+          rowCount: processingActivities.length,
+        };
+      },
+    },
+    retention: {
+      async listPolicies() {
+        return retentionPolicies.map((policy) => ({ ...policy }));
+      },
+      async extendPolicy(recordClass, retainUntil) {
+        const policy = retentionPolicies.find(
+          (row) => row.recordClass === recordClass,
+        );
+        if (!policy) {
+          throw {
+            code: "not_found",
+            message: `Klasa čuvanja „${recordClass}“ nije upisana u tabelu rokova.`,
+          };
+        }
+        if (!policy.adjustable) {
+          throw {
+            code: "validation_error",
+            message:
+              `Rok za „${policy.naziv}“ se ne podešava: ova evidencija se čuva trajno, ` +
+              "a trajno je odsustvo roka — svaki datum bi ga skratio.",
+          };
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(retainUntil)) {
+          throw {
+            code: "validation_error",
+            message: "Rok čuvanja mora biti u obliku gggg-MM-dd.",
+          };
+        }
+        // The one direction a rok may move. Refused, never clamped — a silent
+        // max() would hide the caller that tried to shorten it.
+        if (policy.retainUntil && retainUntil < policy.retainUntil) {
+          throw {
+            code: "validation_error",
+            message:
+              `Rok čuvanja se pomera samo unapred: „${policy.retainUntil}“ ` +
+              `se ne skraćuje na „${retainUntil}“.`,
+          };
+        }
+
+        policy.retainUntil = retainUntil;
+        policy.updatedAt = now;
+        return { ...policy };
+      },
+    },
+    cenovnik: {
+      async listSnapshots() {
+        // Newest first, and „current“ derived rather than stored — the same
+        // reading `cenovnik_list_snapshots` takes, so a stale pointer cannot
+        // exist here either.
+        return [...cenovnikArchive]
+          .reverse()
+          .map(({ snapshot }, index) => ({ ...snapshot, current: index === 0 }));
+      },
+      async getSnapshot(snapshotId) {
+        const found = cenovnikArchive.find(
+          (row) => row.snapshot.id === snapshotId,
+        );
+        if (!found) {
+          return null;
+        }
+
+        return {
+          snapshot: {
+            ...found.snapshot,
+            current:
+              found.snapshot.id ===
+              cenovnikArchive[cenovnikArchive.length - 1]?.snapshot.id,
+          },
+          body: found.body,
+        };
+      },
+      /**
+       * `commands::cenovnik::outlet`: the frozen archive key once anything has
+       * been published, otherwise what the company settings identify the shop
+       * as — address first, then the name. The seeded shop has published, so
+       * this is the frozen key and an edit to the address does not move it.
+       *
+       * `null` is the state in which nothing is generated, archived or
+       * published at all, and a double that always answered a name would hide
+       * the branch the panel exists to show.
+       */
+      async getOutlet() {
+        if (cenovnikArchive.length > 0) {
+          return MOCK_OUTLET;
+        }
+
+        return (
+          [companySettings.address, companySettings.shopName]
+            .map((candidate) => candidate.trim())
+            .find((candidate) => candidate.length > 0) ?? null
+        );
+      },
+      async getPublishTarget() {
+        return cenovnikTarget;
+      },
+      async setPublishTarget(target) {
+        // `cenovnik_set_publish_target` is `require_admin`: where the shop's
+        // published prices go is what čl. 6 st. 4 then binds it to.
+        if (session?.user.role !== "admin") {
+          throw {
+            code: "forbidden",
+            message: "Samo administrator može da izvrši ovu akciju.",
+          };
+        }
+        if (target.kind === "localFolder") {
+          const folder = target.folder.trim();
+          if (!folder) {
+            throw {
+              code: "validation_error",
+              message: "Folder za objavu cenovnika je obavezan.",
+            };
+          }
+          // The backend refuses a relative path: it would resolve against
+          // whatever directory the app was launched from, so the shop would be
+          // told the cenovnik is published and be unable to say where.
+          if (!/^([/\\]|[A-Za-z]:[/\\])/.test(folder)) {
+            throw {
+              code: "validation_error",
+              message:
+                "Putanja do foldera mora biti puna putanja, na primer " +
+                "„/Users/ana/cenovnik“.",
+            };
+          }
+          cenovnikTarget = { kind: "localFolder", folder };
+        } else {
+          cenovnikTarget = { kind: "notConfigured" };
+        }
+
+        return cenovnikTarget;
+      },
+      /**
+       * `penalty` is deliberately `null` whatever the legal form, for the same
+       * reason `assessCashPayment` leaves it null: every statutory fine figure
+       * lives in `src-tauri/src/legal.rs` and nowhere else, and a second copy
+       * here could silently drift out of tier. The panel renders a null penalty
+       * as a pointer to Podešavanja → Profil, never as a figure.
+       */
+      async getNotice() {
+        return {
+          summary:
+            "Trgovac je dužan da na svojoj internet stranici, posebno za svaki " +
+            "prodajni objekat, objavi cenovnik u digitalnom obliku pogodnom za " +
+            "automatsku obradu i da ga ažurira u realnom vremenu. U cenovniku " +
+            "se, kao i na prodajnom mestu, ističu prodajna i jedinična cena. " +
+            "Zakon nigde ne propisuje obavezu trgovca da ima internet stranicu, " +
+            "pa za trgovca koji je nema nije razjašnjeno da li je dužan da je " +
+            "izradi.",
+          penalty: null,
+          citation:
+            "Zakon o zaštiti potrošača (Sl. glasnik RS, br. 35/2026), čl. 6 " +
+            "st. 1–3; prekršaj: čl. 210. Nadzor: tržišna inspekcija.",
+          isLegalDuty: true,
+        } satisfies LegalNotice;
+      },
+    },
+    // A test double, not a second implementation. The rules that decide what a
+    // popis may do live in `crate::popis` and `crate::commands::popis`; what is
+    // kept here is the shape plus the four properties a UI test would otherwise
+    // be able to pass vacuously against: the čl. 20 st. 3 gate (req. 39), the
+    // čl. 8 st. 5 blind read (req. 29), the five arrows of the state machine,
+    // and the posting lock (req. 41).
+    popis: {
+      async list() {
+        return popisSessions.map((session) => ({
+          id: session.id,
+          vrsta: session.vrsta,
+          prodajnoMesto: session.prodajnoMesto,
+          datumPopisa: session.datumPopisa,
+          status: session.status,
+          postedAt: session.postedAt,
+          brojLinija: session.linije.length,
+        }));
+      },
+      async get(id) {
+        return popisView(popisById(id));
+      },
+      async proveraListi(id, prijavljene) {
+        const session = popisById(id);
+        const nedostaju = POPIS_LISTE.filter(
+          (lista) =>
+            prijavljene.includes(lista.vrsta) &&
+            !session.linije.some((linija) => linija.listaVrsta === lista.vrsta),
+        ).map((lista) => ({ ...lista, brojStavki: 0 }));
+
+        return {
+          spremno: nedostaju.length === 0,
+          nedostaju,
+          poruka:
+            nedostaju.length === 0
+              ? null
+              : "Popisne liste nisu potpune: " +
+                nedostaju.map((lista) => lista.naziv).join(", ") +
+                ". Prijavljena kategorija bez ijedne stavke ne može u izveštaj.",
+        };
+      },
+      async open(request) {
+        // Req. 39 — ZoRač čl. 20 st. 3 legislates the ordering, so the double
+        // refuses here exactly as the backend does. Without this a UI test
+        // could „open“ a popis the real app would never have opened.
+        if (!request.uskladjivanjePotvrdjeno) {
+          throw new Error(
+            "Popis se ne može otvoriti dok se ne potvrdi usklađivanje glavne " +
+              "knjige sa dnevnikom i pomoćnih knjiga sa glavnom knjigom " +
+              "(ZoRač čl. 20 st. 3).",
+          );
+        }
+
+        const session: MockPopis = {
+          id: popisSessions.length + 1,
+          vrsta: request.vrsta,
+          prodajnoMesto: request.prodajnoMesto,
+          datumPopisa: request.datumPopisa,
+          periodFrom: request.periodFrom,
+          periodTo: request.periodTo,
+          status: "draft",
+          planRadaJson: request.planRadaJson,
+          odlukaRef: request.odlukaRef,
+          perpetualOdlukaRef: request.perpetualOdlukaRef,
+          uskladjivanjePotvrdjenoAt: now,
+          postedAt: null,
+          komisija: request.komisija.map((clan, index) => ({
+            id: index + 1,
+            ime: clan.ime,
+            uloga: clan.uloga,
+            rukujeImovinom: clan.rukujeImovinom,
+          })),
+          potpisi: [],
+          linije: [],
+        };
+        popisSessions.push(session);
+        return popisView(session);
+      },
+      async saveLine(sessionId, lineId, input) {
+        const session = popisById(sessionId);
+        popisEnsureOtvoren(session);
+
+        // Req. 30 — the two potpisi freeze two snapshots. A stavka that could
+        // still be edited after the čl. 8 st. 5 signature would make that
+        // signature attest to a state that no longer exists.
+        if (session.status === "counted_signed") {
+          throw new Error(
+            "Stvarno stanje je potpisano (PoP čl. 8 st. 5) — popisne liste se više ne menjaju.",
+          );
+        }
+        if (session.status === "computed_signed") {
+          throw new Error(
+            "Obračunate popisne liste su potpisane (PoP čl. 9 st. 3) i više se ne menjaju.",
+          );
+        }
+        if (session.status === "computed" && lineId === null) {
+          throw new Error(
+            "Nova stavka se ne dodaje posle potpisa stvarnog stanja — nju niko nije prebrojao (PoP čl. 8 st. 5).",
+          );
+        }
+
+        // Req. 29. The refusal, not a silent drop: a caller that had the field
+        // discarded would believe it had stored book data.
+        if (
+          input.knjigovodstvenaKolicinaMilli !== null &&
+          !popisKnjigovodstvoDostupno(session)
+        ) {
+          throw new Error(
+            "Knjigovodstvena količina se ne unosi pre potpisa stvarnog stanja " +
+              "(PoP čl. 8 st. 5).",
+          );
+        }
+
+        const stored: PopisLineView = {
+          id: lineId ?? session.linije.length + 1,
+          listaVrsta: input.listaVrsta,
+          sifra: input.sifra,
+          naziv: input.naziv,
+          vrsta: input.vrsta,
+          jedinicaMere: input.jedinicaMere,
+          stvarnaKolicinaMilli: input.stvarnaKolicinaMilli,
+          bliziOpis: input.bliziOpis,
+          knjigovodstvenaKolicinaMilli: input.knjigovodstvenaKolicinaMilli,
+          razlikaMilli: null,
+          cenaMinor: input.cenaMinor,
+        };
+        const existing = session.linije.findIndex((linija) => linija.id === lineId);
+        if (existing >= 0) {
+          session.linije[existing] = stored;
+        } else {
+          session.linije.push(stored);
+        }
+
+        return popisView(session);
+      },
+      async startCount(id) {
+        return popisView(popisAdvanceSession(id, "draft", "counting"));
+      },
+      async signPhaseA(id, potpisnici) {
+        const session = popisById(id);
+        popisPotpis(session, "a", potpisnici, "counting");
+        // The statutory order: the potpis first, the book quantities only
+        // after it. The v20 write guard aborts the other way round.
+        session.status = "counted_signed";
+        for (const linija of session.linije) {
+          if (linija.knjigovodstvenaKolicinaMilli === null) {
+            linija.knjigovodstvenaKolicinaMilli = popisKnjigovodstvo(linija);
+          }
+        }
+        return popisView(session);
+      },
+      async compute(id) {
+        const session = popisAdvanceSession(id, "counted_signed", "computed");
+        for (const linija of session.linije) {
+          linija.razlikaMilli =
+            linija.knjigovodstvenaKolicinaMilli === null
+              ? null
+              : linija.stvarnaKolicinaMilli - linija.knjigovodstvenaKolicinaMilli;
+        }
+        return popisView(session);
+      },
+      async signPhaseB(id, potpisnici) {
+        const session = popisById(id);
+        popisPotpis(session, "b", potpisnici, "computed");
+        session.status = "computed_signed";
+        return popisView(session);
+      },
+      async post(id) {
+        const session = popisAdvanceSession(id, "computed_signed", "posted");
+        session.postedAt = now;
+        return popisView(session);
+      },
+      async getPodesavanja() {
+        return { ...popisPodesavanja };
+      },
+      async setPodesavanja(podesavanja) {
+        popisPodesavanja = {
+          rokPredajeFi: podesavanja.rokPredajeFi?.trim() || null,
+        };
+        return { ...popisPodesavanja };
+      },
+      async nivelacijaPregled() {
+        return {
+          obaveze: [],
+          obavestenje: MOCK_NIVELACIJA_OBAVESTENJE,
+          izvor:
+            "Prati se: nivelacije i izmene cene u katalogu artikala. Ne prate " +
+            "se: akcijske cene iz kampanja, cene iz uvoza artikala.",
+        };
+      },
+      async nivelacijaObuhvat(id, obuhvat) {
+        const session = popisById(id);
+        return {
+          sessionId: session.id,
+          datumPopisa: session.datumPopisa,
+          obuhvat: obuhvat ?? "samo_nivelisani",
+          obavestenje: MOCK_NIVELACIJA_OBAVESTENJE,
+          // Four čl. 8 st. 4 fields and no količina among them — the scope list
+          // is read before anything is counted (req. 29).
+          artikli: products.map((product) => ({
+            sifra: product.sku,
+            naziv: product.name,
+            vrsta: product.categoryName,
+            jedinicaMere: product.unitOfMeasure,
+          })),
+          vecNaListama: 0,
+        };
+      },
+      async izvestaj(id, request) {
+        const session = popisById(id);
+        if (!popisKnjigovodstvoDostupno(session)) {
+          throw new Error(
+            "Izveštaj o popisu se ne sastavlja pre potpisa stvarnog stanja " +
+              "(PoP čl. 8 st. 5).",
+          );
+        }
+
+        return {
+          sessionId: session.id,
+          vrsta: session.vrsta,
+          status: session.status,
+          obveznik: "Butik Primer pr Novi Pazar",
+          pib: "100000001",
+          maticniBroj: "60000001",
+          prodajnoMesto: session.prodajnoMesto,
+          datumPopisa: session.datumPopisa,
+          periodFrom: session.periodFrom,
+          periodTo: session.periodTo,
+          komisija: session.komisija,
+          potpisi: session.potpisi,
+          elementi: POPIS_IZVESTAJ_ELEMENTI.map((element) => ({
+            ...element,
+            tekst: element.narativni
+              ? request.narativ[element.polje as keyof IzvestajNarativ]
+              : null,
+          })),
+          liste: POPIS_LISTE.map((lista) => ({
+            vrsta: lista.vrsta,
+            naziv: lista.naziv,
+            pravniOsnov: lista.pravniOsnov,
+            zbir: popisZbir(
+              session.linije.filter((linija) => linija.listaVrsta === lista.vrsta),
+            ),
+          })),
+          ukupno: popisZbir(session.linije),
+          rok:
+            session.vrsta === "nivelacioni"
+              ? "30 dana po izvršenom popisu"
+              : "30.01.2027",
+          rokPravniOsnov: "PoP čl. 13 st. 2",
+          odlukaOUsvajanju: {
+            rok:
+              session.vrsta === "nivelacioni"
+                ? "30 dana po izvršenom popisu"
+                : "30.01.2027",
+            pravniOsnov: "PoP čl. 14 st. 2",
+            donosilac: "preduzetnik lično",
+            napomena:
+              "Aplikacija ne evidentira odluku o usvajanju izveštaja — donesite " +
+              "je i čuvajte uz izveštaj.",
+          },
+          upozorenja: [
+            "Izveštaj o popisu se ne čuva u aplikaciji, a program ga ne štampa " +
+              "i ne izvozi — štampani primerak sastavite sami i čuvajte ga uz " +
+              "popisne liste.",
+          ],
+        };
+      },
+    },
     print: {
       async openForPrint() {},
       async openExternalUrl() {},
     },
   };
+
+  /** The outlet's newest publication — the file čl. 6 st. 4 binds it to today. */
+  function currentCenovnik() {
+    return cenovnikArchive[cenovnikArchive.length - 1];
+  }
+
+  function popisById(id: number): MockPopis {
+    const found = popisSessions.find((candidate) => candidate.id === id);
+    if (!found) {
+      throw new Error("Popis nije pronađen.");
+    }
+    return found;
+  }
+
+  /**
+   * `crate::popis::book_quantities_released` — **both** limbs. The status limb
+   * alone is module-private backend-side precisely so nothing can reach it: a
+   * session can be born in `counted_signed` with no potpis behind it, and this
+   * double must not be the one place where that shortcut works.
+   */
+  function popisKnjigovodstvoDostupno(session: MockPopis): boolean {
+    return (
+      session.status !== "draft" &&
+      session.status !== "counting" &&
+      session.potpisi.some((potpis) => potpis.faza === "a")
+    );
+  }
+
+  /** Req. 41 — čl. 14 st. 3 with ZoRač čl. 8 st. 4: a correction is a new popis. */
+  function popisEnsureOtvoren(session: MockPopis) {
+    if (session.status === "posted") {
+      throw new Error(
+        "Popis je proknjižen i više se ne menja — ispravka se sprovodi novim popisom.",
+      );
+    }
+  }
+
+  function popisAdvanceSession(
+    id: number,
+    from: PopisStatus,
+    to: PopisStatus,
+  ): MockPopis {
+    const session = popisById(id);
+    popisEnsureOtvoren(session);
+    if (session.status !== from) {
+      throw new Error(
+        `Prelaz nije dozvoljen iz stanja „${session.status}“ u „${to}“.`,
+      );
+    }
+    session.status = to;
+    return session;
+  }
+
+  function popisPotpis(
+    session: MockPopis,
+    faza: "a" | "b",
+    potpisnici: string[],
+    from: PopisStatus,
+  ) {
+    popisEnsureOtvoren(session);
+    if (session.status !== from) {
+      throw new Error(`Potpis nije moguć u stanju „${session.status}“.`);
+    }
+    if (potpisnici.length === 0) {
+      throw new Error("Popisnu listu potpisuju članovi komisije.");
+    }
+    for (const potpisnik of potpisnici) {
+      session.potpisi.push({
+        id: session.potpisi.length + 1,
+        faza,
+        potpisnik,
+        potpisanoAt: now,
+        snapshotHash: `mock-${faza}-${session.id}-${session.potpisi.length + 1}`,
+      });
+    }
+  }
+
+  /**
+   * The perpetual stanje, read at the moment the čl. 8 st. 5 potpis is taken —
+   * the earliest moment the article permits reading it at all. A šifra that
+   * resolves to nothing keeps its `null`: the gotovina and potraživanja liste
+   * have no perpetual record behind them, and a fabricated zero would report a
+   * manjak the shop does not have.
+   */
+  function popisKnjigovodstvo(linija: PopisLineView): number | null {
+    const product = products.find((candidate) => candidate.sku === linija.sifra);
+    return product ? product.currentStockMilli : null;
+  }
+
+  function popisZbir(linije: PopisLineView[]): IzvestajZbir {
+    const zbir: IzvestajZbir = {
+      brojStavki: linije.length,
+      stavkeBezCene: 0,
+      stavkeBezKnjigovodstvenogStanja: 0,
+      stavkeSaViskom: 0,
+      stavkeSaManjkom: 0,
+      vrednostPoPopisuMinor: 0,
+      vrednostPoKnjigamaMinor: 0,
+      vrednosnaRazlikaMinor: 0,
+      potpuno: true,
+    };
+
+    for (const linija of linije) {
+      if (linija.cenaMinor === null) {
+        zbir.stavkeBezCene += 1;
+        zbir.potpuno = false;
+      }
+      if (linija.knjigovodstvenaKolicinaMilli === null) {
+        zbir.stavkeBezKnjigovodstvenogStanja += 1;
+        zbir.potpuno = false;
+      }
+      if (linija.razlikaMilli !== null && linija.razlikaMilli > 0) {
+        zbir.stavkeSaViskom += 1;
+      }
+      if (linija.razlikaMilli !== null && linija.razlikaMilli < 0) {
+        zbir.stavkeSaManjkom += 1;
+      }
+      if (linija.cenaMinor !== null) {
+        zbir.vrednostPoPopisuMinor += Math.round(
+          (linija.stvarnaKolicinaMilli * linija.cenaMinor) / 1000,
+        );
+        if (linija.knjigovodstvenaKolicinaMilli !== null) {
+          zbir.vrednostPoKnjigamaMinor += Math.round(
+            (linija.knjigovodstvenaKolicinaMilli * linija.cenaMinor) / 1000,
+          );
+        }
+      }
+    }
+
+    zbir.vrednosnaRazlikaMinor =
+      zbir.vrednostPoPopisuMinor - zbir.vrednostPoKnjigamaMinor;
+    return zbir;
+  }
+
+  /**
+   * Req. 29 lives here, not in the caller. While the release predicate is false
+   * the view carries **no** book quantity and **no** razlika: this double drops
+   * them on the way out, where the real backend never reads them in the first
+   * place. A double that leaked them would let a UI test that shows an
+   * „očekivano“ column pass.
+   */
+  function popisView(session: MockPopis): PopisSessionView {
+    const dostupno = popisKnjigovodstvoDostupno(session);
+    const upozorenja: string[] = [];
+
+    for (const clan of session.komisija) {
+      if (clan.rukujeImovinom) {
+        upozorenja.push(
+          `${clan.ime} rukuje imovinom koja se popisuje — PoP čl. 5 st. 1 to ` +
+            "ne dozvoljava za člana komisije. Za jedno lice iz čl. 6 st. 1 " +
+            "shodna primena čl. 5 st. 1 nije razjašnjena. Popis nije zaustavljen.",
+        );
+      }
+    }
+
+    if (session.linije.some((linija) => linija.listaVrsta === "konsignacija")) {
+      upozorenja.push(
+        "Potpisanu konsignacionu listu dostavite vlasniku robe u roku od 10 " +
+          "dana od dana popisa (PoP čl. 2 st. 6). Aplikacija je ne dostavlja.",
+      );
+    }
+
+    return {
+      id: session.id,
+      vrsta: session.vrsta,
+      prodajnoMesto: session.prodajnoMesto,
+      datumPopisa: session.datumPopisa,
+      periodFrom: session.periodFrom,
+      periodTo: session.periodTo,
+      status: session.status,
+      planRadaJson: session.planRadaJson,
+      odlukaRef: session.odlukaRef,
+      perpetualOdlukaRef: session.perpetualOdlukaRef,
+      uskladjivanjePotvrdjenoAt: session.uskladjivanjePotvrdjenoAt,
+      postedAt: session.postedAt,
+      fazaAPotpisana: session.potpisi.some((potpis) => potpis.faza === "a"),
+      fazaBPotpisana: session.potpisi.some((potpis) => potpis.faza === "b"),
+      knjigovodstvoDostupno: dostupno,
+      komisija: session.komisija.map((clan) => ({ ...clan })),
+      potpisi: session.potpisi.map((potpis) => ({ ...potpis })),
+      // The blind read, as `read_lines` performs it. `cenaMinor` is withheld with
+      // the rest of the Phase B block **except** on the two liste where it is not
+      // a cena: the čl. 11 st. 1 apoen and the čl. 12 st. 2 iznos are the
+      // commission's own counted figures, so they stay readable while the lista
+      // is being written — otherwise the field is write-only during the count.
+      linije: session.linije.map((linija) => ({
+        ...linija,
+        knjigovodstvenaKolicinaMilli: dostupno
+          ? linija.knjigovodstvenaKolicinaMilli
+          : null,
+        razlikaMilli: dostupno ? linija.razlikaMilli : null,
+        cenaMinor:
+          dostupno ||
+          linija.listaVrsta === "gotovina" ||
+          linija.listaVrsta === "potrazivanja"
+            ? linija.cenaMinor
+            : null,
+      })),
+      liste: POPIS_LISTE.map((lista) => ({
+        ...lista,
+        brojStavki: session.linije.filter(
+          (linija) => linija.listaVrsta === lista.vrsta,
+        ).length,
+      })),
+      konsignacijaRok: session.linije.some(
+        (linija) => linija.listaVrsta === "konsignacija",
+      )
+        ? popisPlusDana(session.datumPopisa, 10)
+        : null,
+      upozorenja,
+    };
+  }
+
+  /**
+   * Req. 11: a price change republishes, and nothing else does. Čl. 6 st. 3
+   * wants the published file to match the outlet's current prices *„u realnom
+   * vremenu“*, so this rides on the write that moved them — mirroring
+   * `commands::catalog::republish_cenovnik`, including the jedinična cena, which
+   * is a published price under st. 1/st. 2 and moves with the package content
+   * without touching `salePriceMinor`.
+   *
+   * A double that skipped this would warn at the till after every ordinary price
+   * raise, where the real backend stays silent because it republished first.
+   */
+  function republishCenovnik() {
+    const generatedAt = `${new Date(
+      Date.parse(now) + cenovnikArchive.length * 1000,
+    )
+      .toISOString()
+      .slice(0, 19)}Z`;
+    // Inactive articles are not offered, so they have no price to publish.
+    const rows = products
+      .filter((product) => product.active)
+      .map((product) => ({
+        sifra: product.sku,
+        barkod: product.barcode,
+        naziv: product.name,
+        jedinicaMere: product.unitOfMeasure,
+        prodajnaCenaMinor: product.salePriceMinor,
+        jedinicnaCenaMinor: unitPriceMinor(product),
+        jedinicaZaJedinicnuCenu: product.jedinicnaCenaJedinica ?? null,
+      }))
+      .sort((left, right) => left.sifra.localeCompare(right.sifra));
+    const body = renderMockCenovnik(rows, generatedAt);
+
+    cenovnikArchive.push({
+      snapshot: {
+        id: cenovnikArchive.length + 1,
+        prodajnoMesto: MOCK_OUTLET,
+        generatedAt,
+        rowCount: rows.length,
+        contentHash: mockContentHash(body),
+        // No target is configured in the seeded shop, so the file is archived
+        // and goes nowhere — the honest state, not a failure.
+        publishedAt: null,
+        publishedTarget: null,
+        current: false,
+      },
+      body,
+    });
+  }
+
+  /** „Did this write move a published price?“ — the sale price or the pair. */
+  function movesAPublishedPrice(
+    before: ProductSummary | undefined,
+    after: ProductSummary,
+  ): boolean {
+    return (
+      before === undefined ||
+      before.active !== after.active ||
+      before.salePriceMinor !== after.salePriceMinor ||
+      (before.jedinicnaCenaJedinica ?? null) !==
+        (after.jedinicnaCenaJedinica ?? null) ||
+      (before.jedinicnaCenaSadrzajMilli ?? null) !==
+        (after.jedinicnaCenaSadrzajMilli ?? null)
+    );
+  }
+
+  /** Integer minutes, like every other duration in this app. */
+  function plusMinutes(instant: string, minutes: number): string {
+    return `${new Date(new Date(instant).getTime() + minutes * 60_000)
+      .toISOString()
+      .slice(0, 19)}Z`;
+  }
+
+  /**
+   * The newest nalog that has neither ended nor been revoked and whose expiry
+   * has not passed. Expiry is exclusive — at `expiresAt` the nalog is spent.
+   */
+  function liveSupportSession(): SupportSession | undefined {
+    return [...supportSessions]
+      .reverse()
+      .find(
+        (candidate) =>
+          !candidate.endedAt &&
+          !candidate.revokedAt &&
+          candidate.grantedAt <= now &&
+          now < candidate.expiresAt,
+      );
+  }
+
+  function filterAudit(query: AuditQuery): AuditEvent[] {
+    return auditEvents
+      .filter((event) => !query.from || event.at.slice(0, 10) >= query.from)
+      .filter((event) => !query.to || event.at.slice(0, 10) <= query.to)
+      .filter(
+        (event) =>
+          query.actorUserId === null ||
+          query.actorUserId === undefined ||
+          event.actorUserId === query.actorUserId,
+      )
+      .map((event) => ({ ...event }));
+  }
+
+  /**
+   * The four answers computed from `now`. `notifiable` is derived from the risk
+   * assessment and is `null` until one exists — it never decided whether the
+   * record was written (req. 43).
+   */
+  function derivedBreach(
+    stored: BreachDraft & { id: number; createdAt: string; updatedAt: string },
+  ): Breach {
+    const saznanje = new Date(stored.saznanjeAt).getTime();
+    const rok = plusMinutes(stored.saznanjeAt, 72 * 60);
+    const notifiable =
+      stored.riskOutcome === null || stored.riskOutcome === undefined
+        ? null
+        : stored.riskOutcome !== "bez_rizika";
+
+    return {
+      ...stored,
+      rokObavestavanjaIsticeAt: rok,
+      notifiable,
+      delayReasonRequired:
+        notifiable === true &&
+        !stored.poverenikNotifiedAt &&
+        new Date(now).getTime() - saznanje > 72 * 60 * 60 * 1000,
+      obavestavanjeLicaObavezno: stored.riskOutcome === "visok_rizik",
+    };
+  }
+
+  function buildMonth(
+    userId: number,
+    godina: number,
+    mesec: number,
+  ): WorkTimeMonth {
+    const prefix = `${godina}-${String(mesec).padStart(2, "0")}`;
+    const entries = withSupersedes(
+      workTimeEntries.filter((entry) => entry.userId === userId),
+    )
+      .filter((entry) => entry.dan.startsWith(prefix))
+      .sort((left, right) =>
+        left.dan === right.dan
+          ? left.verzija - right.verzija
+          : left.dan.localeCompare(right.dan),
+      );
+
+    const ukupno = emptyMinutes();
+    for (const entry of entries.filter((candidate) => !candidate.zamenjen)) {
+      for (const key of Object.keys(ukupno) as (keyof WorkTimeMinutes)[]) {
+        ukupno[key] += entry.minuti[key];
+      }
+    }
+
+    const closed = workTimePeriods.find(
+      (period) =>
+        period.userId === userId &&
+        period.godina === godina &&
+        period.mesec === mesec,
+    );
+
+    return {
+      userId,
+      zaposleni:
+        users.find((user) => user.id === userId)?.displayName ?? "Zaposleni",
+      godina,
+      mesec,
+      zatvoren: Boolean(closed),
+      closedAt: closed?.closedAt ?? null,
+      entries,
+      ukupno,
+      napomena: EVIDENCIJA_ZAGLAVLJE,
+      advisoryNapomena: ADVISORY_TAG,
+    };
+  }
+
+  function writeWorkTimeEntry(
+    request: SaveWorkTimeEntryRequest,
+    korekcijaRazlog: string | null,
+  ) {
+    const godina = Number(request.dan.slice(0, 4));
+    const mesec = Number(request.dan.slice(5, 7));
+
+    if (
+      workTimePeriods.some(
+        (period) =>
+          period.userId === request.userId &&
+          period.godina === godina &&
+          period.mesec === mesec,
+      )
+    ) {
+      throw {
+        code: "period_closed",
+        message: `Period ${nazivPerioda(godina, mesec)}. je zaključen i više se ne može menjati. Zaključenje je konačno.`,
+      };
+    }
+
+    const live = withSupersedes(workTimeEntries).find(
+      (entry) =>
+        entry.userId === request.userId &&
+        entry.dan === request.dan &&
+        !entry.zamenjen,
+    );
+
+    if (korekcijaRazlog && !live) {
+      throw {
+        code: "not_found",
+        message: "Za ovaj dan ne postoji unos koji bi se ispravio.",
+      };
+    }
+    if (!korekcijaRazlog && live) {
+      throw {
+        code: "entry_exists",
+        message:
+          "Za ovaj dan već postoji unos. Izmena se evidentira kao ispravka.",
+      };
+    }
+
+    const minuti = buildWorkTimeMinutes(request);
+    const week = mondayOf(request.dan);
+    const weeklyOvertimeMinutes =
+      minuti.prekovremeniMinuta +
+      withSupersedes(workTimeEntries)
+        .filter(
+          (entry) =>
+            entry.userId === request.userId &&
+            !entry.zamenjen &&
+            entry.dan !== request.dan &&
+            mondayOf(entry.dan) === week,
+        )
+        .reduce((sum, entry) => sum + entry.minuti.prekovremeniMinuta, 0);
+    const dailyTotalMinutes =
+      minuti.efektivnoIzvrseniMinuta + minuti.prekovremeniMinuta;
+    const weeklyCapExceeded = weeklyOvertimeMinutes > WEEKLY_OVERTIME_CAP_MINUTES;
+    const dailyCapExceeded = dailyTotalMinutes > DAILY_TOTAL_CAP_MINUTES;
+    const caps = {
+      weeklyOvertimeMinutes,
+      dailyTotalMinutes,
+      weeklyTotalMinutes: dailyTotalMinutes,
+      weeklyCapExceeded,
+      dailyCapExceeded,
+      preraspodelaWeeklyCapExceeded: false,
+      requiresOverride: weeklyCapExceeded || dailyCapExceeded,
+    };
+
+    // Never a dead end: the day is recordable, it just has to say why.
+    if (caps.requiresOverride && !request.capOverrideRazlog) {
+      throw {
+        code: "cap_override_required",
+        message:
+          "Prekoračen je zakonski limit iz ZoR čl. 53. Dan se može evidentirati, " +
+          "ali morate izabrati razlog prekoračenja.",
+        details: { caps },
+      };
+    }
+
+    const entry: WorkTimeEntryView = {
+      id: workTimeEntries.length + 1,
+      userId: request.userId,
+      dan: request.dan,
+      verzija: live ? live.verzija + 1 : 1,
+      zamenjen: false,
+      supersedesId: live?.id ?? null,
+      kategorijaOdsustva: request.kategorijaOdsustva,
+      capOverrideRazlog: request.capOverrideRazlog,
+      korekcijaRazlog,
+      unioUserId: session?.user.id ?? 1,
+      unioIme: session?.user.displayName ?? "Administrator",
+      createdAt: now,
+      updatedAt: now,
+      minuti,
+    };
+    workTimeEntries.push(entry);
+
+    return { entry, caps, protections: [] };
+  }
 
   return services;
 }
@@ -2051,13 +3974,15 @@ function ledgerLatest(_productId: number): string | null {
 const CASH_DEPOSIT_FOOTER =
   "Zbir po danu prometa je konvencija ove aplikacije, a ne zakonska kategorija: " +
   "rok teče od prijema gotovine, a ni Zakon 68/2015 ni Pravilnik 77/2011 ne " +
-  "poznaju dnevni izveštaj. Gotovina podignuta sa tekućeg računa radnje izuzeta " +
-  "je iz osnovice po Pravilniku 77/2011 čl. 5 st. 2, ali samo ako je isplata " +
-  "izvršena u skladu sa čl. 2 st. 2 ili st. 3 tog pravilnika — proverite " +
-  "dokumentaciju za svaki izuzeti iznos. To je olakšica na nivou podzakonskog " +
-  "akta; sam zakon („po bilo kom osnovu“) i kazna iz čl. 7 ne sadrže nijedan " +
-  "izuzetak. Izveštaj je informativan: nadzor vrši Poreska uprava, a rok ne " +
-  "blokira prodaju, zatvaranje smene ni fiskalizaciju.";
+  "poznaju dnevni izveštaj. Iz osnovice je izuzeta samo ona gotovina podignuta " +
+  "sa tekućeg računa radnje za koju je zabeleženo da je isplaćena u skladu sa " +
+  "Pravilnikom 77/2011 čl. 2 st. 2 (uz originalnu dokumentaciju podnetu banci " +
+  "na uvid i overu) ili čl. 2 st. 3 (dnevni limit od 150.000 dinara bez " +
+  "dokumentacije). Podizanja bez te potvrde ostaju u osnovici i imaju rok za " +
+  "polog. Izuzeće je olakšica na nivou podzakonskog akta — sam zakon („po bilo " +
+  "kom osnovu“) i kazna iz čl. 7 ne sadrže nijedan izuzetak. Izveštaj je " +
+  "informativan: nadzor vrši Poreska uprava, a rok ne blokira prodaju, " +
+  "zatvaranje smene ni fiskalizaciju.";
 
 /**
  * The demo double for `cash_deposit_report`.
@@ -2127,6 +4052,201 @@ function buildMockCashDepositReport(
     },
     footer: CASH_DEPOSIT_FOOTER,
   };
+}
+
+/**
+ * The prodajno mesto the seeded archive is keyed on. `commands::cenovnik::
+ * prodajno_mesto` derives it from the shop's address and then freezes it, so
+ * this matches `companySettings.address` above.
+ */
+const MOCK_OUTLET = "Bulevar 1, Beograd";
+
+/** `src-tauri/src/cenovnik.rs::COLUMNS`, in order. */
+const CENOVNIK_COLUMNS = [
+  "sifra",
+  "barkod",
+  "naziv",
+  "jedinica_mere",
+  "prodajna_cena",
+  "jedinicna_cena",
+  "jedinica_za_jedinicnu_cenu",
+  "datum_azuriranja",
+];
+
+interface MockCenovnikRow {
+  sifra: string;
+  barkod: string | null;
+  naziv: string;
+  jedinicaMere: string;
+  prodajnaCenaMinor: number;
+  /** `null` when the article states no jedinična cena — a visible gap in the
+   *  published file, never a guessed figure. */
+  jedinicnaCenaMinor: number | null;
+  jedinicaZaJedinicnuCenu: string | null;
+}
+
+/**
+ * The published file in its real shape — BOM, `;` separator, CRLF, the barcode
+ * quoted as text and prices rendered with two decimals from integer para at the
+ * boundary only. A double that published a tidier file than
+ * `src-tauri/src/cenovnik.rs::render_csv` would let a reader-side defect through.
+ */
+function renderMockCenovnik(rows: MockCenovnikRow[], generatedAt: string): string {
+  const day = generatedAt.slice(0, 10).split("-").reverse().join("-");
+  const line = (fields: string[]) => `${fields.join(";")}\r\n`;
+
+  return (
+    "﻿" +
+    line(CENOVNIK_COLUMNS) +
+    rows
+      .map((row) =>
+        line([
+          row.sifra,
+          row.barkod ? `"${row.barkod}"` : "",
+          row.naziv,
+          row.jedinicaMere,
+          rsdFromPara(row.prodajnaCenaMinor),
+          row.jedinicnaCenaMinor === null
+            ? ""
+            : rsdFromPara(row.jedinicnaCenaMinor),
+          row.jedinicaZaJedinicnuCenu ?? "",
+          day,
+        ]),
+      )
+      .join("")
+  );
+}
+
+/** Two decimals from integer para, at the boundary only — never a float. */
+function rsdFromPara(minor: number): string {
+  const sign = minor < 0 ? "-" : "";
+  const absolute = Math.abs(minor);
+
+  return `${sign}${Math.floor(absolute / 100)}.${`${absolute % 100}`.padStart(2, "0")}`;
+}
+
+/**
+ * The jedinična cena in para per one unit of the measure, mirroring
+ * `CenovnikRow::jedinicna_cena_minor`: no measure means no unit price at all,
+ * and no package content means one selling unit IS one of the measure, so the
+ * two prices coincide. Rounded to the nearest para — truncation would publish
+ * 6,66 where the true figure is 6,67.
+ */
+function unitPriceMinor(product: ProductSummary): number | null {
+  if (!product.jedinicnaCenaJedinica) {
+    return null;
+  }
+  const sadrzajMilli = product.jedinicnaCenaSadrzajMilli;
+  if (sadrzajMilli == null) {
+    return product.salePriceMinor;
+  }
+  if (sadrzajMilli <= 0) {
+    return null;
+  }
+
+  return Math.round((product.salePriceMinor * 1000) / sadrzajMilli);
+}
+
+/**
+ * A stand-in for the archive's `content_hash`. **Not SHA-256** — the real digest
+ * is computed in `src-tauri/src/cenovnik.rs::content_hash` and nothing on this
+ * side reproduces it. All a double owes is what the field is used for: a stable
+ * 64-hex handle that changes whenever the body does, so a surface comparing two
+ * publications cannot pass by accident.
+ */
+function mockContentHash(body: string): string {
+  let hash = 0x811c9dc5;
+  for (const character of body) {
+    hash = Math.imul(hash ^ character.codePointAt(0)!, 0x01000193) >>> 0;
+  }
+
+  return Array.from({ length: 8 }, (_, index) =>
+    ((hash + index * 0x9e3779b1) >>> 0).toString(16).padStart(8, "0"),
+  ).join("");
+}
+
+/**
+ * One archived cenovnik for the seeded catalog. `mlekoPriceMinor` is what makes
+ * the older publication differ from the newer one — čl. 6 st. 5 exists so the
+ * two can be compared, and an archive whose files were identical would
+ * demonstrate nothing.
+ */
+function mockSnapshot(
+  id: number,
+  generatedAt: string,
+  mlekoPriceMinor: number,
+): { snapshot: CenovnikSnapshot; body: string } {
+  const body = renderMockCenovnik(
+    [
+      {
+        sifra: "MLEKO-1L",
+        barkod: "8600000000010",
+        naziv: "Mleko 1 l",
+        jedinicaMere: "kom",
+        prodajnaCenaMinor: mlekoPriceMinor,
+        jedinicnaCenaMinor: mlekoPriceMinor,
+        jedinicaZaJedinicnuCenu: "l",
+      } satisfies MockCenovnikRow,
+      {
+        sifra: "KAFA-200",
+        barkod: "8600000000027",
+        naziv: "Kafa 200 g",
+        jedinicaMere: "kom",
+        prodajnaCenaMinor: 50000,
+        jedinicnaCenaMinor: 250000,
+        jedinicaZaJedinicnuCenu: "kg",
+      },
+    ],
+    generatedAt,
+  );
+
+  return {
+    snapshot: {
+      id,
+      prodajnoMesto: MOCK_OUTLET,
+      generatedAt,
+      rowCount: 2,
+      contentHash: mockContentHash(body),
+      // Nothing has accepted the file: the seeded shop has configured no target,
+      // which is the state a fresh install is actually in.
+      publishedAt: null,
+      publishedTarget: null,
+      // Derived on read, exactly as the backend derives it — never stored.
+      current: false,
+    },
+    body,
+  };
+}
+
+/**
+ * The prodajna cena the file publishes for each šifra — the inverse of
+ * `renderMockCenovnik`, and the only source the till guard may compare against.
+ * Columns are located by NAME out of the file's own header, as
+ * `cenovnik.rs::published_prices` does it, so a reordered header cannot silently
+ * shift the price column.
+ */
+function publishedPrices(body: string): Map<string, number> {
+  const lines = body.replace(/^﻿/, "").split(/\r?\n/);
+  const header = (lines.shift() ?? "").split(";");
+  const sifraAt = header.indexOf("sifra");
+  const cenaAt = header.indexOf("prodajna_cena");
+  const prices = new Map<string, number>();
+
+  if (sifraAt < 0 || cenaAt < 0) {
+    return prices;
+  }
+
+  for (const line of lines) {
+    const fields = line.split(";");
+    const sifra = fields[sifraAt];
+    const cena = fields[cenaAt];
+    if (!sifra || !/^-?\d+\.\d{2}$/.test(cena ?? "")) {
+      continue;
+    }
+    prices.set(sifra, Math.round(Number(cena) * 100));
+  }
+
+  return prices;
 }
 
 /**
