@@ -9,3 +9,5 @@ Local-first POS foundation for Serbian retail stores and boutiques. The current 
 - `bun run test` runs frontend tests.
 - `bun run build` builds the frontend.
 - `cd src-tauri && cargo test -- --test-threads=1` runs Rust tests.
+
+default creds: admin | 1234
