@@ -1545,6 +1545,67 @@ mod tests {
         });
     }
 
+    /// The register is handed to the Poverenik, so a capability it claims is a
+    /// claim the shop makes about itself. This project has shipped a document
+    /// promising behaviour the code lacks **six separate times**, and the last
+    /// one lived in this very file — the popis rok_osnov said the izveštaj
+    /// „sastavlja se i štampa na zahtev“ while the popis module has no print and
+    /// no export at all.
+    ///
+    /// So this is a sweep, not a pinned sentence. The two fixes before it each
+    /// pinned one string and left its neighbours unguarded, which is exactly how
+    /// instances two through six survived. Any claim that the program prints,
+    /// exports, sends or files something must be negated in the same breath.
+    #[test]
+    fn the_generated_register_promises_no_output_the_program_cannot_produce() {
+        with_state("cl47_no_false_output_promise", |state| {
+            sign_in_admin(state);
+            let register = generate(state, NOW).expect("the register should generate");
+            let company = CompanySettings::default();
+            let haystack = format!(
+                "{}\n{}",
+                register_text(&register),
+                render_html(&company, &register)
+            );
+
+            // Scope: a sentence whose subject is the PROGRAM. That is the shape
+            // every one of the six incidents took — „program … štampa na zahtev“.
+            // A passive clause about something else („materijal koji se šalje
+            // tehničkoj podršci“) is not a claim about what this app does, and a
+            // participle („štampani primerak“) is the obveznik's own paper.
+            for sentence in haystack.split(['.', ';']) {
+                if !sentence.contains("program") && !sentence.contains("aplikacij") {
+                    continue;
+                }
+                for (verb, negation) in [
+                    ("štampa", "ne štampa"),
+                    ("izvozi", "ne izvozi"),
+                    ("šalje", "ne šalje"),
+                    ("podnosi", "ne podnosi"),
+                ] {
+                    // The verb, not a longer word that merely starts with it.
+                    let claimed = sentence.match_indices(verb).any(|(at, _)| {
+                        sentence[at + verb.len()..]
+                            .chars()
+                            .next()
+                            .is_none_or(|next| !next.is_alphabetic())
+                    });
+                    if claimed {
+                        assert!(
+                            sentence.contains(negation),
+                            "the čl. 47 register says the program „{verb}“ without negating it: \
+                             „{}“ — the register is read by an inspector, so a capability it names \
+                             is one the shop is taken to have. Six times in this project a document \
+                             promised behaviour the code lacked. If the program genuinely gained \
+                             this output, say so here deliberately.",
+                            sentence.trim()
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     /// The export is what the čl. 47 st. 8 *uvid* and the Pravilnik 40/2019
     /// čl. 4 st. 1 *Prilog* are both made of, so it has to carry all seven st. 1
     /// elements, and it has to say plainly that the st. 4 obrađivač record is a
