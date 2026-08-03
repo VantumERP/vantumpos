@@ -44,13 +44,17 @@ import {
 import type { PopisService, PosServices } from "@/services/ports";
 import type {
   KomisijaClanInput,
+  NivelacijaObuhvatId,
+  NivelacijaObuhvatView,
   NivelacijaPregledView,
   PopisLineInput,
+  PopisLista,
   PopisSessionView,
   PopisStatus,
   PopisSummary,
   PopisUloga,
   PopisVrsta,
+  ProveraListiView,
 } from "@/services/types";
 
 /**
@@ -343,7 +347,13 @@ export function PopisModule({ services }: { services: PosServices }) {
       {selected ? (
         <>
           <Separator />
+          {/*
+            Keyed on the popis: the req. 36 declaration is an answer about ONE
+            popis, and carrying it across when the shop opens another would
+            declare categories nobody was asked about.
+          */}
           <PopisDetail
+            key={selected.id}
             services={services}
             session={selected}
             busy={busy}
@@ -702,6 +712,34 @@ function PopisDetail({
 }) {
   const korak = sledeciKorak(session.status);
   const [potpisnici, setPotpisnici] = useState("");
+  // Req. 36. The declaration is a request parameter and not a stored fact —
+  // nothing in the schema records it — so it lives with the popis on screen and
+  // travels with the izveštaj request, empty or not.
+  const [prijavljene, setPrijavljene] = useState<PopisLista[]>([]);
+  const [provera, setProvera] = useState<ProveraListiView | null>(null);
+
+  const popis = services.popis;
+
+  useEffect(() => {
+    let cancelled = false;
+    popis
+      .proveraListi(session.id, prijavljene)
+      .then((rezultat) => {
+        if (!cancelled) {
+          setProvera(rezultat);
+        }
+      })
+      .catch(() => {
+        // A readiness report that failed to load is not itself a refusal: the
+        // one that stops the izveštaj is the generator's, by name.
+        if (!cancelled) {
+          setProvera(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [popis, session, prijavljene]);
 
   const imena =
     potpisnici.trim() === ""
@@ -846,15 +884,171 @@ function PopisDetail({
         </Alert>
       )}
 
+      {session.vrsta === "nivelacioni" ? (
+        <NivelacijaObuhvatPanel services={services} session={session} />
+      ) : null}
+
       <CountSheet
         session={session}
         onSaveLine={onSaveLine}
         busy={busy}
+        prijavljene={prijavljene}
+        onPrijava={(lista) =>
+          setPrijavljene((current) =>
+            current.includes(lista)
+              ? current.filter((kandidat) => kandidat !== lista)
+              : [...current, lista],
+          )
+        }
+        provera={provera}
       />
 
       <Separator />
 
-      <IzvestajPanel services={services} session={session} />
+      <IzvestajPanel
+        services={services}
+        session={session}
+        prijavljene={prijavljene}
+      />
+    </div>
+  );
+}
+
+/**
+ * Req. 33 / PoP čl. 8 st. 4 — the article list the commission is handed before
+ * the count, under the scope the shop picked.
+ *
+ * **The scope is a control here and a duty nowhere.** The two options and the
+ * reasoning behind them are stated once, by `NivelacijaPanel`, off the
+ * backend's own strings; this block only picks between them, so the copy req.
+ * 33 is about is not repeated in a second, softer wording. The narrowed one is
+ * the default because the backend defaults to it, and the answer says which
+ * scope it applied.
+ *
+ * **Four fields and no količina among them (req. 29).** The list is read before
+ * anything is counted, so a perpetual stanje beside each article would hand the
+ * book quantities over at the very start of the count — the leak no later
+ * potpis can unring. Nothing is written either: `stvarna_kolicina_milli` is NOT
+ * NULL, so a seeded stavka would carry a count of zero indistinguishable from a
+ * counted zero.
+ */
+function NivelacijaObuhvatPanel({
+  services,
+  session,
+}: {
+  services: PosServices;
+  session: PopisSessionView;
+}) {
+  const [obuhvat, setObuhvat] = useState<NivelacijaObuhvatId | null>(null);
+  const [pregled, setPregled] = useState<NivelacijaObuhvatView | null>(null);
+  const [greska, setGreska] = useState<string | undefined>();
+
+  const popis = services.popis;
+
+  useEffect(() => {
+    let cancelled = false;
+    popis
+      .nivelacijaObuhvat(session.id, obuhvat)
+      .then((odgovor) => {
+        if (!cancelled) {
+          setPregled(odgovor);
+          setGreska(undefined);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setPregled(null);
+          setGreska(poruka(cause));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+    // On `session` and not on `session.id`: `vecNaListama` counts the artikli
+    // already written down, so it goes stale the moment a stavka is saved — and
+    // a count this block reports wrongly is worse than one it does not report.
+  }, [popis, session, obuhvat]);
+
+  return (
+    <div
+      role="group"
+      aria-label="Artikli za popis po nivelaciji"
+      className="flex flex-col gap-2 rounded-md border p-3"
+    >
+      <p className="text-sm font-medium">
+        Artikli za popis po nivelaciji (PoP čl. 8 st. 4)
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Nomenklaturni brojevi, nazivi, vrsta i jedinice mere koji se predaju
+        komisiji pre brojanja. Količine ovde ne stoje — brojanje ih tek utvrđuje
+        (PoP čl. 8 st. 5). Aplikacija ne upisuje ove artikle na popisne liste:
+        stavku upisuje komisija kad je prebroji.
+      </p>
+
+      {greska ? (
+        <p className="text-sm text-muted-foreground">{greska}</p>
+      ) : null}
+
+      {pregled === null ? null : (
+        <Field className="w-auto">
+          <FieldLabel htmlFor="popis-nivelacija-obuhvat">
+            Obim za ovu listu
+          </FieldLabel>
+          {/*
+            The default is applied by the backend and reported back in
+            `pregled.obuhvat` — the select shows what was applied rather than a
+            default this screen keeps its own copy of.
+          */}
+          <NativeSelect
+            id="popis-nivelacija-obuhvat"
+            value={pregled.obuhvat}
+            onChange={(event) =>
+              setObuhvat(event.target.value as NivelacijaObuhvatId)
+            }
+          >
+            {pregled.obavestenje.obuhvat.map((opcija) => (
+              <NativeSelectOption key={opcija.obuhvat} value={opcija.obuhvat}>
+                {opcija.naziv}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+          <FieldDescription>
+            Obrazloženje oba obima stoji uz obavezu po nivelaciji, iznad.
+          </FieldDescription>
+        </Field>
+      )}
+
+      {pregled === null ? null : pregled.artikli.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          U ovom obimu nema nijednog artikla.
+        </p>
+      ) : (
+        <>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Nomenklaturni broj</TableHead>
+                <TableHead>Naziv</TableHead>
+                <TableHead>Vrsta</TableHead>
+                <TableHead>Jedinica mere</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pregled.artikli.map((artikal) => (
+                <TableRow key={`${artikal.sifra ?? ""}-${artikal.naziv}`}>
+                  <TableCell>{artikal.sifra ?? "—"}</TableCell>
+                  <TableCell>{artikal.naziv}</TableCell>
+                  <TableCell>{artikal.vrsta ?? "—"}</TableCell>
+                  <TableCell>{artikal.jedinicaMere ?? "—"}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          <p className="text-xs text-muted-foreground">
+            Već na popisnim listama: {pregled.vecNaListama}.
+          </p>
+        </>
+      )}
     </div>
   );
 }

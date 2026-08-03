@@ -202,7 +202,11 @@ describe("IzvestajPanel — the čl. 8 st. 5 gate", () => {
     const spy = vi.spyOn(services.popis, "izvestaj");
 
     render(
-      <IzvestajPanel services={services} session={session("counting")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("counting")}
+        prijavljene={[]}
+      />,
     );
 
     expect(
@@ -220,7 +224,11 @@ describe("IzvestajPanel — the eight čl. 13 st. 1 elements (req. 37)", () => {
     vi.spyOn(services.popis, "izvestaj").mockResolvedValue(izvestaj);
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={[]}
+      />,
     );
 
     await popuniNarativ(user);
@@ -248,7 +256,11 @@ describe("IzvestajPanel — the eight čl. 13 st. 1 elements (req. 37)", () => {
     );
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={[]}
+      />,
     );
 
     await popuniNarativ(user);
@@ -271,7 +283,11 @@ describe("IzvestajPanel — the computed rok (req. 38)", () => {
     });
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={[]}
+      />,
     );
 
     await popuniNarativ(user);
@@ -295,7 +311,11 @@ describe("IzvestajPanel — the computed rok (req. 38)", () => {
     vi.spyOn(services.popis, "izvestaj").mockResolvedValue(izvestaj);
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={[]}
+      />,
     );
 
     await popuniNarativ(user);
@@ -322,7 +342,11 @@ describe("IzvestajPanel — the computed rok (req. 38)", () => {
       .mockResolvedValue({ rokPredajeFi: "2028-03-31" });
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={[]}
+      />,
     );
 
     const polje = await screen.findByLabelText(
@@ -352,7 +376,11 @@ describe("IzvestajPanel — what the app does not keep", () => {
     vi.spyOn(services.popis, "izvestaj").mockResolvedValue(izvestaj);
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={[]}
+      />,
     );
 
     await popuniNarativ(user);
@@ -367,6 +395,10 @@ describe("IzvestajPanel — what the app does not keep", () => {
    * Req. 36 — the declaration is a parameter, not a stored flag, and it is
    * REQUIRED on the wire: an omitted array satisfies the completeness gate
    * vacuously. The panel therefore always sends one, empty or not.
+   *
+   * It is *taken* on the count sheet, where an empty declared lista can still
+   * be filled — after the čl. 8 st. 5 potpis, which this panel needs before it
+   * works at all, no stavka can be added to one.
    */
   it("sends the declared categories with the request", async () => {
     const user = userEvent.setup();
@@ -376,12 +408,13 @@ describe("IzvestajPanel — what the app does not keep", () => {
       .mockResolvedValue(izvestaj);
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={["gotovina"]}
+      />,
     );
 
-    await user.click(
-      screen.getByRole("checkbox", { name: /gotovina po apoenima/i }),
-    );
     await popuniNarativ(user);
     await user.click(screen.getByRole("button", { name: /sastavi izveštaj/i }));
 
@@ -406,7 +439,11 @@ describe("IzvestajPanel — what the app does not keep", () => {
       .mockResolvedValue(izvestaj);
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={[]}
+      />,
     );
 
     await popuniNarativ(user);
@@ -433,7 +470,11 @@ describe("IzvestajPanel — the totals it does and does not report", () => {
     vi.spyOn(services.popis, "izvestaj").mockResolvedValue(izvestaj);
 
     render(
-      <IzvestajPanel services={services} session={session("computed")} />,
+      <IzvestajPanel
+        services={services}
+        session={session("computed")}
+        prijavljene={[]}
+      />,
     );
 
     await popuniNarativ(user);

@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { PopisModule, sledeciKorak } from "./PopisModule";
 import { navigationItems } from "@/app/navigation";
@@ -12,13 +12,17 @@ type User = ReturnType<typeof userEvent.setup>;
 interface OtvoriOpcije {
   potvrdiUskladjivanje?: boolean;
   clan?: { ime: string; rukujeImovinom: boolean };
+  vrsta?: "godisnji" | "nivelacioni";
 }
 
 /** Fills the „novi popis“ form and submits it. */
 async function otvoriPopis(user: User, opcije: OtvoriOpcije = {}) {
-  const { potvrdiUskladjivanje = true, clan } = opcije;
+  const { potvrdiUskladjivanje = true, clan, vrsta } = opcije;
 
   await user.click(await screen.findByRole("button", { name: /novi popis/i }));
+  if (vrsta) {
+    await user.selectOptions(screen.getByLabelText(/vrsta popisa/i), vrsta);
+  }
   await user.clear(screen.getByLabelText(/prodajno mesto/i));
   await user.type(screen.getByLabelText(/prodajno mesto/i), "Butik Centar");
   await user.clear(screen.getByLabelText(/datum popisa/i));
@@ -406,5 +410,189 @@ describe("PopisModule — the count sheet and the izveštaj", () => {
     expect(await screen.findByText(/PoP čl\. 2 st\. 6/)).toBeInTheDocument();
     expect(screen.getByText(/2027-01-10/)).toBeInTheDocument();
     expect(screen.getByText(/ne dostavlja/i)).toBeInTheDocument();
+  });
+});
+
+describe("PopisModule — the req. 36 declaration, taken in time", () => {
+  /**
+   * The gate refuses a *declared* category whose lista is empty. Asked at the
+   * izveštaj it can only ever fire after the čl. 8 st. 5 potpis, and by then
+   * `counted_signed` refuses every line write and `computed` refuses a new
+   * stavka by name — so the only remedy left is a whole new popis. Asked during
+   * the count, the remedy is one stavka: this walks exactly that.
+   */
+  it("surfaces the empty declared lista while the shop can still fill it", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user);
+    await user.click(
+      await screen.findByRole("button", { name: /započni brojanje/i }),
+    );
+
+    await user.click(
+      await screen.findByRole("checkbox", { name: /gotovina po apoenima/i }),
+    );
+
+    expect(
+      await screen.findByText(/popisne liste nisu potpune/i),
+    ).toBeInTheDocument();
+    // The door is still open — this is the whole point of asking here.
+    expect(
+      screen.getByRole("button", { name: /potpiši stvarno stanje/i }),
+    ).toBeEnabled();
+
+    await user.selectOptions(screen.getByLabelText(/popisna lista/i), "gotovina");
+    await user.type(screen.getByLabelText(/^naziv/i), "Novčanica 1.000");
+    await user.clear(screen.getByLabelText(/stvarna količina/i));
+    await user.type(screen.getByLabelText(/stvarna količina/i), "5");
+    await user.click(screen.getByRole("button", { name: /sačuvaj stavku/i }));
+
+    await waitFor(() =>
+      expect(screen.queryByText(/popisne liste nisu potpune/i)).toBeNull(),
+    );
+    expect(
+      screen.getByText(/sve prijavljene kategorije imaju bar jednu stavku/i),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * The declaration taken during the count is the one the izveštaj is judged
+   * against — one answer, carried forward, not two independent ones that can
+   * disagree about what the shop said it had.
+   */
+  it("carries the count-phase declaration through to the izveštaj", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await user.click(
+      await screen.findByRole("button", { name: /započni brojanje/i }),
+    );
+
+    await user.click(
+      await screen.findByRole("checkbox", { name: /gotovina po apoenima/i }),
+    );
+    await user.selectOptions(screen.getByLabelText(/popisna lista/i), "gotovina");
+    await user.type(screen.getByLabelText(/^naziv/i), "Novčanica 1.000");
+    await user.clear(screen.getByLabelText(/stvarna količina/i));
+    await user.type(screen.getByLabelText(/stvarna količina/i), "5");
+    await user.click(screen.getByRole("button", { name: /sačuvaj stavku/i }));
+
+    await user.click(
+      await screen.findByRole("button", { name: /potpiši stvarno stanje/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /obračunaj razlike/i }),
+    );
+
+    expect(
+      await screen.findByText(
+        /prijavljene kategorije uz popisne liste: gotovina po apoenima/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * All six liste stand on the sheet from the first moment, each with the
+   * article that requires it. Without them the five posebne liste of čl. 10
+   * st. 3, čl. 10 st. 4, čl. 11 st. 1, čl. 12 st. 2 and čl. 2 st. 5 are
+   * invisible until somebody guesses they exist.
+   */
+  it("shows all six liste with their article during the count", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    render(<PopisModule services={svc} />);
+
+    await otvoriPopis(user);
+    await user.click(
+      await screen.findByRole("button", { name: /započni brojanje/i }),
+    );
+
+    const session = (await svc.popis.list())[0];
+    const pregled = await svc.popis.get(session.id);
+    expect(pregled.liste).toHaveLength(6);
+
+    for (const lista of pregled.liste) {
+      expect(
+        await screen.findByRole("checkbox", { name: lista.naziv }),
+      ).toBeInTheDocument();
+      expect(screen.getAllByText(lista.pravniOsnov).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("PopisModule — the čl. 8 st. 4 handover list on a nivelacija popis", () => {
+  /**
+   * Req. 33 / PoP čl. 8 st. 4 — „листе са номенклатурним бројевима, називима,
+   * врсти и јединицама мере“. Four fields and no količina among them: the list
+   * is read before anything is counted, so a stanje beside each article would
+   * hand the book quantities over at the very start of the count (req. 29).
+   */
+  it("hands over the four čl. 8 st. 4 fields and no quantity", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    render(<PopisModule services={svc} />);
+
+    await otvoriPopis(user, { vrsta: "nivelacioni" });
+
+    const blok = await screen.findByRole("group", {
+      name: /artikli za popis po nivelaciji/i,
+    });
+
+    // Exactly four columns and not one more — an „očekivano“ or „stanje“ column
+    // added here is the earliest čl. 8 st. 5 leak there is.
+    expect(
+      within(blok)
+        .getAllByRole("columnheader")
+        .map((zaglavlje) => zaglavlje.textContent),
+    ).toEqual(["Nomenklaturni broj", "Naziv", "Vrsta", "Jedinica mere"]);
+
+    const obuhvat = await svc.popis.nivelacijaObuhvat(1, null);
+    for (const artikal of obuhvat.artikli) {
+      expect(within(blok).getByText(artikal.naziv)).toBeInTheDocument();
+    }
+    // The seeded perpetual stanje of „Mleko 1 l“ — 3 kom — reaches no cell.
+    expect(within(blok).queryByText("3 kom")).toBeNull();
+  });
+
+  /**
+   * The scope is a control and not a label. Design §3 offers the narrowing as a
+   * default with its reasoning visible and §7 t. 8 forbids calling it required
+   * — a block that printed both options and let the shop pick neither would
+   * make „obim slobodno proširite“ an instruction with nothing behind it.
+   */
+  it("lets the shop widen the scope and asks the backend for the wider one", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const spy = vi.spyOn(svc.popis, "nivelacijaObuhvat");
+    render(<PopisModule services={svc} />);
+
+    await otvoriPopis(user, { vrsta: "nivelacioni" });
+
+    const izbor = await screen.findByLabelText(/obim za ovu listu/i);
+    // The backend applied its own default and said which one it applied.
+    await waitFor(() => expect(izbor).toHaveValue("samo_nivelisani"));
+    expect(spy).toHaveBeenCalledWith(1, null);
+
+    await user.selectOptions(izbor, "ceo_objekat");
+
+    await waitFor(() => expect(spy).toHaveBeenCalledWith(1, "ceo_objekat"));
+    expect(izbor).toHaveValue("ceo_objekat");
+  });
+
+  /** A godišnji popis has no nivelacija scope, and the backend refuses one. */
+  it("offers the handover list only on a nivelacija popis", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user);
+    await screen.findByRole("button", { name: /započni brojanje/i });
+
+    expect(
+      screen.queryByRole("group", { name: /artikli za popis po nivelaciji/i }),
+    ).toBeNull();
   });
 });

@@ -1,10 +1,11 @@
-import { LockIcon } from "lucide-react";
+import { AlertCircleIcon, LockIcon } from "lucide-react";
 import { useState } from "react";
 import type { FormEvent } from "react";
 
 import { formatQuantity, parseQuantityInput } from "@/app/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Field,
   FieldDescription,
@@ -31,6 +32,7 @@ import type {
   PopisLineView,
   PopisLista,
   PopisSessionView,
+  ProveraListiView,
 } from "@/services/types";
 
 /**
@@ -57,11 +59,70 @@ import type {
  * that were counted and nothing else; the two signed states and the posted one
  * take nothing. A button that always got refused would promise a write this
  * app does not have.
+ *
+ * **All six liste are on screen, the empty ones included, and the req. 36
+ * declaration is asked here rather than at the izveštaj.** `read_liste` returns
+ * all six with their naziv and pravni osnov on purpose — a posebna lista the
+ * count sheet never shows is a posebna lista the shop never fills — and the
+ * declaration has to be answered while a stavka can still be added: after the
+ * čl. 8 st. 5 potpis `counted_signed` refuses every line write and `computed`
+ * refuses a new stavka by name, so a shop first told „prijavljena kategorija je
+ * prazna“ at izveštaj time has no remedy left but a whole new popis. What the
+ * readiness check says is the backend's own sentence, never a second wording.
  */
 
 /** What the price column is on this lista. Čl. 11 st. 1 makes it the apoen. */
 function cenaNaziv(lista: PopisLista): string {
   return lista === "gotovina" ? "Apoen" : "Cena";
+}
+
+/**
+ * A milli-unit quantity as it goes into an input, sign and all.
+ *
+ * Paired with [`parseSignedQuantityInput`]: whatever this renders, that reads
+ * back. The pairing is the point — a value shown in a field the form then
+ * refuses is a stavka the operator cannot save at all.
+ */
+function kolicinaUnos(milli: number): string {
+  return `${milli < 0 ? "-" : ""}${Math.abs(milli) / 1000}`;
+}
+
+/**
+ * A quantity that may be negative, in milli-units.
+ *
+ * **Only the knjigovodstvena side may be negative, and it really can be.**
+ * `inventory_balances.quantity_milli` carries no non-negative CHECK, this app
+ * supports `allow_negative_stock`/`allow_overselling`, and the čl. 8 st. 5
+ * release copies the balance verbatim with no clamp — so a stavka can come back
+ * holding −3. `parseQuantityInput` accepts no minus, so without this the field
+ * would show the stored value, refuse the save under the name of a field the
+ * operator never typed into, and leave the čl. 9 st. 1 t. 5 cena unenterable for
+ * that stavka for the life of the popis. The counted side needs none of it:
+ * `stvarna_kolicina_milli >= 0` is a v20 CHECK and `save_line` refuses a
+ * negative count by name.
+ */
+function parseSignedQuantityInput(value: string): number {
+  const normalized = value.trim();
+  const negativna = normalized.startsWith("-");
+  const iznos = parseQuantityInput(negativna ? normalized.slice(1) : normalized);
+  return negativna && iznos !== 0 ? -iznos : iznos;
+}
+
+/** „nijedna stavka“ / „1 stavka“ / „2 stavke“ / „5 stavki“. */
+function stavkeNaziv(broj: number): string {
+  if (broj === 0) {
+    return "nijedna stavka";
+  }
+
+  const jedinice = broj % 10;
+  const desetice = broj % 100;
+  if (jedinice === 1 && desetice !== 11) {
+    return `${broj} stavka`;
+  }
+  if (jedinice >= 2 && jedinice <= 4 && (desetice < 12 || desetice > 14)) {
+    return `${broj} stavke`;
+  }
+  return `${broj} stavki`;
 }
 
 /** What the shop may do to the liste in this state, and why. */
@@ -127,6 +188,15 @@ const PRAZNA_FORMA: FormState = {
   cena: "",
 };
 
+/**
+ * The six liste in the article's order, as a last resort only.
+ *
+ * The naziv and the pravni osnov a shop reads come from `session.liste` — the
+ * backend's own strings, one wording for the lista and for any refusal about it.
+ * This list exists so the vrsta dropdown can offer all six before anything has
+ * loaded, and so a lista carrying stavke can never vanish from the sheet just
+ * because a payload failed to report it.
+ */
 const LISTE: { vrsta: PopisLista; naziv: string }[] = [
   { vrsta: "roba", naziv: "Roba u objektu" },
   { vrsta: "ostecena", naziv: "Oštećena, zastarela i neupotrebljiva roba" },
@@ -136,8 +206,33 @@ const LISTE: { vrsta: PopisLista; naziv: string }[] = [
   { vrsta: "konsignacija", naziv: "Konsignaciona i druga tuđa roba" },
 ];
 
-function listaNaziv(lista: PopisLista): string {
-  return LISTE.find((candidate) => candidate.vrsta === lista)?.naziv ?? lista;
+/** One popisna lista as the sheet shows it — all six, filled or not. */
+interface Grupa {
+  vrsta: PopisLista;
+  naziv: string;
+  /** `null` only when the payload did not report this lista at all. */
+  pravniOsnov: string | null;
+  brojStavki: number;
+  linije: PopisLineView[];
+}
+
+function grupeZaSesiju(session: PopisSessionView): Grupa[] {
+  return LISTE.map((lista) => {
+    const pregled = session.liste.find(
+      (kandidat) => kandidat.vrsta === lista.vrsta,
+    );
+    const linije = session.linije.filter(
+      (linija) => linija.listaVrsta === lista.vrsta,
+    );
+
+    return {
+      vrsta: lista.vrsta,
+      naziv: pregled?.naziv ?? lista.naziv,
+      pravniOsnov: pregled?.pravniOsnov ?? null,
+      brojStavki: pregled?.brojStavki ?? linije.length,
+      linije,
+    };
+  });
 }
 
 function formaZaLiniju(linija: PopisLineView): FormState {
@@ -148,12 +243,12 @@ function formaZaLiniju(linija: PopisLineView): FormState {
     naziv: linija.naziv,
     vrsta: linija.vrsta ?? "",
     jedinicaMere: linija.jedinicaMere ?? "",
-    stvarnaKolicina: (linija.stvarnaKolicinaMilli / 1000).toString(),
+    stvarnaKolicina: kolicinaUnos(linija.stvarnaKolicinaMilli),
     bliziOpis: linija.bliziOpis ?? "",
     knjigovodstvenaKolicina:
       linija.knjigovodstvenaKolicinaMilli === null
         ? ""
-        : (linija.knjigovodstvenaKolicinaMilli / 1000).toString(),
+        : kolicinaUnos(linija.knjigovodstvenaKolicinaMilli),
     cena:
       linija.cenaMinor === null ? "" : (linija.cenaMinor / 100).toFixed(2),
   };
@@ -163,6 +258,9 @@ export function CountSheet({
   session,
   onSaveLine,
   busy = false,
+  prijavljene = [],
+  onPrijava,
+  provera = null,
 }: {
   session: PopisSessionView;
   /**
@@ -174,6 +272,15 @@ export function CountSheet({
     input: PopisLineInput,
   ) => Promise<void>;
   busy?: boolean;
+  /** Req. 36 — the categories the shop has declared present in this popis. */
+  prijavljene?: PopisLista[];
+  /** Absent means the declaration is not being asked for on this render. */
+  onPrijava?: (lista: PopisLista) => void;
+  /**
+   * The backend's own req. 36 readiness answer. Its `poruka` is the sentence
+   * the izveštaj generator refuses with, printed here verbatim.
+   */
+  provera?: ProveraListiView | null;
 }) {
   const [form, setForm] = useState<FormState>(PRAZNA_FORMA);
   const [error, setError] = useState<string | undefined>();
@@ -186,12 +293,11 @@ export function CountSheet({
   // when one is picked and never on its own.
   const formaVidljiva = editable && (!obracunSamo || form.lineId !== null);
 
-  const grupe = LISTE.map((lista) => ({
-    ...lista,
-    linije: session.linije.filter(
-      (linija) => linija.listaVrsta === lista.vrsta,
-    ),
-  })).filter((grupa) => grupa.linije.length > 0);
+  // All six, empty ones included (req. 36) — never only the ones that already
+  // carry rows.
+  const grupe = grupeZaSesiju(session);
+  const listaNaziv = (lista: PopisLista): string =>
+    grupe.find((grupa) => grupa.vrsta === lista)?.naziv ?? lista;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -210,7 +316,7 @@ export function CountSheet({
     let knjigovodstvenaKolicinaMilli: number | null = null;
     if (dostupno && form.knjigovodstvenaKolicina.trim() !== "") {
       try {
-        knjigovodstvenaKolicinaMilli = parseQuantityInput(
+        knjigovodstvenaKolicinaMilli = parseSignedQuantityInput(
           form.knjigovodstvenaKolicina,
         );
       } catch {
@@ -273,102 +379,157 @@ export function CountSheet({
         </Alert>
       ) : null}
 
-      {grupe.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          Na popisnim listama još nema nijedne stavke.
-        </p>
+      {onPrijava ? (
+        <div className="flex flex-col gap-2 rounded-md border p-3">
+          <p className="text-sm font-medium">
+            Koje kategorije postoje u ovom popisu?
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Posebna lista se traži tamo gde kategorija postoji (PoP čl. 2 st. 5,
+            čl. 10–12). Šta postoji zna radnja, ne knjige — zato se prijavljuje
+            uz same liste, dok se stavka još može dodati: prijavljena kategorija
+            bez ijedne stavke zaustavlja izveštaj o popisu.
+          </p>
+          {rezim.kind === "otvoren" ? null : (
+            <p className="text-xs text-muted-foreground">
+              Popisne liste više ne primaju novu stavku.
+            </p>
+          )}
+          {provera && !provera.spremno && provera.poruka ? (
+            <Alert>
+              <AlertCircleIcon />
+              <AlertDescription>{provera.poruka}</AlertDescription>
+            </Alert>
+          ) : null}
+          {provera?.spremno && prijavljene.length > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              Sve prijavljene kategorije imaju bar jednu stavku.
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
       {grupe.map((grupa) => (
         <div key={grupa.vrsta} className="flex flex-col gap-2">
-          <p className="text-sm font-medium">{grupa.naziv}</p>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Šifra</TableHead>
-                <TableHead>Naziv</TableHead>
-                <TableHead>Vrsta</TableHead>
-                <TableHead>Jed. mere</TableHead>
-                <TableHead className="text-right">Stvarna količina</TableHead>
-                {/*
-                  Req. 29. Not „render null as a dash“ — the columns do not
-                  exist at all while čl. 8 st. 5 withholds the data, because a
-                  column with a dash in it is a place a later change puts a
-                  number back.
-                */}
-                {dostupno ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {onPrijava ? (
+              <label
+                className="flex items-center gap-2 text-sm font-medium"
+                htmlFor={`popis-prijava-${grupa.vrsta}`}
+              >
+                <Checkbox
+                  id={`popis-prijava-${grupa.vrsta}`}
+                  checked={prijavljene.includes(grupa.vrsta)}
+                  onCheckedChange={() => onPrijava(grupa.vrsta)}
+                />
+                {grupa.naziv}
+              </label>
+            ) : (
+              <p className="text-sm font-medium">{grupa.naziv}</p>
+            )}
+            {grupa.pravniOsnov === null ? null : (
+              <span className="text-xs text-muted-foreground">
+                {grupa.pravniOsnov}
+              </span>
+            )}
+            <span className="text-xs text-muted-foreground">
+              {stavkeNaziv(grupa.brojStavki)}
+            </span>
+          </div>
+
+          {grupa.linije.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Na ovoj listi nema nijedne stavke.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Šifra</TableHead>
+                  <TableHead>Naziv</TableHead>
+                  <TableHead>Vrsta</TableHead>
+                  <TableHead>Jed. mere</TableHead>
+                  <TableHead className="text-right">Stvarna količina</TableHead>
+                  {/*
+                    Req. 29. Not „render null as a dash“ — the columns do not
+                    exist at all while čl. 8 st. 5 withholds the data, because a
+                    column with a dash in it is a place a later change puts a
+                    number back.
+                  */}
+                  {dostupno ? (
+                    <TableHead className="text-right">
+                      Knjigovodstvena količina
+                    </TableHead>
+                  ) : null}
+                  {dostupno ? (
+                    <TableHead className="text-right">Razlika</TableHead>
+                  ) : null}
+                  <TableHead>Bliži opis</TableHead>
                   <TableHead className="text-right">
-                    Knjigovodstvena količina
+                    {cenaNaziv(grupa.vrsta)}
                   </TableHead>
-                ) : null}
-                {dostupno ? (
-                  <TableHead className="text-right">Razlika</TableHead>
-                ) : null}
-                <TableHead>Bliži opis</TableHead>
-                <TableHead className="text-right">
-                  {cenaNaziv(grupa.vrsta)}
-                </TableHead>
-                {editable ? <TableHead /> : null}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {grupa.linije.map((linija) => (
-                <TableRow key={linija.id}>
-                  <TableCell>{linija.sifra ?? "—"}</TableCell>
-                  <TableCell>{linija.naziv}</TableCell>
-                  <TableCell>{linija.vrsta ?? "—"}</TableCell>
-                  <TableCell>{linija.jedinicaMere ?? "—"}</TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {formatQuantity(
-                      linija.stvarnaKolicinaMilli,
-                      linija.jedinicaMere ?? "kom",
-                    )}
-                  </TableCell>
-                  {dostupno ? (
-                    <TableCell className="text-right tabular-nums">
-                      {linija.knjigovodstvenaKolicinaMilli === null
-                        ? "—"
-                        : formatQuantity(
-                            linija.knjigovodstvenaKolicinaMilli,
-                            linija.jedinicaMere ?? "kom",
-                          )}
-                    </TableCell>
-                  ) : null}
-                  {dostupno ? (
-                    <TableCell className="text-right tabular-nums">
-                      {linija.razlikaMilli === null
-                        ? "—"
-                        : formatQuantity(
-                            linija.razlikaMilli,
-                            linija.jedinicaMere ?? "kom",
-                          )}
-                    </TableCell>
-                  ) : null}
-                  <TableCell>{linija.bliziOpis ?? "—"}</TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {linija.cenaMinor === null
-                      ? "—"
-                      : formatRsd(linija.cenaMinor)}
-                  </TableCell>
-                  {editable ? (
-                    <TableCell className="text-right">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => {
-                          setForm(formaZaLiniju(linija));
-                          setError(undefined);
-                        }}
-                      >
-                        Izmeni
-                      </Button>
-                    </TableCell>
-                  ) : null}
+                  {editable ? <TableHead /> : null}
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {grupa.linije.map((linija) => (
+                  <TableRow key={linija.id}>
+                    <TableCell>{linija.sifra ?? "—"}</TableCell>
+                    <TableCell>{linija.naziv}</TableCell>
+                    <TableCell>{linija.vrsta ?? "—"}</TableCell>
+                    <TableCell>{linija.jedinicaMere ?? "—"}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatQuantity(
+                        linija.stvarnaKolicinaMilli,
+                        linija.jedinicaMere ?? "kom",
+                      )}
+                    </TableCell>
+                    {dostupno ? (
+                      <TableCell className="text-right tabular-nums">
+                        {linija.knjigovodstvenaKolicinaMilli === null
+                          ? "—"
+                          : formatQuantity(
+                              linija.knjigovodstvenaKolicinaMilli,
+                              linija.jedinicaMere ?? "kom",
+                            )}
+                      </TableCell>
+                    ) : null}
+                    {dostupno ? (
+                      <TableCell className="text-right tabular-nums">
+                        {linija.razlikaMilli === null
+                          ? "—"
+                          : formatQuantity(
+                              linija.razlikaMilli,
+                              linija.jedinicaMere ?? "kom",
+                            )}
+                      </TableCell>
+                    ) : null}
+                    <TableCell>{linija.bliziOpis ?? "—"}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {linija.cenaMinor === null
+                        ? "—"
+                        : formatRsd(linija.cenaMinor)}
+                    </TableCell>
+                    {editable ? (
+                      <TableCell className="text-right">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            setForm(formaZaLiniju(linija));
+                            setError(undefined);
+                          }}
+                        >
+                          Izmeni
+                        </Button>
+                      </TableCell>
+                    ) : null}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </div>
       ))}
 
@@ -395,9 +556,16 @@ export function CountSheet({
                   })
                 }
               >
-                {LISTE.map((lista) => (
-                  <NativeSelectOption key={lista.vrsta} value={lista.vrsta}>
-                    {lista.naziv}
+                {/*
+                  The article travels with the option: a posebna lista offered
+                  as a bare word in a dropdown is one the shop has no way to
+                  recognise as the čl. 10–12 lista it owes.
+                */}
+                {grupe.map((grupa) => (
+                  <NativeSelectOption key={grupa.vrsta} value={grupa.vrsta}>
+                    {grupa.pravniOsnov === null
+                      ? grupa.naziv
+                      : `${grupa.naziv} (${grupa.pravniOsnov})`}
                   </NativeSelectOption>
                 ))}
               </NativeSelect>

@@ -1,11 +1,10 @@
 import { AlertCircleIcon, FileTextIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Field,
   FieldDescription,
@@ -45,6 +44,11 @@ import type {
  * side, and what a refusal says is what the operator reads — one wording, not
  * two. The only thing decided here is whether to offer the button at all, and
  * that is decided by `knjigovodstvoDostupno`, the backend's own answer.
+ *
+ * It is not where the req. 36 declaration is *taken*. It travels on the wire
+ * from here — always, empty or not — but it is answered on the count sheet,
+ * because by the time this panel can be used at all the čl. 8 st. 5 potpis has
+ * been taken and no stavka can be added to an empty lista any more.
  *
  * It is not a *store*. Nothing in the schema records an izveštaj: the document
  * is composed when it is asked for and it survives only on paper. The backend's
@@ -95,16 +99,6 @@ const NARATIVNI_ELEMENTI: {
   },
 ];
 
-/** Req. 36 — the categories the shop declares present, checked against the liste. */
-const PRIJAVLJIVE_LISTE: { vrsta: PopisLista; naziv: string }[] = [
-  { vrsta: "roba", naziv: "Roba u objektu" },
-  { vrsta: "ostecena", naziv: "Oštećena, zastarela i neupotrebljiva roba" },
-  { vrsta: "van_objekta", naziv: "Roba van objekta" },
-  { vrsta: "gotovina", naziv: "Gotovina po apoenima" },
-  { vrsta: "potrazivanja", naziv: "Nedokumentovana potraživanja i obaveze" },
-  { vrsta: "konsignacija", naziv: "Konsignaciona i druga tuđa roba" },
-];
-
 const PRAZAN_NARATIV: IzvestajNarativ = {
   uzrociNeslaganja: "",
   predloziZaLikvidacijuRazlika: "",
@@ -112,6 +106,13 @@ const PRAZAN_NARATIV: IzvestajNarativ = {
   primedbeLicaKojaRukujuVrednostima: "",
   ostalePrimedbeIPredlozi: "",
 };
+
+/** The backend's own naziv for a lista — never a second spelling of it here. */
+function listaNaziv(session: PopisSessionView, lista: PopisLista): string {
+  return (
+    session.liste.find((pregled) => pregled.vrsta === lista)?.naziv ?? lista
+  );
+}
 
 function poruka(cause: unknown): string {
   if (cause instanceof Error) {
@@ -126,12 +127,17 @@ function poruka(cause: unknown): string {
 export function IzvestajPanel({
   services,
   session,
+  prijavljene,
 }: {
   services: PosServices;
   session: PopisSessionView;
+  /**
+   * Req. 36 — the categories the shop declared present, taken on the count
+   * sheet where an empty one can still be filled.
+   */
+  prijavljene: PopisLista[];
 }) {
   const [narativ, setNarativ] = useState<IzvestajNarativ>(PRAZAN_NARATIV);
-  const [prijavljene, setPrijavljene] = useState<PopisLista[]>([]);
   const [izvestaj, setIzvestaj] = useState<IzvestajView | null>(null);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
@@ -159,14 +165,6 @@ export function IzvestajPanel({
       cancelled = true;
     };
   }, [popis]);
-
-  const toggleLista = useCallback((lista: PopisLista) => {
-    setPrijavljene((current) =>
-      current.includes(lista)
-        ? current.filter((candidate) => candidate !== lista)
-        : [...current, lista],
-    );
-  }, []);
 
   async function sastavi(event: FormEvent) {
     event.preventDefault();
@@ -253,31 +251,18 @@ export function IzvestajPanel({
             </p>
             {error ? <FieldError>{error}</FieldError> : null}
 
-            <div className="flex flex-col gap-2">
-              <p className="text-sm font-medium">
-                Koje kategorije postoje u ovom popisu?
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Posebna lista se traži tamo gde kategorija postoji (PoP čl. 2
-                st. 5, čl. 10–12). Šta postoji zna radnja, ne knjige — zato se
-                prijavljuje ovde, a prijavljena kategorija bez ijedne stavke
-                zaustavlja izveštaj.
-              </p>
-              {PRIJAVLJIVE_LISTE.map((lista) => (
-                <label
-                  key={lista.vrsta}
-                  className="flex items-center gap-2 text-sm"
-                  htmlFor={`prijava-${lista.vrsta}`}
-                >
-                  <Checkbox
-                    id={`prijava-${lista.vrsta}`}
-                    checked={prijavljene.includes(lista.vrsta)}
-                    onCheckedChange={() => toggleLista(lista.vrsta)}
-                  />
-                  {lista.naziv}
-                </label>
-              ))}
-            </div>
+            {/*
+              Req. 36 — declared on the count sheet, sent from here. Shown and
+              not silently attached: it is what the completeness gate is judged
+              against, and by this point an empty lista can no longer be filled.
+            */}
+            <p className="text-xs text-muted-foreground">
+              {prijavljene.length === 0
+                ? "Nijedna kategorija nije prijavljena uz popisne liste."
+                : `Prijavljene kategorije uz popisne liste: ${prijavljene
+                    .map((lista) => listaNaziv(session, lista))
+                    .join(", ")}.`}
+            </p>
 
             <Separator />
 

@@ -4,10 +4,64 @@ import { describe, expect, it, vi } from "vitest";
 
 import { CountSheet, countSheetRezim } from "./CountSheet";
 import type {
+  ListaPregled,
   PopisLineView,
   PopisSessionView,
   PopisStatus,
 } from "@/services/types";
+
+/**
+ * All six liste as `read_liste` reports them — **the empty ones included, each
+ * with its own pravni osnov**. That is the shape the backend deliberately
+ * returns and the shape the count sheet owes the shop: a posebna lista the
+ * sheet never shows is a posebna lista the shop never fills.
+ */
+const SVE_LISTE: ListaPregled[] = [
+  {
+    vrsta: "roba",
+    naziv: "roba u objektu",
+    pravniOsnov: "PoP čl. 9 st. 1 t. 1",
+    brojStavki: 0,
+  },
+  {
+    vrsta: "ostecena",
+    naziv: "oštećena, zastarela i neupotrebljiva roba",
+    pravniOsnov: "PoP čl. 10 st. 3",
+    brojStavki: 0,
+  },
+  {
+    vrsta: "van_objekta",
+    naziv: "roba van objekta (na popravci i kod trećeg lica)",
+    pravniOsnov: "PoP čl. 10 st. 4",
+    brojStavki: 0,
+  },
+  {
+    vrsta: "gotovina",
+    naziv: "gotovina po apoenima",
+    pravniOsnov: "PoP čl. 11 st. 1",
+    brojStavki: 0,
+  },
+  {
+    vrsta: "potrazivanja",
+    naziv: "nedokumentovana potraživanja i obaveze",
+    pravniOsnov: "PoP čl. 12 st. 2",
+    brojStavki: 0,
+  },
+  {
+    vrsta: "konsignacija",
+    naziv: "konsignaciona i druga tuđa roba",
+    pravniOsnov: "PoP čl. 2 st. 5",
+    brojStavki: 0,
+  },
+];
+
+/** The six liste with `brojStavki` set for the ones the fixture filled. */
+function liste(broj: Partial<Record<ListaPregled["vrsta"], number>>): ListaPregled[] {
+  return SVE_LISTE.map((pregled) => ({
+    ...pregled,
+    brojStavki: broj[pregled.vrsta] ?? 0,
+  }));
+}
 
 /**
  * A counted stavka. `knjigovodstvenaKolicinaMilli` and `razlikaMilli` are what
@@ -59,7 +113,7 @@ function popis(
     komisija: [],
     potpisi: [],
     linije: [linija()],
-    liste: [],
+    liste: liste({ roba: 1 }),
     konsignacijaRok: null,
     upozorenja: [],
     ...overrides,
@@ -297,6 +351,145 @@ describe("CountSheet — the write rules the backend actually has", () => {
     // Čl. 8 st. 4 and čl. 9 st. 1 t. 1 — what the commission signed does not move.
     expect(screen.getByLabelText(/stvarna količina/i)).toBeDisabled();
     expect(screen.getByLabelText(/^naziv/i)).toBeDisabled();
+  });
+
+  /**
+   * A negative knjigovodstvena količina is reachable and it must not lock the
+   * stavka out of its obračun. `inventory_balances.quantity_milli` carries no
+   * non-negative CHECK, the app supports `allow_negative_stock` and
+   * `populate_book_quantities` copies the balance verbatim — so the field comes
+   * back holding „-3“, and a parser that accepts no minus refuses the save,
+   * names a field the operator never touched, and leaves the čl. 9 st. 1 t. 5
+   * cena unenterable for that stavka forever. The counted side needs none of
+   * this: `stvarna_kolicina_milli >= 0` is a v20 CHECK.
+   */
+  it("round-trips a negative book quantity instead of refusing the obračun", async () => {
+    const user = userEvent.setup();
+    const onSaveLine = vi.fn().mockResolvedValue(undefined);
+    render(
+      <CountSheet
+        session={popis("computed", {
+          linije: [linija({ knjigovodstvenaKolicinaMilli: -3000 })],
+        })}
+        onSaveLine={onSaveLine}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /izmeni/i }));
+
+    expect(screen.getByLabelText(/knjigovodstvena količina/i)).toHaveValue("-3");
+
+    await user.click(screen.getByRole("button", { name: /sačuvaj stavku/i }));
+
+    await waitFor(() => expect(onSaveLine).toHaveBeenCalledTimes(1));
+    expect(onSaveLine.mock.calls[0][1]).toMatchObject({
+      knjigovodstvenaKolicinaMilli: -3000,
+      cenaMinor: 249900,
+    });
+    expect(
+      screen.queryByText(/knjigovodstvena količina nije ispravna/i),
+    ).not.toBeInTheDocument();
+  });
+
+  /** A minus is not a licence to accept anything: the digits still have to parse. */
+  it("still refuses a book quantity that is not a number", async () => {
+    const user = userEvent.setup();
+    const onSaveLine = vi.fn().mockResolvedValue(undefined);
+    render(
+      <CountSheet
+        session={popis("computed", {
+          linije: [linija({ knjigovodstvenaKolicinaMilli: 9000 })],
+        })}
+        onSaveLine={onSaveLine}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /izmeni/i }));
+    await user.clear(screen.getByLabelText(/knjigovodstvena količina/i));
+    await user.type(screen.getByLabelText(/knjigovodstvena količina/i), "-");
+    await user.click(screen.getByRole("button", { name: /sačuvaj stavku/i }));
+
+    expect(
+      await screen.findByText(/knjigovodstvena količina nije ispravna/i),
+    ).toBeInTheDocument();
+    expect(onSaveLine).not.toHaveBeenCalled();
+  });
+});
+
+describe("CountSheet — the six liste of req. 36", () => {
+  /**
+   * `read_liste` returns all six deliberately — the empty ones included, each
+   * with its naziv and its pravni osnov — and a sheet that showed only the
+   * groups already carrying rows would leave the five posebne liste invisible
+   * until somebody guessed they existed. Čl. 10 st. 3, čl. 10 st. 4, čl. 11
+   * st. 1, čl. 12 st. 2 and čl. 2 st. 5 each require one where the category is
+   * present, and „present“ is a fact about the shop that no ledger holds.
+   */
+  it("renders all six liste with their article, the empty ones visibly empty", () => {
+    render(<CountSheet session={popis("counting")} />);
+
+    for (const pregled of SVE_LISTE) {
+      expect(screen.getAllByText(pregled.naziv).length).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText(pregled.pravniOsnov).length,
+      ).toBeGreaterThan(0);
+    }
+
+    // Five of the six carry nothing yet, and each says so where it stands.
+    expect(screen.getAllByText(/nema nijedne stavke/i)).toHaveLength(5);
+  });
+
+  /**
+   * Req. 36's declaration belongs to the count phase and not to the izveštaj:
+   * after the čl. 8 st. 5 potpis `counted_signed` refuses every line write and
+   * `computed` refuses a new stavka by name, so a shop first told „prijavljena
+   * kategorija je prazna“ at izveštaj time has no remedy left but a whole new
+   * popis. Asked here, the remedy is still one stavka away.
+   */
+  it("asks which categories exist while the liste still admit a stavka", async () => {
+    const user = userEvent.setup();
+    const onPrijava = vi.fn();
+    render(
+      <CountSheet
+        session={popis("counting")}
+        onSaveLine={vi.fn()}
+        prijavljene={[]}
+        onPrijava={onPrijava}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /gotovina po apoenima/i }),
+    );
+
+    expect(onPrijava).toHaveBeenCalledWith("gotovina");
+  });
+
+  /**
+   * The refusal is the backend's, printed verbatim: `provera_listi` calls the
+   * very function the izveštaj generator refuses with, so the shop reads one
+   * sentence and not two.
+   */
+  it("prints the backend's readiness refusal without rewording it", () => {
+    const poruka =
+      "Popisne liste nisu potpune: prijavljeno je da postoji „gotovina po " +
+      "apoenima“ (PoP čl. 11 st. 1) — a te liste su prazne.";
+
+    render(
+      <CountSheet
+        session={popis("counting")}
+        onSaveLine={vi.fn()}
+        prijavljene={["gotovina"]}
+        onPrijava={vi.fn()}
+        provera={{
+          spremno: false,
+          nedostaju: [SVE_LISTE[3]],
+          poruka,
+        }}
+      />,
+    );
+
+    expect(screen.getByText(poruka)).toBeInTheDocument();
   });
 });
 
