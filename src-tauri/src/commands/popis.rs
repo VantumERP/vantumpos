@@ -376,14 +376,23 @@ fn read_commission(
 /// this comment. Selecting everything and blanking it in Rust would look the same
 /// from the outside and be a different thing.
 ///
-/// **The one thing the blind read does carry out of the Phase B block is the
-/// apoen** (req. 36 / čl. 11 st. 1). On the gotovina lista `cena_minor` is not the
-/// čl. 9 st. 1 t. 5 obračunska cena — it is the denomination the commission itself
-/// counted, and withholding it would leave the cash lista unreadable exactly while
-/// it is being written. Čl. 8 st. 5 keeps back podatke iz knjigovodstva **o
-/// količinama**; it does not keep the commission from its own count. Everywhere
-/// else the cena stays withheld, because there it is an obračun figure and the
-/// obračun has not happened yet.
+/// **What the blind read does carry out of the Phase B block is `cena_minor` on
+/// the two liste where it is not a cena at all** (req. 36). On the gotovina lista
+/// it is the **apoen** of čl. 11 st. 1 — the denomination the commission itself
+/// counted — and on the lista of nedokumentovana potraživanja i obaveze it is the
+/// **iznos** of čl. 12 st. 2, the figure the commission establishes and, since
+/// that lista carries no count, the only substantive figure on the stavka. Čl. 8
+/// st. 5 keeps back podatke iz knjigovodstva **o količinama**; it does not keep
+/// the commission from its own findings, and neither of these two has a perpetual
+/// record behind it to be kept back from.
+///
+/// Withholding them would make the field **write-only during the count**: the
+/// till offers it, the row comes back „—“, the edit form reopens empty, and the
+/// Phase A `snapshot_hash` — taken from this very read — records the figure as
+/// absent under a potpis the commission gave over it.
+///
+/// Everywhere else the cena stays withheld, because there it really is the čl. 9
+/// st. 1 t. 5 obračunska cena and the obračun has not happened yet.
 fn read_lines(
     connection: &Connection,
     session_id: i64,
@@ -393,13 +402,17 @@ fn read_lines(
         let mut statement = connection.prepare(
             "SELECT id, lista_vrsta, sifra, naziv, vrsta, jedinica_mere,
                     stvarna_kolicina_milli, blizi_opis,
-                    CASE WHEN lista_vrsta = ?2 THEN cena_minor END
+                    CASE WHEN lista_vrsta IN (?2, ?3) THEN cena_minor END
              FROM popis_lines
              WHERE session_id = ?1
              ORDER BY id",
         )?;
         let rows = statement.query_map(
-            params![session_id, PopisLista::Gotovina.as_db_str()],
+            params![
+                session_id,
+                PopisLista::Gotovina.as_db_str(),
+                PopisLista::Potrazivanja.as_db_str()
+            ],
             |row| {
                 Ok(PopisLineView {
                     id: row.get(0)?,
@@ -865,9 +878,11 @@ struct PotpisanaStavka {
     jedinica_mere: Option<String>,
     stvarna_kolicina_milli: i64,
     blizi_opis: Option<String>,
-    /// On the gotovina lista this is the **apoen** and therefore part of what was
-    /// counted; everywhere else it is the čl. 9 st. 1 t. 5 cena and the obračun's
-    /// to fill in. Read back so the two cases can be told apart.
+    /// On the gotovina lista this is the **apoen** (čl. 11 st. 1) and on the lista
+    /// of nedokumentovana potraživanja i obaveze the **iznos** (čl. 12 st. 2), so
+    /// on both it is part of what was counted; everywhere else it is the čl. 9
+    /// st. 1 t. 5 cena and the obračun's to fill in. Read back so the cases can be
+    /// told apart.
     cena_minor: Option<i64>,
 }
 
@@ -903,26 +918,67 @@ impl PotpisanaStavka {
         PopisLista::from_db_str(&self.lista_vrsta)
     }
 
-    /// Whether a Phase B payload moves the apoen of a signed gotovina line. `None`
-    /// leaves it alone — the UPDATE coalesces — so only a payload that actually
-    /// carries a different apoen is a move.
-    fn apoen_pomeren(&self, input: &PopisLineInput) -> bool {
-        self.lista() == Some(PopisLista::Gotovina)
-            && input.cena_minor.is_some()
+    /// Whether a Phase B payload moves a figure the commission itself counted and
+    /// signed — the čl. 11 st. 1 apoen on the gotovina lista, the čl. 12 st. 2
+    /// iznos on the lista of nedokumentovana potraživanja i obaveze. Those are the
+    /// two `cena_minor` carries the blind read hands out (see `read_lines`) and
+    /// therefore the two the Phase A `snapshot_hash` covers; the potpis freezes
+    /// exactly what it attested to and nothing else, which is why the other four
+    /// liste keep the čl. 9 st. 1 t. 5 cena editable in the obračun.
+    ///
+    /// `None` leaves the figure alone — the UPDATE coalesces — so only a payload
+    /// that actually carries a different one is a move.
+    fn prebrojani_iznos_pomeren(&self, input: &PopisLineInput) -> bool {
+        matches!(
+            self.lista(),
+            Some(PopisLista::Gotovina | PopisLista::Potrazivanja)
+        ) && input.cena_minor.is_some()
             && input.cena_minor != self.cena_minor
     }
 
-    /// What the obračun may still fill in on this stavka, said in the refusal
-    /// above. It differs by lista and the difference matters: on the gotovina lista
-    /// the „cena“ is the apoen and is frozen with the count, so telling the shop it
-    /// may still edit a cena there would be an operator string promising something
-    /// the very next call refuses.
-    fn obracunska_polja(&self) -> &'static str {
-        if self.lista() == Some(PopisLista::Gotovina) {
-            "U obračunu se popunjava samo knjigovodstvena količina — „cena“ na listi gotovine je \
-             apoen i deo je potpisanog stvarnog stanja"
+    /// The refusal for [`Self::prebrojani_iznos_pomeren`], as a `(code, message)`
+    /// pair. Two codes rather than one: `popis_apoen_potpisan` is the shipped wire
+    /// contract for the gotovina limb and renaming it would break a caller for no
+    /// gain. Each names the figure and its article rather than calling both
+    /// „cena“ — on one lista it is an apoen and on the other an iznos, and a
+    /// message that got that wrong would send the shop looking for a pricing
+    /// mistake it did not make.
+    fn prebrojani_iznos_refusal(&self) -> (&'static str, &'static str) {
+        if self.lista() == Some(PopisLista::Potrazivanja) {
+            (
+                "popis_prebrojani_iznos_potpisan",
+                "Na popisnoj listi nedokumentovanih potraživanja i obaveza „cena“ je iznos \
+                 potraživanja odnosno obaveze — deo prebrojanog stvarnog stanja (PoP čl. 12 \
+                 st. 2), a ne obračunska cena. Potpisani iznos se više ne menja (PoP čl. 8 st. 5) \
+                 — ispravka se sprovodi novim popisom.",
+            )
         } else {
-            "U obračunu se popunjavaju samo cena i knjigovodstvena količina"
+            (
+                "popis_apoen_potpisan",
+                "Na popisnoj listi gotovine „cena“ je apoen — deo prebrojanog stvarnog stanja \
+                 (PoP čl. 11 st. 1), a ne obračunska cena. Potpisani apoen se više ne menja (PoP \
+                 čl. 8 st. 5) — ispravka se sprovodi novim popisom.",
+            )
+        }
+    }
+
+    /// What the obračun may still fill in on this stavka, said in the refusal
+    /// above. It differs by lista and the difference matters: on the two liste
+    /// whose „cena“ is the commission's own counted figure it is frozen with the
+    /// count, so telling the shop it may still edit a cena there would be an
+    /// operator string promising something the very next call refuses.
+    fn obracunska_polja(&self) -> &'static str {
+        match self.lista() {
+            Some(PopisLista::Gotovina) => {
+                "U obračunu se popunjava samo knjigovodstvena količina — „cena“ na listi gotovine \
+                 je apoen i deo je potpisanog stvarnog stanja"
+            }
+            Some(PopisLista::Potrazivanja) => {
+                "U obračunu se popunjava samo knjigovodstvena količina — „cena“ na listi \
+                 nedokumentovanih potraživanja i obaveza je iznos potraživanja i deo je \
+                 potpisanog stvarnog stanja"
+            }
+            _ => "U obračunu se popunjavaju samo cena i knjigovodstvena količina",
         }
     }
 }
@@ -1152,19 +1208,18 @@ pub(crate) fn save_line(
                 ));
             }
 
-            // Req. 36 / čl. 11 st. 1 — on the gotovina lista `cena_minor` is the
-            // APOEN, part of what the commission counted and signed, and not a
-            // price the obračun fills in under čl. 9 st. 1 t. 5. Left unpinned, a
-            // signed „5 × 1.000“ could become „5 × 5.000“ in Phase B with the
-            // količina untouched, and the čl. 8 st. 5 potpis would attest to a cash
-            // count nobody took.
-            if potpisana.apoen_pomeren(input) {
-                return Err(AppError::business(
-                    "popis_apoen_potpisan",
-                    "Na popisnoj listi gotovine „cena“ je apoen — deo prebrojanog stvarnog stanja \
-                     (PoP čl. 11 st. 1), a ne obračunska cena. Potpisani apoen se više ne menja \
-                     (PoP čl. 8 st. 5) — ispravka se sprovodi novim popisom.",
-                ));
+            // Req. 36 / čl. 11 st. 1 and čl. 12 st. 2 — on the gotovina lista
+            // `cena_minor` is the APOEN and on the lista of nedokumentovana
+            // potraživanja i obaveze it is the IZNOS: on both it is part of what
+            // the commission counted and signed, not a price the obračun fills in
+            // under čl. 9 st. 1 t. 5. Both are exactly the figures the blind read
+            // hands out and the Phase A snapshot hash therefore covers. Left
+            // unpinned, a signed „5 × 1.000“ could become „5 × 5.000“ in Phase B
+            // with the količina untouched, and the čl. 8 st. 5 potpis would attest
+            // to a count nobody took.
+            if potpisana.prebrojani_iznos_pomeren(input) {
+                let (kod, poruka) = potpisana.prebrojani_iznos_refusal();
+                return Err(AppError::business(kod, poruka));
             }
         }
         PopisStatus::CountedSigned => {
@@ -1840,8 +1895,9 @@ pub(crate) fn compose_izvestaj(
     }
 
     upozorenja.push(
-        "Ovaj izveštaj se sastavlja u trenutku kada se zatraži i ne čuva se u aplikaciji — \
-         odštampajte ga i čuvajte uz popisne liste."
+        "Ovaj izveštaj se sastavlja u trenutku kada se zatraži, prikazuje se na ekranu i ne \
+         čuva se u aplikaciji. Program ga ne štampa i ne izvozi — štampani primerak sastavite \
+         sami i čuvajte ga uz popisne liste."
             .to_string(),
     );
 
@@ -3565,6 +3621,172 @@ mod tests {
         });
     }
 
+    /// The čl. 12 st. 2 lista is the second one whose „cena“ is the commission's
+    /// own figure rather than an obračun one — and unlike the gotovina lista it is
+    /// the **only** figure the lista carries. A nedokumentovano potraživanje has no
+    /// count and no perpetual record behind it: its naziv, its bliži opis and its
+    /// iznos are the whole stavka.
+    ///
+    /// The carve-out therefore has to reach it, and for exactly the čl. 11 st. 1
+    /// reason: čl. 8 st. 5 withholds *podatke iz knjigovodstva o količinama*, and
+    /// this is neither. Withheld, the iznos was **write-only** during the count —
+    /// the till offered the field, the row came back „—“, the edit form reopened
+    /// empty, and the Phase A snapshot hash, which is taken from this same blind
+    /// read, recorded the amount as absent under a čl. 8 st. 5 potpis the
+    /// commission had signed over it.
+    ///
+    /// The negative control travels in the same test: on the four liste where the
+    /// cena really is the čl. 9 st. 1 t. 5 obračunska cena it stays withheld, or
+    /// the carve-out would have become „show everything“.
+    #[test]
+    fn the_blind_read_shows_the_cl_12_st_2_iznos_the_commission_established() {
+        with_app("popis_blind_potrazivanje", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+
+            for lista in [
+                PopisLista::Potrazivanja,
+                PopisLista::Ostecena,
+                PopisLista::Konsignacija,
+            ] {
+                let mut linija = lista_line(lista);
+                if lista != PopisLista::Potrazivanja {
+                    linija.cena_minor = Some(249_900);
+                }
+                save_line(&connection, id, None, &linija, "2026-12-31T09:20:00Z").unwrap_or_else(
+                    |error| panic!("the {} line should save: {error}", lista.naziv()),
+                );
+            }
+
+            let counting = load_session(&connection, id).expect("the session should load");
+            assert!(!counting.knjigovodstvo_dostupno, "still Phase A");
+            let cena_na = |lista: PopisLista| {
+                counting
+                    .linije
+                    .iter()
+                    .find(|linija| linija.lista_vrsta == lista.as_db_str())
+                    .unwrap_or_else(|| panic!("the {} line should be there", lista.naziv()))
+                    .cena_minor
+            };
+
+            assert_eq!(
+                cena_na(PopisLista::Potrazivanja),
+                Some(350_000),
+                "the čl. 12 st. 2 iznos is the commission's own figure and the only \
+                 one on the lista — a stavka that shows „—“ while it is being \
+                 written is a stavka the operator signs blind"
+            );
+            assert_eq!(
+                cena_na(PopisLista::Ostecena),
+                None,
+                "on the čl. 10 st. 3 lista the cena is the obračun's (čl. 9 st. 1 t. 5)"
+            );
+            assert_eq!(
+                cena_na(PopisLista::Konsignacija),
+                None,
+                "and on the čl. 2 st. 5 lista too — the carve-out is two liste, not all six"
+            );
+        });
+    }
+
+    /// The other half of the same rule: what the blind read carries, the čl. 8
+    /// st. 5 potpis freezes. The iznos is now inside the Phase A snapshot hash, so
+    /// an obračun that moved it would leave the potpis attesting to a figure the
+    /// commission never established — the identical argument `apoen_pomeren` was
+    /// written for, on the identical wire shape.
+    #[test]
+    fn the_signed_cl_12_st_2_iznos_does_not_move_in_the_obracun() {
+        with_app("popis_potrazivanje_iznos_frozen", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let mut connection = state.db().open().expect("database should open");
+            save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Potrazivanja),
+                "2026-12-31T09:20:00Z",
+            )
+            .expect("the claim line should save");
+            sign_phase_a(
+                &mut connection,
+                id,
+                &["Miloš Đurđević".to_string()],
+                "2026-12-31T17:00:00Z",
+            )
+            .expect("the čl. 8 st. 5 potpis should record");
+            let computed = compute_differences(&connection, id, "2027-01-02T09:00:00Z")
+                .expect("the obračun should open");
+            let line_id = computed
+                .linije
+                .iter()
+                .find(|linija| linija.lista_vrsta == "potrazivanja")
+                .expect("the claim line should be there")
+                .id;
+
+            let mut podmetnut = lista_line(PopisLista::Potrazivanja);
+            podmetnut.cena_minor = Some(900_000);
+            let error = save_line(
+                &connection,
+                id,
+                Some(line_id),
+                &podmetnut,
+                "2027-01-02T10:00:00Z",
+            )
+            .expect_err("the signed iznos must not move");
+
+            assert_eq!(error.code(), "popis_prebrojani_iznos_potpisan");
+            assert!(
+                error.to_string().contains("čl. 12 st. 2"),
+                "the refusal must say why the iznos is not editable here, said: {error}"
+            );
+
+            // And the refusal for a moved naziv must not offer an edit the very
+            // next call would refuse.
+            let mut preimenovan = lista_line(PopisLista::Potrazivanja);
+            preimenovan.naziv = "Nešto sasvim drugo".into();
+            preimenovan.cena_minor = None;
+            let poruka = save_line(
+                &connection,
+                id,
+                Some(line_id),
+                &preimenovan,
+                "2027-01-02T10:05:00Z",
+            )
+            .expect_err("a signed naziv must not move")
+            .to_string();
+            assert!(
+                poruka.contains("samo knjigovodstvena količina"),
+                "the čl. 12 st. 2 lista has no cena left to fill in, said: {poruka}"
+            );
+
+            // Leaving the iznos alone is still a legal obračun edit.
+            let mut netaknuto = lista_line(PopisLista::Potrazivanja);
+            netaknuto.cena_minor = None;
+            netaknuto.knjigovodstvena_kolicina_milli = Some(0);
+            save_line(
+                &connection,
+                id,
+                Some(line_id),
+                &netaknuto,
+                "2027-01-02T10:10:00Z",
+            )
+            .expect("an obračun edit that does not touch the iznos must go through");
+            let after = load_session(&connection, id).expect("the session should load");
+            assert_eq!(
+                after
+                    .linije
+                    .iter()
+                    .find(|linija| linija.lista_vrsta == "potrazivanja")
+                    .expect("the claim line should be there")
+                    .cena_minor,
+                Some(350_000),
+                "the COALESCE keeps the iznos the commission signed"
+            );
+        });
+    }
+
     /// On the gotovina lista `cena_minor` is the **apoen** — part of what the
     /// commission counted and signed under čl. 8 st. 5, not a price the obračun
     /// fills in under čl. 9 st. 1 t. 5. Left unpinned, a signed „5 × 1.000“ could
@@ -4682,6 +4904,14 @@ mod tests {
     /// čl. 9 st. 3 potpis is not yet on these liste; and **the izveštaj is not kept
     /// by this application** — it is composed when it is asked for, and a shop that
     /// closed the screen would otherwise lose what it typed without being told.
+    ///
+    /// The third one has a second half, and it is the half that was wrong. This
+    /// warning used to end *„odštampajte ga i čuvajte uz popisne liste“* — an
+    /// instruction the screen it appears on cannot carry out. There is no print
+    /// and no export anywhere in the popis module: `PopisService` has no exporting
+    /// method and no popis screen calls `PrintService.openForPrint`, which
+    /// reklamacije, KEP and the čl. 47 register all do. So the warning has to say
+    /// that the printing is the shop's own to do, and it is pinned here.
     #[test]
     fn the_izvestaj_warns_without_blocking_and_says_it_is_not_stored() {
         with_app("popis_izvestaj_warnings", |app| {
@@ -4732,6 +4962,12 @@ mod tests {
             assert!(
                 poruke.contains("ne čuva"),
                 "the izveštaj must say that this application does not keep it, said: {poruke}"
+            );
+            assert!(
+                poruke.contains("ne štampa") && poruke.contains("ne izvozi"),
+                "and that it does not print or export it either — the module has \
+                 neither, so an instruction to „odštampajte ga“ sends the shop \
+                 looking for a button that does not exist, said: {poruke}"
             );
         });
     }

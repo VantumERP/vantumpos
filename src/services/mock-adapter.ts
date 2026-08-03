@@ -3069,8 +3069,9 @@ export function createMockServices(): PosServices {
               "je i čuvajte uz izveštaj.",
           },
           upozorenja: [
-            "Izveštaj o popisu se ne čuva u aplikaciji — odštampajte ga i " +
-              "čuvajte uz popisne liste.",
+            "Izveštaj o popisu se ne čuva u aplikaciji, a program ga ne štampa " +
+              "i ne izvozi — štampani primerak sastavite sami i čuvajte ga uz " +
+              "popisne liste.",
           ],
         };
       },
@@ -3260,12 +3261,23 @@ export function createMockServices(): PosServices {
       knjigovodstvoDostupno: dostupno,
       komisija: session.komisija.map((clan) => ({ ...clan })),
       potpisi: session.potpisi.map((potpis) => ({ ...potpis })),
+      // The blind read, as `read_lines` performs it. `cenaMinor` is withheld with
+      // the rest of the Phase B block **except** on the two liste where it is not
+      // a cena: the čl. 11 st. 1 apoen and the čl. 12 st. 2 iznos are the
+      // commission's own counted figures, so they stay readable while the lista
+      // is being written — otherwise the field is write-only during the count.
       linije: session.linije.map((linija) => ({
         ...linija,
         knjigovodstvenaKolicinaMilli: dostupno
           ? linija.knjigovodstvenaKolicinaMilli
           : null,
         razlikaMilli: dostupno ? linija.razlikaMilli : null,
+        cenaMinor:
+          dostupno ||
+          linija.listaVrsta === "gotovina" ||
+          linija.listaVrsta === "potrazivanja"
+            ? linija.cenaMinor
+            : null,
       })),
       liste: POPIS_LISTE.map((lista) => ({
         ...lista,

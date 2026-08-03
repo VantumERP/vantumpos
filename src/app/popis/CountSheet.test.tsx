@@ -298,6 +298,87 @@ describe("CountSheet — the write rules the backend actually has", () => {
   });
 
   /**
+   * The third meaning of the same column, and the one the sheet used to get
+   * wrong in both directions. On the čl. 12 st. 2 lista `cenaMinor` is the
+   * **iznos of a nedokumentovano potraživanje ili obaveza** — the commission's
+   * own figure, and the only substantive one the lista carries, since a claim
+   * has no count. Labelling it „Cena“ under „Obračunska cena (PoP čl. 9 st. 1
+   * t. 5)“ told the operator it was a step-5 field, while the blind read
+   * withheld it: the field took a value during `counting`, the row came back
+   * „—“, the edit form reopened empty, and the čl. 8 st. 5 potpis went over an
+   * amount the screen never showed back.
+   */
+  it("calls the price column an iznos on the čl. 12 st. 2 lista and shows it during the count", async () => {
+    const user = userEvent.setup();
+    render(
+      <CountSheet
+        session={popis("counting", {
+          linije: [
+            linija({
+              id: 2,
+              listaVrsta: "potrazivanja",
+              sifra: null,
+              naziv: "Potraživanje bez isprave",
+              jedinicaMere: null,
+              stvarnaKolicinaMilli: 0,
+              cenaMinor: 350000,
+            }),
+          ],
+          liste: liste({ potrazivanja: 1 }),
+        })}
+        onSaveLine={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    // The counted amount is on the lista while the lista is being written.
+    expect(screen.getByText("3.500,00 RSD")).toBeInTheDocument();
+    expect(screen.getByText("Iznos")).toBeInTheDocument();
+
+    // And it round-trips into the edit form instead of reopening empty.
+    await user.click(screen.getByRole("button", { name: /izmeni/i }));
+    expect(screen.getByLabelText(/^iznos$/i)).toHaveValue("3500.00");
+    // The field says which figure it is, and it is not the step-5 cena.
+    expect(
+      screen.getByText(/deo prebrojanog stanja \(PoP čl\. 12 st\. 2\)/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Obračunska cena \(PoP čl\. 9 st\. 1 t\. 5\)/),
+    ).not.toBeInTheDocument();
+  });
+
+  /**
+   * The write side of the same rule. What the count showed, the čl. 8 st. 5
+   * potpis froze — the backend refuses a moved iznos by name — so the obračun
+   * must not offer an input for it, exactly as it does not for the apoen. An
+   * enabled field whose save the next call refuses is the affordance this
+   * module refuses to render anywhere else.
+   */
+  it("withholds the iznos input in the obračun, as it does the apoen", async () => {
+    const user = userEvent.setup();
+    render(
+      <CountSheet
+        session={popis("computed", {
+          linije: [
+            linija({
+              id: 2,
+              listaVrsta: "potrazivanja",
+              naziv: "Potraživanje bez isprave",
+              stvarnaKolicinaMilli: 0,
+              cenaMinor: 350000,
+            }),
+          ],
+          liste: liste({ potrazivanja: 1 }),
+        })}
+        onSaveLine={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /izmeni/i }));
+
+    expect(screen.getByLabelText(/^iznos$/i)).toBeDisabled();
+  });
+
+  /**
    * Req. 30. Between the čl. 8 st. 5 potpis and the obračun the liste are shut:
    * an „Izmeni“ button here would be an affordance the very next call refuses.
    */

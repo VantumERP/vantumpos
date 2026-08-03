@@ -427,7 +427,7 @@ impl RecordClass {
                 "Arhiva objavljenih cenovnika (ZZP čl. 6 st. 5 — poređenje ranije objavljenih cena sa cenama objavljenim u realnom vremenu). Podrazumevani rok je dve godine, koliko traje zastarelost prekršajnog gonjenja iz ZZP čl. 213; rok se pomera samo unapred. Automatsko čišćenje uklanja samo snimke starije od tog roka i nikada važeći cenovnik prodajnog objekta, koji ostaje bez obzira na starost. Ova arhiva ne sadrži podatke o ličnosti — u njoj su šifre, nazivi i cene artikala i naziv prodajnog mesta."
             }
             Self::PopisDokumentacija => {
-                "Popisne liste sa svim posebnim listama, podaci o popisu, sastav komisije za popis i potpisi na listama (ZoRač čl. 20 i čl. 21; Pravilnik o popisu). Rok čuvanja je pet godina, a računa se od poslednjeg dana poslovne godine na koju se popis odnosi (ZoRač čl. 28 st. 7 i st. 9) — zato popis izvršen u toku godine i popis na datum bilansa iste godine ističu istog dana. Rok se pomera samo unapred. Nijedan propis ne imenuje popisne liste izričito: rok od pet godina je zaključak po osnovu da su to isprave na osnovu kojih se unose podaci u poslovne knjige, a isti rok bi dao i čl. 28 st. 5 kada bi se posmatrale kao pomoćne knjige. Proknjižen popis se ne menja — ispravka ide kroz novi popis (PoP čl. 14 st. 3; ZoRač čl. 8 st. 4). Izveštaj o popisu se ne čuva u aplikaciji: sastavlja se i štampa na zahtev, pa štampani i potpisani primerak čuva obveznik. Automatsko brisanje popisne dokumentacije ne postoji — program samo računa najraniji dan od kog čuvanje više ne bi bilo obavezno."
+                "Popisne liste sa svim posebnim listama, podaci o popisu, sastav komisije za popis i potpisi na listama (ZoRač čl. 20 i čl. 21; Pravilnik o popisu). Rok čuvanja je pet godina, a računa se od poslednjeg dana poslovne godine na koju se popis odnosi (ZoRač čl. 28 st. 7 i st. 9) — zato popis izvršen u toku godine i popis na datum bilansa iste godine ističu istog dana. Rok se pomera samo unapred. Nijedan propis ne imenuje popisne liste izričito: rok od pet godina je zaključak po osnovu da su to isprave na osnovu kojih se unose podaci u poslovne knjige, a isti rok bi dao i čl. 28 st. 5 kada bi se posmatrale kao pomoćne knjige. Proknjižen popis se ne menja — ispravka ide kroz novi popis (PoP čl. 14 st. 3; ZoRač čl. 8 st. 4). Izveštaj o popisu se ne čuva u aplikaciji: sastavlja se na zahtev i prikazuje na ekranu, a program ga ne štampa i ne izvozi — štampani i potpisani primerak sastavlja i čuva sam obveznik. Automatsko brisanje popisne dokumentacije ne postoji — program samo računa najraniji dan od kog čuvanje više ne bi bilo obavezno."
             }
         }
     }
@@ -1467,13 +1467,22 @@ mod tests {
     /// asks why the liste are still there — and what it reads to find out what
     /// this program is **not** keeping for it.
     ///
-    /// Three claims in it are load-bearing and none of them is decoration.
+    /// Four claims in it are load-bearing and none of them is decoration.
     ///
     /// **The izveštaj o popisu is not stored.** Task 6 composes it on demand and
-    /// prints it; no table holds one. Req. 42 names *„popisne liste and the
-    /// izveštaj“* together, so a note that repeated the requirement verbatim
+    /// shows it on screen; no table holds one. Req. 42 names *„popisne liste and
+    /// the izveštaj“* together, so a note that repeated the requirement verbatim
     /// would promise a five-year archive of a document this application never
     /// held — and the shop would stop keeping the paper.
+    ///
+    /// **Nor does this application print it.** The popis module ships no print
+    /// and no export: `PopisService` has no exporting method, and no popis screen
+    /// calls `PrintService.openForPrint` the way reklamacije, KEP and the čl. 47
+    /// register all do. The first version of this note said the izveštaj
+    /// *„sastavlja se i štampa na zahtev“*, which is a button the shop would look
+    /// for and not find — and, worse, the same clause stood in the čl. 47
+    /// register an inspector reads. Both halves are pinned below, because the
+    /// first version of this test pinned only the neighbouring sentence.
     ///
     /// **No automatic deletion exists.** [`popis_purge_eligible`] is a gate, not
     /// a sweep: it answers *may this go yet*, and nothing calls it outside this
@@ -1517,6 +1526,16 @@ mod tests {
             "req. 42 names the izveštaj beside the liste, but nothing in this \
              schema stores one — the note must say so or the shop stops keeping \
              the printed copy: {note}"
+        );
+        assert!(
+            note.contains("program ga ne štampa"),
+            "the other half of the same sentence, and the one nothing pinned: the \
+             popis module has no print and no export, so a note saying the izveštaj \
+             „se štampa na zahtev“ describes a button that does not exist: {note}"
+        );
+        assert!(
+            !note.contains("štampa na zahtev"),
+            "the withdrawn clause must not come back: {note}"
         );
         assert!(
             note.contains("Automatsko brisanje") && note.contains("ne postoji"),

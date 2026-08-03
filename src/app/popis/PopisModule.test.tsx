@@ -326,21 +326,45 @@ describe("PopisModule — the statutory sequence", () => {
    * electronic signature is an unverified deviation (§6 R-6). Clicking here
    * records that the members signed the printed liste; it is not itself a
    * signature, and the copy must not let the shop believe otherwise.
+   *
+   * **And it must cite the article of the potpis actually being taken.** There
+   * are two, and they are not the same act: the `counting` step is the čl. 8
+   * st. 5 potpis on the counted liste — the one that releases the book data —
+   * while čl. 9 st. 3's *„uz štampanje“* governs the obračunate liste signed
+   * after it. A paragraph that printed „PoP čl. 9 st. 3“ under both left the
+   * operator reading two different provisions for one act, one of which does not
+   * govern it. So the article is carried on `Korak` beside the label and both
+   * phases are asserted; the same `pravniOsnov` the step header already shows.
    */
-  it("says the potpis is recorded, not made, and that the liste are printed", async () => {
+  it("cites the article of the potpis being taken, in both phases", async () => {
     const user = userEvent.setup();
     render(<PopisModule services={services()} />);
 
-    await otvoriPopis(user);
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
     await user.click(
       await screen.findByRole("button", { name: /započni brojanje/i }),
     );
 
+    // Phase A — čl. 8 st. 5, and čl. 9 st. 3 must not appear on it at all.
+    const fazaA = await screen.findByText(/ne zamenjuje potpis na papiru/i);
+    expect(fazaA).toHaveTextContent(/PoP čl\. 8 st\. 5/);
+    expect(fazaA).not.toHaveTextContent(/čl\. 9 st\. 3/);
     expect(await screen.findByText(/odštampajte/i)).toBeInTheDocument();
-    expect(screen.getByText(/PoP čl\. 9 st\. 3/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/ne zamenjuje potpis na papiru/i),
-    ).toBeInTheDocument();
+
+    // Phase B — the čl. 9 st. 3 potpis on the obračunate liste.
+    await user.click(
+      screen.getByRole("button", { name: /potpiši stvarno stanje/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /obračunaj razlike/i }),
+    );
+    await screen.findByRole("button", { name: /potpiši obračunate liste/i });
+
+    const fazaB = screen.getByText(/ne zamenjuje potpis na papiru/i);
+    expect(fazaB).toHaveTextContent(/PoP čl\. 9 st\. 3/);
+    expect(fazaB).not.toHaveTextContent(/čl\. 8 st\. 5/);
   });
 });
 

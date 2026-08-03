@@ -915,11 +915,44 @@ lawful count in the name of a duty that does not exist. No summed naturalna koli
 document. No automatic deletion of popis documentation — `popis_purge_eligible` is a gate, like the two
 beside it, and the stored napomena says so.
 
+**Residuals batch (03.08.2026).** Three defects and two undisclosed gaps, none of which changes a
+statutory answer; the gates run at **cargo 901 / bun 505**, migration still **v20**.
+
+| Defect | Fixed |
+|---|---|
+| **The sixth false-promise artefact**, and the first to reach an inspector-facing document. `retention.rs`'s stored napomena, the `cl47.rs` čl. 47 register entry and `commands/popis.rs`'s own izveštaj warning all said the izveštaj *„sastavlja se i štampa na zahtev“* / *„odštampajte ga“*. **There is no print and no export anywhere in the popis module** — `PopisService` has fifteen methods and none exports, and no popis screen calls `PrintService.openForPrint`. All three now say the izveštaj is assembled on demand and **shown on screen**, that the program neither prints nor exports it, and that the printed and signed copy is the obveznik's own to make and keep. The existing retention test pinned only the neighbouring sentence, which is why nothing caught it: it now pins the *„ne štampa“* half **and** asserts the withdrawn clause cannot come back |
+| **The čl. 8 st. 5 signature step cited čl. 9 st. 3.** `PopisModule` printed *„…ne zamenjuje potpis na papiru (PoP čl. 9 st. 3)“* under **every** `korak.potpis`, including `counting`, whose own `pravniOsnov` is čl. 8 st. 5 — two different articles for one act, and čl. 9 st. 3's *„uz štampanje“* governs the liste printed **after** the natural count, not the čl. 8 st. 5 potpis. The article is now `korak.pravniOsnov`, never a literal, and the test asserts both phases and that neither shows the other's article. The same sentence now also says the program does not print the liste |
+| **The čl. 12 st. 2 iznos was write-only during the count.** The blind read carved `cena_minor` out for `gotovina` only, on the ground that elsewhere it is an obračun figure — which does not hold for nedokumentovana potraživanja i obaveze, whose iznos is the commission's **own** figure, has no perpetual record behind it, and is the only substantive figure that lista carries. The till offered the field, the row came back „—“, the edit form reopened empty, and the Phase A `snapshot_hash` — taken from that same blind read — recorded the amount as absent under a potpis the commission had given over it. **Chosen fix: extend the carve-out**, on the identical čl. 11 st. 1 reasoning; withholding the input instead would have left the čl. 12 st. 2 lista with no amount on the document the commission signs, which is worse evidence, not better. The freeze follows the read — what the blind read carries, the potpis freezes — so a moved iznos is refused in the obračun by name (`popis_prebrojani_iznos_potpisan`; the shipped `popis_apoen_potpisan` code is unchanged), the obračun's „what you may still fill in“ string no longer offers a cena that lista does not have, and the count sheet calls the column **Iznos** with its own article and disables it in the obračun. The four liste where the cena really is the čl. 9 st. 1 t. 5 figure are untouched, asserted as the negative control |
+
 **Still open after this batch.**
 
 - **Req. 31/32 — the printed popisna lista.** The single largest hole. Čl. 9 st. 3's *„uz štampanje“*
   is express, SW-8 shipped a printing stack, and no task in this plan wired the two together. Until it
-  lands the shop prints the liste from somewhere else, and the register row says exactly that.
+  lands the shop prints the liste from somewhere else, and the register row says exactly that. **The
+  izveštaj o popisu is inside this hole and was not disclosed as such** — `PopisService` has no
+  exporting method and no popis screen calls `PrintService.openForPrint`, which reklamacije, KEP and
+  the čl. 47 register all do, so the izveštaj is a screen and nothing more. Corrected 03.08.2026: the
+  retention napomena, the čl. 47 register entry and the izveštaj's own warning had all said it
+  *„sastavlja se i štampa na zahtev“*.
+- **Req. 35 — the plan rada and the odluka o popisu are essentially uncoded.** `plan_rada_json` and
+  `odluka_ref` are free text captured once at `open_popis` and echoed back; nothing parses, validates
+  or even trims them. **Nothing generates a plan rada and nothing generates the odluka o popisu i
+  obrazovanju komisije**, and — the limb that matters — **no approval is recorded**: PoP čl. 8 st. 2
+  requires the plan to be *approved* by the lice iz čl. 4 st. 2, for a preduzetnik the owner
+  personally, and there is no column, no command and no screen for who approved it or when. The v20
+  comment at `db/migrations.rs:1169` names that approval as the column's whole purpose, which is what
+  makes the gap a discrepancy rather than a decision. Closing it needs a schema v20 does not have.
+- **Req. 40's second limb has no code.** The first limb is present and correct — popisivači are named
+  persons, `popis_commission.rukuje_imovinom` carries the čl. 5 st. 1 flag, and the warning never
+  blocks. *„Reuse the flag for ZoRač čl. 10 st. 5 (control of računovodstvene isprave)“* has **zero
+  occurrences in the crate**: `rukuje_imovinom` is read in exactly one place, `komisija_upozorenja`,
+  and no code path anywhere consults it when računovodstvene isprave are controlled.
+- **`perpetual_odluka_ref` validates itself and is then never consumed.** `ensure_perpetual_shortcut`
+  refuses a reference with no posted in-year popis behind it (req. 34), and after that the column is
+  only read back into the view. **No code path shortens or skips the count**, so čl. 9 st. 2's *„the
+  exception excuses step 2) only“* is not modelled at all — the natural count of t. 1 is what the
+  module always requires. The direction is the conservative one and nothing is unsound, but the field
+  today buys a gate and no behaviour.
 - **Čl. 9 st. 2's *usvojen* limb is still unchecked.** Req. 34's gate verifies that an in-year popis was
   *izvršen i proknjižen*; the čl. 14 st. 2 odluka o usvajanju has no stored fact to check, so the
   module states that it does not record the decision instead of implying that it does.

@@ -71,9 +71,27 @@ import type {
  * readiness check says is the backend's own sentence, never a second wording.
  */
 
-/** What the price column is on this lista. Čl. 11 st. 1 makes it the apoen. */
+/**
+ * What the price column is on this lista — the same column carries three
+ * different things and only the wording tells the operator which one is being
+ * filled in.
+ *
+ * Čl. 11 st. 1 makes it the **apoen** on the gotovina lista and čl. 12 st. 2 the
+ * **iznos** of a nedokumentovano potraživanje ili obaveza; on both it is the
+ * commission's own figure, part of the counted state, and the blind read hands it
+ * back during the count. Everywhere else it is the čl. 9 st. 1 t. 5 obračunska
+ * cena, which the backend withholds until the čl. 8 st. 5 potpis.
+ */
 function cenaNaziv(lista: PopisLista): string {
-  return lista === "gotovina" ? "Apoen" : "Cena";
+  if (lista === "gotovina") {
+    return "Apoen";
+  }
+  return lista === "potrazivanja" ? "Iznos" : "Cena";
+}
+
+/** The two liste whose „cena“ the čl. 8 st. 5 potpis freezes with the count. */
+function prebrojaniIznos(lista: PopisLista): boolean {
+  return lista === "gotovina" || lista === "potrazivanja";
 }
 
 /**
@@ -681,10 +699,16 @@ export function CountSheet({
               <FieldLabel htmlFor="popis-cena">
                 {cenaNaziv(form.listaVrsta)}
               </FieldLabel>
+              {/*
+                Disabled in the obračun on exactly the two liste where the figure
+                is part of the signed count — the backend refuses a moved apoen
+                and a moved iznos by name, and an input whose save the next call
+                rejects is the affordance this sheet renders nowhere else.
+              */}
               <Input
                 id="popis-cena"
                 value={form.cena}
-                disabled={obracunSamo && form.listaVrsta === "gotovina"}
+                disabled={obracunSamo && prebrojaniIznos(form.listaVrsta)}
                 onChange={(event) =>
                   setForm({ ...form, cena: event.target.value })
                 }
@@ -692,7 +716,9 @@ export function CountSheet({
               <FieldDescription>
                 {form.listaVrsta === "gotovina"
                   ? "Apoen novčanice ili kovanice — deo prebrojanog stanja (PoP čl. 11 st. 1), a ne obračunska cena."
-                  : "Obračunska cena (PoP čl. 9 st. 1 t. 5)."}
+                  : form.listaVrsta === "potrazivanja"
+                    ? "Iznos nedokumentovanog potraživanja odnosno obaveze — deo prebrojanog stanja (PoP čl. 12 st. 2), a ne obračunska cena."
+                    : "Obračunska cena (PoP čl. 9 st. 1 t. 5)."}
               </FieldDescription>
             </Field>
 

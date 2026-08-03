@@ -838,11 +838,24 @@ function PopisDetail({
                 „uz štampanje“ — the potpis is on paper. This records that it
                 happened; it is not itself a signature, and §6 R-6 leaves the
                 purely electronic route unverified.
+
+                The article is `korak.pravniOsnov`, never a literal. There are
+                two potpisi and they discharge different provisions: čl. 8 st. 5
+                on the counted liste, čl. 9 st. 3 on the obračunate ones. Printing
+                čl. 9 st. 3 under both — which this paragraph used to do — showed
+                the operator two articles for one act, and cited the „uz
+                štampanje“ rule for a potpis it does not govern.
+
+                And the printing is the shop's own: this application has no print
+                and no export for a popisna lista, which is the module's largest
+                disclosed hole, so the sentence says so rather than sending the
+                operator looking for a button.
               */}
               <p className="text-sm">
-                Odštampajte popisne liste i neka ih članovi komisije potpišu.
-                Ovde se evidentira da je taj potpis dat — evidentiranje ne
-                zamenjuje potpis na papiru (PoP čl. 9 st. 3).
+                Odštampajte popisne liste i neka ih članovi komisije potpišu —
+                program ih ne štampa i ne izvozi. Ovde se evidentira da je taj
+                potpis dat: evidentiranje ne zamenjuje potpis na papiru{" "}
+                {`(${korak.pravniOsnov}).`}
               </p>
               <Field className="w-auto">
                 <FieldLabel htmlFor="popis-potpisnici">

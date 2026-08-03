@@ -333,8 +333,8 @@ const TEMPLATES: &[Template] = &[
              čuvaju se pet godina, a rok se računa od poslednjeg dana poslovne godine na koju se \
              odnose (čl. 28 st. 9). Nijedan propis ne imenuje popisne liste izričito, pa je ovo \
              zaključak a ne izričita odredba; rok se pomera samo unapred. Izveštaj o popisu se ne \
-             čuva u aplikaciji — sastavlja se i štampa na zahtev, pa štampani primerak čuva \
-             obveznik.",
+             čuva u aplikaciji — sastavlja se na zahtev i prikazuje na ekranu, a program ga ne \
+             štampa i ne izvozi; štampani primerak sastavlja i čuva sam obveznik.",
         retention: Some(RecordClass::PopisDokumentacija),
         mere: "Podaci iz knjigovodstva o količinama ne izdaju se komisiji pre nego što je stvarno \
              stanje upisano u popisne liste i pre nego što su te liste potpisane (Pravilnik o \
