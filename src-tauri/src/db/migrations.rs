@@ -1395,6 +1395,43 @@ END;
 -- log and v19 for the cenovnik archive.
 "#,
     },
+    Migration {
+        version: 21,
+        name: "popis_plan_rada_approval_and_odluka_date",
+        sql: r#"
+-- Req. 35 / PoP čl. 8 st. 1–2. v20 stored the plan rada's text (plan_rada_json)
+-- and a free-text reference to the odluka (odluka_ref), but neither carried the
+-- ACT: čl. 8 st. 2 requires the plan to be approved by the lice iz čl. 4 st. 2 —
+-- for a preduzetnik the owner personally (čl. 4 st. 2 → ZoRač čl. 43 st. 3) — and
+-- with no record of who approved it and when, an approved plan and a merely typed
+-- one read back identically.
+--
+-- All three columns are nullable and nothing is backfilled. An existing session
+-- has no approval, and a popis may legitimately be opened before the plan is
+-- approved; writing one in on the shop's behalf would record a čl. 8 st. 2 act
+-- that nobody performed, which is a worse defect than the missing column.
+ALTER TABLE popis_sessions ADD COLUMN plan_rada_odobrio TEXT
+    CHECK (plan_rada_odobrio IS NULL OR plan_rada_odobrio <> '');
+-- The pairing is the point. An approver with no date, or a date with no approver,
+-- is not an approval — it is half a record of one, and čl. 8 st. 2 is satisfied
+-- only by the whole. SQLite evaluates every CHECK on every write regardless of
+-- which column the statement names, so this one constraint refuses both halves,
+-- on INSERT and on UPDATE, in either direction (recording and withdrawing).
+ALTER TABLE popis_sessions ADD COLUMN plan_rada_odobreno_at TEXT
+    CHECK ((plan_rada_odobreno_at IS NULL OR plan_rada_odobreno_at <> '')
+           AND (plan_rada_odobrio IS NULL) = (plan_rada_odobreno_at IS NULL));
+-- The odluka o popisu i obrazovanju komisije is a separate act from the approval
+-- of the plan rada, so its date stands alone rather than pairing with anything.
+-- RFC3339 like every other decision stamp in this schema, supplied as `now: &str`.
+ALTER TABLE popis_sessions ADD COLUMN odluka_doneta_at TEXT
+    CHECK (odluka_doneta_at IS NULL OR odluka_doneta_at <> '');
+-- No trigger work: v20's trg_popis_sessions_zakljucan fires BEFORE UPDATE on the
+-- whole row (WHEN OLD.status = 'posted') rather than naming columns, so the
+-- req. 41 posting lock already covers these three. That is asserted by test, not
+-- assumed — an approval recorded after the čl. 14 st. 3 knjiženje would date a
+-- čl. 8 st. 2 act to after the popis it was supposed to precede.
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -2296,6 +2333,375 @@ mod tests {
                 )
                 .is_err(),
                 "the v19 immutability trigger must survive the v20 upgrade"
+            );
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// SW-16 follow-on, req. 35 / PoP čl. 8 st. 1–2: the plan rada is not merely
+    /// written, it is APPROVED by the lice iz čl. 4 st. 2 — for a preduzetnik the
+    /// owner personally (čl. 4 st. 2 → ZoRač čl. 43 st. 3) — and the odluka o
+    /// popisu i obrazovanju komisije is issued before the count. v20 stored the
+    /// plan's text and a free-text reference to the odluka, so an approved plan
+    /// and a merely typed one read back identically.
+    ///
+    /// The pairing CHECK is the load-bearing part: an approver with no date, or a
+    /// date with no approver, is not an approval, and a half-recorded one is the
+    /// false-record class this project keeps catching.
+    #[test]
+    fn migration_v21_records_the_plan_rada_approval_and_the_odluka_date() {
+        let path = test_database_path("migration_v21_plan_approval");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            for column in [
+                "plan_rada_odobrio",
+                "plan_rada_odobreno_at",
+                "odluka_doneta_at",
+            ] {
+                assert!(
+                    column_exists(&conn, "popis_sessions", column),
+                    "popis_sessions should carry {column} after v21"
+                );
+            }
+
+            // A popis may legitimately be opened before the plan is approved, and
+            // nothing approves it on the session's behalf: an approval nobody
+            // performed would be a false record of a čl. 8 st. 2 act.
+            seed_popis_session(&conn, 1, "draft");
+            let (odobrio, odobreno_at, odluka_at): (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "SELECT plan_rada_odobrio, plan_rada_odobreno_at, odluka_doneta_at
+                       FROM popis_sessions WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("the fresh session should read back");
+            assert_eq!(
+                (odobrio, odobreno_at, odluka_at),
+                (None, None, None),
+                "a new popis carries no approval — čl. 8 st. 2 is an act, not a default"
+            );
+
+            // Each half-state, by UPDATE and by INSERT. Both directions matter:
+            // a session can be born half-approved just as easily as edited into it.
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions SET plan_rada_odobrio = 'Miloš Đurđević' WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "an approver with no date is not a čl. 8 st. 2 approval"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions SET plan_rada_odobreno_at = '2026-12-29T09:00:00Z'
+                      WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "a date with no approver is not a čl. 8 st. 2 approval"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO popis_sessions (id, vrsta, prodajno_mesto, datum_popisa, status,
+                                                 plan_rada_odobrio, created_at, updated_at)
+                     VALUES (9, 'godisnji', 'Butik Centar', '2026-12-31', 'draft',
+                             'Miloš Đurđević', '2026-12-29T09:00:00Z', '2026-12-29T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "nor may a session be born half-approved"
+            );
+
+            // Blank is the half-state wearing a value: an empty approver names
+            // nobody and an empty stamp dates nothing.
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions
+                        SET plan_rada_odobrio = '', plan_rada_odobreno_at = '2026-12-29T09:00:00Z'
+                      WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "an empty approver names nobody"
+            );
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions
+                        SET plan_rada_odobrio = 'Miloš Đurđević', plan_rada_odobreno_at = ''
+                      WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "an empty approval stamp dates nothing"
+            );
+
+            // The whole approval, recorded in one write, is ordinary.
+            conn.execute(
+                "UPDATE popis_sessions
+                    SET plan_rada_odobrio = 'Miloš Đurđević',
+                        plan_rada_odobreno_at = '2026-12-29T09:00:00Z',
+                        updated_at = '2026-12-29T09:00:00Z'
+                  WHERE id = 1",
+                [],
+            )
+            .expect("an approver and a date together are an approval");
+            let (odobrio, odobreno_at): (String, String) = conn
+                .query_row(
+                    "SELECT plan_rada_odobrio, plan_rada_odobreno_at FROM popis_sessions
+                      WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the approval should read back");
+            assert_eq!(
+                (odobrio.as_str(), odobreno_at.as_str()),
+                ("Miloš Đurđević", "2026-12-29T09:00:00Z")
+            );
+
+            // And withdrawing it is the same rule in reverse: both halves go, or
+            // neither does.
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions SET plan_rada_odobreno_at = NULL WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "an approval cannot be half-withdrawn either"
+            );
+
+            // The odluka date stands on its own: čl. 8 st. 2's approval of the plan
+            // and the odluka o popisu i obrazovanju komisije are separate acts.
+            conn.execute(
+                "UPDATE popis_sessions SET odluka_doneta_at = '2026-12-20T10:00:00Z' WHERE id = 1",
+                [],
+            )
+            .expect("the odluka date is independent of the plan approval");
+            assert!(
+                conn.execute(
+                    "UPDATE popis_sessions SET odluka_doneta_at = '' WHERE id = 1",
+                    [],
+                )
+                .is_err(),
+                "an empty odluka stamp says the odluka was issued at no time"
+            );
+
+            // Req. 41 — the posting lock reaches the new columns, because v20's
+            // trigger freezes the whole row rather than naming columns. An approval
+            // recorded after the čl. 14 st. 3 knjiženje would date a čl. 8 st. 2 act
+            // to after the popis it was supposed to precede.
+            seed_popis_session(&conn, 2, "posted");
+            for assignment in [
+                "plan_rada_odobrio = 'Neko', plan_rada_odobreno_at = '2027-02-01T09:00:00Z'",
+                "odluka_doneta_at = '2027-02-01T09:00:00Z'",
+            ] {
+                let error = conn
+                    .execute(
+                        &format!("UPDATE popis_sessions SET {assignment} WHERE id = 2"),
+                        [],
+                    )
+                    .expect_err("a posted popis takes no further approval");
+                assert!(
+                    error.to_string().contains("Proknjižen popis"),
+                    "the posting lock, not a CHECK, must be what refuses {assignment}: {error}"
+                );
+            }
+        }
+        std::fs::remove_file(&path).expect("test database should be removed");
+    }
+
+    /// The installed-base path: a till already running v20 gains the čl. 8 st. 2
+    /// approval columns without losing a popis, a counted line or a potpis — and
+    /// without being handed an approval it never performed. Seeding through a raw
+    /// connection at `MIGRATIONS[..20]` and only then opening with `Db::new` is what
+    /// makes this provable; seeding after `Db::new` would prove a new-schema round
+    /// trip and nothing about the upgrade (commit 270796c).
+    #[test]
+    fn migration_v21_preserves_pre_existing_rows() {
+        let path = test_database_path("migration_v21_survival");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw connection");
+            conn.execute_batch(
+                "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);",
+            )
+            .expect("migrations table");
+
+            for migration in &MIGRATIONS[..20] {
+                assert!(
+                    migration.version <= 20,
+                    "the pre-v21 prefix must stop at v20, saw v{}",
+                    migration.version
+                );
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, '2026-08-02T00:00:00Z')",
+                    rusqlite::params![migration.version, migration.name],
+                )
+                .expect("record the migration");
+            }
+
+            conn.execute_batch(
+                "INSERT INTO tax_rates (id, name, rate_basis_points, created_at, updated_at)
+                     VALUES (210, 'PDV 20', 2000, '2026-07-01T08:00:00Z', '2026-07-01T08:00:00Z');
+                 INSERT INTO products (id, name, sku, barcode, unit_of_measure, sale_price_minor,
+                                       purchase_price_minor, tax_rate_id, minimum_stock_milli,
+                                       created_at, updated_at)
+                     VALUES (210, 'Marama svilena', 'MAR-001', '0123456789012', 'kom', 249900,
+                             120000, 210, 0, '2026-07-01T08:00:00Z', '2026-07-20T08:00:00Z');
+                 INSERT INTO popis_sessions (id, vrsta, prodajno_mesto, datum_popisa, period_from,
+                                             period_to, status, plan_rada_json, odluka_ref,
+                                             uskladjivanje_potvrdjeno_at, created_at, updated_at)
+                     VALUES (210, 'godisnji', 'Butik Centar', '2026-12-31', '2026-01-01',
+                             '2026-12-31', 'computed', '{\"smene\":\"08-16\"}', 'Odluka 3/2026',
+                             '2026-12-30T07:00:00Z', '2026-12-31T08:00:00Z', '2026-12-31T18:00:00Z');
+                 INSERT INTO popis_commission (id, session_id, ime, uloga, rukuje_imovinom, created_at)
+                     VALUES (210, 210, 'Miloš Đurđević', 'predsednik', 0, '2026-12-30T08:00:00Z');
+                 INSERT INTO popis_signatures (id, session_id, faza, potpisnik, potpisano_at,
+                                               snapshot_hash, created_at)
+                     VALUES (210, 210, 'a', 'Miloš Đurđević', '2026-12-31T17:00:00Z', 'hash-a',
+                             '2026-12-31T17:00:00Z');
+                 INSERT INTO popis_lines (id, session_id, lista_vrsta, sifra, naziv, vrsta,
+                                          jedinica_mere, stvarna_kolicina_milli, blizi_opis,
+                                          knjigovodstvena_kolicina_milli, cena_minor,
+                                          created_at, updated_at)
+                     VALUES (210, 210, 'roba', 'MAR-001', 'Marama svilena', 'roba u prodavnici',
+                             'kom', 7000, 'blago oštećena ambalaža', 9000, 249900,
+                             '2026-12-31T09:00:00Z', '2026-12-31T17:30:00Z');",
+            )
+            .expect("seed v20-era rows");
+            drop(conn);
+
+            let db = Db::new(&path).expect("database should migrate forward");
+            let conn = db.open().expect("database should open");
+
+            let (name, barcode, price): (String, String, i64) = conn
+                .query_row(
+                    "SELECT name, barcode, sale_price_minor FROM products WHERE id = 210",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("the pre-v21 product must survive verbatim");
+            assert_eq!(
+                (name.as_str(), barcode.as_str(), price),
+                ("Marama svilena", "0123456789012", 249900),
+                "the leading zero of a 13-digit barcode must survive as text"
+            );
+
+            let (vrsta, mesto, datum, status, plan, odluka, uskladjivanje, created): (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+            ) = conn
+                .query_row(
+                    "SELECT vrsta, prodajno_mesto, datum_popisa, status, plan_rada_json,
+                            odluka_ref, uskladjivanje_potvrdjeno_at, created_at
+                       FROM popis_sessions WHERE id = 210",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
+                )
+                .expect("the pre-v21 popis session must survive verbatim");
+            assert_eq!(
+                (
+                    vrsta.as_str(),
+                    mesto.as_str(),
+                    datum.as_str(),
+                    status.as_str(),
+                    plan.as_str(),
+                    odluka.as_str(),
+                    uskladjivanje.as_str(),
+                    created.as_str(),
+                ),
+                (
+                    "godisnji",
+                    "Butik Centar",
+                    "2026-12-31",
+                    "computed",
+                    "{\"smene\":\"08-16\"}",
+                    "Odluka 3/2026",
+                    "2026-12-30T07:00:00Z",
+                    "2026-12-31T08:00:00Z",
+                )
+            );
+
+            let (stvarna, knjigovodstvena, cena, opis): (i64, i64, i64, String) = conn
+                .query_row(
+                    "SELECT stvarna_kolicina_milli, knjigovodstvena_kolicina_milli, cena_minor,
+                            blizi_opis
+                       FROM popis_lines WHERE id = 210",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("the counted line must survive the upgrade");
+            assert_eq!(
+                (stvarna, knjigovodstvena, cena, opis.as_str()),
+                (7000, 9000, 249900, "blago oštećena ambalaža"),
+                "quantities are milli-units and money is para — the upgrade rounds nothing"
+            );
+
+            let (potpisnik, potpisano_at, hash): (String, String, String) = conn
+                .query_row(
+                    "SELECT potpisnik, potpisano_at, snapshot_hash FROM popis_signatures
+                      WHERE id = 210",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("the čl. 8 st. 5 potpis must survive the upgrade");
+            assert_eq!(
+                (potpisnik.as_str(), potpisano_at.as_str(), hash.as_str()),
+                ("Miloš Đurđević", "2026-12-31T17:00:00Z", "hash-a")
+            );
+
+            // The upgrade approves nothing. An approval nobody performed is exactly
+            // the false record čl. 8 st. 2 is about, so a backfill here would be
+            // worse than the missing column it replaced.
+            let (odobrio, odobreno_at, odluka_doneta_at): (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = conn
+                .query_row(
+                    "SELECT plan_rada_odobrio, plan_rada_odobreno_at, odluka_doneta_at
+                       FROM popis_sessions WHERE id = 210",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("the new columns should read back");
+            assert_eq!(
+                (odobrio, odobreno_at, odluka_doneta_at),
+                (None, None, None),
+                "an upgraded popis has an unapproved plan, not an approval it never got"
+            );
+
+            // The upgrade must not have quietly rebuilt the v20 table: the čl. 8
+            // st. 5 blind-count trigger is still the thing standing between a
+            // counting commission and the book quantities.
+            seed_popis_session(&conn, 211, "counting");
+            assert!(
+                insert_popis_line(&conn, 211, "Marama svilena", Some(9000)).is_err(),
+                "the v20 blind-count trigger must survive the v21 upgrade"
             );
         }
         std::fs::remove_file(&path).expect("test database should be removed");

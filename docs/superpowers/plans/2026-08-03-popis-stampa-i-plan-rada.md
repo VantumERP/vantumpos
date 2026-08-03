@@ -48,8 +48,10 @@ All nullable: an existing session has none, and a popis may legitimately be open
 
 The posting write-lock must extend to these columns; check whether v20's trigger already covers the whole row or names columns, and match it.
 
-- [ ] **Step 1: Write the failing tests** — the three columns exist; the pairing CHECK refuses each half-state; the posting lock covers them; **a v20-seeded survival test applying `MIGRATIONS[..20]` to a raw Connection, seeding a session, `drop(conn)`, then `Db::new`, asserting the seeded row survives verbatim** — mirror commit `270796c`. A test that seeds after `Db::new` proves nothing.
-- [ ] **Steps 2–5:** run red, implement, run green, commit.
+- [x] **Step 1: Write the failing tests** — the three columns exist; the pairing CHECK refuses each half-state; the posting lock covers them; **a v20-seeded survival test applying `MIGRATIONS[..20]` to a raw Connection, seeding a session, `drop(conn)`, then `Db::new`, asserting the seeded row survives verbatim** — mirror commit `270796c`. A test that seeds after `Db::new` proves nothing.
+- [x] **Steps 2–5:** run red, implement, run green, commit.
+
+**Shipped.** v21 `popis_plan_rada_approval_and_odluka_date`, three `ALTER TABLE … ADD COLUMN`s, no trigger work: v20's `trg_popis_sessions_zakljucan` fires on the whole row (`WHEN OLD.status = 'posted'`), so the req. 41 lock already reached the new columns — asserted by test rather than assumed. **Deviation:** each column also carries a non-empty CHECK (`… IS NULL OR … <> ''`) beyond the pairing the plan specified, because a blank approver names nobody and a blank stamp dates nothing — the half-state wearing a value. Nothing is backfilled; an upgraded popis reads back unapproved.
 
 ---
 
