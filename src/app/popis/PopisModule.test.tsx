@@ -366,6 +366,50 @@ describe("PopisModule — the statutory sequence", () => {
     expect(fazaB).toHaveTextContent(/PoP čl\. 9 st\. 3/);
     expect(fazaB).not.toHaveTextContent(/čl\. 8 st\. 5/);
   });
+
+  /**
+   * A string must not state the opposite of what the program does, and that runs
+   * in both directions. This paragraph used to end „program ih ne štampa i ne
+   * izvozi“, which was true until `popis_export_lista` shipped and false the
+   * moment it did: the backend now renders both popisne liste and writes them to
+   * `exports/`. Flipping the sentence the other way would be the same defect
+   * again — this panel has no button on it, so a sentence announcing an export
+   * would send the operator hunting for one. So the paragraph makes no claim
+   * about the program at all: it states the operator's duty and what recording
+   * the potpis here does and does not do.
+   *
+   * The izveštaj carries the opposite sentence and it is still true — čl. 13
+   * st. 1's izveštaj is composed on screen and nothing exports it. That claim is
+   * about a different document and `IzvestajPanel.test.tsx` pins it separately;
+   * this assertion is scoped to this paragraph so the two cannot be confused.
+   */
+  it("does not deny the print and the export the backend now has", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await user.click(
+      await screen.findByRole("button", { name: /započni brojanje/i }),
+    );
+
+    const fazaA = await screen.findByText(/ne zamenjuje potpis na papiru/i);
+    expect(fazaA).not.toHaveTextContent(/ne štampa/i);
+    expect(fazaA).not.toHaveTextContent(/ne izvozi/i);
+
+    await user.click(
+      screen.getByRole("button", { name: /potpiši stvarno stanje/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /obračunaj razlike/i }),
+    );
+    await screen.findByRole("button", { name: /potpiši obračunate liste/i });
+
+    const fazaB = screen.getByText(/ne zamenjuje potpis na papiru/i);
+    expect(fazaB).not.toHaveTextContent(/ne štampa/i);
+    expect(fazaB).not.toHaveTextContent(/ne izvozi/i);
+  });
 });
 
 describe("PopisModule — the čl. 9 st. 2 shortcut (req. 34)", () => {

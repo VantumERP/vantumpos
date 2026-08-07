@@ -2651,8 +2651,20 @@ mod tests {
 
     /// The commands take a Tauri `State`, so a headless mock app is needed to
     /// obtain a real managed state — the pattern `reklamacije.rs` established.
+    ///
+    /// **A directory of its own, not merely a file of its own.**
+    /// `campaigns::write_export` resolves `exports/` beside the database, so tests
+    /// whose databases share `std::env::temp_dir()` share one `exports/` — and the
+    /// popisna-lista file name is a pure function of the popis id and the phase,
+    /// which in a fresh database is always `popisne-liste-1-faza-{a|b}.html`. Under
+    /// a plain `cargo test` the export tests then wrote, read back and deleted each
+    /// other's sheets. So the database goes one level down, the way
+    /// `cenovnik::with_publish_folder` does it, and the teardown takes the folder
+    /// whole: the WAL sidecars and every exported sheet go with it, and no test
+    /// needs to clean up a file by hand.
     fn with_app(test_name: &str, test: impl FnOnce(&tauri::App<tauri::test::MockRuntime>)) {
-        let path = test_database_path(test_name);
+        let folder = test_database_path(test_name).with_extension("");
+        let path = folder.join("popis.sqlite3");
 
         {
             let db = Db::new(&path).expect("database should initialize");
@@ -2663,7 +2675,7 @@ mod tests {
             test(&app);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        std::fs::remove_dir_all(&folder).expect("test folder should be removed");
     }
 
     fn sign_in_admin(state: &AppState) {
@@ -6150,6 +6162,54 @@ mod tests {
             .join(file_name)
     }
 
+    /// The isolation the „no document was left behind“ assertions rest on.
+    ///
+    /// `write_export` resolves `exports/` beside the database and the sheet's name
+    /// is a pure function of the popis id and the phase. Every `with_app` database
+    /// is fresh, so every test here allocates popis id 1 and asks for
+    /// `popisne-liste-1-faza-{a|b}.html` — one name for the lot of them. While the
+    /// database sat directly in `std::env::temp_dir()` that was one shared file:
+    /// under a plain `cargo test` one test read its export after another test's
+    /// cleanup had deleted it, and `!putanja.exists()` — the assertion that pins
+    /// the guard running *before* the write — could have gone green because a
+    /// different test removed the document. The gate pins `--test-threads=1` and
+    /// hid both.
+    #[test]
+    fn every_popis_test_exports_into_a_directory_of_its_own() {
+        let koren = std::env::temp_dir();
+        let mut putanje = Vec::new();
+        for test_name in ["popis_izolacija_prva", "popis_izolacija_druga"] {
+            with_app(test_name, |app| {
+                putanje.push(izvezena_putanja(
+                    app.state::<AppState>().inner(),
+                    "popisne-liste-1-faza-b.html",
+                ));
+            });
+        }
+
+        assert_ne!(
+            putanje[0], putanje[1],
+            "two popis tests must not be able to write, read and delete one path"
+        );
+        for putanja in &putanje {
+            let direktorijum = putanja
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("an export sits in exports/ beside the database");
+            assert_ne!(
+                direktorijum,
+                koren.as_path(),
+                "the exports/ directory must be this test's own and not the temp root's: {}",
+                putanja.display()
+            );
+            assert!(
+                !direktorijum.exists(),
+                "with_app has to take the whole directory with it, exports and all: {}",
+                direktorijum.display()
+            );
+        }
+    }
+
     /// A popis counted, signed under čl. 8 st. 5 and taken into the obračun — the
     /// only state in which a čl. 9 st. 3 sheet lawfully exists. `sign_phase_a`
     /// fills the book column from the perpetual record, so the row afterwards
@@ -6234,7 +6294,6 @@ mod tests {
                 html.contains("Košulja"),
                 "the sheet still has to carry what was counted: {html}"
             );
-            std::fs::remove_file(&exported.path).ok();
         });
     }
 
@@ -6250,7 +6309,6 @@ mod tests {
             sign_in_admin(state.inner());
             let putanja =
                 izvezena_putanja(state.inner(), &format!("popisne-liste-{id}-faza-b.html"));
-            std::fs::remove_file(&putanja).ok();
 
             let error = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::B))
                 .expect_err("the čl. 9 st. 3 sheet does not exist before the čl. 8 st. 5 potpis");
@@ -6307,7 +6365,56 @@ mod tests {
                 html.contains("čl. 9 st. 3"),
                 "the sheet names the provision it is printed under: {html}"
             );
-            std::fs::remove_file(&exported.path).ok();
+        });
+    }
+
+    /// Req. 32 makes the obveznik, its PIB and its matični broj a limb of the
+    /// requirement, and a signed sheet whose header identifies nobody identifies
+    /// nothing. The command has to reach the settings row for them.
+    ///
+    /// This is asserted because nothing else could assert it: every test database
+    /// here is bare, `load_company_settings` falls back to `CompanySettings::
+    /// default()` — „VantumPOS“, empty PIB, empty matični broj — and the renderer's
+    /// own tests hand it a fixture. Replacing the command's lookup with the default
+    /// therefore produced byte-identical HTML in every other test in the crate. The
+    /// seeded identity is asserted on the file, and the default name is asserted
+    /// absent, so the fallback cannot pass for the lookup.
+    #[test]
+    fn the_exported_sheet_carries_the_obveznik_the_shop_registered() {
+        with_app("popis_export_obveznik", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_computed(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+            crate::commands::settings::save_company_settings(
+                state.inner(),
+                crate::commands::settings::CompanySettingsRequest {
+                    shop_name: "Zlatara Đurđević doo".to_string(),
+                    address: "Njegoševa 12, Beograd".to_string(),
+                    pib: "111222333".to_string(),
+                    registration_number: "64123456".to_string(),
+                    phone: "0113456789".to_string(),
+                    logo_path: None,
+                    currency: "RSD".to_string(),
+                },
+            )
+            .expect("the company settings should save");
+
+            let exported = popis_export_lista(app.state::<AppState>(), id, None)
+                .expect("the obračunate liste should export");
+
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(
+                html.contains("Zlatara Đurđević doo"),
+                "the sheet has to name the obveznik the shop registered: {html}"
+            );
+            assert!(html.contains("111222333"), "…with its PIB: {html}");
+            assert!(html.contains("64123456"), "…and its matični broj: {html}");
+            assert!(
+                !html.contains("VantumPOS"),
+                "the CompanySettings::default() fallback must not stand in for the \
+                 obveznik: {html}"
+            );
         });
     }
 
@@ -6330,8 +6437,6 @@ mod tests {
 
             assert_eq!(a.file_name, format!("popisne-liste-{prvi}-faza-a.html"));
             assert_eq!(b.file_name, format!("popisne-liste-{drugi}-faza-b.html"));
-            std::fs::remove_file(&a.path).ok();
-            std::fs::remove_file(&b.path).ok();
         });
     }
 
@@ -6379,7 +6484,6 @@ mod tests {
             sign_in_admin(state.inner());
             let putanja_b =
                 izvezena_putanja(state.inner(), &format!("popisne-liste-{id}-faza-b.html"));
-            std::fs::remove_file(&putanja_b).ok();
 
             let error = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::B))
                 .expect_err("a status nobody signed for must not release the book side");
@@ -6399,7 +6503,6 @@ mod tests {
             let html =
                 std::fs::read_to_string(&exported.path).expect("the export should be on disk");
             assert!(!html.to_lowercase().contains("knjigovodstven"), "{html}");
-            std::fs::remove_file(&exported.path).ok();
         });
     }
 
@@ -6430,7 +6533,6 @@ mod tests {
                 "the reprint is the čl. 8 st. 5 document, columns and all: {html}"
             );
             assert!(html.contains("Košulja"), "{html}");
-            std::fs::remove_file(&exported.path).ok();
         });
     }
 

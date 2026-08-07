@@ -846,16 +846,22 @@ function PopisDetail({
                 the operator two articles for one act, and cited the „uz
                 štampanje“ rule for a potpis it does not govern.
 
-                And the printing is the shop's own: this application has no print
-                and no export for a popisna lista, which is the module's largest
-                disclosed hole, so the sentence says so rather than sending the
-                operator looking for a button.
+                The paragraph makes no claim about what the program can output.
+                It used to end „program ih ne štampa i ne izvozi“, which was
+                honest while it was true and stopped being true when
+                `popis_export_lista` shipped — the backend renders both popisne
+                liste and writes them to `exports/`. Announcing that export here
+                would be the same defect facing the other way: this panel has no
+                such button yet, and a sentence promising one sends the operator
+                hunting. So the sentence states the duty, which is the shop's
+                either way, and stops there. The izveštaj keeps its own „program
+                ga ne štampa i ne izvozi“ — that is a different document and it
+                is still true.
               */}
               <p className="text-sm">
-                Odštampajte popisne liste i neka ih članovi komisije potpišu —
-                program ih ne štampa i ne izvozi. Ovde se evidentira da je taj
-                potpis dat: evidentiranje ne zamenjuje potpis na papiru{" "}
-                {`(${korak.pravniOsnov}).`}
+                Odštampajte popisne liste i neka ih članovi komisije potpišu.
+                Ovde se evidentira da je taj potpis dat: evidentiranje ne
+                zamenjuje potpis na papiru {`(${korak.pravniOsnov}).`}
               </p>
               <Field className="w-auto">
                 <FieldLabel htmlFor="popis-potpisnici">
