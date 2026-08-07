@@ -543,6 +543,59 @@ describe("WorkTimeModule protection findings", () => {
       await screen.findByText(/nije ispravan datum/i),
     ).toBeInTheDocument();
   });
+
+  /**
+   * The čl. 87 weekly leg is the opposite of the two above: the statute states
+   * the prohibition itself, so the backend REFUSES the row and the finding comes
+   * back on the ERROR path, inside `details.protections`. That branch had no
+   * test at all, and a block the operator never sees is a refusal they cannot
+   * act on — they would be told only „Dan nije evidentiran“ about a day that
+   * looks lawful on its own, since eight hours breaches no daily leg.
+   *
+   * The fixture is the exact payload `write_entry` serializes, variant name
+   * included: `maloletanNedeljniLimit` is a value this module never enumerates,
+   * which is the point — it renders every `ProtectionKind` off `blocking` and
+   * `poruka`, so a new variant surfaces without a branch being added for it.
+   */
+  it("surfaces the blocking čl. 87 weekly finding a refused save carries", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    const poruka =
+      "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova nedeljno (ZoR čl. 87). Za dane ove kalendarske nedelje u kojima je zaposleni mlađi od 18 godina već je evidentirano 35 č 00 min, a sa ovim danom bilo bi 43 č 00 min.";
+    vi.spyOn(services.worktime, "saveEntry").mockRejectedValue({
+      code: "protection_block",
+      message: poruka,
+      details: {
+        protections: [
+          { kind: "maloletanNedeljniLimit", blocking: true, poruka },
+        ],
+      },
+    });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+
+    await setMinutes(user, /efektivno izvršeni/i, "480");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+
+    const alert = (
+      await screen.findByText(/Unos nije dozvoljen/i)
+    ).closest<HTMLElement>('[data-slot="alert"]');
+    expect(alert).not.toBeNull();
+    expect(within(alert!).getByText(/35 časova nedeljno/)).toBeInTheDocument();
+    expect(within(alert!).getByText(/ZoR čl\. 87/)).toBeInTheDocument();
+    // The figures the refusal names: what the week already holds, and what this
+    // day would have made it. The register holds neither 43 h nor this day.
+    expect(within(alert!).getByText(/već je evidentirano 35 č 00 min/)).toBeInTheDocument();
+
+    // A prohibition must not be dressed as a note — that is the title the čl. 90
+    // advisory carries, and it is the wrong one here.
+    expect(
+      screen.queryByText(/napomena o zaštiti zaposlenog/i),
+    ).not.toBeInTheDocument();
+    // And the operator is told the day did not go in.
+    expect(screen.getByText(/Dan nije evidentiran/i)).toBeInTheDocument();
+  });
 });
 
 describe("WorkTimeModule day selection", () => {

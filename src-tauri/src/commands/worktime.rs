@@ -1995,6 +1995,148 @@ mod tests {
         });
     }
 
+    /// The čl. 87 weekly leg driven through the real write path with the profile
+    /// filled in **before** the first day, and counted afterwards.
+    ///
+    /// [`a_birth_date_filled_in_later_does_not_lock_a_minors_recorded_week`] runs
+    /// the other order and cannot answer this question: there the week was
+    /// recorded while `datum_rodjenja` was still empty and the minor guards were
+    /// dormant, so nothing was ever refused with the guard live for the whole
+    /// week. Here it is live for every single write.
+    ///
+    /// What this pins is not that `check_protection` returns the finding —
+    /// `worktime::tests` pins that — but that [`write_entry`] **refuses the row**
+    /// on it. A guard the write path computes and then discards is the same as no
+    /// guard, and in an append-only register the difference is permanent: a row
+    /// this leg let through could never be withdrawn, only superseded, and it
+    /// would stand in the evidencija as a week the employer recorded over the
+    /// cap. So the month is listed afterwards and the live rows are counted; the
+    /// refusal has to mean the INSERT never happened, not that the operator saw a
+    /// message.
+    ///
+    /// Six eight-hour days is the shape the weekly leg exists for — every one of
+    /// them satisfies the eight-hour daily leg exactly, which is why the daily
+    /// leg alone never sees the 48 h — but six of them cannot be written through
+    /// this path, because the *fifth* is already 40 h and is refused. The Friday
+    /// here is therefore a short three-hour day, which leaves the week on exactly
+    /// the 35 časova čl. 87 allows, and the Saturday is the write that would
+    /// raise it past.
+    #[test]
+    fn the_cl_87_weekly_leg_refuses_the_write_and_leaves_no_row_behind() {
+        with_state("worktime_cl87_weekly_leaves_no_row", |state| {
+            sign_in_admin(state);
+            let maloletnik = seed_employee(state, "radnik8c", "Radnik Osam C");
+            // Seventeen for the whole of that week, and on file before the first
+            // write rather than after it.
+            set_datum_rodjenja(state, maloletnik, "2009-01-15");
+
+            // Ponedeljak–četvrtak, eight hours each: 32 h, inside both legs.
+            for dan in ["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06"] {
+                let saved = save_entry(
+                    state,
+                    radni_dan(maloletnik, dan, 480, 0),
+                    &format!("{dan}T20:00:00Z"),
+                )
+                .expect("eight hours a day is inside both legs of čl. 87");
+                assert!(
+                    saved.protections.is_empty(),
+                    "an eight-hour day of a minor raises nothing: {:?}",
+                    saved.protections
+                );
+            }
+
+            // Petak, three hours: the week stands at exactly 35 h. „Do 35 časova“
+            // is the cap itself, so this must record.
+            let saved = save_entry(
+                state,
+                radni_dan(maloletnik, "2026-08-07", 180, 0),
+                "2026-08-07T20:00:00Z",
+            )
+            .expect("35 časova is the cap, not a breach of it");
+            assert!(saved.protections.is_empty());
+
+            // Subota, eight hours: 43 h. Refused, and refused on the weekly leg —
+            // the day itself is eight hours, so the daily leg has nothing to say.
+            let error = save_entry(
+                state,
+                radni_dan(maloletnik, "2026-08-08", 480, 0),
+                "2026-08-08T20:00:00Z",
+            )
+            .expect_err("the sixth day of a minor's week breaches ZoR čl. 87");
+            assert_eq!(error.code(), "protection_block");
+            let poruka = error.to_string();
+            assert!(
+                poruka.contains("35 časova nedeljno") && poruka.contains("čl. 87"),
+                "the refusal must name the article and the figure: {poruka}"
+            );
+            assert!(
+                poruka.contains("već je evidentirano 35 č 00 min")
+                    && poruka.contains("bilo bi 43 č 00 min"),
+                "the refusal names what stands and what this day would make it: {poruka}"
+            );
+
+            // What the command layer actually serializes — this is the payload
+            // `WorkTimeModule` reads back out of `details.protections` to render
+            // the refusal, so the wire value of the variant is pinned here.
+            let command_error = crate::app_error::CommandError::from(error);
+            assert_eq!(command_error.code, "protection_block");
+            let details = command_error
+                .details
+                .expect("a refusal carries the findings it was refused on");
+            let protections = details["protections"]
+                .as_array()
+                .expect("the details carry the protection array")
+                .clone();
+            assert_eq!(
+                protections.len(),
+                1,
+                "the eight-hour day breaches the weekly leg only: {protections:?}"
+            );
+            assert_eq!(protections[0]["kind"], "maloletanNedeljniLimit");
+            assert_eq!(protections[0]["blocking"], true);
+
+            // čl. 87 states the prohibition itself, so there is no ground that
+            // buys the day: the protection gate runs before the čl. 53 caps and
+            // an override reason does not reach it.
+            let error = save_entry(
+                state,
+                {
+                    let mut request = radni_dan(maloletnik, "2026-08-08", 480, 0);
+                    request.cap_override_razlog =
+                        Some("iznenadno_povecanje_obima_posla".to_string());
+                    request
+                },
+                "2026-08-08T20:30:00Z",
+            )
+            .expect_err("čl. 87 has no override");
+            assert_eq!(error.code(), "protection_block");
+
+            // And nothing was left behind. Five days went in, five stand, and the
+            // register holds exactly the 35 h the cap allows.
+            let mesec = list_month(state, maloletnik, 2026, 8).expect("the month should list");
+            assert_eq!(
+                mesec.entries.len(),
+                5,
+                "the refused day must not be in the register at all: {:?}",
+                mesec
+                    .entries
+                    .iter()
+                    .map(|entry| entry.dan.as_str())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                mesec.entries.iter().all(|entry| entry.dan != "2026-08-08"),
+                "a refused write may not leave a row an append-only register can \
+                 never withdraw"
+            );
+            assert!(
+                mesec.entries.iter().all(|entry| !entry.zamenjen),
+                "every one of the five is live"
+            );
+            assert_eq!(mesec.ukupno.efektivno_izvrseni_minuta, 4 * 480 + 180);
+        });
+    }
+
     #[test]
     fn absence_minutes_land_in_the_bucket_derived_from_the_category() {
         with_state("worktime_absence_bucket_derived", |state| {
