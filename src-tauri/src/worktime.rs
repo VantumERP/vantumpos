@@ -163,6 +163,20 @@ fn monday_of_week(day: &str) -> Option<Date> {
 /// hours a day. Minutes, never floating point.
 pub const MINOR_DAILY_CAP_MINUTES: i64 = 8 * 60;
 
+/// ZoR čl. 87 — the other half of the same sentence: 35 časova nedeljno for a
+/// zaposleni mlađi od 18 godina. Minutes, never floating point.
+///
+/// The two legs are independent, and the weekly one is the leg that actually
+/// binds a scheduled minor: every day of a 48-hour week can satisfy the eight-hour
+/// daily cap exactly, so a guard built out of the daily leg alone never sees it.
+/// „Nedeljno“ is the calendar week [`in_same_iso_week`] anchors on, the same one
+/// čl. 53 st. 2 is read against.
+///
+/// The čl. 88 st. 1 bans limit how the total can be reached, they do not replace
+/// this cap: a minor records no prekovremeni and no preraspodela, so the whole of
+/// the 35 h is plain scheduled work.
+pub const MINOR_WEEKLY_CAP_MINUTES: i64 = 35 * 60;
+
 /// ZoR čl. 88 st. 1 — the prohibition runs to „mlađi od 18 godina života“.
 const PUNOLETSTVO_GODINA: i32 = 18;
 
@@ -207,6 +221,11 @@ pub enum ProtectionKind {
     MaloletanPreraspodela,
     /// čl. 87 — an employee under 18 is capped at eight hours a day.
     MaloletanDnevniLimit,
+    /// čl. 87 — an employee under 18 is capped at 35 časova nedeljno, the second
+    /// leg of the same sentence and the one that binds a lawful-looking week: six
+    /// days that each satisfy [`MaloletanDnevniLimit`](ProtectionKind::MaloletanDnevniLimit)
+    /// exactly are still 48 h.
+    MaloletanNedeljniLimit,
     /// čl. 91 — a protected parent works overtime only on their written consent.
     SaglasnostRoditelja,
     /// čl. 90 — pregnancy or nursing, conditional on a health authority's finding.
@@ -246,11 +265,31 @@ pub struct ProtectionBlock {
 /// overtime. čl. 58 keeps preraspodela out of the overtime derivation, which
 /// means nothing else in this module would ever notice the prohibition.
 ///
+/// `week` is the employee's other stored days around `day`, and it carries the
+/// čl. 87 weekly leg — 35 časova nedeljno. It is filtered exactly as `assess_caps`
+/// filters it: rows outside `day`'s calendar week are dropped, and so is the
+/// stored row for `day` itself, because `entry` is the version being assessed and
+/// counting the superseded row beside it would read a correction that *lowers* a
+/// day's hours as a breach. That filter is `assess_caps`'s and is reused rather
+/// than re-derived — two copies of the same week arithmetic drift apart.
+///
+/// **`week` must carry live rows only — `MAX(verzija)` per `dan`** — precondition 1
+/// of [`assess_caps`], and it bites harder here. There a superseded row inflates a
+/// figure that merely asks the operator for a čl. 53 st. 1 ground; here it inflates
+/// a figure that **refuses the write**, so a shop correcting a minor's week
+/// downwards would be locked out of recording days that actually happened. The
+/// `dan != day` filter protects the assessed date only, never the other six.
+///
+/// The weekly leg is deliberately not routed through `assess_caps`: čl. 87 states
+/// the prohibition itself, so it blocks, while every leg `assess_caps` reports is
+/// an overridable cap the operator walks through with a recorded ground. Putting
+/// the 35 h beside the 60 h would make it look like the second kind.
+///
 /// Two limits of this function, both deliberate:
 ///
-/// 1. **The čl. 87 weekly leg (35 časova nedeljno) is not checked.** It needs the
-///    employee's week, which this signature does not carry; `assess_caps` is where
-///    a week is already in hand.
+/// 1. **The čl. 88 st. 2 night leg is not checked.** Night hours are a čl. 62
+///    computation over clock times that `DayHours` does not carry, the same reason
+///    the čl. 90 and čl. 91 night limbs are absent.
 /// 2. **An absent `datum_rodjenja` raises nothing.** v17 adds the column nullable
 ///    and does not backfill it, so treating "unknown" as "minor" would block every
 ///    employee nobody has filled in yet — and a register that refuses to describe
@@ -263,6 +302,7 @@ pub fn check_protection(
     p: &EmployeeProtection,
     day: &str,
     entry: &DayHours,
+    week: &[DayHours],
 ) -> Vec<ProtectionBlock> {
     let mut blocks = Vec::new();
     let ima_prekovremeni = entry.prekovremeni_minuta > 0;
@@ -294,6 +334,31 @@ pub fn check_protection(
                 poruka: "Zaposleni mlađi od 18 godina života ne može da radi duže od osam \
                          časova dnevno (ZoR čl. 87)."
                     .to_string(),
+            });
+        }
+        // The čl. 87 weekly leg. Both buckets are summed: čl. 88 st. 1 bans a
+        // minor's overtime separately and this module refuses it above, but a day
+        // that carried it is still hours worked, and čl. 87's figure is the week's
+        // total. Reading efektivno alone would let a refused-but-recorded minute
+        // fall out of the very total it belongs in.
+        let nedeljno_minuta: i64 = week
+            .iter()
+            .filter(|d| d.dan != day && in_same_iso_week(&d.dan, day))
+            .map(|d| d.efektivno_minuta + d.prekovremeni_minuta)
+            .sum::<i64>()
+            + entry.efektivno_minuta
+            + entry.prekovremeni_minuta;
+        if nedeljno_minuta > MINOR_WEEKLY_CAP_MINUTES {
+            blocks.push(ProtectionBlock {
+                kind: ProtectionKind::MaloletanNedeljniLimit,
+                blocking: true,
+                poruka: format!(
+                    "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova \
+                     nedeljno (ZoR čl. 87). Za kalendarsku nedelju ovog dana evidentirano je \
+                     {} č {:02} min.",
+                    nedeljno_minuta / 60,
+                    nedeljno_minuta % 60
+                ),
             });
         }
     }
@@ -652,7 +717,7 @@ mod tests {
     fn an_employee_under_eighteen_cannot_be_given_overtime_at_all() {
         // čl. 88 st. 1 — an unconditional prohibition, not a warning.
         let p = protection_born("2009-09-01");
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         let block = blocks
             .iter()
             .find(|b| b.kind == ProtectionKind::MaloletanPrekovremeni)
@@ -663,44 +728,166 @@ mod tests {
     #[test]
     fn an_employee_under_eighteen_is_capped_at_eight_hours_a_day() {
         let p = protection_born("2009-09-01");
-        let blocks = check_protection(&p, "2026-08-03", &day(540, 0));
+        let blocks = check_protection(&p, "2026-08-03", &day(540, 0), &[]);
         assert!(blocks
             .iter()
             .any(|b| b.kind == ProtectionKind::MaloletanDnevniLimit));
     }
 
-    /// **The čl. 87 weekly leg — 35 časova nedeljno — is not implemented.** Only
-    /// the daily leg is, and the register claimed both until the SW-14 review.
-    /// This pins the gap so no reader has to take the prose on trust: six lawful
-    /// eight-hour days are 48 h in one calendar week, far over 35, and
-    /// `check_protection` raises nothing, because its signature carries a day and
-    /// not a week.
-    ///
-    /// The under-18 čl. 88 st. 1 bans do limit the damage — a minor cannot reach
-    /// 35 h through overtime or preraspodela, only through plain scheduled hours.
-    ///
-    /// **When the weekly leg is built this test fails, and that is its purpose:**
-    /// it forces `docs/PROGRESS.md` and the SW-14 register row to be re-stated in
-    /// the same commit. Delete it then, together with `docs_guard`'s matching
-    /// guard — do not weaken either.
+    /// ZoR čl. 87 caps an employee under 18 at 35 časova nedeljno. Six eight-hour
+    /// days is 48 h and breaks it, while satisfying the daily leg every single
+    /// day — which is precisely why the daily leg alone never raised anything.
     #[test]
-    fn the_cl_87_weekly_leg_is_not_checked() {
+    fn six_eight_hour_days_break_the_cl_87_weekly_cap_for_a_minor() {
         let p = protection_born("2009-09-01");
-        // Monday to Saturday of one calendar week, exactly eight hours a day.
-        for dan in [
+        let week: Vec<DayHours> = [
             "2026-08-03",
             "2026-08-04",
             "2026-08-05",
             "2026-08-06",
             "2026-08-07",
-            "2026-08-08",
-        ] {
-            assert!(
-                check_protection(&p, dan, &day(480, 0)).is_empty(),
-                "{dan}: exactly 8 h satisfies the čl. 87 daily leg, and nothing in this module \
-                 counts the week — 48 h passes unremarked"
-            );
-        }
+        ]
+        .iter()
+        .map(|dan| DayHours {
+            dan: (*dan).to_string(),
+            efektivno_minuta: 480,
+            prekovremeni_minuta: 0,
+        })
+        .collect();
+
+        // The sixth day: 5 × 8 h stored + 8 h now = 48 h.
+        let blocks = check_protection(&p, "2026-08-08", &day(480, 0), &week);
+
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "48 h in one week must raise the čl. 87 weekly leg: {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit && b.blocking),
+            "čl. 87 is a prohibition, not an overridable cap: {blocks:?}"
+        );
+    }
+
+    /// Exactly 35 h is lawful — the cap is „do 35 časova“, so the breach is
+    /// strictly above it. Off by one here refuses a week the law allows.
+    #[test]
+    fn exactly_thirty_five_hours_is_within_the_cl_87_weekly_cap() {
+        let p = protection_born("2009-09-01");
+        let week: Vec<DayHours> = ["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06"]
+            .iter()
+            .map(|dan| DayHours {
+                dan: (*dan).to_string(),
+                efektivno_minuta: 420,
+                prekovremeni_minuta: 0,
+            })
+            .collect();
+
+        // 4 × 7 h stored + 7 h now = 35 h exactly.
+        let blocks = check_protection(&p, "2026-08-07", &day(420, 0), &week);
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "35 h is the cap, not a breach of it: {blocks:?}"
+        );
+    }
+
+    /// The stored row for the day being assessed must not be counted beside the
+    /// version replacing it, or a correction that LOWERS the hours reads as a
+    /// breach. This is the defect `assess_caps` already guards against.
+    #[test]
+    fn the_stored_row_for_the_day_under_assessment_is_not_double_counted() {
+        let p = protection_born("2009-09-01");
+        // The whole week is stored, including a 10 h row for the day we reassess.
+        let week: Vec<DayHours> = [
+            ("2026-08-03", 480),
+            ("2026-08-04", 480),
+            ("2026-08-05", 480),
+            ("2026-08-06", 600),
+        ]
+        .iter()
+        .map(|(dan, m)| DayHours {
+            dan: (*dan).to_string(),
+            efektivno_minuta: *m,
+            prekovremeni_minuta: 0,
+        })
+        .collect();
+
+        // Correcting 2026-08-06 down to 4 h: 3 × 8 h + 4 h = 28 h, inside the cap.
+        let blocks = check_protection(&p, "2026-08-06", &day(240, 0), &week);
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "the stored 10 h row was counted beside the 4 h correction replacing it: {blocks:?}"
+        );
+    }
+
+    /// Days in a neighbouring week are not this week's hours. `in_same_iso_week`
+    /// is Monday-based, so 2026-08-02 (a Sunday) belongs to the week before.
+    #[test]
+    fn a_neighbouring_week_does_not_feed_the_cl_87_total() {
+        let p = protection_born("2009-09-01");
+        let week: Vec<DayHours> = [
+            "2026-07-28",
+            "2026-07-29",
+            "2026-07-30",
+            "2026-07-31",
+            "2026-08-02",
+        ]
+        .iter()
+        .map(|dan| DayHours {
+            dan: (*dan).to_string(),
+            efektivno_minuta: 480,
+            prekovremeni_minuta: 0,
+        })
+        .collect();
+
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 0), &week);
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "last week's 40 h reached this week's čl. 87 total: {blocks:?}"
+        );
+    }
+
+    /// An adult is not capped at 35 h by čl. 87 at all — the article speaks only
+    /// of an employee under 18. Guarding this stops the leg leaking onto the
+    /// whole workforce, which would refuse an ordinary 40-hour week.
+    #[test]
+    fn the_cl_87_weekly_leg_does_not_reach_an_adult() {
+        let p = protection_born("1990-01-01");
+        let week: Vec<DayHours> = [
+            "2026-08-03",
+            "2026-08-04",
+            "2026-08-05",
+            "2026-08-06",
+            "2026-08-07",
+        ]
+        .iter()
+        .map(|dan| DayHours {
+            dan: (*dan).to_string(),
+            efektivno_minuta: 480,
+            prekovremeni_minuta: 0,
+        })
+        .collect();
+
+        let blocks = check_protection(&p, "2026-08-08", &day(480, 0), &week);
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "čl. 87 reaches „zaposleni mlađi od 18 godina“ only: {blocks:?}"
+        );
     }
 
     /// „Mlađi od 18 godina života“ is strictly younger, so the eighteenth
@@ -709,13 +896,13 @@ mod tests {
     #[test]
     fn the_minor_guards_stop_on_the_eighteenth_birthday() {
         let p = protection_born("2008-08-03");
-        let on_the_birthday = check_protection(&p, "2026-08-03", &day(540, 60));
+        let on_the_birthday = check_protection(&p, "2026-08-03", &day(540, 60), &[]);
         assert!(
             on_the_birthday.is_empty(),
             "an employee who turned 18 today is no longer „mlađi od 18 godina“"
         );
 
-        let day_before = check_protection(&p, "2026-08-02", &day(540, 60));
+        let day_before = check_protection(&p, "2026-08-02", &day(540, 60), &[]);
         assert!(
             day_before
                 .iter()
@@ -733,7 +920,7 @@ mod tests {
         let mut p = protection_born("2009-09-01");
         p.radi_u_preraspodeli = true;
 
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 0));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 0), &[]);
         let block = blocks
             .iter()
             .find(|b| b.kind == ProtectionKind::MaloletanPreraspodela)
@@ -747,7 +934,7 @@ mod tests {
     fn an_adult_may_work_in_preraspodela() {
         let mut p = protection_born("1990-04-11");
         p.radi_u_preraspodeli = true;
-        assert!(check_protection(&p, "2026-08-03", &day(480, 0)).is_empty());
+        assert!(check_protection(&p, "2026-08-03", &day(480, 0), &[]).is_empty());
     }
 
     /// čl. 91 is a consent given *before* the overtime. `saglasnost_prekovremeni_od`
@@ -760,7 +947,7 @@ mod tests {
         p.samohrani_roditelj = Some(true);
         p.saglasnost_prekovremeni_od = Some("2027-03-01".to_string());
 
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(
             blocks
                 .iter()
@@ -778,7 +965,7 @@ mod tests {
         p.samohrani_roditelj = Some(true);
         p.saglasnost_prekovremeni_od = Some("2026-13-45".to_string());
 
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(
             blocks
                 .iter()
@@ -796,7 +983,7 @@ mod tests {
         p.samohrani_roditelj = Some(true);
         p.saglasnost_prekovremeni_od = Some("2026-08-03".to_string());
 
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(!blocks
             .iter()
             .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
@@ -810,7 +997,7 @@ mod tests {
     #[test]
     fn an_unreadable_date_of_birth_is_reported_rather_than_silently_dropped() {
         let p = protection_born("2009-13-45");
-        let blocks = check_protection(&p, "2026-08-03", &day(540, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(540, 60), &[]);
         let block = blocks
             .iter()
             .find(|b| b.kind == ProtectionKind::NeispravanDatumUProfilu)
@@ -829,7 +1016,7 @@ mod tests {
         let mut p = protection_child_born("2020-13-45");
         p.samohrani_roditelj = Some(true);
 
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(
             blocks
                 .iter()
@@ -847,7 +1034,7 @@ mod tests {
         p.samohrani_roditelj = Some(true);
         p.dete_tezak_invalid = Some(true);
 
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(blocks
             .iter()
             .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
@@ -864,7 +1051,7 @@ mod tests {
     fn an_unknown_date_of_birth_raises_no_minor_guard() {
         let mut p = protection_born("2009-09-01");
         p.datum_rodjenja = None;
-        assert!(check_protection(&p, "2026-08-03", &day(540, 60)).is_empty());
+        assert!(check_protection(&p, "2026-08-03", &day(540, 60), &[]).is_empty());
     }
 
     /// The threshold is SEVEN for a samohrani roditelj (čl. 91 st. 2). The
@@ -875,7 +1062,7 @@ mod tests {
         p.samohrani_roditelj = Some(true);
         p.saglasnost_prekovremeni_od = None;
 
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         let block = blocks
             .iter()
             .find(|b| b.kind == ProtectionKind::SaglasnostRoditelja)
@@ -886,7 +1073,7 @@ mod tests {
         );
 
         p.saglasnost_prekovremeni_od = Some("2026-01-15".to_string());
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(!blocks
             .iter()
             .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
@@ -896,7 +1083,7 @@ mod tests {
     fn a_single_parent_of_a_child_over_seven_needs_no_consent() {
         let mut p = protection_child_born("2018-06-01"); // 8 years old
         p.samohrani_roditelj = Some(true);
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(!blocks
             .iter()
             .any(|b| b.kind == ProtectionKind::SaglasnostRoditelja));
@@ -911,7 +1098,7 @@ mod tests {
         p.dete_tezak_invalid = Some(true);
         p.saglasnost_prekovremeni_od = None;
 
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(
             blocks
                 .iter()
@@ -924,7 +1111,7 @@ mod tests {
     fn a_non_single_parent_threshold_is_three_not_seven() {
         let mut p = protection_child_born("2022-06-01"); // 4 years old
         p.samohrani_roditelj = Some(false);
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(
             !blocks
                 .iter()
@@ -940,7 +1127,7 @@ mod tests {
     fn the_child_threshold_includes_the_birthday_itself() {
         let mut p = protection_child_born("2023-08-03"); // turns three on the test day
         p.samohrani_roditelj = Some(false);
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         assert!(
             blocks
                 .iter()
@@ -948,7 +1135,7 @@ mod tests {
             "the third birthday is still „dete do tri godine života“"
         );
 
-        let blocks = check_protection(&p, "2026-08-04", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-04", &day(480, 60), &[]);
         assert!(
             !blocks
                 .iter()
@@ -963,7 +1150,7 @@ mod tests {
     fn a_day_without_overtime_raises_no_consent_requirement() {
         let mut p = protection_child_born("2024-06-01");
         p.samohrani_roditelj = Some(true);
-        assert!(check_protection(&p, "2026-08-03", &day(480, 0)).is_empty());
+        assert!(check_protection(&p, "2026-08-03", &day(480, 0), &[]).is_empty());
     }
 
     /// čl. 90 is NOT an unconditional block — it fires on a health authority's
@@ -972,7 +1159,7 @@ mod tests {
     fn pregnancy_warns_rather_than_blocks() {
         let mut p = protection_born("1995-01-01");
         p.trudnoca_ili_dojenje = Some(true);
-        let blocks = check_protection(&p, "2026-08-03", &day(480, 60));
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 60), &[]);
         let block = blocks
             .iter()
             .find(|b| b.kind == ProtectionKind::TrudnocaNocniIPrekovremeni)
@@ -1002,37 +1189,53 @@ mod tests {
         svi.datum_rodjenja_najmladjeg_deteta = Some("2024-01-01".to_string());
         svi.radi_u_preraspodeli = true;
 
+        // Four stored eight-hour days beside the ten-hour day assessed: 42 h, over
+        // the čl. 87 weekly cap. Without a week the fixture cannot raise the
+        // weekly leg at all, and its poruka — the only one here built with
+        // `format!` — would leave this guard entirely.
+        let nedelja: Vec<DayHours> = ["2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"]
+            .iter()
+            .map(|dan| DayHours {
+                dan: (*dan).to_string(),
+                efektivno_minuta: 480,
+                prekovremeni_minuta: 0,
+            })
+            .collect();
+
         // The two unusable-profile messages, one per date the guards read.
         let neispravan_rodjenja = protection_born("2009-13-45");
         let mut neispravan_deteta = protection_child_born("2020-13-45");
         neispravan_deteta.samohrani_roditelj = Some(true);
 
-        let mut blocks = check_protection(&svi, "2026-08-03", &day(540, 60));
+        let mut blocks = check_protection(&svi, "2026-08-03", &day(540, 60), &nedelja);
         assert_eq!(
             blocks.len(),
-            5,
+            6,
             "the fixture must raise every statutory kind or it guards nothing: {blocks:?}"
         );
         blocks.extend(check_protection(
             &neispravan_rodjenja,
             "2026-08-03",
             &day(540, 60),
+            &[],
         ));
         blocks.extend(check_protection(
             &neispravan_deteta,
             "2026-08-03",
             &day(480, 60),
+            &[],
         ));
         assert_eq!(
             blocks.len(),
-            7,
-            "5 statutory + one unusable-date message per date read: {blocks:?}"
+            8,
+            "6 statutory + one unusable-date message per date read: {blocks:?}"
         );
 
         let ocekivane = [
             ProtectionKind::MaloletanPrekovremeni,
             ProtectionKind::MaloletanPreraspodela,
             ProtectionKind::MaloletanDnevniLimit,
+            ProtectionKind::MaloletanNedeljniLimit,
             ProtectionKind::SaglasnostRoditelja,
             ProtectionKind::TrudnocaNocniIPrekovremeni,
             ProtectionKind::NeispravanDatumUProfilu,
@@ -1051,6 +1254,7 @@ mod tests {
                 ProtectionKind::MaloletanPrekovremeni
                 | ProtectionKind::MaloletanPreraspodela
                 | ProtectionKind::MaloletanDnevniLimit
+                | ProtectionKind::MaloletanNedeljniLimit
                 | ProtectionKind::SaglasnostRoditelja
                 | ProtectionKind::TrudnocaNocniIPrekovremeni
                 | ProtectionKind::NeispravanDatumUProfilu => {}

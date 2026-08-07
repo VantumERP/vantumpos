@@ -1697,6 +1697,7 @@ export type WorkTimeProtectionKind =
   | "maloletanPrekovremeni"
   | "maloletanPreraspodela"
   | "maloletanDnevniLimit"
+  | "maloletanNedeljniLimit"
   | "saglasnostRoditelja"
   | "trudnocaNocniIPrekovremeni"
   | "neispravanDatumUProfilu";

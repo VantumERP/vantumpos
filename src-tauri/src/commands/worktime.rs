@@ -626,7 +626,13 @@ fn write_entry(
         prekovremeni_minuta: minuti.prekovremeni_minuta,
     };
 
-    let protections = check_protection(&protection, &dan, &day_hours);
+    // One week serves both gates. `load_week` moved above `check_protection` when
+    // the čl. 87 weekly leg landed: the protection guards now need the same live
+    // rows the čl. 53 caps do, and loading it twice would be two queries that can
+    // disagree inside one transaction.
+    let week = load_week(&tx, request.user_id, &dan)?;
+
+    let protections = check_protection(&protection, &dan, &day_hours, &week);
     if let Some(block) = protections.iter().find(|block| block.blocking) {
         return Err(AppError::business_with_details(
             "protection_block",
@@ -635,7 +641,6 @@ fn write_entry(
         ));
     }
 
-    let week = load_week(&tx, request.user_id, &dan)?;
     let caps = assess_caps_for_employee(&dan, &day_hours, &week, &protection);
     if caps.requires_override && request.cap_override_razlog.is_none() {
         let poruka = if caps.preraspodela_weekly_cap_exceeded {

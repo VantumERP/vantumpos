@@ -554,15 +554,32 @@ fn no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move() {
     }
 }
 
-/// The register and `PROGRESS.md` both credited `worktime::check_protection`
-/// with „maloletnik 35 h/8 h“. Only the daily leg exists — see
-/// `worktime::MINOR_DAILY_CAP_MINUTES` and the doc comment on
-/// `check_protection`, which says the weekly leg needs a week the signature does
-/// not carry. Naming the figure is fine; asserting it is enforced is not, so any
-/// line carrying it must mark it unbuilt on the same line.
+/// **Inverted 07.08.2026, when the leg it guarded was built.** Its predecessor,
+/// `no_document_claims_the_cl_87_weekly_leg_is_enforced`, required every line
+/// naming 35 h to mark the leg unbuilt, because only `MINOR_DAILY_CAP_MINUTES`
+/// existed and the register credited `check_protection` with both legs of
+/// čl. 87. `MINOR_WEEKLY_CAP_MINUTES` and `ProtectionKind::MaloletanNedeljniLimit`
+/// now exist and `commands::worktime::write_entry` refuses on them, so that
+/// guard's own instruction — delete it when the leg lands — has come due.
+///
+/// It is inverted rather than dropped. A false *denial* is the same defect as a
+/// false promise pointed the other way, and it is the more dangerous half in a
+/// register: a row that says a protection for an employee under 18 is unbuilt
+/// withdraws the reader's only pointer to a guard the shop is actually running,
+/// and the guard that used to sit here would have *demanded* that denial forever.
+/// Deleting it outright would have left the next stale sentence about čl. 87
+/// landing in exactly the place the last one did.
+///
+/// Bound to the constant rather than only to the words, so renaming the cap
+/// stops this file compiling instead of leaving the prose unbacked. The check is
+/// line-local for the same reason `popis_register_rows` is: a markdown row is one
+/// line, and a correction filed three sections away leaves the row itself reading
+/// as an open gap.
 #[test]
-fn no_document_claims_the_cl_87_weekly_leg_is_enforced() {
+fn no_document_says_the_cl_87_weekly_leg_is_still_unbuilt() {
     const UNBUILT: [&str; 3] = ["is not checked", "nije proveren", "not implemented"];
+    let cap: i64 = crate::worktime::MINOR_WEEKLY_CAP_MINUTES;
+    assert_eq!(cap, 35 * 60, "ZoR čl. 87 — 35 časova nedeljno, in minutes");
 
     for (doc, text) in [
         ("docs/SERBIAN-LAW-COMPLIANCE.md", REGISTER),
@@ -570,11 +587,20 @@ fn no_document_claims_the_cl_87_weekly_leg_is_enforced() {
     ] {
         for needle in ["35 h", "35 časova"] {
             for (line_no, line) in lines_with(text, needle) {
+                let stale: Vec<&str> = UNBUILT
+                    .iter()
+                    .copied()
+                    .filter(|marker| line.contains(marker))
+                    .collect();
                 assert!(
-                    UNBUILT.iter().any(|marker| line.contains(marker)),
-                    "{doc}:{line_no} names the ZoR čl. 87 weekly leg (\"{needle}\") without \
-                     saying it is unbuilt. Only the 8 h/day leg is in code \
-                     (worktime::MINOR_DAILY_CAP_MINUTES); the 35 h/week leg is enforced nowhere."
+                    stale.is_empty(),
+                    "{doc}:{line_no} names the ZoR čl. 87 weekly leg (\"{needle}\") and still \
+                     says {stale:?}. The leg shipped 07.08.2026 — \
+                     `worktime::MINOR_WEEKLY_CAP_MINUTES`, \
+                     `ProtectionKind::MaloletanNedeljniLimit`, and a blocking refusal in \
+                     `commands::worktime::write_entry`. Re-state the line: a document that \
+                     denies a čl. 87 protection the code runs is the same defect as one that \
+                     promises a protection it lacks."
                 );
             }
         }

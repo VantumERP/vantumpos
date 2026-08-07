@@ -210,7 +210,7 @@ migration **v16**.
 | 1 — schema | **Migration v17**: `work_time_entries` (one row per employee/day, the 15 ZEOR čl. 24 tač. 1 minute buckets, versioned append-only correction chain, a partial unique index giving one live row per day), `work_time_periods`, `retention_policies`, employee-profile columns on `users`. Absence category is a closed `CHECK` enum with **zero free-text columns**, and the bucket column is **derived** from the category (`{kategorija}_minuta`), enforced by a test that parses the live `CHECK` | `4265190`, `6f9de79`, `6b41c43` |
 | 2 — caps | `worktime.rs::assess_caps` — čl. 53 st. 2 (≤ 8 h prekovremenog per **calendar week, Monday-based**) and st. 3 (≤ 12 h daily total incl. overtime); civil-date arithmetic reused from `cash_deposit.rs` rather than re-derived. The stored version of the day under assessment is not double-counted | `d5ad982`, `b3a2d4c` |
 | 3 — penalty copy | `legal.rs::overtime_record_missing` (čl. 276 st. 1 u vezi sa tač. 1a) and `overtime_caps_exceeded` (čl. 274 st. 1 tač. 3), both tier-resolved from `pravna_forma`; the čl. 276 st. 2 odgovorno-lice line is suppressed for a preduzetnik. A test guards that **no ZEOR figure** is reachable anywhere, and three previously vacuous guards were closed | `6ae257e`, `c0fc959` |
-| 4 — protection | `worktime.rs::check_protection` — čl. 87 (8 h/day for a minor; the 35 h/week leg is not checked), **čl. 88 st. 1 bans prekovremeni *and* preraspodela**, čl. 91 st. 1 (dete do 3) and st. 2 (**samohrani roditelj — threshold SEVEN**, plus `dete_tezak_invalid` with no age limit) require a stored written consent **dated before the day worked**, čl. 90 warns rather than blocks. `derives_overtime_automatically` returns `false` under preraspodela — čl. 58 hours are not overtime | `defcecf`, `8c04a05` |
+| 4 — protection | `worktime.rs::check_protection` — čl. 87 (8 h/day for a minor; the 35 h/week leg was **not built in this batch** — *closed 07.08.2026*, see the section below), **čl. 88 st. 1 bans prekovremeni *and* preraspodela**, čl. 91 st. 1 (dete do 3) and st. 2 (**samohrani roditelj — threshold SEVEN**, plus `dete_tezak_invalid` with no age limit) require a stored written consent **dated before the day worked**, čl. 90 warns rather than blocks. `derives_overtime_automatically` returns `false` under preraspodela — čl. 58 hours are not overtime | `defcecf`, `8c04a05` |
 | 5 — commands | `commands/worktime.rs`: `worktime_list_month`, `save_entry`, `correct_entry`, `close_period`, `export_csv`, `my_hours`, `notices`. Not one `UPDATE` against `work_time_entries`; a correction is a new `verzija` row carrying who/when/why. `require_admin` is the **first statement of the domain function**, not of the `#[tauri::command]` wrapper. A cap breach records the day and asks for a čl. 53 st. 1 ground; a čl. 87–91 block refuses the row. Preraspodela is branched onto the čl. 57 st. 5 60 h/week ceiling, and a month cannot close before it ends | `5a87e4a`, `93c95e7` |
 | 6 — retention | `retention.rs` — the single shared table SW11-SW15 §3 req. 42 mandates. `WorktimeClassification` = `trajno` + `never_purge`, unreachable by the go-live reset (`assert_never_purge_intact` runs **inside** that transaction in `backup.rs`) — **restore is not fenced and cannot be**: `restore_backup` replaces the database file, so the register returns as the snapshot holds it, the `pre_restore` safety copy is the only protection on that path, and the `backup_restored` event records the never-purge counts on both sides; a count-based refusal cannot tell a legitimately older backup from data loss and would leave a shop unable to restore at all. A backup-prune path **does not exist** in the crate, so that limb guards nothing; `WorktimeOvertimeLog` carries an upward-only **3-year** floor applied to each record's own `dan`, with a fail-safe that refuses to purge when no floor is stored; `WorktimeDraft` is bounded by the period close | `ee7fcca`, `0c96a6a` |
 | 7 — Radno vreme UI | `src/app/worktime/WorkTimeModule.tsx` — monthly grid, cap warnings with the override ground, period close, CSV export, and the absence category behind `canSeeAbsenceReason`. Non-blocking čl. 87–91 findings are surfaced rather than swallowed, and the recorded day is guarded | `6807309`, `2f576d7` |
@@ -238,9 +238,13 @@ credited to `assess_caps` rather than to its caller, an unqualified "no fine fig
 and — in the notice handed to employees — ZZPL čl. 95 st. 1 **tač. 20** where the čl. 23 offence is
 **tač. 8**. All four are corrected above, and the defect class now has a guard:
 `src-tauri/src/docs_guard.rs` (test-only) reads the three documents and fails when a compliance row
-claims more than the code delivers. `worktime.rs::the_cl_87_weekly_leg_is_not_checked` pins the gap in
-behaviour — six eight-hour days raise nothing — so building the leg breaks the test and forces the prose
-to be re-stated in the same commit.
+claims more than the code delivers. `worktime.rs::the_cl_87_weekly_leg_is_not_checked` pinned the gap in
+behaviour — six eight-hour days raise nothing — so building the leg would break the test and force the
+prose to be re-stated in the same commit. *(That is what happened on 07.08.2026: both that test and
+`docs_guard::no_document_claims_the_cl_87_weekly_leg_is_enforced` were deleted by their own
+instructions, and the second was replaced by its inverse,
+`no_document_says_the_cl_87_weekly_leg_is_still_unbuilt`, which now fails on a document that denies the
+leg. See the section below.)*
 
 Latest migration: **v17**.
 
@@ -251,11 +255,17 @@ a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export
 
 **Still open after this batch** (requirement numbers are `docs/SW14-VERIFIED-RULES.md` §4):
 
-- **Req 12, weekly leg — the čl. 87 cap of 35 časova nedeljno for an employee under 18 is not checked.**
-  `check_protection` enforces only the 8 h/day leg (`MINOR_DAILY_CAP_MINUTES`); the weekly leg needs the
-  employee's week, which that signature does not carry, and no caller supplies it. The under-18 čl. 88 st. 1
-  bans on prekovremeni and preraspodela *are* enforced, so a minor cannot accumulate the week through
-  overtime — but a minor scheduled 7 h a day across six days raises nothing.
+- **Req 12, weekly leg — the čl. 87 cap of 35 časova nedeljno for an employee under 18 — was closed on
+  07.08.2026** and is moved out of this list into the section that records the work. What it said stands
+  as the reason that work was done, and is kept here rather than deleted: `check_protection` enforced only
+  the 8 h/day leg (`MINOR_DAILY_CAP_MINUTES`); the weekly leg needed the employee's week, which that
+  signature did not carry and no caller supplied. The under-18 čl. 88 st. 1 bans on prekovremeni and
+  preraspodela *were* enforced, so a minor could not accumulate the week through overtime — but a minor
+  scheduled 7 h a day across six days raised nothing. `MINOR_WEEKLY_CAP_MINUTES` and
+  `ProtectionKind::MaloletanNedeljniLimit` now close it, and the block **refuses the row**: čl. 87 states
+  the prohibition itself, so it is not an overridable čl. 53 cap. **One limb of req. 12 did not close with
+  it:** the čl. 88 st. 2 **night** ban, which needs the čl. 62 night computation `DayHours` does not carry
+  — the same reason the night limbs of čl. 90 and čl. 91 are absent.
 - **Req 18, restore leg — the trajno classes are fenced against the go-live reset, not against a restore.**
   `assert_never_purge_intact` runs inside the `reset_trading_data` transaction. `restore_backup` replaces the
   database file, so `work_time_entries`, `work_time_periods` and `retention_policies` come back exactly as the
