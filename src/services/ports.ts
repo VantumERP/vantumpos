@@ -628,8 +628,20 @@ export interface PopisService {
    * reach paper, which is the breach the whole module is built around. `"a"`
    * only ever narrows, so the čl. 2 st. 6 reprint of the signed counted state
    * may ask for it in any state.
+   *
+   * **`lista` null is the whole popis; named, it is one popisna lista on paper
+   * of its own.** PoP čl. 2 st. 6 owes the owner of tuđa roba a primerak of the
+   * signed *posebna* popisna lista, and the bundle cannot be that primerak — it
+   * carries every other lista of the popis, and on the čl. 9 st. 3 sheet their
+   * book quantities and valuation besides. Narrowing selects a subset of a
+   * document whose phase the backend has already decided, so it can only ever
+   * withhold.
    */
-  exportLista(id: number, faza: PopisPrintFaza | null): Promise<ExportedFile>;
+  exportLista(
+    id: number,
+    faza: PopisPrintFaza | null,
+    lista: PopisLista | null,
+  ): Promise<ExportedFile>;
   /** Req. 35 — the odluka o popisu i obrazovanju komisije, as a document. */
   exportOdluka(id: number): Promise<ExportedFile>;
   /** Req. 35 / PoP čl. 8 st. 1 — the plan rada with the approval as stored. */

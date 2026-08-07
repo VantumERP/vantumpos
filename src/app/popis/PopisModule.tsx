@@ -85,11 +85,14 @@ import type {
  * štampanje“*; what is recorded here is that the members signed the printed
  * liste, and a purely electronic signature is an unverified deviation (§6 R-6).
  *
- * It never picks which popisna lista gets printed. `popis_export_lista` derives
- * the phase from the session's own status and čl. 8 st. 5 potpis; this module
- * sends `null` — „print what this popis has“ — or, for the čl. 2 st. 6 reprint,
- * `„a“`, which can only narrow. It never sends `„b“`, because that would be a
- * screen instructing the backend to put book quantities on paper.
+ * It never picks which of the two sheets gets printed. `popis_export_lista`
+ * derives the phase from the session's own status and čl. 8 st. 5 potpis; this
+ * module sends `null` — „print what this popis has“ — or, for the čl. 2 st. 6
+ * reprint, `„a“`, which can only narrow. It never sends `„b“`, because that
+ * would be a screen instructing the backend to put book quantities on paper.
+ * Which *lista* goes on the paper is a different question and this module does
+ * answer it, because čl. 2 st. 6 makes one lista leave the shop on its own —
+ * and that answer can only ever withhold, never widen.
  *
  * It never approves the plan rada on the shop's behalf. The čl. 4 st. 2 field
  * is pre-filled with the registered obveznik and nothing else happens until
@@ -1043,6 +1046,15 @@ function planRadaSadrzina(plan: string | null): boolean {
  * to meet. `„a“` narrows and never widens, which is why naming it here is safe
  * where naming `„b“` never is.
  *
+ * **…and the same rok is why a lista prints on its own.** The reprint above is
+ * still the whole popis: every lista, one after another. Čl. 2 st. 6 owes the
+ * owner of tuđa roba a primerak of *one* posebna popisna lista, and handing him
+ * the bundle would disclose the shop's entire counted inventory to somebody
+ * entitled to see one sheet. So each lista that has stavke gets a print action
+ * of its own, and the ten-day rok is stated beside the button that produces the
+ * document it is about rather than only in the warning. A lista with nothing on
+ * it gets no button: an empty sheet is an invitation to sign over nothing.
+ *
  * **The approval control is absent on a posted popis** because `odobri_plan_rada`
  * runs `posting_lock` and would refuse it (čl. 14 st. 3) — the module offers no
  * action the state machine rejects. The documents stay printable: a reprint
@@ -1112,6 +1124,10 @@ function DokumentiPanel({
 
   const dostupno = session.knjigovodstvoDostupno;
   const proknjizen = session.status === "posted";
+  // The liste this popis actually has stavke on. A button for an empty lista
+  // would print a sheet with nothing on it, and the six are always reported —
+  // empty ones included — so the filter is the module's own „present“ test.
+  const pojedinacne = session.liste.filter((pregled) => pregled.brojStavki > 0);
   // Half a record is not an approval — v21 pairs the two columns in a CHECK,
   // and a screen reading only the name would report an approval with no date
   // behind it as one that happened.
@@ -1129,7 +1145,7 @@ function DokumentiPanel({
         <p className="text-sm">
           {dostupno
             ? "Štampaju se obračunate popisne liste (PoP čl. 9 st. 3) — sa knjigovodstvenim stanjem, naturalnim razlikama, cenama i vrednostima."
-            : "Štampa se popisna lista stvarnog stanja (PoP čl. 8 st. 5) — bez knjigovodstvenih količina, bez razlika i bez vrednosti."}
+            : "Štampa se popisna lista stvarnog stanja (PoP čl. 8 st. 5) — bez knjigovodstvenih količina, bez razlika i bez vrednosnog obračuna. Apoen (PoP čl. 11 st. 1) i iznos (PoP čl. 12 st. 2) se štampaju: to je prebrojano stanje, a ne podatak iz poslovnih knjiga."}
         </p>
         <p className="text-xs text-muted-foreground">
           Koja se od te dve liste štampa ne bira se ovde: aplikacija je izvodi
@@ -1144,7 +1160,7 @@ function DokumentiPanel({
             variant="outline"
             onClick={() => {
               void runPrint(
-                () => popis.exportLista(session.id, null),
+                () => popis.exportLista(session.id, null, null),
                 "Popisne liste nisu izvezene.",
               );
             }}
@@ -1159,7 +1175,7 @@ function DokumentiPanel({
               variant="outline"
               onClick={() => {
                 void runPrint(
-                  () => popis.exportLista(session.id, "a"),
+                  () => popis.exportLista(session.id, "a", null),
                   "Liste stvarnog stanja nisu izvezene.",
                 );
               }}
@@ -1174,6 +1190,37 @@ function DokumentiPanel({
             Potpisano stvarno stanje ostaje da se štampa i posle obračuna — taj
             primerak nosi samo prebrojano stanje, onako kako je potpisano.
           </p>
+        ) : null}
+
+        {pojedinacne.length > 0 ? (
+          <div className="flex flex-col gap-2 border-t pt-2">
+            <p className="text-sm">
+              Pojedinačne popisne liste. Svaka od šest listi je poseban popisni
+              dokument, pa se štampa i potpisuje zasebno. Potpisan primerak
+              posebne popisne liste za tuđu robu dostavlja se vlasniku najkasnije
+              u roku od deset dana od dana popisa (PoP čl. 2 st. 6) — dostavljate
+              ga vi, aplikacija ga ne šalje nikome.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {pojedinacne.map((pregled) => (
+                <Button
+                  key={pregled.vrsta}
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    void runPrint(
+                      () => popis.exportLista(session.id, null, pregled.vrsta),
+                      `Popisna lista „${pregled.naziv}“ nije izvezena.`,
+                    );
+                  }}
+                >
+                  <PrinterIcon data-icon="inline-start" aria-hidden="true" />
+                  {`Štampaj samo: ${pregled.naziv}`}
+                </Button>
+              ))}
+            </div>
+          </div>
         ) : null}
       </div>
 

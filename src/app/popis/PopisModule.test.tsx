@@ -525,9 +525,20 @@ describe("PopisModule — the count sheet and the izveštaj", () => {
     await user.type(screen.getByLabelText(/stvarna količina/i), "2");
     await user.click(screen.getByRole("button", { name: /sačuvaj stavku/i }));
 
-    expect(await screen.findByText(/PoP čl\. 2 st\. 6/)).toBeInTheDocument();
+    // The reminder is read out of the warning itself. The čl. 2 st. 6 rok is
+    // now also cited beside the per-lista print action — the button that
+    // produces the primerak the rok is about — so a document-wide `getByText`
+    // matches two elements. Scoping to the alert is strictly more precise than
+    // the `findByText` this replaced: the warning has to carry the disclaimer,
+    // not merely share a page with it. The rok itself is rendered separately,
+    // above the komisija table, and is still asserted there.
+    const upozorenja = await screen.findAllByRole("alert");
+    const podsetnik = upozorenja.find((element) =>
+      /PoP čl\. 2 st\. 6/.test(element.textContent ?? ""),
+    );
+    expect(podsetnik).toBeDefined();
+    expect(podsetnik).toHaveTextContent(/ne dostavlja/i);
     expect(screen.getByText(/2027-01-10/)).toBeInTheDocument();
-    expect(screen.getByText(/ne dostavlja/i)).toBeInTheDocument();
   });
 });
 
@@ -745,6 +756,42 @@ describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
   });
 
   /**
+   * …and it must not deny a column the same sheet carries. The copy used to end
+   * *„bez knjigovodstvenih količina, bez razlika i bez vrednosti“*, but the čl. 8
+   * st. 5 sheet prints the čl. 11 st. 1 apoen and the čl. 12 st. 2 iznos as
+   * grouped RSD — `popis_print::iznos_prebrojan` puts them there, `read_lines`
+   * deliberately releases `cena_minor` for those two liste during the blind
+   * count, and both are the commission's own counted figure rather than anything
+   * the books know. A false denial is the mirror of the six false promises, and
+   * this one was shipped operator copy about a document the same commit
+   * generates.
+   *
+   * The binding half of this property lives in Rust, where the column set is
+   * known: `popis_print::tests::the_screen_never_denies_a_money_column_the_cl_8_st_5_sheet_prints`
+   * reads this file and derives its needles from `iznos_prebrojan`. This test is
+   * the reader's half — that the correction is actually on screen where the
+   * operator sees it, and not merely in the source.
+   */
+  it("does not deny the čl. 11 st. 1 apoen and the čl. 12 st. 2 iznos the sheet prints", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "counting");
+
+    const brojanje = await screen.findByText(/štampa se popisna lista/i);
+    expect(brojanje).not.toHaveTextContent(/bez vrednosti/i);
+    expect(brojanje).toHaveTextContent(/apoen/i);
+    expect(brojanje).toHaveTextContent(/PoP čl\. 11 st\. 1/);
+    expect(brojanje).toHaveTextContent(/PoP čl\. 12 st\. 2/);
+    // The two clauses that are true and structurally enforced stay put.
+    expect(brojanje).toHaveTextContent(/bez knjigovodstvenih količina/i);
+    expect(brojanje).toHaveTextContent(/bez razlika/i);
+  });
+
+  /**
    * The two descriptions must not be one interchangeable string. A single
    * sentence covering both phases would either name čl. 8 st. 5 over a sheet
    * carrying razlike or name čl. 9 st. 3 over one that carries none — and the
@@ -831,7 +878,7 @@ describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
     );
 
     await waitFor(() => expect(izvoz).toHaveBeenCalledTimes(1));
-    expect(izvoz).toHaveBeenLastCalledWith(1, null);
+    expect(izvoz).toHaveBeenLastCalledWith(1, null, null);
     expect((await izvoz.mock.results[0].value).fileName).toContain("faza-a");
 
     await dovediDo(user, "computed");
@@ -847,7 +894,7 @@ describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
     );
 
     await waitFor(() => expect(izvoz).toHaveBeenCalledTimes(2));
-    expect(izvoz).toHaveBeenLastCalledWith(1, null);
+    expect(izvoz).toHaveBeenLastCalledWith(1, null, null);
     expect((await izvoz.mock.results[1].value).fileName).toContain("faza-b");
   });
 
@@ -909,7 +956,7 @@ describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
     ] as const) {
       await dovediDo(user, status);
       for (const dugme of await screen.findAllByRole("button", {
-        name: /^štampaj (popisne liste|potpisane liste)/i,
+        name: /^štampaj /i,
       })) {
         await user.click(dugme);
       }
@@ -945,7 +992,70 @@ describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
       await screen.findByRole("button", { name: /štampaj potpisane liste/i }),
     );
 
-    await waitFor(() => expect(izvoz).toHaveBeenCalledWith(1, "a"));
+    await waitFor(() => expect(izvoz).toHaveBeenCalledWith(1, "a", null));
+  });
+
+  /**
+   * …and reachable as **one lista**, which is the document čl. 2 st. 6 actually
+   * names. The signed sheet the previous test reaches is the whole popis: every
+   * lista, one after another. Handing that to the owner of tuđa roba discloses
+   * the shop's entire counted inventory to somebody entitled to see one lista,
+   * so the module states a ten-day rok it could not let the shop meet without a
+   * narrowing action of its own.
+   *
+   * The button appears only for a lista that has stavke — the six are always
+   * reported, empty ones included, and a button that printed an empty sheet is
+   * an invitation to sign over nothing.
+   */
+  it("prints one posebna popisna lista on its own for the čl. 2 st. 6 primerak", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const izvoz = vi.spyOn(svc.popis, "exportLista");
+    vi.spyOn(svc.print, "openForPrint").mockResolvedValue(undefined);
+
+    render(<PopisModule services={svc} />);
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "counting");
+
+    const blok = await screen.findByRole("group", {
+      name: /popisne liste za štampu/i,
+    });
+    // Nothing is counted yet, so no lista has a sheet of its own to print.
+    expect(
+      within(blok).queryByRole("button", { name: /^štampaj samo:/i }),
+    ).toBeNull();
+
+    await user.selectOptions(
+      screen.getByLabelText(/popisna lista/i),
+      "konsignacija",
+    );
+    await user.type(screen.getByLabelText(/^naziv/i), "Haljina — komision");
+    await user.clear(screen.getByLabelText(/stvarna količina/i));
+    await user.type(screen.getByLabelText(/stvarna količina/i), "2");
+    await user.click(screen.getByRole("button", { name: /sačuvaj stavku/i }));
+
+    const dugme = await screen.findByRole("button", {
+      name: /^štampaj samo: konsignaciona/i,
+    });
+    await user.click(dugme);
+
+    await waitFor(() =>
+      expect(izvoz).toHaveBeenCalledWith(1, null, "konsignacija"),
+    );
+    const izvezeno = await izvoz.mock.results[0].value;
+    expect(izvezeno.fileName).toContain("konsignacija");
+    // The roba lista has nothing on it, so it gets no action of its own — and
+    // the čl. 2 st. 6 rok is stated where the primerak is produced.
+    expect(
+      screen.queryByRole("button", { name: /^štampaj samo: roba/i }),
+    ).toBeNull();
+    expect(
+      within(
+        await screen.findByRole("group", { name: /popisne liste za štampu/i }),
+      ).getByText(/PoP čl\. 2 st\. 6/),
+    ).toBeInTheDocument();
   });
 
   /**

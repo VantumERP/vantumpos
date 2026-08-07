@@ -39,6 +39,18 @@
 //! that, since čl. 8 st. 1 puts the plan rada in the komisija's hands and a shop
 //! may lawfully keep it on paper.
 //!
+//! **One signature block per lista, and one lista per document where that is what
+//! is asked for.** Čl. 8 st. 5 has the members sign *„те листе“* — those liste,
+//! each of them — and čl. 2 st. 6 then obliges the shop to put a *primerak
+//! potpisane posebne popisne liste* in the hands of the owner of tuđa roba within
+//! ten days. A bundle of six tables under one trailing signature discharges
+//! neither: it cannot be handed over without disclosing the whole counted
+//! inventory to somebody entitled to see one sheet, and one lista torn out of it
+//! carries no signature at all. So [`potpisni_blok`] travels with its lista and
+//! names it, the sections break onto pages of their own, and
+//! [`render_jedna_lista`] renders any one of them as a document in its own right.
+//! Nothing here delivers anything — the obveznik delivers that primerak.
+//!
 //! **Neither document decides who takes the popis.** [`sastav_popisa`] reads the
 //! roster into three states and not two: an empty roster is the ordinary state of
 //! the odluka, which *is* the appointment, so resolving that silence into
@@ -112,25 +124,82 @@ impl PrintFaza {
 // The popisna lista
 // ---------------------------------------------------------------------------
 
-/// Req. 31 / req. 32 — the printable popisne liste of one popis, one table per
-/// lista that has stavke, with the čl. 8 st. 5 columns withheld structurally in
-/// Faza A.
+/// Req. 31 / req. 32 — every popisna lista of one popis that has stavke, one
+/// table each, with the čl. 8 st. 5 columns withheld structurally in Faza A.
 pub fn render_popisna_lista(
     company: &CompanySettings,
     view: &PopisSessionView,
     faza: PrintFaza,
 ) -> String {
-    let mut html = doc_head(&format!("Popisne liste — {}", faza.naziv()));
+    render_liste(company, view, faza, None)
+}
 
-    html.push_str(&format!(
-        "<h1>POPISNE LISTE — {}</h1>\n",
-        escape_html(&faza.naziv().to_uppercase())
-    ));
+/// Req. 36 / PoP čl. 2 st. 6 — **one** popisna lista, on paper of its own.
+///
+/// Čl. 2 st. 6 obliges the shop to put a *primerak potpisane posebne popisne
+/// liste* in the hands of the owner of tuđa roba within ten days of the count.
+/// That is a document handed to a third party, and the bundle
+/// [`render_popisna_lista`] produces is not it: it carries every other lista of
+/// the popis, and on the čl. 9 st. 3 sheet every knjigovodstvena količina, every
+/// cena and every vrednost besides. Handing it over discloses the shop's whole
+/// counted inventory to somebody entitled to see one lista; tearing one lista out
+/// of it used to hand over an unsigned sheet, because the document carried a
+/// single signature block at the end for the whole popis.
+///
+/// So the narrowing exists, and the bundle was fixed too — [`potpisni_blok`] is
+/// now emitted once per lista rather than once per document, which is also what
+/// čl. 8 st. 5 asks for in as many words: *„…пре него што чланови комисије за
+/// попис потпишу те листе“*, those liste, each of them.
+///
+/// Nothing here delivers anything. The obveznik delivers that primerak; this
+/// function writes a document he can sign and hand over.
+pub fn render_jedna_lista(
+    company: &CompanySettings,
+    view: &PopisSessionView,
+    faza: PrintFaza,
+    lista: PopisLista,
+) -> String {
+    render_liste(company, view, faza, Some(lista))
+}
+
+/// The body both entry points share. `izbor` of `None` prints every lista that
+/// has stavke; `Some(lista)` prints that one and nothing else — including its
+/// own signature block, which is the whole point of the narrowing.
+fn render_liste(
+    company: &CompanySettings,
+    view: &PopisSessionView,
+    faza: PrintFaza,
+    izbor: Option<PopisLista>,
+) -> String {
+    let (naslov_dokumenta, naslov) = match izbor {
+        Some(lista) => (
+            format!("Popisna lista — {}", lista.naziv()),
+            format!(
+                "POPISNA LISTA — {} — {}",
+                lista.naziv().to_uppercase(),
+                faza.naziv().to_uppercase()
+            ),
+        ),
+        None => (
+            format!("Popisne liste — {}", faza.naziv()),
+            format!("POPISNE LISTE — {}", faza.naziv().to_uppercase()),
+        ),
+    };
+
+    let mut html = doc_head(&naslov_dokumenta);
+    html.push_str(&format!("<h1>{}</h1>\n", escape_html(&naslov)));
     html.push_str(&zaglavlje(company, view, faza));
     html.push_str(&napomena_faze(faza));
+    if let Some(lista) = izbor {
+        html.push_str(&napomena_jedne_liste(lista));
+    }
 
     let mut razvrstane = 0usize;
+    let mut odstampano = 0usize;
     for lista in PopisLista::ALL {
+        if izbor.is_some_and(|trazena| trazena != lista) {
+            continue;
+        }
         let linije: Vec<&PopisLineView> = view
             .linije
             .iter()
@@ -140,22 +209,41 @@ pub fn render_popisna_lista(
             continue;
         }
         razvrstane += linije.len();
+        odstampano += 1;
         html.push_str(&sekcija(view, lista, &linije, faza));
+        html.push_str(&potpisni_blok(view, faza, Some(&oznaka_liste(view, lista))));
     }
 
     // A stavka whose lista this build does not know is a stavka the v20 CHECK
     // should have refused — but it is still a line the commission counted, and a
     // signed document that quietly drops one says something untrue about the
-    // stanje. It gets a section of its own rather than disappearing.
-    if razvrstane < view.linije.len() {
+    // stanje. It gets a section of its own rather than disappearing — on the
+    // bundle only, because it belongs to no lista and a narrowed document is
+    // about one.
+    if izbor.is_none() && razvrstane < view.linije.len() {
         html.push_str(&sekcija_nerazvrstanih(view, faza));
+        html.push_str(&potpisni_blok(view, faza, Some(OZNAKA_NERAZVRSTANIH)));
+        odstampano += 1;
     }
 
-    if view.linije.is_empty() {
-        html.push_str("<p class=\"prazno\">Nijedna popisna lista nema stavke.</p>\n");
+    // Čl. 8 st. 4 has the liste given to the komisija before the count, so an
+    // empty sheet is a document the bylaw asks for — and it still needs somewhere
+    // to sign.
+    if odstampano == 0 {
+        html.push_str(&format!(
+            "<p class=\"prazno\">{}</p>\n",
+            escape_html(&match izbor {
+                Some(lista) => format!("Popisna lista „{}“ nema stavke.", lista.naziv()),
+                None => "Nijedna popisna lista nema stavke.".to_string(),
+            })
+        ));
+        html.push_str(&potpisni_blok(
+            view,
+            faza,
+            izbor.map(|lista| oznaka_liste(view, lista)).as_deref(),
+        ));
     }
 
-    html.push_str(&potpisni_blok(view, faza));
     html.push_str(
         "<footer>Zakon ne propisuje obrazac popisne liste — raspored kolona je interni \
          (Pravilnik o popisu, čl. 1–16, nema priloga sa obrascem). Interni dokument. Nije \
@@ -163,6 +251,43 @@ pub fn render_popisna_lista(
     );
     html
 }
+
+/// What a narrowed document says about being narrowed, and — on the konsignaciona
+/// lista — what čl. 2 st. 6 then requires of the shop.
+///
+/// A reader holding one lista has to know it is one, or a document listing four
+/// stavke reads as a popis of four stavke. And the konsignaciona lista is the
+/// only one of the six with a statutory recipient, so its own paper is where the
+/// ten-day rok belongs — stated the way `konsignacija_podsetnik` states it, with
+/// the delivery left plainly to the obveznik.
+fn napomena_jedne_liste(lista: PopisLista) -> String {
+    let mut tekst = format!(
+        "Ovaj dokument sadrži samo jednu popisnu listu — „{}“ ({}). Ostale popisne liste istog \
+         popisa štampaju se posebno.",
+        lista.naziv(),
+        lista.pravni_osnov()
+    );
+    if lista == PopisLista::Konsignacija {
+        tekst.push_str(
+            " Potpisan primerak ove posebne popisne liste dostavlja se vlasniku tuđe imovine \
+             najkasnije u roku od deset dana od dana na koji je popis izvršen (PoP čl. 2 st. 6). \
+             Aplikacija tu listu ne dostavlja umesto vas.",
+        );
+    }
+    format!("<p class=\"napomena\">{}</p>\n", escape_html(&tekst))
+}
+
+/// Which lista a signature block belongs to, printed above the ruled lines.
+fn oznaka_liste(view: &PopisSessionView, lista: PopisLista) -> String {
+    format!(
+        "Popisna lista: {} · Broj liste: {} · {}",
+        lista.naziv(),
+        broj_liste(view, lista),
+        lista.pravni_osnov()
+    )
+}
+
+const OZNAKA_NERAZVRSTANIH: &str = "Stavke koje nisu razvrstane ni u jednu popisnu listu";
 
 /// Req. 32's header block. A signed sheet whose header identifies nobody
 /// identifies nothing, so the obveznik, its PIB and matični broj, the objekat, the
@@ -256,7 +381,11 @@ fn napomena_faze(faza: PrintFaza) -> String {
 
 /// One lista, headed by its own naziv and the article that requires it. The six
 /// are separate lists by law (req. 36), not tabs of one sheet, so each gets its
-/// own broj liste and its own signature-bearing table.
+/// own broj liste — and, since [`render_liste`] follows every one of these with
+/// its own [`potpisni_blok`], its own signature.
+///
+/// The signature block is a sibling and not a child, so the table markup this
+/// function emits stays exactly what the section contains.
 fn sekcija(
     view: &PopisSessionView,
     lista: PopisLista,
@@ -452,6 +581,18 @@ fn identitet_celije(linija: &PopisLineView) -> String {
 
 /// Req. 30 — the commission signs, so the paper has somewhere to sign.
 ///
+/// **One block per lista, not one per document, and `oznaka` is what says which.**
+/// Čl. 8 st. 5 has the members sign *„те листе“* — the liste, each of them — and
+/// čl. 2 st. 6 then has one of those liste leave the shop on its own. A document
+/// with six tables and a single signature at the end cannot produce that
+/// primerak: tearing out the konsignaciona lista tears out an unsigned sheet, and
+/// handing over the document whole hands a third party the shop's entire counted
+/// inventory. So the block travels with its lista, names it, and gets a page
+/// break in front of the next one.
+///
+/// `oznaka` is `None` only where there is no lista to name: an empty popis, the
+/// čl. 8 st. 4 sheet given to the komisija before anything is counted.
+///
 /// **The heading is read off the roster, not hardcoded.** PoP čl. 6 st. 1 lets the
 /// popis of a mikro pravno lice or a preduzetnik be taken by one person, and čl. 6
 /// st. 2 extends the commission provisions to that person only *shodno* — they are
@@ -461,12 +602,16 @@ fn identitet_celije(linija: &PopisLineView) -> String {
 /// contradicting itself about who signed it. Where the roster is mixed, empty or
 /// unknown the heading carries both limbs, in the construction `cl47.rs` already
 /// registers the data subjects under.
-fn potpisni_blok(view: &PopisSessionView, faza: PrintFaza) -> String {
+fn potpisni_blok(view: &PopisSessionView, faza: PrintFaza, oznaka: Option<&str>) -> String {
     let mut html = format!(
         "<section class=\"potpisi\">\n<h2>{} — {}</h2>\n",
         escape_html(potpisni_naslov(view)),
         escape_html(faza.pravni_osnov())
     );
+
+    if let Some(oznaka) = oznaka {
+        html.push_str(&format!("<p class=\"meta\">{}</p>\n", escape_html(oznaka)));
+    }
 
     if view.komisija.is_empty() {
         html.push_str(
@@ -1005,6 +1150,8 @@ td.amount, th.amount { text-align: right; white-space: nowrap; }\n\
 table.zaglavlje { width: auto; }\n\
 table.zaglavlje th { background: #f0f0f0; }\n\
 section.lista { page-break-inside: avoid; }\n\
+section.potpisi { page-break-inside: avoid; }\n\
+section.lista ~ section.lista { page-break-before: always; }\n\
 section.odredba, section.sastav, section.plan, section.odobrenje \
 { page-break-inside: avoid; }\n\
 table.raspored { width: auto; }\n\
@@ -1895,6 +2042,159 @@ mod tests {
         );
     }
 
+    /// …and every one of those sections is signed on its own.
+    ///
+    /// Čl. 8 st. 5 has the members sign *„те листе“* — the liste, each of them —
+    /// and until this shipped the document carried one signature block appended
+    /// after the last section, for the whole popis. That reads as one signature
+    /// over six lists, and it makes the čl. 2 st. 6 primerak impossible: tearing
+    /// the konsignaciona lista out of the bundle tears out an unsigned sheet.
+    /// Each block also names the lista it belongs to, because six identical
+    /// blocks in one document say nothing about what is being signed.
+    #[test]
+    fn every_lista_section_carries_its_own_signature_block_naming_that_lista() {
+        let view = view_with_every_lista();
+        let html = render_popisna_lista(&company(), &view, PrintFaza::A);
+
+        assert_eq!(
+            html.matches("<section class=\"potpisi\">").count(),
+            PopisLista::ALL.len(),
+            "one signature block per lista, not one per document: {html}"
+        );
+        for lista in PopisLista::ALL {
+            assert!(
+                html.contains(&escape_html(&oznaka_liste(&view, lista))),
+                "the signature block for „{}“ does not say which lista it signs: {html}",
+                lista.naziv()
+            );
+        }
+        // A lista that shares a printed page with the next one cannot be handed
+        // over on its own, so the sections break.
+        assert!(
+            DOC_STYLE.contains("section.lista ~ section.lista { page-break-before: always; }"),
+            "the liste have to start on pages of their own: {DOC_STYLE}"
+        );
+    }
+
+    /// PoP čl. 2 st. 6 — the owner of tuđa roba is owed a *primerak potpisane
+    /// posebne popisne liste* within ten days, and that is a document handed to a
+    /// third party. The bundle cannot be it: it carries every other lista of the
+    /// popis, and on the čl. 9 st. 3 sheet the book quantities and the valuation
+    /// of all of them. So one lista prints on paper of its own, with its own
+    /// signature block and the ten-day rok on the same page — and with **nothing
+    /// from any other lista on it**, which is the half that makes it deliverable.
+    #[test]
+    fn one_lista_prints_on_paper_of_its_own_for_the_cl_2_st_6_primerak() {
+        let mut view = view_with_every_lista();
+        for (index, linija) in view.linije.iter_mut().enumerate() {
+            linija.naziv = format!("Stavka broj {index}");
+        }
+        let konsignaciona = view
+            .linije
+            .iter()
+            .find(|linija| linija.lista_vrsta == PopisLista::Konsignacija.as_db_str())
+            .map(|linija| linija.naziv.clone())
+            .expect("the fixture puts a stavka on every lista");
+
+        let html = render_jedna_lista(&company(), &view, PrintFaza::A, PopisLista::Konsignacija);
+
+        assert_eq!(
+            html.matches("<section class=\"lista\">").count(),
+            1,
+            "the čl. 2 st. 6 primerak carries one lista: {html}"
+        );
+        assert_eq!(
+            html.matches("<section class=\"potpisi\">").count(),
+            1,
+            "…and one signature block, which is what makes it a primerak potpisane liste: {html}"
+        );
+        assert!(
+            html.contains(&konsignaciona),
+            "…that lista's stavke: {html}"
+        );
+        for linija in &view.linije {
+            if linija.naziv == konsignaciona {
+                continue;
+            }
+            assert!(
+                !html.contains(&linija.naziv),
+                "„{}“ belongs to another lista and reached the primerak handed to the owner \
+                 of tuđa roba: {html}",
+                linija.naziv
+            );
+        }
+        assert!(
+            html.contains("čl. 2 st. 6") && html.contains("deset dana"),
+            "the rok belongs on the paper the duty is about: {html}"
+        );
+        assert!(
+            html.contains("Aplikacija tu listu ne dostavlja umesto vas"),
+            "…and the delivery is the obveznik's, which the document may not leave implied: \
+             {html}"
+        );
+    }
+
+    /// The narrowing narrows and never widens: a čl. 8 st. 5 sheet stays a čl. 8
+    /// st. 5 sheet when it carries one lista, and the structural withholding is
+    /// the same `red_faza_a` path.
+    #[test]
+    fn a_narrowed_lista_withholds_the_book_side_exactly_as_the_bundle_does() {
+        let mut view = view_with_every_lista();
+        view.knjigovodstvo_dostupno = true;
+        for linija in &mut view.linije {
+            linija.knjigovodstvena_kolicina_milli = Some(9_999);
+            linija.razlika_milli = Some(-1_234);
+        }
+
+        for lista in PopisLista::ALL {
+            let html = render_jedna_lista(&company(), &view, PrintFaza::A, lista);
+            for procureno in [format_kolicina(9_999), format_kolicina(-1_234)] {
+                assert!(
+                    !html.contains(&procureno),
+                    "„{procureno}“ reached the narrowed čl. 8 st. 5 sheet for {}: {html}",
+                    lista.as_db_str()
+                );
+            }
+            assert!(
+                !html.to_lowercase().contains("knjigovodstven"),
+                "the narrowed čl. 8 st. 5 sheet for {} carries the column heading: {html}",
+                lista.as_db_str()
+            );
+        }
+    }
+
+    /// Čl. 8 st. 4 gives the komisija the liste *before* the count, so a lista
+    /// with nothing on it yet is a document the bylaw asks for — and it still
+    /// needs somewhere to sign. It says which lista it is, so an empty sheet
+    /// cannot be mistaken for a popis with nothing in it.
+    #[test]
+    fn a_narrowed_lista_with_no_stavke_still_prints_a_sheet_that_can_be_signed() {
+        let view = view_with_lines();
+        let html = render_jedna_lista(&company(), &view, PrintFaza::A, PopisLista::Konsignacija);
+
+        assert_eq!(
+            html.matches("<section class=\"lista\">").count(),
+            0,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<section class=\"potpisi\">").count(),
+            1,
+            "an empty čl. 8 st. 4 sheet still has to be signable: {html}"
+        );
+        assert!(
+            html.contains(&escape_html(&format!(
+                "Popisna lista „{}“ nema stavke.",
+                PopisLista::Konsignacija.naziv()
+            ))),
+            "…and it has to say which lista is empty: {html}"
+        );
+        assert!(
+            !html.contains("Košulja"),
+            "the roba lista's stavke are not on the konsignaciona lista: {html}"
+        );
+    }
+
     /// A lista with no stavke is not a section — čl. 10–12 require a lista where
     /// the category is present, and a printed empty table invites a signature over
     /// nothing.
@@ -1941,6 +2241,63 @@ mod tests {
             !html.contains(">Cena<"),
             "the čl. 9 st. 1 t. 5 cena is not part of the count: {html}"
         );
+    }
+
+    /// …and the sentence on screen beside the button may not deny what the test
+    /// above proves the sheet carries.
+    ///
+    /// The screen's čl. 8 st. 5 copy read *„bez knjigovodstvenih količina, bez
+    /// razlika i bez vrednosti“*. The first two clauses are true and structurally
+    /// enforced; the third was not, because [`iznos_prebrojan`] puts the čl. 11
+    /// st. 1 apoen and the čl. 12 st. 2 iznos on the Faza A sheet as grouped RSD
+    /// — this crate proving in one test that the sheet carries money figures
+    /// while the screen denied it two files away. Over-denial is the mirror of
+    /// the six false promises and `docs_guard` already treats it as one, so it is
+    /// caught the same way.
+    ///
+    /// **The tie is derived, not written out.** The needles come from
+    /// [`iznos_prebrojan`], [`iznos_kolona`] and `PopisLista::pravni_osnov`, so a
+    /// lista added to the counted-money set fails this test until the copy names
+    /// it. `PopisModule.tsx` is read here rather than asserted in vitest because
+    /// the property is about the **renderer's** column set, and only this side of
+    /// the app knows what that set is.
+    #[test]
+    fn the_screen_never_denies_a_money_column_the_cl_8_st_5_sheet_prints() {
+        const EKRAN: &str = include_str!("../../src/app/popis/PopisModule.tsx");
+        const POCETAK: &str = "Štampa se popisna lista stvarnog stanja";
+
+        let recenica = EKRAN
+            .split(POCETAK)
+            .nth(1)
+            .unwrap_or_else(|| panic!("`PopisModule.tsx` must carry the čl. 8 st. 5 sentence"))
+            .split('"')
+            .next()
+            .expect("the sentence is one string literal");
+
+        assert!(
+            !recenica.contains("bez vrednosti"),
+            "the screen denies every value on a sheet that prints the čl. 11 st. 1 apoen and \
+             the čl. 12 st. 2 iznos: „{recenica}“"
+        );
+
+        for lista in PopisLista::ALL
+            .into_iter()
+            .filter(|lista| iznos_prebrojan(*lista))
+        {
+            let kolona = iznos_kolona(lista).to_lowercase();
+            assert!(
+                recenica.to_lowercase().contains(&kolona),
+                "the čl. 8 st. 5 sheet prints a „{}“ column for {}, and the sentence beside the \
+                 button never mentions it: „{recenica}“",
+                iznos_kolona(lista),
+                lista.as_db_str()
+            );
+            assert!(
+                recenica.contains(lista.pravni_osnov()),
+                "…nor the provision that figure is counted under ({}): „{recenica}“",
+                lista.pravni_osnov()
+            );
+        }
     }
 
     /// A stavka the v20 CHECK should have made impossible is still a stavka the
@@ -2397,5 +2754,103 @@ mod tests {
             render_plan_rada(&company(), &view).contains("&lt;script&gt;"),
             "the escaped form still has to be visible on the plan rada"
         );
+    }
+
+    /// Čl. 8 st. 5 reaches these two documents as well, and nothing was watching
+    /// it there.
+    ///
+    /// `popis_export_odluka` and `popis_export_plan_rada` are gated by the admin
+    /// check and by nothing else — the odluka precedes the count, so there is no
+    /// state to gate on — which means both are printable while the popis is
+    /// `counting`, the state the blind count is *about*. Both are handed the whole
+    /// [`PopisSessionView`], `linije` included. Neither renderer walks `linije`
+    /// today, so nothing leaks; but that is a fact about this build, and until
+    /// this test existed the only thing standing between the komisija and the book
+    /// side of these two sheets was that `load_session` happened to have returned
+    /// a blind view. That is precisely the „property of somebody else's SELECT“
+    /// the module doc rejects for the popisna lista.
+    ///
+    /// So the view is made to leak on purpose, the way the čl. 8 st. 5 sheet's own
+    /// first test makes it leak, and both documents are swept for the figures and
+    /// for the word.
+    #[test]
+    fn the_pre_count_documents_carry_no_book_data_even_when_the_view_carries_it() {
+        let mut view = view_odobren();
+        view.knjigovodstvo_dostupno = true;
+        for linija in &mut view.linije {
+            linija.knjigovodstvena_kolicina_milli = Some(9_999);
+            linija.razlika_milli = Some(-1_234);
+            linija.cena_minor = Some(249_900);
+        }
+
+        for (dokument, html) in [
+            ("odluka", render_odluka(&company(), &view)),
+            ("plan rada", render_plan_rada(&company(), &view)),
+        ] {
+            for procureno in [
+                format_kolicina(9_999),
+                format_kolicina(-1_234),
+                format_rsd_minor(249_900),
+                format_rsd_minor(vrednost_minor(7_000, 249_900).expect("the fixture fits an i64")),
+            ] {
+                assert!(
+                    !html.contains(&procureno),
+                    "„{procureno}“ reached the {dokument}, which is printable during the count: \
+                     {html}"
+                );
+            }
+            assert!(
+                !html.to_lowercase().contains("knjigovodstven"),
+                "the {dokument} must not even carry the notion: {html}"
+            );
+            assert!(
+                !html.to_lowercase().contains("razlik"),
+                "the {dokument} must not name a razlika either: {html}"
+            );
+            assert!(
+                html.contains("Butik Centar"),
+                "…while still being the document it is meant to be: {html}"
+            );
+        }
+    }
+
+    /// The structural half of the rule above, on the two renderers this time.
+    ///
+    /// A behavioural sweep proves what one view produced; it cannot prove that the
+    /// pre-count pair has no business with the counted lines at all. These two
+    /// documents are about the popis, the roster and the čl. 8 st. 2 approval —
+    /// `linije` is not an input either of them has any use for, and a body that
+    /// never names it cannot leak from it however the view was loaded. Asserted
+    /// against the source for the reason
+    /// [`the_phase_a_row_renderer_never_names_a_phase_b_field`] is: reading the
+    /// field and then not printing it looks identical from outside and is a
+    /// different thing.
+    #[test]
+    fn neither_pre_count_renderer_reaches_for_the_counted_lines() {
+        const SOURCE: &str = include_str!("popis_print.rs");
+
+        for renderer in ["fn render_odluka(", "fn render_plan_rada("] {
+            let telo = SOURCE
+                .split(renderer)
+                .nth(1)
+                .unwrap_or_else(|| panic!("`{renderer}` must exist"))
+                .split("\n/// ")
+                .next()
+                .unwrap_or_else(|| panic!("`{renderer}` must end somewhere"));
+
+            for polje in [
+                "linije",
+                "knjigovodstvena_kolicina_milli",
+                "razlika_milli",
+                "knjigovodstvo_dostupno",
+            ] {
+                assert!(
+                    !telo.contains(polje),
+                    "`{renderer}` names `{polje}`; the odluka and the plan rada are printable \
+                     while the popis is counting, so the counted lines are one edit away from \
+                     the paper the komisija is handed (PoP čl. 8 st. 5)"
+                );
+            }
+        }
     }
 }

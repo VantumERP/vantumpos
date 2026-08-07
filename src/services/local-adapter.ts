@@ -479,8 +479,10 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       // `faza_stampe` against the session's own čl. 8 st. 5 potpis, so an
       // adapter that resolved it to a phase here would be answering the one
       // question this module keeps backend-side on purpose.
-      exportLista: (id, faza) =>
-        invoke<ExportedFile>("popis_export_lista", { id, faza }),
+      // `lista` likewise: `null` is the whole popis, a named lista is the čl. 2
+      // st. 6 primerak of that one lista and can only narrow the same document.
+      exportLista: (id, faza, lista) =>
+        invoke<ExportedFile>("popis_export_lista", { id, faza, lista }),
       exportOdluka: (id) => invoke<ExportedFile>("popis_export_odluka", { id }),
       exportPlanRada: (id) =>
         invoke<ExportedFile>("popis_export_plan_rada", { id }),

@@ -1238,8 +1238,9 @@ describe("local service adapter", () => {
     await services.popis.nivelacijaPregled();
     await services.popis.nivelacijaObuhvat(4, "ceo_objekat");
     await services.popis.izvestaj(4, { prijavljeneListe: [], narativ });
-    await services.popis.exportLista(4, null);
-    await services.popis.exportLista(4, "a");
+    await services.popis.exportLista(4, null, null);
+    await services.popis.exportLista(4, "a", null);
+    await services.popis.exportLista(4, null, "konsignacija");
     await services.popis.exportOdluka(4);
     await services.popis.exportPlanRada(4);
     await services.popis.odobriPlan(4, "Amina Hodžić");
@@ -1281,19 +1282,29 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenNthCalledWith(14, "popis_export_lista", {
       id: 4,
       faza: null,
+      lista: null,
     });
     expect(invoke).toHaveBeenNthCalledWith(15, "popis_export_lista", {
       id: 4,
       faza: "a",
+      lista: null,
     });
-    expect(invoke).toHaveBeenNthCalledWith(16, "popis_export_odluka", { id: 4 });
-    expect(invoke).toHaveBeenNthCalledWith(17, "popis_export_plan_rada", {
+    // …and `lista` likewise: PoP čl. 2 st. 6 owes the owner of tuđa roba a
+    // primerak of ONE posebna popisna lista, so the narrowing has to reach the
+    // command rather than being resolved into a filter on this side.
+    expect(invoke).toHaveBeenNthCalledWith(16, "popis_export_lista", {
+      id: 4,
+      faza: null,
+      lista: "konsignacija",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(17, "popis_export_odluka", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(18, "popis_export_plan_rada", {
       id: 4,
     });
     // Req. 35 / PoP čl. 8 st. 2 — the name goes across as typed. The backend
     // trims it and refuses a blank one by name; an adapter that substituted the
     // shop's registered name would record an approval nobody gave.
-    expect(invoke).toHaveBeenNthCalledWith(18, "popis_odobri_plan", {
+    expect(invoke).toHaveBeenNthCalledWith(19, "popis_odobri_plan", {
       id: 4,
       odobrio: "Amina Hodžić",
     });

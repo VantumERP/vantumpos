@@ -58,11 +58,11 @@ describe("mock popis — the čl. 8 st. 5 print phase", () => {
     const session = await services.popis.open(otvoriZahtev());
     await services.popis.startCount(session.id);
 
-    await expect(services.popis.exportLista(session.id, "b")).rejects.toThrow(
+    await expect(services.popis.exportLista(session.id, "b", null)).rejects.toThrow(
       /čl\. 8 st\. 5/,
     );
 
-    const faza = await services.popis.exportLista(session.id, null);
+    const faza = await services.popis.exportLista(session.id, null, null);
     expect(faza.fileName).toContain("faza-a");
   });
 
@@ -70,13 +70,53 @@ describe("mock popis — the čl. 8 st. 5 print phase", () => {
     const services = createMockServices();
     const id = await doObracuna(services);
 
-    const derivirano = await services.popis.exportLista(id, null);
+    const derivirano = await services.popis.exportLista(id, null, null);
     expect(derivirano.fileName).toContain("faza-b");
 
     // Čl. 2 st. 6 — the signed counted state stays printable afterwards, and an
     // explicit „a“ can only ever narrow what the sheet carries.
-    const ponovo = await services.popis.exportLista(id, "a");
+    const ponovo = await services.popis.exportLista(id, "a", null);
     expect(ponovo.fileName).toContain("faza-a");
+  });
+
+  /**
+   * PoP čl. 2 st. 6 — one lista on its own, under a file name of its own so the
+   * primerak cannot overwrite the bundle, and with a row count of what that
+   * document carries rather than of the whole popis. The double has to model the
+   * narrowing or the UI test that produces the primerak passes against a double
+   * that quietly hands back the bundle.
+   */
+  it("narrows the export to one popisna lista, with a file name of its own", async () => {
+    const services = createMockServices();
+    const session = await services.popis.open(otvoriZahtev());
+    await services.popis.startCount(session.id);
+    for (const lista of ["roba", "konsignacija"] as const) {
+      await services.popis.saveLine(session.id, null, {
+        listaVrsta: lista,
+        sifra: null,
+        naziv: `Stavka na listi ${lista}`,
+        vrsta: null,
+        jedinicaMere: "kom",
+        stvarnaKolicinaMilli: 2000,
+        bliziOpis: null,
+        knjigovodstvenaKolicinaMilli: null,
+        cenaMinor: null,
+      });
+    }
+
+    const svega = await services.popis.exportLista(session.id, null, null);
+    const jedna = await services.popis.exportLista(
+      session.id,
+      null,
+      "konsignacija",
+    );
+
+    expect(svega.rowCount).toBe(2);
+    expect(jedna.rowCount).toBe(1);
+    expect(jedna.fileName).toBe(
+      `popisna-lista-${session.id}-konsignacija-faza-a.html`,
+    );
+    expect(jedna.fileName).not.toBe(svega.fileName);
   });
 });
 

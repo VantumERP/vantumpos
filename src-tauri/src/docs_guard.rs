@@ -859,14 +859,7 @@ fn the_register_states_the_popis_export_it_has_instead_of_the_denial_it_replaced
 /// the export stops this file compiling instead of leaving the register's claim
 /// unbacked.
 fn popis_register_rows() -> Vec<(&'static str, usize, &'static str)> {
-    let _liste: fn(
-        tauri::State<'_, crate::AppState>,
-        i64,
-        Option<crate::popis_print::PrintFaza>,
-    ) -> Result<
-        crate::commands::reports::ExportedFile,
-        crate::app_error::CommandError,
-    > = crate::commands::popis::popis_export_lista;
+    let _liste: crate::commands::popis::ExportListaFn = crate::commands::popis::popis_export_lista;
 
     let rows: Vec<(&'static str, usize, &'static str)> = REGISTER
         .lines()

@@ -1693,7 +1693,8 @@ mod tests {
                          document promised behaviour the code lacked. An affirmative claim is \
                          allowed only for „izvozi“ over {IZLAZI:?}, each of which is bound to \
                          the command that produces it, and only when the same sentence names \
-                         none of {BEZ_IZLAZA:?}.",
+                         none of {BEZ_IZLAZA:?}, none of {TUDJI_OBJEKTI:?}, and says „{U_DATOTEKU}“ \
+                         — the one destination this crate reaches.",
                         recenica.trim()
                     );
                 }
@@ -1714,6 +1715,37 @@ mod tests {
     /// conjunction — „izvozi popisne liste i zapisnik“ is exactly the shape a
     /// widening edit takes.
     const BEZ_IZLAZA: [&str; 3] = ["izveštaj", "zapisnik", "odluku o usvajanju"];
+
+    /// The other object nouns an affirmative „izvozi“ sentence may not carry
+    /// beside the three, for a **different** reason than [`BEZ_IZLAZA`]'s.
+    ///
+    /// These are not documents the crate cannot produce — `cl47::export` really
+    /// does write the evidencija radnji obrade, `cenovnik` and `kalkulacija`
+    /// have exports of their own. They are objects the escape was never granted
+    /// *for*: [`IZLAZI`] is bound by function pointer to three popis commands
+    /// and to nothing else, so a sentence claiming a fourth object rides on an
+    /// allowance nobody measured. The rule for them is the rule for the other
+    /// three verbs — negate it or do not say it — and silence about a
+    /// capability is a cost the sweep has always accepted.
+    ///
+    /// `obrasc`/`obrazac` earns its place twice over: „izvozi popisne liste u
+    /// obliku propisanog obrasca“ would also plant a §2c breach, because
+    /// Pravilnik 89/2020 prescribes no obrazac for the popisna lista at all.
+    /// The stem is `obrasc`/`obrazac` and deliberately not `obraz`, which would
+    /// swallow „odluku o popisu i **obraz**ovanju komisije“ — the odluka's own
+    /// full name — and reject a true sentence.
+    const TUDJI_OBJEKTI: [&str; 5] = ["evidencij", "knjigu", "obrasc", "obrazac", "cenovnik"];
+
+    /// The verb and its destination, contiguous.
+    ///
+    /// The whole of what this crate gained is *writing a file*: `write_export`
+    /// puts bytes in `exports/` and the operator's own OS opens them. So an
+    /// affirmative „izvozi“ has to say where it exports **to**, immediately
+    /// after the verb, and the only destination the code can back is a file.
+    /// This is what fails „Program izvozi popisne liste na Nacionalni portal
+    /// otvorenih podataka“, which names a real document, names nothing from
+    /// either deny-list, and is false about everything that matters.
+    const U_DATOTEKU: &str = "izvozi u datoteku";
 
     /// The verb one sentence claims the program performs while the crate cannot
     /// back the claim, if there is one.
@@ -1747,16 +1779,42 @@ mod tests {
     /// print handler, which is why every shipped sentence is worded „izvozi u
     /// datoteku za štampu“. So only „izvozi“ may stand affirmatively, and the
     /// other three keep the original rule: negate it or do not say it.
+    ///
+    /// **And along „izvozi“ the escape is bounded by an allow-list plus a
+    /// destination, because a deny-list alone left the class wide open.** The
+    /// first cut of the verb-scoped amendment read „names one of [`IZLAZI`] and
+    /// none of [`BEZ_IZLAZA`]“, which is an allow-noun ORed with a deny-noun and
+    /// therefore lets any object outside both ride through on the conjunction.
+    /// Measured, not reasoned — all four of these passed it, and the
+    /// pre-amendment guard had failed every one, so **along „izvozi“ the
+    /// amendment was strictly looser and the plan record saying otherwise was
+    /// wrong**: „Program izvozi popisne liste na Nacionalni portal otvorenih
+    /// podataka“ · „Program izvozi popisne liste i evidenciju o povredama
+    /// podataka o ličnosti“ · „Aplikacija izvozi plan rada i knjigu evidencije
+    /// prometa Poreskoj upravi“ · „Program izvozi popisne liste u obliku
+    /// propisanog obrasca“. Three bounds now stand together and each one is
+    /// needed: the sentence names one of [`IZLAZI`], it names nothing from
+    /// [`BEZ_IZLAZA`] **or** [`TUDJI_OBJEKTI`], and the verb sits immediately in
+    /// front of [`U_DATOTEKU`] — the only destination this crate reaches. Drop
+    /// the destination and the portal claim passes; drop the object list and
+    /// „izvozi u datoteku popisne liste i evidenciju o povredama“ passes. All
+    /// nine shapes are in
+    /// `the_output_sweep_still_fails_a_claim_the_crate_cannot_back`.
+    ///
+    /// **The residual, stated rather than implied.** Along „izvozi“ this is
+    /// necessarily looser than „negate it or stay silent“, because the register
+    /// now has something true to say. What is left open is a sentence that says
+    /// „izvozi u datoteku“, names only the three, and then claims a second
+    /// destination with a verb outside the four — the same residual the verb
+    /// list has always had, and the reason the list is the thing to widen if
+    /// this class ever reappears.
     fn neosnovana_tvrdnja(recenica: &str) -> Option<&'static str> {
         // The binding is the point: rename or delete any of the three and this
         // stops compiling, so the allow-list cannot outlive the capability it
         // describes. Nothing else in the crate may be added to `IZLAZI` without
         // the same binding.
-        let _liste: fn(
-            State<'_, AppState>,
-            i64,
-            Option<crate::popis_print::PrintFaza>,
-        ) -> Result<ExportedFile, CommandError> = crate::commands::popis::popis_export_lista;
+        let _liste: crate::commands::popis::ExportListaFn =
+            crate::commands::popis::popis_export_lista;
         let _odluka: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
             crate::commands::popis::popis_export_odluka;
         let _plan: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
@@ -1767,13 +1825,16 @@ mod tests {
         if !recenica.contains("program") && !recenica.contains("aplikacij") {
             return None;
         }
-        // A claim may stand affirmatively when it says WHICH document it is
-        // claiming, and every document it names is one of the three above.
-        // „…popisne liste i izveštaj o popisu“ — the half-true shape a widening
-        // edit actually takes — fails on the second limb, and a claim naming
-        // nothing fails on the first.
+        // A claim may stand affirmatively only in the shape the three shipped
+        // sentences have: it says WHICH document it is claiming, every object it
+        // names is one of the three, and it says the export goes into a file.
+        // „…popisne liste i izveštaj o popisu“ fails on the second limb, a claim
+        // naming nothing fails on the first, and „…na Nacionalni portal“ fails
+        // on the third.
         let imenuje_izlaz = IZLAZI.iter().any(|izlaz| recenica.contains(izlaz))
-            && !BEZ_IZLAZA.iter().any(|bez| recenica.contains(bez));
+            && !BEZ_IZLAZA.iter().any(|bez| recenica.contains(bez))
+            && !TUDJI_OBJEKTI.iter().any(|tudji| recenica.contains(tudji))
+            && recenica.contains(U_DATOTEKU);
 
         for (verb, negacija) in [
             ("štampa", "ne štampa"),
@@ -1814,6 +1875,10 @@ mod tests {
             "Izveštaj o popisu se ne čuva u aplikaciji — sastavlja se na zahtev i prikazuje na \
              ekranu, a program ga ne štampa i ne izvozi",
             " 6) — tu listu dostavlja obveznik, program je ne šalje nikome",
+            // The same claim as the izveštaj warning carries it, split on its own
+            // semicolon. It lives in `commands::popis`, outside this sweep's
+            // haystack, so nothing but this list holds it to the same rule.
+            "Popisne liste, odluku o popisu i plan rada program izvozi u datoteku za štampu",
             // No claim at all, and a participle that is the obveznik's own paper.
             "Štampani i potpisani primerak sastavlja i čuva sam obveznik",
         ] {
@@ -1848,21 +1913,61 @@ mod tests {
                 "Aplikacija podnosi popisne liste Poreskoj upravi",
                 "podnosi",
             ),
+            // Two false verbs in one sentence, and the sweep now names the
+            // earlier one. It used to name „šalje“, because „izvozi plan rada“
+            // was excused by the noun hit alone; with the destination bound in
+            // place it is not, so the same sentence is rejected one verb sooner.
+            // The `šalje` scope is still exercised on its own by the probe
+            // below, which carries no „izvozi“ at all.
             (
                 "Program izvozi plan rada i šalje ga knjigovođi elektronskom poštom",
-                "šalje",
+                "izvozi",
             ),
             (
                 "Popisne liste program šalje vlasniku robe elektronskom poštom",
                 "šalje",
+            ),
+            // The class the first amendment left wide open, and the reason the
+            // escape is now bounded by the verb's own destination rather than
+            // by a noun hit. Each of these names a real document, names none of
+            // `BEZ_IZLAZA`, and claims something the crate cannot do — so the
+            // „one hit and no deny-list hit“ pair passed all four. The crate's
+            // whole capability is *writing a file*, so an affirmative „izvozi“
+            // has to say that in as many words, immediately after the verb.
+            (
+                "Program izvozi popisne liste na Nacionalni portal otvorenih podataka",
+                "izvozi",
+            ),
+            (
+                "Program izvozi popisne liste i evidenciju o povredama podataka o ličnosti",
+                "izvozi",
+            ),
+            (
+                "Aplikacija izvozi plan rada i knjigu evidencije prometa Poreskoj upravi",
+                "izvozi",
+            ),
+            // …and this one would plant a §2c breach besides: no obrazac is
+            // prescribed for the popisna lista.
+            (
+                "Program izvozi popisne liste u obliku propisanog obrasca",
+                "izvozi",
+            ),
+            // The destination clause on its own is not enough either: a second
+            // object smuggled in beside the three rides through „izvozi u
+            // datoteku“ unless the objects are checked as well.
+            (
+                "Program izvozi u datoteku popisne liste i evidenciju o povredama podataka",
+                "izvozi",
             ),
         ] {
             assert_eq!(
                 neosnovana_tvrdnja(neistinita),
                 Some(verb),
                 "the sweep must still fail „{neistinita}“ on „{verb}“ — the amendment allows an \
-                 affirmative „izvozi“ over {IZLAZI:?} and nothing else; this crate sends nothing \
-                 anywhere, files nothing with anybody and prints nothing itself"
+                 affirmative „izvozi“ only over {IZLAZI:?}, only with none of {BEZ_IZLAZA:?} and \
+                 none of {TUDJI_OBJEKTI:?} beside them, and only when the sentence says \
+                 „{U_DATOTEKU}“; this crate sends nothing anywhere, files nothing with anybody \
+                 and prints nothing itself"
             );
         }
     }

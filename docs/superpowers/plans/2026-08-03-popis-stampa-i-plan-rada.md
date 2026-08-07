@@ -311,7 +311,7 @@ Per phase, a „Štampaj popisne liste“ action calling the export then `openFo
 
 **Review pass (07.08.2026) — six findings closed, one of them a correction to the paragraph above.**
 
-- **The sweep amendment was scoped to the sentence, not to the verb, and that made it looser for two verbs rather than stronger.** „…got stronger rather than looser“ above is true along `štampa`/`izvozi` and **false** along `šalje`/`podnosi`: `istinita` was computed once per sentence and then OR-ed into the assertion for all four verbs, so naming a real document bought a sentence any claim at all about it. Measured: „Aplikacija podnosi popisne liste Poreskoj upravi“, „Program štampa popisne liste i šalje ih vlasniku tuđe robe u roku od deset dana (PoP čl. 2 st. 6)“ and „Program izvozi plan rada i šalje ga knjigovođi elektronskom poštom“ all passed the amended guard, and the first two are exactly the sentences a future developer writes about this module, because čl. 2 st. 6 is a real duty the register discusses. The escape is now scoped to **`izvozi` alone** — the three commands write a file, and the crate neither prints (the OS opens the file), nor sends, nor files anything, which is why every shipped sentence reads „izvozi u datoteku za štampu“. `štampa`, `šalje` and `podnosi` keep the original „negate it or do not say it“ rule. The predicate is factored out as `neosnovana_tvrdnja` so the amendment can be **measured** instead of asserted: `the_output_sweep_still_fails_a_claim_the_crate_cannot_back` runs it over four true shapes and eight untrue ones, including all three above. `BEZ_IZLAZA` also gained `zapisnik` and `odluku o usvajanju`, so a real document can no longer carry a false one through on a conjunction. And `every_export_the_sweep_allows_is_registered_as_a_command` carries the function-pointer binding the rest of the way to `lib.rs`'s `generate_handler!` — a Rust item no invoke handler names is an export no operator can reach, which the typed bindings alone did not catch.
+- **The sweep amendment was scoped to the sentence, not to the verb, and that made it looser for two verbs rather than stronger.** „…got stronger rather than looser“ above is true along `štampa`/`izvozi` and **false** along `šalje`/`podnosi`: `istinita` was computed once per sentence and then OR-ed into the assertion for all four verbs, so naming a real document bought a sentence any claim at all about it. Measured: „Aplikacija podnosi popisne liste Poreskoj upravi“, „Program štampa popisne liste i šalje ih vlasniku tuđe robe u roku od deset dana (PoP čl. 2 st. 6)“ and „Program izvozi plan rada i šalje ga knjigovođi elektronskom poštom“ all passed the amended guard, and the first two are exactly the sentences a future developer writes about this module, because čl. 2 st. 6 is a real duty the register discusses. The escape is now scoped to **`izvozi` alone** — the three commands write a file, and the crate neither prints (the OS opens the file), nor sends, nor files anything, which is why every shipped sentence reads „izvozi u datoteku za štampu“. **Corrected again by the whole-branch review below: „got stronger rather than looser“ was false along `izvozi` too**, and the two sentences in this bullet that said otherwise — that one, and „`BEZ_IZLAZA` also gained `zapisnik` and `odluku o usvajanju`, so a real document can no longer carry a false one through on a conjunction“ — are corrected there with the measurement that shows it. `štampa`, `šalje` and `podnosi` keep the original „negate it or do not say it“ rule. The predicate is factored out as `neosnovana_tvrdnja` so the amendment can be **measured** instead of asserted: `the_output_sweep_still_fails_a_claim_the_crate_cannot_back` runs it over four true shapes and eight untrue ones, including all three above. `BEZ_IZLAZA` also gained `zapisnik` and `odluku o usvajanju`, so a real document can no longer carry a false one through on a conjunction. And `every_export_the_sweep_allows_is_registered_as_a_command` carries the function-pointer binding the rest of the way to `lib.rs`'s `generate_handler!` — a Rust item no invoke handler names is an export no operator can reach, which the typed bindings alone did not catch.
 - **The withdrawn „štampa se na zahtev“ clause was still standing in the mock adapter.** `d928b36` pulled it out of `retention.rs` and planted a guard beside it, but that guard reads the Rust string, so `mock-adapter.ts`'s copy of the same `popis_dokumentacija` napomena survived the sixth-incident fix untouched and drifted four sentences behind the string it models. It now mirrors `RecordClass::PopisDokumentacija::napomena` — the čl. 14 st. 3 sentence, the export sentence and the izveštaj's own denial — and two new tests in `mock-adapter.popis.test.ts` pin both halves.
 - **`docs/SERBIAN-LAW-COMPLIANCE.md` got the superseding note `docs/PROGRESS.md` got, and the „Checked and found clean“ paragraph above was wrong to omit it.** Register row 19 and the §3 SW-16 row both still said „there is no print or export for a popisna lista“, that `PopisService` „has fifteen methods and none exports“, and that req. 35 records no approval. Task 6 is chartered to restate them, but Task 3's own rule — a false sentence standing for the length of a task is a false sentence shipped if the task never runs — applies to this file too. Both rows are corrected **in the cell**, because a register row is read on its own and a correction three sections away leaves the row reading as a closed item. Req. 32's „editable default template“ limb is left open in both. `docs_guard::the_register_corrects_every_denial_of_the_popis_export_it_now_has` pins it, line-locally and bound to `popis_export_lista` by function pointer; none of the eighteen existing guards read a claim about output.
 - **Nothing pinned that the primary print button sends `null`.** Measured before the fix: narrowing `PopisModule.tsx`'s primary action to `„a“` left the whole frontend suite green, and under that mutation a `computed` popis announces „Štampaju se obračunate popisne liste (PoP čl. 9 st. 3)“ over a click that produces the čl. 8 st. 5 sheet. The backend cannot see this — `faza_stampe` honours an explicit `„a“` in every state by design (Task 3's Deviation 3) — so it is the frontend's half of the property. `asks for the derived phase and gets the document its own copy names` now asserts `(1, null)` **and** reads the phase back out of the double's `fileName`, so the sentence on screen and the document it produces are tied in one test.
@@ -340,6 +340,131 @@ Per phase, a „Štampaj popisne liste“ action calling the export then `openFo
 **Deviation 3 — three more dated SW-16 sentences were given closing pointers.** Task 5's superseding blockquote reached the residuals table only. The SW-16 section's own opening disclosure (*„There is no print and no export for a popisna lista“*), its „Deliberately not built“ paragraph and its Task 10 row all still read as current to anyone skimming. Each now carries a one-clause pointer to the 07.08.2026 section, and each says which limbs did **not** close — the paragraphs themselves stand, because they are the dated record the work answers.
 
 **Nothing was credited that the code does not do.** The izveštaj is still screen-only (`popis_izvestaj` returns a view; no command writes one to a file), `odluka_doneta_at` is still written by no verb, req. 32's editable default template is still unbuilt, and the čl. 2 st. 6 primerak is still delivered by the shop. All four are in both documents' open lists. The čl. 48 audit trail's lopsidedness and `db::test_database_path`'s shared temp root are recorded as open options rather than as closed ones.
+
+---
+
+### Whole-branch adversarial review (07.08.2026) — seven findings, all closed
+
+Read over the finished branch rather than over any one task. Six of the seven are one class: **a
+statement about the code that the code stopped backing.** No plan task was reopened; every change
+below is additive or a correction of a sentence.
+
+**Finding 1 + 4 (raised twice, independently) — the čl. 2 st. 6 primerak could not be produced.**
+`render_popisna_lista` emitted `potpisni_blok` **once**, after the last section, and
+`popis_export_lista` wrote the whole thing to one file. Task 3's Deviation 3 and Task 5's Deviation 2
+both justified shipped behaviour on PoP čl. 2 st. 6 — ten days to deliver a *primerak potpisane
+posebne popisne liste* to the owner of tuđa roba — and the module states that duty in
+`konsignacija_podsetnik`, in the izveštaj and on screen. What it could produce was neither limb of it:
+handing over the export meant handing a third party every other lista of the popis, and on the čl. 9
+st. 3 sheet their knjigovodstvene količine, cene and vrednosti besides; tearing out the konsignaciona
+section meant handing over a sheet with no signature line on it. `sekcija`'s own doc comment claimed
+the opposite („each gets its own broj liste and its own signature-bearing table“) and has been
+corrected.
+
+Closed on both limbs, and the plan is deliberately exceeded here because the plan's own shape — one
+document, one signature block — is what the finding is about. **`potpisni_blok` now takes an
+`oznaka` and is emitted once per lista section**, naming the lista it signs, with
+`section.lista ~ section.lista { page-break-before: always }` so a lista is physically separable; this
+is also čl. 8 st. 5 read literally — *„пре него што чланови комисије за попис потпишу те листе“*,
+those liste, each of them. **And `popis_export_lista` gained a fourth parameter,
+`lista: Option<PopisLista>`**, rendered by a new `render_jedna_lista` over a shared private
+`render_liste(company, view, faza, izbor)`; `render_popisna_lista` keeps its three-parameter shape so
+the twenty existing renderer tests were not disturbed. The narrowed file is
+`popisna-lista-{id}-{lista}-faza-{a|b}.html` with a `row_count` of what that document carries, and a
+narrowed čl. 8 st. 4 sheet with no stavke still prints a signable page that says which lista is empty.
+The narrowing **cannot widen**: `faza_stampe` still decides the phase and runs before the render, so a
+narrowed Faza B request before the potpis is refused by the same code and still leaves nothing on
+disk. Frontend: `exportLista(id, faza, lista)` through `ports`, `local-adapter` and `mock-adapter`, and
+`DokumentiPanel` renders one print action per lista with stavke, with the ten-day rok stated beside the
+button that produces the document it is about. Five new tests, each measured by mutation — a
+document-level signature block trips the per-lista test and nothing else; ignoring `izbor` trips the
+two narrowing tests; dropping the page break trips the per-lista test.
+
+**Finding 2 — two guard comments still explained themselves with the denial this cycle falsified.**
+`retention.rs` and `commands/popis.rs` both said the popis module ships no print and no export and gave
+the absence of an exporting service method and of an `openForPrint` caller as the evidence — each
+sitting directly above a test body that, since Task 5, asserted the opposite. Task 5's shipped note
+claimed the denials had been reviewed in both directions; these two were missed because both are
+**comments**, and nothing in this repository sweeps those. Both rewritten to scope the denial to the
+**izveštaj alone**, historical note kept and dated, and the class is now swept:
+`no_comment_in_the_popis_stack_still_denies_the_export_the_module_has` reads the four files that carry
+the export stack and fails on the withdrawn wordings, bound by function pointer to the three commands.
+Its needles are stored in halves and joined at runtime, because the test lives inside one of the files
+it sweeps — that is documented on the constant rather than left to be rediscovered.
+
+**Finding 3 — the čl. 47 output sweep passed false `izvozi` claims.** The Task 5 escape was „names one
+of `IZLAZI` and none of `BEZ_IZLAZA`“, an allow-noun ORed with a deny-noun, so any object outside both
+rode through on the conjunction. Measured rather than reasoned — four probes passed the amended guard
+and the pre-amendment guard had failed every one, so **along `izvozi` the amendment had been strictly
+looser, not stronger**, and the bullet above saying otherwise is corrected in place. Three bounds now
+stand together, each measured by dropping it and watching a specific probe pass: one of `IZLAZI`, none
+of `BEZ_IZLAZA` **or** the new `TUDJI_OBJEKTI`, and the verb immediately in front of `U_DATOTEKU` —
+`„izvozi u datoteku“`, the only destination `write_export` reaches. Nine untrue shapes are probed now
+instead of eight, and one existing expectation moved: „Program izvozi plan rada i šalje ga knjigovođi
+elektronskom poštom“ is now reported on `izvozi` rather than on `šalje`, because the destination bound
+rejects it one verb earlier; the `šalje` scope is still exercised by a probe carrying no `izvozi`. The
+residual is stated in the doc comment: along `izvozi` this is necessarily looser than
+negate-or-stay-silent, because the register now has something true to say.
+
+**Finding 5 — the obveznik lookup was unpinned on two of the three exports.** Task 3's review closed
+exactly this hole for `popis_export_lista`; Task 4 then added two commands with the identical lookup
+and did not extend the guard, so an odluka o popisu identifying its issuer as „VantumPOS“ with no PIB
+and no matični broj — a čl. 4 st. 2 decision naming nobody as the person who made it — was a state no
+test in the crate could see. `the_exported_sheet_carries_the_obveznik_the_shop_registered` became
+`the_exported_documents_carry_the_obveznik_the_shop_registered` and loops all three commands.
+Measured: with both new lookups stubbed to `CompanySettings::default()` the full suite failed exactly
+one test, where before the change it failed none.
+
+**Finding 6 — the čl. 8 st. 5 button copy denied a column the sheet carries.** *„bez knjigovodstvenih
+količina, bez razlika i bez vrednosti“*: the first two clauses are true and structurally enforced, the
+third was not — `iznos_prebrojan` puts the čl. 11 st. 1 apoen and the čl. 12 st. 2 iznos on the Faza A
+sheet as grouped RSD, which the crate proves in
+`the_counted_money_column_prints_during_the_count_and_the_cena_does_not` while the screen denied it two
+files away. The clause is now „bez vrednosnog obračuna“ and the exception is stated with both
+citations. Pinned from the side that knows the column set:
+`the_screen_never_denies_a_money_column_the_cl_8_st_5_sheet_prints` reads `PopisModule.tsx` through
+`include_str!` and derives its needles from `iznos_prebrojan`, `iznos_kolona` and
+`PopisLista::pravni_osnov`, so a lista added to the counted-money set fails the test until the copy
+names it. The reader's half is a vitest assertion on the rendered panel.
+
+**Finding 7 — nothing tested that the odluka and the plan rada withhold book data.** Both are
+printable while the popis is `counting` and both are handed the whole `PopisSessionView`. Neither
+renderer walks `linije` today, so nothing leaked — but that was a fact about this build, and the only
+thing standing between the komisija and the book side of those two sheets was that `load_session`
+happened to return a blind view, which is exactly the „property of somebody else's SELECT“ the module
+doc rejects for the popisna lista. Two guards now, and both are needed:
+`the_pre_count_documents_carry_no_book_data_even_when_the_view_carries_it` sweeps both documents built
+from a deliberately leaking view, and `neither_pre_count_renderer_reaches_for_the_counted_lines`
+asserts against the source that neither renderer names `linije` at all. Measured in both directions —
+a leak planted in a renderer body trips both, one planted in a shared helper trips only the
+behavioural one.
+
+**Deviation from the house rules, stated rather than hidden.** For findings 1/4 the interface was
+written before its tests: the renderer split and the command parameter went in first, and the five
+tests followed. Every one of them was then measured by re-introducing the defect it exists to catch,
+which is the same evidence a red-first run would have produced, but it is not the order the house rule
+asks for. Findings 3 and 6 were done red-first (the probes and the copy guard both failed for the
+right reason before the fix); findings 2, 5 and 7 are regression tests over code that was already
+correct, and each was measured by mutation.
+
+**No existing test was weakened.** Three were changed in the open: the obveznik test was renamed and
+now loops three commands instead of one; the frontend čl. 2 st. 6 reminder test reads its facts out of
+the warning element rather than off the whole page, because the rok is now also cited beside the
+per-lista button — strictly more precise, since the warning has to carry the disclaimer rather than
+merely share a page with it; and the `„b“` sweep widened from two button names to every print button
+on the panel, so the new per-lista actions are covered by it.
+
+**Docs.** `docs/PROGRESS.md` gained a *Whole-branch adversarial review* subsection and its čl. 2 st. 6
+bullet is corrected — *„the module now prints the signed lista“* over-credited on both limbs, and the
+bullet now says which limbs closed and which one (the delivery) did not. Both popis cells of
+`docs/SERBIAN-LAW-COMPLIANCE.md` were corrected in the cell: row 19's item (4) and the §3 SW-16 row now
+say the čl. 2 st. 6 *document* is producible and that only the delivery remains the obveznik's.
+
+**Review gates, every command exited `0`:** `bun run test` **539 passed** / 35 files, 0 failed ·
+`bun run build` ✓ · `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` **988
+passed**, 0 failed, 0 ignored, 0 measured, 0 filtered out · `cargo clippy … -D warnings` clean ·
+`cargo fmt … --check` clean · `git diff --check` clean. Net **+10 cargo / +3 bun** over `fad328b`. No
+migration; head stays **v22**.
 
 ---
 

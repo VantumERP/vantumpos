@@ -3105,7 +3105,7 @@ export function createMockServices(): PosServices {
        * nothing, and čl. 2 st. 6 owes the owner of tuđa roba a primerak of the
        * signed counted lista after the potpis.
        */
-      async exportLista(id, faza) {
+      async exportLista(id, faza, lista) {
         const session = popisById(id);
         const dostupno = popisKnjigovodstvoDostupno(session);
         if (!dostupno && faza === "b") {
@@ -3117,11 +3117,22 @@ export function createMockServices(): PosServices {
         }
 
         const primenjena = dostupno ? (faza ?? "b") : "a";
+        // The čl. 2 st. 6 primerak: one lista, its own file name so it cannot
+        // overwrite the bundle, and a row count of what that document carries
+        // rather than of the whole popis.
+        const ime =
+          lista === null
+            ? `popisne-liste-${id}-faza-${primenjena}.html`
+            : `popisna-lista-${id}-${lista}-faza-${primenjena}.html`;
         return {
-          fileName: `popisne-liste-${id}-faza-${primenjena}.html`,
-          path: `mock://exports/popisne-liste-${id}-faza-${primenjena}.html`,
+          fileName: ime,
+          path: `mock://exports/${ime}`,
           mimeType: "text/html" as const,
-          rowCount: session.linije.length,
+          rowCount:
+            lista === null
+              ? session.linije.length
+              : session.linije.filter((linija) => linija.listaVrsta === lista)
+                  .length,
         };
       },
       async exportOdluka(id) {

@@ -2643,23 +2643,78 @@ fn faza_stampe(
 /// render and therefore before the write, so a refused export leaves no document
 /// on disk for somebody to find and sign.
 ///
+/// **`lista` omitted is the bundle; named, it is one popisna lista on its own
+/// paper.** Req. 36's six liste are separate lists by law, and čl. 2 st. 6 makes
+/// one of them leave the shop: the owner of tuđa roba is owed a *primerak
+/// potpisane posebne popisne liste* within ten days. The bundle cannot be that
+/// primerak — it carries every other lista of the popis, and on the čl. 9 st. 3
+/// sheet the book quantities and the valuation of all of them — so a shop that
+/// handed it over would disclose its whole counted inventory to somebody entitled
+/// to see one lista. Narrowing is therefore not a convenience; it is the only way
+/// this command can produce the document čl. 2 st. 6 names.
+///
+/// It narrows and never widens, so it needs no guard of its own: [`faza_stampe`]
+/// still decides the phase, and one lista of a document is a subset of that
+/// document. A lista with no stavke is rendered as an empty sheet rather than
+/// refused, for the čl. 8 st. 4 reason `faza_stampe` does not gate `draft`.
+///
 /// There is no izveštaj export here and none anywhere: čl. 13 st. 1's izveštaj is
 /// still composed on request and shown on screen, which is what the operator
 /// strings around it say.
+/// The exact signature of [`popis_export_lista`], written once.
+///
+/// Three separate guards bind that command by **function pointer** — `cl47`'s
+/// output sweep, `docs_guard`'s register check and this module's own comment
+/// sweep — because a binding is what stops an allow-list, a compliance row or a
+/// doc comment outliving the capability it describes: rename or delete the
+/// command and they stop compiling rather than going quietly stale. Written out
+/// inline in each of them, a four-parameter `fn` type is over clippy's
+/// complexity budget, so it is named here beside the thing it describes.
+#[cfg(test)]
+pub(crate) type ExportListaFn = fn(
+    State<'_, AppState>,
+    i64,
+    Option<PrintFaza>,
+    Option<PopisLista>,
+) -> Result<ExportedFile, CommandError>;
+
 #[tauri::command]
 pub fn popis_export_lista(
     state: State<'_, AppState>,
     id: i64,
     faza: Option<PrintFaza>,
+    lista: Option<PopisLista>,
 ) -> Result<ExportedFile, CommandError> {
     super::auth::require_admin(state.inner())?;
     let connection = state.db().open().map_err(CommandError::from)?;
     let session = load_session(&connection, id)?;
     let faza = faza_stampe(session.status, session.faza_a_potpisana, faza)?;
     let company = super::settings::load_company_settings(state.inner())?;
-    let html = crate::popis_print::render_popisna_lista(&company, &session, faza);
-    let file_name = format!("popisne-liste-{id}-faza-{}.html", faza.kljuc());
-    super::campaigns::write_export(state.inner(), &file_name, &html, session.linije.len())
+
+    // `row_count` counts what the document actually carries, so a narrowed
+    // export does not report the whole popis's stavke against one lista.
+    let (html, file_name, broj_stavki) = match lista {
+        Some(lista) => (
+            crate::popis_print::render_jedna_lista(&company, &session, faza, lista),
+            format!(
+                "popisna-lista-{id}-{}-faza-{}.html",
+                lista.as_db_str(),
+                faza.kljuc()
+            ),
+            session
+                .linije
+                .iter()
+                .filter(|linija| linija.lista_vrsta == lista.as_db_str())
+                .count(),
+        ),
+        None => (
+            crate::popis_print::render_popisna_lista(&company, &session, faza),
+            format!("popisne-liste-{id}-faza-{}.html", faza.kljuc()),
+            session.linije.len(),
+        ),
+    };
+
+    super::campaigns::write_export(state.inner(), &file_name, &html, broj_stavki)
         .map_err(Into::into)
 }
 
@@ -5163,11 +5218,24 @@ mod tests {
     ///
     /// The third one has a second half, and it is the half that was wrong. This
     /// warning used to end *„odštampajte ga i čuvajte uz popisne liste“* — an
-    /// instruction the screen it appears on cannot carry out. There is no print
-    /// and no export anywhere in the popis module: `PopisService` has no exporting
-    /// method and no popis screen calls `PrintService.openForPrint`, which
-    /// reklamacije, KEP and the čl. 47 register all do. So the warning has to say
-    /// that the printing is the shop's own to do, and it is pinned here.
+    /// instruction the screen it appears on cannot carry out, because
+    /// [`compose_izvestaj`] returns a view and no command in this crate writes an
+    /// izveštaj to a file. So the warning has to say that the printing is the
+    /// shop's own to do, and it is pinned here.
+    ///
+    /// **The denial reaches the izveštaj and stops there.** This paragraph went
+    /// on, until 07.08.2026, to generalise the denial over the whole module and
+    /// to give the absence of an exporting service method and of an
+    /// `openForPrint` caller as its evidence. That described the module of
+    /// 03.08.2026 and went false the moment `popis_export_lista` landed:
+    /// `popis_export_lista`, [`popis_export_odluka`] and [`popis_export_plan_rada`]
+    /// write three documents into `exports/`; `PopisService` carries
+    /// `exportLista`, `exportOdluka` and `exportPlanRada`; and `PopisModule`'s
+    /// `DokumentiPanel` hands every returned path to `PrintService.openForPrint`.
+    /// The last assertion in the body below already required this warning to name
+    /// that export, so the comment was contradicting its own test forty lines
+    /// later — the direction nothing in this crate was watching, and now swept by
+    /// [`no_comment_in_the_popis_stack_still_denies_the_export_the_module_has`].
     #[test]
     fn the_izvestaj_warns_without_blocking_and_says_it_is_not_stored() {
         with_app("popis_izvestaj_warnings", |app| {
@@ -6440,7 +6508,7 @@ mod tests {
             );
             sign_in_admin(state.inner());
 
-            let exported = popis_export_lista(app.state::<AppState>(), id, None)
+            let exported = popis_export_lista(app.state::<AppState>(), id, None, None)
                 .expect("the counted-state sheet should export");
 
             assert!(
@@ -6486,7 +6554,7 @@ mod tests {
             let putanja =
                 izvezena_putanja(state.inner(), &format!("popisne-liste-{id}-faza-b.html"));
 
-            let error = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::B))
+            let error = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::B), None)
                 .expect_err("the čl. 9 st. 3 sheet does not exist before the čl. 8 st. 5 potpis");
 
             assert_eq!(error.code, "popis_obracunate_liste_pre_potpisa");
@@ -6520,7 +6588,7 @@ mod tests {
             let id = seeded_computed(state.inner(), "KOS-1");
             sign_in_admin(state.inner());
 
-            let exported = popis_export_lista(app.state::<AppState>(), id, None)
+            let exported = popis_export_lista(app.state::<AppState>(), id, None, None)
                 .expect("the obračunate liste should export");
 
             assert_eq!(exported.mime_type, "text/html");
@@ -6555,8 +6623,19 @@ mod tests {
     /// therefore produced byte-identical HTML in every other test in the crate. The
     /// seeded identity is asserted on the file, and the default name is asserted
     /// absent, so the fallback cannot pass for the lookup.
+    ///
+    /// **All three exports, not just the sheet.** This test opened life over
+    /// `popis_export_lista` alone, and the two exports added afterwards carry the
+    /// identical lookup and were left unguarded: renderer-level coverage proves
+    /// only that `render_odluka` prints the obveznik it is *handed*, and every
+    /// assertion the odluka and the plan rada command tests make reads off the
+    /// popis row or the roster. An odluka o popisu identifying its issuer as
+    /// „VantumPOS“ with no PIB and no matični broj — a čl. 4 st. 2 decision naming
+    /// nobody as the person who made it — was a state no test in the crate could
+    /// see. The three are looped here rather than in three tests because it is one
+    /// property of one lookup written out three times.
     #[test]
-    fn the_exported_sheet_carries_the_obveznik_the_shop_registered() {
+    fn the_exported_documents_carry_the_obveznik_the_shop_registered() {
         with_app("popis_export_obveznik", |app| {
             let state = app.state::<AppState>();
             let id = seeded_computed(state.inner(), "KOS-1");
@@ -6575,23 +6654,115 @@ mod tests {
             )
             .expect("the company settings should save");
 
-            let exported = popis_export_lista(app.state::<AppState>(), id, None)
-                .expect("the obračunate liste should export");
+            // One name and one way of reaching it, per document. Named so the
+            // array literal stays inside clippy's complexity budget.
+            type Izvoz = fn(&tauri::App<tauri::test::MockRuntime>, i64) -> ExportedFile;
 
-            let html =
-                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
-            assert!(
-                html.contains("Zlatara Đurđević doo"),
-                "the sheet has to name the obveznik the shop registered: {html}"
-            );
-            assert!(html.contains("111222333"), "…with its PIB: {html}");
-            assert!(html.contains("64123456"), "…and its matični broj: {html}");
-            assert!(
-                !html.contains("VantumPOS"),
-                "the CompanySettings::default() fallback must not stand in for the \
-                 obveznik: {html}"
-            );
+            let izvozi: [(&str, Izvoz); 3] = [
+                ("popisne liste", |app, id| {
+                    popis_export_lista(app.state::<AppState>(), id, None, None)
+                        .expect("the obračunate liste should export")
+                }),
+                ("odluka o popisu", |app, id| {
+                    popis_export_odluka(app.state::<AppState>(), id)
+                        .expect("the odluka should export")
+                }),
+                ("plan rada", |app, id| {
+                    popis_export_plan_rada(app.state::<AppState>(), id)
+                        .expect("the plan rada should export")
+                }),
+            ];
+
+            for (dokument, izvoz) in izvozi {
+                let exported = izvoz(app, id);
+                let html =
+                    std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+                assert!(
+                    html.contains("Zlatara Đurđević doo"),
+                    "the {dokument} has to name the obveznik the shop registered: {html}"
+                );
+                assert!(
+                    html.contains("111222333"),
+                    "…with its PIB, on the {dokument}: {html}"
+                );
+                assert!(
+                    html.contains("64123456"),
+                    "…and its matični broj, on the {dokument}: {html}"
+                );
+                assert!(
+                    !html.contains("VantumPOS"),
+                    "the CompanySettings::default() fallback must not stand in for the \
+                     obveznik on the {dokument}: {html}"
+                );
+            }
         });
+    }
+
+    /// The seventh instance of this project's false-statement family, found in
+    /// the one place nothing sweeps: a **comment**.
+    ///
+    /// `docs_guard` watches the two compliance documents, `cl47`'s sweep watches
+    /// the generated register, and `retention`'s test watches the stored napomena.
+    /// Nothing watched the rationale of the guards themselves — so when the popis
+    /// module gained three exports, two guard comments went on asserting that it
+    /// had none, each of them sitting directly above a test body that required
+    /// the opposite. A stale denial in a comment is worse than one in a document:
+    /// the reader it misleads is the developer holding the delete key over the
+    /// assertion.
+    ///
+    /// So the withdrawn wordings are needles and the four files that carry the
+    /// popis export stack are the haystack. The historical record is deliberately
+    /// still allowed — both remaining references say the module *had* no export
+    /// „when this note was written“, in the past tense, and neither matches a
+    /// needle. What may not come back is the present-tense claim, in any of the
+    /// four forms it was actually written in.
+    #[test]
+    fn no_comment_in_the_popis_stack_still_denies_the_export_the_module_has() {
+        // The needles describe an absence; these bindings are the presence. A
+        // rename or a deletion stops this test compiling, so the sweep cannot
+        // outlive the capability that makes the denial false.
+        let _liste: ExportListaFn = popis_export_lista;
+        let _odluka: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
+            popis_export_odluka;
+        let _plan: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
+            popis_export_plan_rada;
+
+        const IZVORI: [(&str, &str); 4] = [
+            ("commands/popis.rs", include_str!("popis.rs")),
+            ("retention.rs", include_str!("../retention.rs")),
+            ("cl47.rs", include_str!("../cl47.rs")),
+            ("popis_print.rs", include_str!("../popis_print.rs")),
+        ];
+
+        // The exact sentences that were standing on 07.08.2026, and the two
+        // pieces of evidence they gave for themselves.
+        //
+        // **Each needle is stored in halves and joined at runtime**, because this
+        // test lives inside one of the files it sweeps: written whole, every
+        // needle would match its own declaration and the guard would fail on
+        // itself for ever. That is not a way round the rule — the rule is about a
+        // sentence a reader takes as a statement about the code, and an array
+        // element cut in two is not one.
+        const POVUCENE: [[&str; 2]; 4] = [
+            ["no print and no export ", "anywhere in the popis module"],
+            ["ships no print ", "and no export"],
+            ["has no exporting ", "method"],
+            ["no popis screen ", "calls `PrintService.openForPrint`"],
+        ];
+
+        for (datoteka, izvor) in IZVORI {
+            for delovi in POVUCENE {
+                let povucena = delovi.concat();
+                assert!(
+                    !izvor.contains(&povucena),
+                    "`{datoteka}` still says „{povucena}“ — the popis module exports three \
+                     documents through `popis_export_lista`, `popis_export_odluka` and \
+                     `popis_export_plan_rada`, and `PopisModule` opens each of them for print. \
+                     A denial in a comment is read by whoever is about to change the assertion \
+                     under it"
+                );
+            }
+        }
     }
 
     /// Two popisi and two phases share one `exports/` directory, so a file name
@@ -6606,13 +6777,114 @@ mod tests {
             assert_ne!(prvi, drugi, "two distinct popisi");
             sign_in_admin(state.inner());
 
-            let a = popis_export_lista(app.state::<AppState>(), prvi, None)
+            let a = popis_export_lista(app.state::<AppState>(), prvi, None, None)
                 .expect("the čl. 8 st. 5 sheet should export");
-            let b = popis_export_lista(app.state::<AppState>(), drugi, None)
+            let b = popis_export_lista(app.state::<AppState>(), drugi, None, None)
                 .expect("the čl. 9 st. 3 sheet should export");
 
             assert_eq!(a.file_name, format!("popisne-liste-{prvi}-faza-a.html"));
             assert_eq!(b.file_name, format!("popisne-liste-{drugi}-faza-b.html"));
+        });
+    }
+
+    /// PoP čl. 2 st. 6 — *„дужан је да примерак потписане посебне пописне листе
+    /// достави … власнику те имовине најкасније у року од десет дана“*.
+    ///
+    /// That primerak goes to a third party, so the document has to be one lista
+    /// and not the popis. Before the narrowing shipped, an operator following the
+    /// module's own ten-day reminder had two wrong moves and no right one: hand
+    /// over the exported file whole — every other lista of the popis, and on the
+    /// čl. 9 st. 3 sheet every knjigovodstvena količina, cena and vrednost — or
+    /// tear the konsignaciona section out of a document whose only signature block
+    /// sat at the end, and hand over an unsigned sheet.
+    ///
+    /// The negative half is the load-bearing one: it is not enough that the
+    /// konsignaciona stavka is on the paper, the roba stavka has to be off it.
+    #[test]
+    fn the_konsignaciona_lista_exports_on_its_own_for_the_cl_2_st_6_primerak() {
+        with_app("popis_export_jedna_lista", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            let connection = state.db().open().expect("database should open");
+            save_line(
+                &connection,
+                id,
+                None,
+                &lista_line(PopisLista::Konsignacija),
+                "2026-12-31T09:20:00Z",
+            )
+            .expect("a konsignaciona stavka should save");
+            sign_in_admin(state.inner());
+
+            let exported = popis_export_lista(
+                app.state::<AppState>(),
+                id,
+                None,
+                Some(PopisLista::Konsignacija),
+            )
+            .expect("the posebna popisna lista should export on its own");
+
+            assert_eq!(
+                exported.file_name,
+                format!("popisna-lista-{id}-konsignacija-faza-a.html"),
+                "the primerak may not overwrite the bundle, nor another lista's sheet"
+            );
+            assert_eq!(
+                exported.row_count, 1,
+                "the count reports what this document carries, not the whole popis"
+            );
+
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(
+                html.contains("Torba"),
+                "the konsignaciona stavka belongs on it: {html}"
+            );
+            assert!(
+                !html.contains("Košulja"),
+                "the roba lista reached the primerak handed to the owner of tuđa roba: {html}"
+            );
+            assert!(
+                html.contains("čl. 2 st. 6") && html.contains("deset dana"),
+                "the rok belongs on the paper the duty is about: {html}"
+            );
+            assert_eq!(
+                html.matches("<section class=\"potpisi\">").count(),
+                1,
+                "a primerak potpisane liste needs exactly one place to sign: {html}"
+            );
+        });
+    }
+
+    /// The narrowing narrows and never widens. `lista` selects a subset of a
+    /// document [`faza_stampe`] has already decided, so it cannot reach past the
+    /// čl. 8 st. 5 potpis — and the refusal still runs before the render and
+    /// therefore before the write.
+    #[test]
+    fn narrowing_to_one_lista_cannot_buy_the_cl_9_st_3_sheet_before_the_potpis() {
+        with_app("popis_export_jedna_lista_faza_b", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+            let putanja = izvezena_putanja(
+                state.inner(),
+                &format!("popisna-lista-{id}-konsignacija-faza-b.html"),
+            );
+
+            let error = popis_export_lista(
+                app.state::<AppState>(),
+                id,
+                Some(PrintFaza::B),
+                Some(PopisLista::Konsignacija),
+            )
+            .expect_err("one lista of the čl. 9 st. 3 sheet is still the čl. 9 st. 3 sheet");
+
+            assert_eq!(error.code, "popis_obracunate_liste_pre_potpisa");
+            assert!(
+                !putanja.exists(),
+                "a refused narrowed export must leave no document behind: {}",
+                putanja.display()
+            );
         });
     }
 
@@ -6623,7 +6895,7 @@ mod tests {
             let id = seeded_count(state.inner(), "KOS-1");
             sign_in_cashier(state.inner());
 
-            let error = popis_export_lista(app.state::<AppState>(), id, None)
+            let error = popis_export_lista(app.state::<AppState>(), id, None, None)
                 .expect_err("a cashier must not export the popisne liste");
 
             assert_eq!(error.code, "forbidden");
@@ -6635,7 +6907,7 @@ mod tests {
         with_app("popis_export_nepostojeci", |app| {
             sign_in_admin(app.state::<AppState>().inner());
 
-            let error = popis_export_lista(app.state::<AppState>(), 404, None)
+            let error = popis_export_lista(app.state::<AppState>(), 404, None, None)
                 .expect_err("a popis that does not exist has no popisne liste");
 
             assert_eq!(error.code, "not_found");
@@ -6661,7 +6933,7 @@ mod tests {
             let putanja_b =
                 izvezena_putanja(state.inner(), &format!("popisne-liste-{id}-faza-b.html"));
 
-            let error = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::B))
+            let error = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::B), None)
                 .expect_err("a status nobody signed for must not release the book side");
             assert_eq!(error.code, "popis_obracunate_liste_pre_potpisa");
             assert!(
@@ -6669,7 +6941,7 @@ mod tests {
                 "a refused export must leave no document behind"
             );
 
-            let exported = popis_export_lista(app.state::<AppState>(), id, None)
+            let exported = popis_export_lista(app.state::<AppState>(), id, None, None)
                 .expect("the counted-state sheet is still printable");
             assert!(
                 exported.file_name.contains("faza-a"),
@@ -6694,8 +6966,9 @@ mod tests {
             let id = seeded_computed(state.inner(), "KOS-1");
             sign_in_admin(state.inner());
 
-            let exported = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::A))
-                .expect("the signed counted-state sheet should reprint");
+            let exported =
+                popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::A), None)
+                    .expect("the signed counted-state sheet should reprint");
 
             assert!(
                 exported.file_name.contains("faza-a"),

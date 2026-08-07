@@ -1475,14 +1475,33 @@ mod tests {
     /// would promise a five-year archive of a document this application never
     /// held — and the shop would stop keeping the paper.
     ///
-    /// **Nor does this application print it.** The popis module ships no print
-    /// and no export: `PopisService` has no exporting method, and no popis screen
-    /// calls `PrintService.openForPrint` the way reklamacije, KEP and the čl. 47
-    /// register all do. The first version of this note said the izveštaj
-    /// *„sastavlja se i štampa na zahtev“*, which is a button the shop would look
-    /// for and not find — and, worse, the same clause stood in the čl. 47
-    /// register an inspector reads. Both halves are pinned below, because the
-    /// first version of this test pinned only the neighbouring sentence.
+    /// **Nor does this application print or export it — the izveštaj, and the
+    /// izveštaj alone.** `compose_izvestaj` returns a view for the screen and no
+    /// command in the crate writes one to a file. Everything beside it in the
+    /// popis module *is* written out: `popis_export_lista`, `popis_export_odluka`
+    /// and `popis_export_plan_rada` put three documents into `exports/`,
+    /// `PopisService` carries `exportLista` / `exportOdluka` / `exportPlanRada`,
+    /// and `PopisModule`'s `DokumentiPanel` hands each returned path to
+    /// `PrintService.openForPrint` the way reklamacije, KEP and the čl. 47
+    /// register do.
+    ///
+    /// That paragraph used to generalise the denial over the whole popis module
+    /// and to give the absence of an exporting service method and of an
+    /// `openForPrint` caller as its evidence. It was true when it was written
+    /// (03.08.2026) and false from the moment `popis_export_lista` landed
+    /// (07.08.2026) — while the assertions below, added in the same cycle,
+    /// already required the note to name the three exported documents. A stale
+    /// denial in the rationale of the guard that exists to catch stale denials is
+    /// the same defect facing inward, and a reader who trusted it would relax the
+    /// very assertion it sits above. Swept now by
+    /// `commands::popis::tests::no_comment_in_the_popis_stack_still_denies_the_export_the_module_has`.
+    ///
+    /// The historical note stands, dated: the first version of this note said
+    /// the izveštaj *„sastavlja se i štampa na zahtev“* — a button the shop would
+    /// look for and not find, and the same clause stood in the čl. 47 register an
+    /// inspector reads until `d928b36` withdrew it. Both halves are pinned below,
+    /// because the first version of this test pinned only the neighbouring
+    /// sentence.
     ///
     /// **No automatic deletion exists.** [`popis_purge_eligible`] is a gate, not
     /// a sweep: it answers *may this go yet*, and nothing calls it outside this
