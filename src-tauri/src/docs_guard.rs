@@ -748,6 +748,119 @@ fn the_profile_screen_states_both_legs_of_cl_87() {
     );
 }
 
+/// The reset dialog must state the retention floor the tombstone records, and
+/// must not send the shop for an archive approval no article asks of it.
+///
+/// Two claims, one paragraph of `GoLiveResetCard`, both wrong since SW-3
+/// (`062250d`) and both read by an owner one click away from a delete that
+/// cannot be undone.
+///
+/// **The floor.** `reset_trading_data`'s `compliance_log` tombstone said
+/// „10y (ZoRač čl. 28; ZPDV čl. 47)“ until 31.07.2026, when `9fa88b8` corrected
+/// it to [`crate::commands::backup::ROK_CUVANJA_PRAVNI_OSNOV`] on
+/// SW11-SW15-VERIFIED-RULES.md §2 Q4 — ZPDV čl. 47 supplies no general period at
+/// all. The dialog kept the withdrawn string verbatim, so the application stated
+/// two different floors for one duty depending on which surface the reader was
+/// on, and the surface with the wrong one is the surface the owner reads. The
+/// screen is therefore bound to the constant and not to a copy of it: correcting
+/// one surface and leaving the other is exactly how these two came apart.
+///
+/// **The archive approval.** ZAG čl. 16 st. 2 confines prior written approval of
+/// the nadležni javni arhiv to državni organi, organi teritorijalne autonomije i
+/// jedinica lokalne samouprave, ustanove, javna preduzeća i imaoci javnih
+/// ovlašćenja (§1 row 5, §3 req. 39). The pilot is a preduzetnik, and the
+/// sentence sent him for a permission no article asks of him — an operator string
+/// asserting a duty the law does not impose, which is the same defect as one
+/// denying a duty it does.
+///
+/// Judged on the stems `arhiv` + `odobren` inside one paragraph rather than on
+/// the exact phrase that was withdrawn, because „bez pismenog odobrenja
+/// nadležnog javnog arhiva“ is the statute's own wording and would walk straight
+/// back past a literal. Nothing here bars the archive duties that are **real** —
+/// the lista kategorija with the arhiv's saglasnost, the arhivska knjiga, the
+/// 30 April prepis — nor may the screen ever tell a preduzetnik that archive law
+/// does not reach him (§4 item 8). Only the approval-before-destruction claim is
+/// barred.
+///
+/// JSX wraps a sentence across source lines, so the file is judged with its
+/// whitespace collapsed and each claim inside the `<p>` it belongs to — the same
+/// reasoning as [`clause_around`], with the element boundary standing in for the
+/// punctuation. Source comments are swept along with the copy, deliberately: the
+/// note recording why the claim was withdrawn is written in English for exactly
+/// that reason, and restating the withdrawn duty in Serbian beside the dialog it
+/// was removed from is how it would find its way back into the dialog.
+#[test]
+fn the_reset_dialog_matches_the_tombstone_and_claims_no_archive_approval() {
+    const SETTINGS_SCREEN: &str = include_str!("../../src/app/settings/SettingsScreen.tsx");
+    /// The sentence carrying the floor, in the words the dialog uses.
+    const ROK: &str = "čuvanje evidencija do 10 godina";
+
+    /// The paragraph `at` falls inside. The fallbacks widen the window rather
+    /// than narrowing it: a claim outside any `<p>` is still judged.
+    fn paragraph_around(text: &str, at: usize) -> &str {
+        let start = text[..at].rfind("<p ").unwrap_or(0);
+        let end = text[at..]
+            .find("</p>")
+            .map_or(text.len(), |index| at + index);
+        text[start..end].trim()
+    }
+
+    let osnov = crate::commands::backup::ROK_CUVANJA_PRAVNI_OSNOV;
+    assert!(
+        !osnov.contains("ZPDV"),
+        "SW11-SW15-VERIFIED-RULES.md §2 Q4 — ZPDV čl. 47 sets no general retention period; its \
+         „najmanje deset godina“ limb is object-specific to the čl. 32 objekti i ulaganja. \
+         `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` is what both the compliance tombstone and \
+         the reset dialog print: „{osnov}“"
+    );
+
+    let text = SETTINGS_SCREEN
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut pomena = 0usize;
+    for (at, _) in text.match_indices(ROK) {
+        pomena += 1;
+        let odlomak = paragraph_around(&text, at);
+        for clan in osnov.split(';').map(str::trim) {
+            assert!(
+                odlomak.contains(clan),
+                "src/app/settings/SettingsScreen.tsx warns about the retention floor without \
+                 naming „{clan}“ — „{odlomak}“. The floor the app records in `compliance_log` is \
+                 `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` („{osnov}“); a dialog citing \
+                 anything else leaves the shop with two floors for one duty."
+            );
+        }
+        assert!(
+            !odlomak.contains("ZPDV"),
+            "src/app/settings/SettingsScreen.tsx attributes the retention floor to ZPDV — \
+             „{odlomak}“. §2 Q4: čl. 47 supplies no general period, and `backup.rs` stopped \
+             citing it for this duty on 31.07.2026. Cite „{osnov}“, the string the tombstone \
+             carries."
+        );
+    }
+    assert!(
+        pomena > 0,
+        "src/app/settings/SettingsScreen.tsx no longer warns („{ROK}“) before the go-live reset. \
+         The floor is real — `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` — and the reset is \
+         irreversible, so silence in front of the confirmation box is worse than the wrong \
+         citation was. Re-state the sentence rather than deleting it."
+    );
+
+    for (at, _) in text.match_indices("arhiv") {
+        let odlomak = paragraph_around(&text, at);
+        assert!(
+            !odlomak.contains("odobren"),
+            "src/app/settings/SettingsScreen.tsx tells the shop an arhiv has to approve a \
+             destruction — „{odlomak}“. ZAG čl. 16 st. 2 confines that approval to the public \
+             sector (§1 row 5, §3 req. 39) and the pilot is a preduzetnik, so the sentence sends \
+             him for a permission no article asks of him. Withdraw the claim; a hedged version is \
+             still an assertion he cannot act on."
+        );
+    }
+}
+
 /// `worktime::assess_caps` hard-codes `preraspodela_weekly_cap_exceeded` to
 /// `false` — it cannot see whether the employee is in preraspodela. The čl. 57
 /// st. 5 branch is taken by the caller,

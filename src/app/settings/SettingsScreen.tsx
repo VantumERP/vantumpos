@@ -1829,11 +1829,30 @@ function GoLiveResetCard({
                 Ova radnja je nepovratna. Unesite OBRISI PODATKE za potvrdu.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {/*
+              Two claims stood here from SW-3 until 07.08.2026 and both were
+              false. The floor was attributed to „ZoRač čl. 28; ZPDV čl. 47“,
+              the very string `reset_trading_data`'s compliance tombstone
+              withdrew on 31.07.2026 — ZPDV čl. 47 supplies no general period,
+              so the app stated two floors for one duty and showed the owner the
+              wrong one. It now prints what the tombstone records; the two are
+              pinned together by `docs_guard`.
+
+              The second was a sentence telling pravna lica they may not destroy
+              dokumentarni materijal without the arhiv's written approval. ZAG
+              čl. 16 st. 2 confines that approval to državni organi, organi TA i
+              JLS, ustanove, javna preduzeća i imaoci javnih ovlašćenja; this
+              shop is a preduzetnik, and the sentence sent him for a permission
+              no article asks of him, immediately above an irreversible delete.
+              It is deleted rather than hedged — a hedge is still an assertion he
+              cannot act on. Nothing here says archive law does not reach him:
+              ZAG čl. 9 st. 1 has no carve-out, and the čuvanje sentence below
+              is exactly that custody duty in the terms he can act on.
+            */}
             <p className="text-sm text-muted-foreground">
-              Zakon zahteva čuvanje evidencija do 10 godina (ZoRač čl. 28; ZPDV
-              čl. 47). Pre brisanja se obavezno pravi rezervna kopija — čuvajte je
-              trajno. Pravna lica ne smeju uništavati dokumentarni materijal bez
-              pismenog odobrenja arhiva.
+              Zakon zahteva čuvanje evidencija do 10 godina (ZoRač čl. 28 st. 4;
+              ZPPPA čl. 114ž). Pre brisanja se obavezno pravi rezervna kopija —
+              čuvajte je trajno.
             </p>
             {/*
               `reset_trading_data` also runs DELETE FROM kalkulacije. The

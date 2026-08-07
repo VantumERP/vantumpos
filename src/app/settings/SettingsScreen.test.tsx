@@ -247,6 +247,39 @@ describe("SettingsScreen", () => {
     expect(
       await screen.findByText(/do 10 godina/i),
     ).toBeInTheDocument();
+
+    // SW11-SW15-VERIFIED-RULES §2 Q4 — the floor is ZoRač čl. 28 st. 4 (dnevnik
+    // i glavna knjiga) with ZPPPA čl. 114ž (apsolutna zastarelost) behind it.
+    // ZPDV čl. 47 sets no general period, and `reset_trading_data`'s compliance
+    // tombstone stopped citing it on 31.07.2026. The dialog is the surface the
+    // owner actually reads, so it must not state a second floor for one duty.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("ZoRač čl. 28 st. 4");
+    expect(dialog).toHaveTextContent("ZPPPA čl. 114ž");
+    expect(dialog).not.toHaveTextContent("ZPDV");
+  });
+
+  it("does not send the shop for an archive approval ZAG čl. 16 st. 2 asks only of the public sector", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Backup" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Obriši probne podatke" }),
+    );
+
+    // ZAG čl. 16 st. 2 confines prior written approval of the nadležni javni
+    // arhiv to državni organi, organi TA i JLS, ustanove, javna preduzeća i
+    // imaoci javnih ovlašćenja (§1 row 5, §3 req. 39). The pilot is a
+    // preduzetnik: the withdrawn sentence sent him for a permission no article
+    // asks of him, in front of a delete he cannot undo. A hedge would have been
+    // the same assertion, so the claim is gone rather than softened.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).not.toHaveTextContent(/arhiv/i);
+    expect(dialog).not.toHaveTextContent(/odobren/i);
+    // The sentence that is true and useful stays: the copy the reset makes is
+    // the only remaining record of what is about to be deleted.
+    expect(dialog).toHaveTextContent(/rezervna kopija/i);
   });
 
   it("discloses that the reset clears the deklaracija checks on the catalog", async () => {

@@ -19,6 +19,25 @@ const BACKUP_STALE_AFTER_HOURS: i64 = 24;
 /// whether an automatic backup is due.
 pub const AUTO_BACKUP_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 
+/// The statutes that actually supply the general 10-year retention floor.
+///
+/// SW11-SW15-VERIFIED-RULES.md §2 Q4: a registered retail preduzetnik on stvarni
+/// prihod keeps dvojno knjigovodstvo (ZPDG čl. 40 st. 2 bars paušal for trgovina
+/// na malo), which puts her inside the full ZoRač čl. 28 profile — st. 4 for the
+/// dnevnik i glavna knjiga, with ZPPPA čl. 114ž (apsolutna zastarelost) behind
+/// it. **ZPDV čl. 47 supplies no general period at all**: it defers to
+/// zastarelost, and its own „najmanje deset godina“ limb is object-specific to
+/// the čl. 32 objekti i ulaganja. Cite čl. 47 for that limb or not at all.
+///
+/// A named constant rather than a literal because two surfaces print this and
+/// they have already drifted once. The go-live tombstone said „10y (ZoRač čl.
+/// 28; ZPDV čl. 47)“ until `9fa88b8` corrected it on 31.07.2026; the reset dialog
+/// on the Podešavanja screen kept the withdrawn wording for another week, so the
+/// application stated two different floors for one duty depending on which
+/// surface the reader was on. `docs_guard` now binds `SettingsScreen.tsx` to this
+/// constant, so the next correction cannot land on one surface only.
+pub const ROK_CUVANJA_PRAVNI_OSNOV: &str = "ZoRač čl. 28 st. 4; ZPPPA čl. 114ž";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupSettings {
@@ -564,11 +583,7 @@ pub fn reset_trading_data(state: &AppState, confirmation_text: &str) -> Result<(
     // „ako ne čuva trajno“ — see `retention::NEVER_PURGE_TABLES`.
     let detail = serde_json::json!({
         "note": "Go-live reset (SW-3).",
-        // §2 Q4: the general 10-year floor is ZPPPA čl. 114ž (apsolutna
-        // zastarelost) plus ZoRač čl. 28 st. 4 (dnevnik i glavna knjiga).
-        // ZPDV čl. 47 supplies no general period — cite it only for the
-        // čl. 32 objekti i ulaganja limb.
-        "retention": "10y (ZoRač čl. 28 st. 4; ZPPPA čl. 114ž)",
+        "retention": format!("10y ({ROK_CUVANJA_PRAVNI_OSNOV})"),
     })
     .to_string();
     insert_compliance_event(&tx, "trading_data_reset", &detail, Some(acting.id))?;
