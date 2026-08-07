@@ -806,13 +806,59 @@ fn the_cl_47_record_invokes_both_limbs_that_destroy_the_250_exemption() {
 /// So the denial is pinned to the code that contradicts it, line-locally. A row
 /// is one line of a markdown table, so requiring the correction on the same line
 /// is requiring it in the same cell — a superseding note filed three sections
-/// away would leave the row itself reading as a closed item. Delete the denial
-/// entirely and this guard goes quiet, which is the right outcome once req.
-/// 31/32 is written up rather than corrected in place.
+/// away would leave the row itself reading as a closed item.
+///
+/// **Amended 07.08.2026, and the amendment tightens the rule rather than
+/// relaxing it.** *„Correct it in the same cell“* was the right rule while the
+/// requirements were being built one task at a time, and the comment above
+/// named its own successor: delete the denial and this guard goes quiet, which
+/// is the right outcome once reqs. 31/32/35 are **written up** rather than
+/// corrected in place. That is what the rule is now — the withdrawn sentence
+/// must be **gone** from the register, and each popis cell must name the command
+/// that replaced it. A cell that reads as a denial followed by two supersessions
+/// is not a statement of what the software does, and the register is the one
+/// document counsel and an inspector read for exactly that. Nothing is lost by
+/// the deletion: the dated disclosure stays in `docs/PROGRESS.md`, which records
+/// what was true when, and this guard is deliberately not run over that file for
+/// the same reason.
 #[test]
-fn the_register_corrects_every_denial_of_the_popis_export_it_now_has() {
-    // Bound to the command, not to the words: rename it and this stops
-    // compiling rather than leaving the register's correction unbacked.
+fn the_register_states_the_popis_export_it_has_instead_of_the_denial_it_replaced() {
+    for poricanje in [
+        "there is no print or export for a popisna lista",
+        "there is no print and no export for a popisna lista",
+        "`PopisService` has fifteen methods and none exports",
+    ] {
+        let zaostalo = lines_with(REGISTER, poricanje);
+        assert!(
+            zaostalo.is_empty(),
+            "docs/SERBIAN-LAW-COMPLIANCE.md still says \"{poricanje}\", which stopped being true \
+             when `popis_export_lista`, `popis_export_odluka` and `popis_export_plan_rada` \
+             shipped. The register states the software's current state, so the denial is restated \
+             and not annotated — `docs/PROGRESS.md` is where the dated disclosure belongs. \
+             Offending lines: {zaostalo:?}"
+        );
+    }
+
+    for (celija, line, text) in popis_register_rows() {
+        assert!(
+            text.contains("popis_export_lista"),
+            "docs/SERBIAN-LAW-COMPLIANCE.md:{line} is {celija} and describes the popis module \
+             without naming `popis_export_lista`. čl. 9 st. 3's „uz štampanje“ is what this row \
+             is about; a reader takes the row alone, so the command that discharges it has to be \
+             in the cell."
+        );
+    }
+}
+
+/// The two cells of `docs/SERBIAN-LAW-COMPLIANCE.md` that describe the popis
+/// module — §2's register row 19 and §3's SW-16 row — as `(name, line number,
+/// text)`. A markdown table row is one line, so a cell is judged on its own
+/// line: that is the whole point of a per-row status column.
+///
+/// Bound to the command it describes rather than only to the words, so renaming
+/// the export stops this file compiling instead of leaving the register's claim
+/// unbacked.
+fn popis_register_rows() -> Vec<(&'static str, usize, &'static str)> {
     let _liste: fn(
         tauri::State<'_, crate::AppState>,
         i64,
@@ -822,21 +868,77 @@ fn the_register_corrects_every_denial_of_the_popis_export_it_now_has() {
         crate::app_error::CommandError,
     > = crate::commands::popis::popis_export_lista;
 
-    for poricanje in [
-        "there is no print or export for a popisna lista",
-        "there is no print and no export for a popisna lista",
-        "`PopisService` has fifteen methods and none exports",
-    ] {
-        for (line, text) in lines_with(REGISTER, poricanje) {
-            assert!(
-                text.contains("popis_export_lista"),
-                "docs/SERBIAN-LAW-COMPLIANCE.md:{line} still says \"{poricanje}\", which stopped \
-                 being true when `popis_export_lista`, `popis_export_odluka` and \
-                 `popis_export_plan_rada` shipped. Correct it in the same cell — a register row \
-                 is read on its own, and a denial with its correction three sections away is a \
-                 denial. Naming `popis_export_lista` in the row satisfies this guard; deleting \
-                 the denial satisfies it too."
-            );
+    let rows: Vec<(&'static str, usize, &'static str)> = REGISTER
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            if line.starts_with("| 19 |") {
+                Some(("§2 register row 19", index + 1, line))
+            } else if line.starts_with("| SW-16 |") {
+                Some(("the §3 SW-16 row", index + 1, line))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "docs/SERBIAN-LAW-COMPLIANCE.md must keep both popis cells — §2 row 19 (the obligation) \
+         and the §3 SW-16 row (what shipped against it). Found: {rows:?}"
+    );
+    rows
+}
+
+/// The izveštaj o popisu is the one popis document this crate does **not** write
+/// to a file. `commands::popis::popis_izvestaj` composes it on demand and hands
+/// back a view for the screen; no command anywhere writes one out, which is what
+/// the three „program ga ne štampa i ne izvozi“ strings have always meant and
+/// what both popis cells now say in English.
+///
+/// A denial goes false the way a promise does — by the code moving under it —
+/// and this one goes false the moment somebody ships the fourth export and
+/// restates nothing. So it is pinned from both sides: the register must carry
+/// the sentence, and `lib.rs`'s invoke handler must contain no command that both
+/// names an izveštaj and writes it out. The handler list is the right place to
+/// look for the second half, because a command no `generate_handler!` names is
+/// one no operator can reach — the reasoning
+/// `cl47::tests::every_export_the_sweep_allows_is_registered_as_a_command` uses
+/// for the three exports that do exist.
+#[test]
+fn nothing_exports_the_izvestaj_and_both_popis_cells_say_so() {
+    const LIB: &str = include_str!("lib.rs");
+    /// The register's own words for it, in both cells.
+    const PORICANJE: &str = "neither printed nor exported";
+    /// A handler name that would write one out. ASCII, because a Rust
+    /// identifier is.
+    const IZLAZ: [&str; 4] = ["export", "izvoz", "print", "stampa"];
+
+    for (celija, line, text) in popis_register_rows() {
+        assert!(
+            text.contains("izveštaj") && text.contains(PORICANJE),
+            "docs/SERBIAN-LAW-COMPLIANCE.md:{line} is {celija} and no longer says that the \
+             izveštaj o popisu is „{PORICANJE}“. Three documents are exported and this one is not, \
+             so a cell that names the exports without excepting the izveštaj reads as though the \
+             whole module prints — the same defect facing the other way."
+        );
+    }
+
+    for line in LIB.lines() {
+        let unos = line.trim().trim_end_matches(',');
+        if !unos.starts_with("commands::") || !unos.to_lowercase().contains("izvestaj") {
+            continue;
         }
+        let unos_lower = unos.to_lowercase();
+        assert!(
+            !IZLAZ.iter().any(|verb| unos_lower.contains(verb)),
+            "`{unos}` is registered as a command, and its name says it writes an izveštaj out. \
+             Both popis cells of docs/SERBIAN-LAW-COMPLIANCE.md say the izveštaj is \
+             „{PORICANJE}“, and so do `retention.rs`'s stored napomena, the čl. 47 register's \
+             `popis_imovine` entry and the izveštaj's own upozorenje in `commands/popis.rs`. \
+             Restate all of them in the same commit — a stale denial withdraws the reader's only \
+             pointer to a capability the shop is now taken to have."
+        );
     }
 }

@@ -856,7 +856,11 @@ PIB/MB, maloprodajni objekat, broj liste), the per-stavka vrednost columns and t
 template** go with it: `PopisLineView` carries no vrednost, so that half is not frontend-only work.
 No task in this plan owned it and none of the copy pretends otherwise — the signature step says the
 liste are printed and signed by the members and that recording the potpis here **does not replace the
-one on paper**.
+one on paper**. *(**Closed 07.08.2026 by reqs. 31/32/35** — `popis_export_lista`,
+`popis_export_odluka` and `popis_export_plan_rada` write three documents into `exports/`. The
+paragraph stands as the disclosure that work answers; it is a dated record of SW-16's own scope. Two
+of the limbs it names did **not** close with it: req. 32's **editable default template**, and the
+izveštaj, which is still composed on demand and shown on screen. See the 07.08.2026 section below.)*
 
 **And the constraint the whole module is shaped around.** PoP čl. 8 st. 5 forbids releasing book
 quantities to the komisija before the counted state is written and signed, so the blindness is enforced
@@ -879,7 +883,7 @@ those tests and nothing else.
 | 7 — nivelacija + KEP hook | The čl. 21 duty and the scope narrowing are **two strings**, and the guard is mechanical: no obuhvat string may contain a duty word (`morate`, `dužni ste`, `dužan je`, `obavezno`, `obavezan je`, `nalaže` — „obaveza“ deliberately excluded, since the copy must be able to deny one). The obligation is derived from **`price_history`, not `kep_entries`** — SW-9b writes no ledger row when on-hand is 0, and an obligation derived from the ledger would lose exactly that repricing silently — is **reported, never auto-created** (an app-opened session would assert a čl. 20 st. 3 usklađivanje nobody performed), and only a **`posted`** nivelacija popis discharges it. The scope list is the čl. 8 st. 4 artefact: four fields, **no količina from any source**, and `CeoObjekat` is `products.active = 1` because filtering on what the books say we have leaks stock through the presence of a line. `kep_nivelacija` returns the notice and `KepModule` renders it as a persistent block, so the duty has one wording; posting a nivelacija popis leaves the ledger fingerprint byte-identical | `ffde4af`, `f564631` |
 | 8 — legal + retention | `legal.rs::popis_not_conducted` — the **eleventh** notice, in `all_notices`, in the duplicated inline list, asserted count bumped to **11** — printing the preduzetnik **čl. 58, 100.000 do 500.000**. The plan's conditional did not fire: §3 V5 does state a preduzetnik figure, so no tier renders `None`. What the memo warns about is the other direction — **čl. 57 st. 1 tač. 12) is a *privredni prestup*** that ZPP čl. 6 st. 1 confines to a pravno lice, so its 100.000–3.000.000 band would overstate the pilot's ceiling roughly sixfold; **„3.000.000“ is now a blanket needle** in `FORBIDDEN_TO_A_PREDUZETNIK`. Retention is `RecordClass::PopisDokumentacija` on the shared table with the **5-year floor of ZoRač čl. 28 st. 7**, counted by a new clock: `business_year_floor` resolves every day of one business year to the same 31 December per **st. 9**, so a nivelacija counted on 14 May 2026 and the godišnji popis of 31.12.2026 expire together instead of the first going seven months early. The class **holds personal data** — `popis_commission` names each popisivač — hence the twelfth čl. 47 radnja, `popis_imovine`. The plan's „panic-safe floor pattern from SW-9c“ is taken as the **fail-safe**, not as the later-of-two-anchors shape: the popis has one statutory clock, and a `posted_at` limb would have added a year to the ordinary case. The test found a real underflow before the implementation shipped — `{:04}` renders year −4 as `-004`, a success-shaped wrong answer | `dd1940d` |
 | 9 — frontend | `src/app/popis/{CountSheet,IzvestajPanel,PopisModule}.tsx` + the `PopisService` port, fifteen wire types, the local adapter, an in-memory double that enforces the same gates, and Popis in the shell. Keyed on the backend's `knjigovodstvoDostupno` — **never on `status`** — and asserted against a payload that carries the book figures anyway, which no real backend sends. Every edit affordance mirrors a write the backend accepts; the three closed states give three different reasons. **`CountSheet` takes `session`, not `status` + `lines`** — the plan's snippet spells the status `countedSigned`, a camelCase form that exists nowhere on the wire. The review moved the req. 36 declaration **out of the izveštaj and onto the count sheet**, where it can still be acted on: asked at the izveštaj it could only fire after the čl. 8 st. 5 potpis, when the only remedy is a whole new popis. It also rendered all six liste including the empty ones, and fixed a negative knjigovodstvena količina making a stavka unsavable | `8760a3a`, `94d1337`, `f41615b` |
-| 10 — docs + gates | This section; register row 19 and the SW-16 row in §3 re-stated, both carrying the **missing print/export** and the three open items **R-5**, **R-6**, **R-7** | this commit |
+| 10 — docs + gates | This section; register row 19 and the SW-16 row in §3 re-stated, both carrying the **missing print/export** and the three open items **R-5**, **R-6**, **R-7**. *(Both cells were re-stated again on 07.08.2026, when the print and the export shipped — see the section below; R-5, R-6 and R-7 are untouched and stand.)* | this commit |
 
 **Verification gates — all six run from the repo root, every command exited `0`:**
 
@@ -903,7 +907,8 @@ Cargo: **61** in `commands/popis.rs`, **36** in `popis.rs`, **4** in `db/migrati
 
 **Deliberately not built** — read these as decisions, not as gaps, except the first, which is a gap and
 is labelled one. **No print and no export for a popisna lista** (above) — a real hole against čl. 9
-st. 3, disclosed rather than dressed up. No stored izveštaj: the document is composed when asked for,
+st. 3, disclosed rather than dressed up, and **closed on 07.08.2026** by the section below. No stored
+izveštaj: the document is composed when asked for,
 which is why req. 42's retention floor reaches the liste, which are rows, and not the izveštaj, which
 lives on paper. No auto-created nivelacija popis. No seeded popisne liste from the nivelacija scope —
 `stvarna_kolicina_milli` is NOT NULL, so a seeded stavka would carry a count of zero that nothing
@@ -937,22 +942,19 @@ statutory answer; the gates run at **cargo 901 / bun 505**, migration still **v2
 
 **Still open after this batch.**
 
-- **Req. 31/32 — the printed popisna lista.** The single largest hole. Čl. 9 st. 3's *„uz štampanje“*
-  is express, SW-8 shipped a printing stack, and no task in this plan wired the two together. Until it
-  lands the shop prints the liste from somewhere else, and the register row says exactly that. **The
-  izveštaj o popisu is inside this hole and was not disclosed as such** — `PopisService` has no
-  exporting method and no popis screen calls `PrintService.openForPrint`, which reklamacije, KEP and
-  the čl. 47 register all do, so the izveštaj is a screen and nothing more. Corrected 03.08.2026: the
-  retention napomena, the čl. 47 register entry and the izveštaj's own warning had all said it
-  *„sastavlja se i štampa na zahtev“*.
-- **Req. 35 — the plan rada and the odluka o popisu are essentially uncoded.** `plan_rada_json` and
-  `odluka_ref` are free text captured once at `open_popis` and echoed back; nothing parses, validates
-  or even trims them. **Nothing generates a plan rada and nothing generates the odluka o popisu i
-  obrazovanju komisije**, and — the limb that matters — **no approval is recorded**: PoP čl. 8 st. 2
-  requires the plan to be *approved* by the lice iz čl. 4 st. 2, for a preduzetnik the owner
-  personally, and there is no column, no command and no screen for who approved it or when. The v20
-  comment at `db/migrations.rs:1169` names that approval as the column's whole purpose, which is what
-  makes the gap a discrepancy rather than a decision. Closing it needs a schema v20 does not have.
+- **Reqs. 31/32 and 35 were the two largest holes in this list and were closed on 07.08.2026.** They
+  are moved out of it and into the section below, which records the work that answers them. What they
+  said stands as the reason that work was done, and is kept here rather than deleted: čl. 9 st. 3's
+  *„uz štampanje“* is express, SW-8 had shipped a printing stack, and no task in the SW-16 plan wired
+  the two together, so until it landed the shop printed the liste from somewhere else; and
+  `plan_rada_json` / `odluka_ref` were free text captured once at `open_popis` and echoed back, with
+  nothing generating either document and **no approval recorded at all**, although PoP čl. 8 st. 2
+  requires the plan to be *approved* by the lice iz čl. 4 st. 2 — for a preduzetnik the owner
+  personally — which the v20 comment at `db/migrations.rs:1169` had already named as that column's
+  whole purpose. **Three limbs did not close with them and travel to the list below:** req. 32's
+  **editable default template**; the **izveštaj**, which is inside this hole, was not disclosed as
+  such until 03.08.2026, and is still composed on demand and shown on screen; and `odluka_doneta_at`,
+  which v21 added and which no verb writes.
 - **Req. 40's second limb has no code.** The first limb is present and correct — popisivači are named
   persons, `popis_commission.rukuje_imovinom` carries the čl. 5 st. 1 flag, and the warning never
   blocks. *„Reuse the flag for ZoRač čl. 10 st. 5 (control of računovodstvene isprave)“* has **zero
@@ -982,6 +984,111 @@ statutory answer; the gates run at **cargo 901 / bun 505**, migration still **v2
   `docs/compliance/obavestenje-zaposlenima.md` has no row about it. The čl. 23 notice belongs to SW-13;
   `docs_guard` records what such a row would have to be called („popisne liste“) rather than inventing
   one here.
+
+---
+
+### Popis — the printed liste, the odluka and the plan rada (reqs. 31/32/35) (2026-08-07)
+
+The two largest holes SW-16 disclosed closed as a six-task TDD plan
+(`docs/superpowers/plans/2026-08-03-popis-stampa-i-plan-rada.md`, design at
+`docs/superpowers/specs/2026-08-01-sw16-popis-design.md` §2 and §5) against the verified rule set in
+`docs/REMAINING-SW-VERIFIED-RULES.md` §2c, §3 V5 and §4 reqs. 30, 31, 32, 35, 36 and 41. The plan's
+own baseline was cargo **902** / bun **505** at migration **v20**. The cycle opened for real at
+`a85a194`, the merge that brought master's reklamacija no-fee migration in and renumbered the popis
+plan-rada migration to **v21** beneath it, and every count below is measured from that merge. **No
+migration was added after it** — v21 already carried the three columns the plan needed — so the head
+stays **v22**.
+
+**The load-bearing property, stated first, because the whole cycle is arranged around it.** PoP čl. 8
+st. 5 forbids releasing book data to the popisna komisija before the counted state is written into the
+liste and signed, and handing somebody a printed sheet **is** releasing it. So the čl. 8 st. 5 sheet
+withholds **structurally**: `red_faza_a` is a code path that never names
+`knjigovodstvena_kolicina_milli` or `razlika_milli` at all — asserted against its own source, because
+selecting them and blanking them would look identical from outside and be the wrong thing — and the
+phase is decided by `faza_stampe` off `book_quantities_released(status, faza_a_potpisana)`, the two
+stored facts, and deliberately never off the view's own `knjigovodstvo_dostupno`, which is that same
+predicate somebody else has already evaluated. The screen may narrow a request to Faza A and can never
+ask for Faza B; the backend refuses the obračun sheet before the potpis **by name** and refuses it
+**before the render**, so a refused export leaves nothing on disk — asserted on the path
+`write_export` itself resolves, not on the return value.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — the čl. 8 st. 2 approval | **Migration v21** (`popis_plan_rada_approval_and_odluka_date`): `plan_rada_odobrio`, `plan_rada_odobreno_at` and `odluka_doneta_at` on `popis_sessions`, all nullable, with a CHECK **pairing** the two approval columns so an approval can never be half-recorded, and a non-empty CHECK on each beyond what the plan asked — a blank approver names nobody and a blank stamp dates nothing, which is the half-state wearing a value. No trigger work: v20's `trg_popis_sessions_zakljucan` fires on the whole row (`WHEN OLD.status = 'posted'`), so the req. 41 posting lock already reached the new columns, and that is **asserted by test rather than assumed**. Nothing is backfilled — an upgraded popis reads back unapproved. A v20-seeded survival test applies `MIGRATIONS[..20]` to a raw connection, seeds, drops it and reopens through `Db::new` | `cb43d06`, `a85a194` |
+| 2 — the renderer | `popis_print.rs`: `render_popisna_lista(company, view, faza)` over `PopisSessionView`, the req. 32 header block, one section per lista naming its own article, and a signature line per member. The red state was two real defects — `sekcija` sent **both** phases to `red_faza_b`, and `zaglavlje_kolona` matched on the constant `PrintFaza::B` instead of on its parameter. Deviations: the unclassified bucket keeps the Faza A columns and the čl. 9 st. 3 sheet says so in the engine's own words (a signed stavka does not move, so the remedy is a new popis — the first wording promised an edit `save_line` refuses); the čl. 6 st. 1 single person is never called a komisija, `potpisni_naslov` derives the heading from the roster, and a sweep fails any prose block naming the komisija without the čl. 6 limb. **Column order is pinned by re-parsing the heading row and the first body row back out of the emitted markup** — every other assertion in the module is a `contains`, a `!contains` or a count, and all three survive a permutation of the cells that prints a manjak as a višak | `1bd9575` |
+| 3 — the export | `popis_export_lista(state, id, faza: Option<PrintFaza>)` in `kep_export_book`'s shape — `require_admin`, load, render, `campaigns::write_export` — writing `popisne-liste-{id}-faza-{a|b}.html`. **One command, not two**, because two would hand the caller the phase back by letting it pick which to call. An explicit Faza A is honoured in every state, including after the potpis: PoP čl. 2 st. 6 gives the owner of tuđa roba ten days to receive a primerak of the **signed** posebna popisna lista, so that reprint has to survive the obračun. The review made the export tests hermetic — `with_app` now puts each database in a folder of its own, so `exports/` is private per test and five tests stopped writing, reading back and deleting the same two absolute paths — and pinned the obveznik, which every bare test database had been letting `CompanySettings::default()` satisfy | `ec1bde8`, `f89814a` |
+| 4 — odluka, plan rada, approval | `render_odluka` / `render_plan_rada` on the header block all four documents now share, plus `popis_export_odluka`, `popis_export_plan_rada` and `popis_odobri_plan`. **Nothing auto-approves:** a blank approver is refused by name rather than substituted from the registered obveznik, because a server-side default is an auto-approval wearing a default's clothes. The approval writes one čl. 48 audit line under a new `AuditObjectType::PopisSession` — `unos` the first time and `menjanje` on a re-record, since two `unos` lines would report two approvals where there was one and a correction — and no personal name reaches it. The čl. 47 register gained the new personal datum. The review qualified an approval standing over a schedule the application does not hold, and stopped an **empty or mixed** roster being declared a komisija: `Sastav::Neodredjen` is now a third state, because the odluka *is* the appointment and printing it before anybody is appointed is its primary use | `8a932bc`, `11673e6` |
+| 5 — the screen | `DokumentiPanel` in `PopisModule.tsx` — two `role="group"` blocks with four print actions over the export-then-`openForPrint` stack `KepModule` and `ReklamacijeModule` already use, plus the pre-filled, editable čl. 8 st. 2 approval field. `CountSheet.tsx` was **not** touched and could not be: its own req. 29 guard sweeps the component for `/knjigovodstven/i`, and the plan's required copy for the counting step is *„bez knjigovodstvenih količina“* — loosening that guard to fit copy is the one thing the house rules forbid, so the block sits in `PopisDetail` instead. The module is asserted **never to send `„b“` in any state**. The three „program ga ne štampa i ne izvozi“ sentences were **not** flipped — all three scope to the izveštaj and all three are still true — but each was incomplete beside a module that had gained three exports, so each keeps its denial verbatim and gains a sentence naming what the program does write. The `cl47.rs` output sweep was amended deliberately and then corrected in review: the escape is scoped to **`izvozi` alone**, bound to the three commands by typed function pointer, with `štampa`, `šalje` and `podnosi` keeping the original negate-it-or-do-not-say-it rule | `0108ab5`, `784c88b` |
+| 6 — docs + gates | This section; register row 19 and the §3 SW-16 row **re-stated** rather than annotated again, with the dated disclosure left here where it belongs; two guards in `docs_guard.rs` (below) | this commit |
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **536 passed** / 0 failed, 35 files (was 512 / 34) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1` | **978 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 977 at the Task 5 review pass) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+62 cargo / +24 bun** over `a85a194`, plus the **2** migration tests Task 1 shipped before that
+merge — **64** cargo tests for the cycle. The cargo figure is the crate's `#[test]` count at `a85a194`
+(**916**) against this commit's (**978**), and the run corroborates it: 978 attributes, 978 tests run.
+Latest migration: **v22**, unchanged by this cycle.
+
+**Whose tests those are.** Cargo: **32** in `popis_print.rs`, **25** in `commands/popis.rs`, **3** in
+`cl47.rs`, **2** in `docs_guard.rs` (one in Task 5's review pass, one in this commit) and **2** in
+`db/migrations.rs` (Task 1, before the merge). Bun: **18** in `src/app/popis/PopisModule.test.tsx` and
+**6** in the new `src/services/mock-adapter.popis.test.ts`.
+
+**Two guards over the register**, because each of the six false promises this project has shipped was
+found by a person reading the sentence and none of them by a test. `docs_guard.rs` gained
+`nothing_exports_the_izvestaj_and_both_popis_cells_say_so` — both popis cells must keep the sentence
+that the izveštaj is neither printed nor exported, **and** `lib.rs`'s invoke handler must register no
+command whose name says it writes one out, so the denial cannot quietly go false the way a promise
+does. And `the_register_corrects_every_denial_of_the_popis_export_it_now_has` became
+`the_register_states_the_popis_export_it_has_instead_of_the_denial_it_replaced`: its rule was *„correct
+the denial in the same cell“*, which was right while the work was in flight, and its own comment named
+the successor — the withdrawn sentence must now be **gone** from the register, and each popis cell must
+name the command that replaced it. That is a tightening, not a relaxation: a cell reading as a denial
+followed by two supersessions is not a statement of what the software does.
+
+**Still open after this cycle** — the first five are this cycle's own residuals; the last carries
+SW-16's forward unchanged, because nothing here touched them.
+
+- **Req. 32's *editable default template* did not ship.** Req. 32 asks for the derived column set as an
+  editable default template and design §2 opens with the same words. What shipped is a fixed layout:
+  `zaglavlje_kolona` and the two row renderers emit a hardcoded column set with no template, no setting
+  and no operator control, and no task in this cycle added one. Everything else req. 32 asks for — the
+  header, the čl. 8 st. 4 / čl. 9 st. 1 t. 1–6 column set, the signature block, the no-obrazac claim —
+  is built and tested, and **nothing operator-facing overstates it**: the footer says the layout is
+  ours and that no obrazac exists, which is true either way. A product gap, not a false claim.
+- **The izveštaj o popisu is still screen-only.** `popis_izvestaj` composes it on demand and returns a
+  view; no command in the crate writes one to a file, and the printed, signed primerak is the
+  obveznik's own to make and keep. That is what the retention napomena, the čl. 47 `popis_imovine`
+  entry and the izveštaj's own upozorenje have said since 03.08.2026, and each now also names the three
+  documents the program does write. The new guard above is what keeps the denial honest.
+- **`odluka_doneta_at` is written by nothing.** v21 added the column and no verb sets it, deliberately:
+  exporting a draft odluka is not *donošenje odluke*, and a command that stamped the column while
+  rendering would record a čl. 4 st. 2 act nobody performed. The generated odluka prints *„nije
+  evidentiran u aplikaciji — upišite ga na odštampanom primerku“* in its own header cell and prints the
+  stored value the moment some later verb records one. So req. 35's odluka has a date field and no way
+  to fill it in, which is the honest state and not a closed item.
+- **The čl. 48 audit trail is lopsided, and this cycle is what made it visible.** The plan approval
+  writes an `audit_events` row; opening a popis, recording the komisija and taking either potpis still
+  write none, though each of them stores names too. Pre-existing, out of this cycle's scope, and it
+  should be decided deliberately rather than left to drift. Related and smaller:
+  `db::test_database_path` still puts every test database directly in `std::env::temp_dir()`. Task 3
+  fixed the popis tests locally instead, because moving it would move ~60 teardowns across the crate in
+  a commit meant to close a popis finding; it remains the better global fix and is recorded here as an
+  open option, not as a closed one.
+- **The čl. 2 st. 6 delivery is still the shop's.** The module now prints the signed lista and sends it
+  to nobody, which is what the čl. 47 register's `vrsta_primalaca` already says and what the ten-day
+  reminder says in the same breath.
+- **Req. 40's second limb, `perpetual_odluka_ref`, the čl. 14 st. 2 *usvojen* limb, the declared
+  presence of a lista category, and R-5/R-6/R-7** stand exactly as the SW-16 section above states them.
+  Nothing in this cycle touched any of them.
 
 ---
 
