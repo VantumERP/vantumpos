@@ -708,6 +708,54 @@ describe("WorkTimeModule protection findings", () => {
     expect(screen.queryByText(/Unos nije dozvoljen/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/ZoR čl\. 87/)).not.toBeInTheDocument();
   });
+
+  /**
+   * The same rule on the exit that never reaches the backend at all.
+   *
+   * `submitEntry` has two exits, and the two tests above both drive the second
+   * attempt through `saveEntry` — so neither of them could see that `toRequest`
+   * returns early on a client-side validation failure, setting `saveError` and
+   * nothing else. Dropping the assessment inside the catch left that path
+   * untouched: a čl. 87 refusal survived an attempt in which nothing was
+   * submitted, which is the destructive-alert-asserting-a-refusal-that-did-not-
+   * happen defect pointed at the one attempt that provably did not happen.
+   *
+   * Clearing the Datum field is the ordinary way to reach it — the operator who
+   * has just been refused goes back to the date to try a different day.
+   */
+  it("does not let a čl. 87 refusal survive an attempt that never leaves the screen", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    const poruka =
+      "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova nedeljno (ZoR čl. 87). Za dane ove kalendarske nedelje u kojima je zaposleni mlađi od 18 godina već je evidentirano 35 č 00 min efektivnog i prekovremenog rada, a sa ovim danom bilo bi 43 č 00 min. U oba zbira nisu uračunati časovi čekanja, zastoja i prekida u radu ni časovi obustave rada zbog štrajka.";
+    vi.spyOn(services.worktime, "saveEntry").mockRejectedValueOnce({
+      code: "protection_block",
+      message: poruka,
+      details: {
+        protections: [
+          { kind: "maloletanNedeljniLimit", blocking: true, poruka },
+        ],
+      },
+    });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+
+    await setMinutes(user, /efektivno izvršeni/i, "480");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+    expect(await screen.findByText(/Unos nije dozvoljen/i)).toBeInTheDocument();
+
+    // The second attempt never reaches the backend: `toRequest` refuses it.
+    await user.clear(screen.getByLabelText(/^datum$/i));
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+    expect(
+      await screen.findByText(/Datum mora biti u obliku gggg-MM-dd/i),
+    ).toBeInTheDocument();
+
+    expect(services.worktime.saveEntry).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Unos nije dozvoljen/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/35 časova nedeljno/)).not.toBeInTheDocument();
+  });
 });
 
 describe("WorkTimeModule day selection", () => {

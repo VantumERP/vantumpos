@@ -372,6 +372,22 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
       return;
     }
 
+    // Every finding on screen belongs to an attempt that is over the moment this
+    // one starts, so the whole assessment is dropped here — above `toRequest`,
+    // not below it. `toRequest` is a second exit from this function and a
+    // client-side refusal is an attempt too: an operator whose Saturday was
+    // refused on čl. 87 and who then clears the Datum field or types „7,5“ into
+    // a minute box would otherwise read „Unos nije dozvoljen … 35 časova
+    // nedeljno … već je evidentirano 35 č 00 min“ above „Dan nije evidentiran —
+    // Datum mora biti u obliku gggg-MM-dd“, with nothing submitted at all. That
+    // is a destructive alert asserting a refusal that did not happen, naming a
+    // weekly figure for a week this attempt never touched. Same rationale as the
+    // `[employeeId, godina, mesec]` effect above, one scope narrower.
+    setProtections([]);
+    setCaps(null);
+    setCapWarning(null);
+    setSaveError(null);
+
     const validated = toRequest(form, employeeId, godina, mesec);
     if (!validated.ok) {
       setSaveError(validated.poruka);
@@ -381,7 +397,6 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
     const request = validated.request;
 
     setSaving(true);
-    setSaveError(null);
 
     try {
       const saved = form.korekcijaRazlog
@@ -416,17 +431,13 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
     } catch (error) {
       const code = errorCode(error);
 
-      // Every finding on screen was raised by an attempt that is now over, so
-      // the whole assessment is dropped before this one states its own. The
-      // branches below each set a different subset of it, and a finding that
-      // outlives the attempt that raised it is the defect the
-      // `[employeeId, godina, mesec]` effect above already guards against for a
-      // selector change: a čl. 87 „Unos nije dozvoljen“ left standing over an
-      // `entry_exists` refusal asserts a prohibition that did not happen and
-      // names a weekly figure for a week this attempt never touched — and left
-      // standing over a čl. 53 cap warning it says the day cannot be recorded
-      // at all, when the module is in fact asking for a razlog that would
-      // record it.
+      // The drop at the top of `submitEntry` already covers every attempt that
+      // reaches this far, and this one is kept for the narrow case it does not:
+      // the success path sets `protections` and `caps` from the saved day
+      // *before* the reload and the toast, so a throw after that point would
+      // otherwise leave a successful save's findings standing over „Dan nije
+      // evidentiran“. The branches below each set a different subset of the
+      // assessment and none of them clears the rest.
       setProtections([]);
       setCaps(null);
       setCapWarning(null);

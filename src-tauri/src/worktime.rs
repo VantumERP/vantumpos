@@ -169,13 +169,17 @@ pub fn in_same_iso_week(a: &str, b: &str) -> bool {
 /// nobody can read must not be the reason a minor's lawful day cannot be
 /// recorded — and an unreadable `day` drops the whole week for the same reason.
 ///
-/// Stated plainly because it is worth knowing: in [`check_protection`] this
-/// currently overlaps the age filter beside it, which fails closed on the same
-/// input (`is_younger_than` cannot order an unreadable day against a birthday
-/// and answers `false`). The overlap is incidental — one predicate asks whether
-/// a row is in the week and the other whether čl. 87 reaches it — and a total
-/// that refuses a write should not depend on a coincidence between two
-/// unrelated helpers to stay safe.
+/// **Dropping the unreadable row is this predicate's job and only this
+/// predicate's**, and that took a correction on 08.08.2026. Until then the age
+/// conjunct beside it in [`check_protection`] was `is_younger_than`, which also
+/// answers `false` for a `dan` it cannot read — so the two filters were not
+/// merely overlapping, they were provably redundant, and no input could
+/// distinguish them: deleting this conjunct from the čl. 87 leg left the whole
+/// suite green while quietly restoring [`in_same_iso_week`]'s fail-open
+/// behaviour to a total that refuses a write. The age conjunct now asks the
+/// positive question ([`is_at_least`] — „was the employee already 18 on this
+/// day?“), so an unreadable row reaches this predicate and is dropped here,
+/// once, by the helper whose documented job it is.
 fn strictly_in_same_iso_week(a: &str, b: &str) -> bool {
     matches!(
         (monday_of_week(a), monday_of_week(b)),
@@ -320,7 +324,11 @@ pub struct ProtectionBlock {
 ///   od 18 godina života“, so in the week the eighteenth birthday falls the adult
 ///   days are ordinary čl. 53 hours. Counting them into the minor's total is a
 ///   construction SW14-VERIFIED-RULES §4 req. 12 does not state, applied as a
-///   hard refusal.
+///   hard refusal. The conjunct is [`is_at_least`] negated rather than
+///   [`is_younger_than`], so it drops a day only on positive knowledge that the
+///   employee had turned 18: an unreadable `dan` is the week predicate's to
+///   drop, and while both helpers dropped it the week predicate could be deleted
+///   with nothing going red.
 ///
 /// **Which buckets both čl. 87 legs count, and the half of that question this
 /// module cannot answer.** [`DayHours`] carries `efektivno_minuta` and
@@ -444,13 +452,19 @@ pub fn check_protection(
         // of the doc comment above, and the poruka discloses their absence.
         //
         // Two filters, each narrower than `assess_caps`'s and each for a reason
-        // this leg has and that one does not — see the doc comment above.
+        // this leg has and that one does not — see the doc comment above. They
+        // answer one question each and neither answers the other's: a `dan`
+        // nobody can read is dropped by `strictly_in_same_iso_week` and by
+        // nothing else, which is why the age conjunct is `!is_at_least` rather
+        // than `is_younger_than`. While it was the latter both conjuncts dropped
+        // the unreadable row, so the week predicate could be deleted with the
+        // whole suite green — corrected 08.08.2026, and the mutation is red now.
         let ostali_dani_minuta: i64 = week
             .iter()
             .filter(|d| {
                 d.dan != day
                     && strictly_in_same_iso_week(&d.dan, day)
-                    && is_younger_than(p.datum_rodjenja.as_deref(), &d.dan, PUNOLETSTVO_GODINA)
+                    && !is_at_least(p.datum_rodjenja.as_deref(), &d.dan, PUNOLETSTVO_GODINA)
             })
             .map(|d| d.efektivno_minuta + d.prekovremeni_minuta)
             .sum();
@@ -601,6 +615,30 @@ fn parental_consent_required(p: &EmployeeProtection, day: &str) -> bool {
 /// itself is already outside the prohibition.
 fn is_younger_than(birth: Option<&str>, day: &str, years: i32) -> bool {
     compare_day_to_birthday(birth, day, years) == Some(Ordering::Less)
+}
+
+/// True only when `day` is **provably** on or after the `years`-th anniversary of
+/// `birth` — the employee is *known* to have been at least that old.
+///
+/// Deliberately not `!is_younger_than`. The two agree on every readable pair and
+/// part company on an unreadable one, where both answer „no“: `is_younger_than`
+/// will not call an employee a minor it cannot age, and this one will not call
+/// them an adult. Neither ever guesses.
+///
+/// Which of the two a filter should use is decided by what an unreadable date has
+/// to do there, and the čl. 87 weekly leg in [`check_protection`] is the reason
+/// this one exists. That filter drops an unreadable stored `dan` through
+/// [`strictly_in_same_iso_week`], which is the predicate whose documented job it
+/// is; written with `is_younger_than` the age conjunct dropped the same row a
+/// second time, so the week predicate could be deleted with the whole suite
+/// staying green and the fail-open behaviour of [`in_same_iso_week`] returning
+/// unnoticed. Phrased as „drop the day only when we know the employee was already
+/// 18“ the two conjuncts answer one question each, and each is load-bearing.
+fn is_at_least(birth: Option<&str>, day: &str, years: i32) -> bool {
+    matches!(
+        compare_day_to_birthday(birth, day, years),
+        Some(Ordering::Equal | Ordering::Greater)
+    )
 }
 
 /// True when a child born on `birth` is still „do `years` godina života“ on `day`.
@@ -945,17 +983,37 @@ mod tests {
     }
 
     /// The stored row for the day being assessed must not be counted beside the
-    /// version replacing it, or a correction that LOWERS the hours reads as a
-    /// breach. This is the defect `assess_caps` already guards against.
+    /// version replacing it, or the superseded hours are charged twice to the
+    /// week. This is the defect `assess_caps` already guards against.
+    ///
+    /// **The input has to be a correction that RAISES the day**, and that is the
+    /// whole reason this test reads the way it does. Written against a *lowering*
+    /// correction — a 10 h row reassessed at 4 h, which is how it stood until
+    /// 08.08.2026 — it could not fail: deleting `d.dan != day` pushes the sum
+    /// over the cap, but `unos_minuta > evidentirano_za_dan` is then false by
+    /// construction (a lowering write raises nothing), so the block is never
+    /// pushed and the assertion holds against both implementations. The
+    /// raise-gate that landed in Task 1's review fix subsumes every lowering
+    /// shape, and this test silently became a duplicate of
+    /// [`a_correction_that_lowers_a_minors_week_is_not_refused`], which pins that
+    /// gate on purpose and still does.
+    ///
+    /// So: Mon–Thu at 8 h with a 2 h Friday, and the Friday corrected up to 3 h.
+    /// De-duplicated the week is 32 h + 3 h = **exactly 35 h**, lawful. Counting
+    /// the superseded 2 h beside it gives 34 h + 3 h = 37 h and the write does
+    /// raise the day, so the ispravka is refused — a lawful correction locked out
+    /// of an append-only register, which is exactly what the raise-gate exists to
+    /// prevent and cannot prevent here.
     #[test]
     fn the_stored_row_for_the_day_under_assessment_is_not_double_counted() {
         let p = protection_born("2009-09-01");
-        // The whole week is stored, including a 10 h row for the day we reassess.
+        // The whole week is stored, including the 2 h row for the day we reassess.
         let week: Vec<DayHours> = [
             ("2026-08-03", 480),
             ("2026-08-04", 480),
             ("2026-08-05", 480),
-            ("2026-08-06", 600),
+            ("2026-08-06", 480),
+            ("2026-08-07", 120),
         ]
         .iter()
         .map(|(dan, m)| DayHours {
@@ -965,14 +1023,15 @@ mod tests {
         })
         .collect();
 
-        // Correcting 2026-08-06 down to 4 h: 3 × 8 h + 4 h = 28 h, inside the cap.
-        let blocks = check_protection(&p, "2026-08-06", &day(240, 0), &week);
+        // Correcting Friday up 2 h → 3 h: 4 × 8 h + 3 h = 35 h, the cap itself.
+        let blocks = check_protection(&p, "2026-08-07", &day(180, 0), &week);
 
         assert!(
             !blocks
                 .iter()
                 .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
-            "the stored 10 h row was counted beside the 4 h correction replacing it: {blocks:?}"
+            "the superseded 2 h row was counted beside the 3 h correction replacing it, \
+             so a 35 h week reads as 37 h and a lawful ispravka is refused: {blocks:?}"
         );
     }
 
@@ -1193,6 +1252,15 @@ mod tests {
     /// can carry one. `in_same_iso_week` keeps such a row on purpose for the
     /// čl. 53 caps, where over-reporting only asks for a ground — here it would
     /// lock a lawful day out of the register with no diagnostic at all.
+    ///
+    /// **This test decides `strictly_in_same_iso_week`'s conjunct and nothing
+    /// else**, which was not true until 08.08.2026: the age filter beside it was
+    /// `is_younger_than`, which also answers `false` for a `dan` it cannot read,
+    /// so the row was dropped twice and the week predicate could be deleted with
+    /// this assertion still holding. The age conjunct is now [`is_at_least`]
+    /// negated and keeps a day it cannot age, so deleting
+    /// `strictly_in_same_iso_week(&d.dan, day)` from `check_protection` fails
+    /// here — verified by mutation on 08.08.2026.
     #[test]
     fn an_unreadable_stored_day_does_not_silently_refuse_a_minors_week() {
         let p = protection_born("2009-09-01");
@@ -1237,6 +1305,46 @@ mod tests {
         assert!(
             !strictly_in_same_iso_week("2026-08-31", "2026-08-32"),
             "and neither must an unreadable day under assessment"
+        );
+    }
+
+    /// `is_at_least` is **not** `!is_younger_than`, and the čl. 87 weekly filter
+    /// depends on it not being.
+    ///
+    /// On a readable pair they are complements and the filter reads the same
+    /// either way. On a `dan` nobody can parse they are both `false` — neither
+    /// helper guesses an age — and that is the whole point: written with
+    /// `is_younger_than` the age conjunct dropped an unreadable row a second
+    /// time, so `strictly_in_same_iso_week`'s conjunct beside it could be deleted
+    /// with the entire suite green. Written with `!is_at_least` the age conjunct
+    /// keeps a day it cannot age and the week predicate does the dropping, alone.
+    /// Asserted directly, because a reviewer reading `!is_at_least(..)` will
+    /// reasonably want to „simplify“ it back.
+    #[test]
+    fn the_two_age_predicates_are_not_complements_on_a_day_that_does_not_parse() {
+        let rodjen = Some("2009-09-01");
+
+        // Readable days: exact complements, before and after the anniversary,
+        // and on the eighteenth birthday itself — čl. 88 st. 1's „mlađi od 18
+        // godina života“ leaves the birthday outside the prohibition.
+        for dan in ["2026-08-31", "2027-08-31", "2027-09-01"] {
+            assert_ne!(
+                is_younger_than(rodjen, dan, PUNOLETSTVO_GODINA),
+                is_at_least(rodjen, dan, PUNOLETSTVO_GODINA),
+                "on a readable day the two age predicates are complements: {dan}"
+            );
+        }
+        assert!(is_at_least(rodjen, "2027-09-01", PUNOLETSTVO_GODINA));
+
+        // v17's column CHECK is a GLOB shape test, so this satisfies the schema.
+        assert!(
+            !is_younger_than(rodjen, "2026-08-32", PUNOLETSTVO_GODINA),
+            "no employee is called a minor on a day that cannot be read"
+        );
+        assert!(
+            !is_at_least(rodjen, "2026-08-32", PUNOLETSTVO_GODINA),
+            "and none is called an adult on one either — the čl. 87 weekly filter \
+             keeps such a row and `strictly_in_same_iso_week` drops it, alone"
         );
     }
 

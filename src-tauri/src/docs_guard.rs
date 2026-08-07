@@ -98,6 +98,17 @@ fn ends_a_sentence(text: &str, at: usize) -> bool {
 /// cell pipe. Text is expected whitespace-collapsed, the way the JSX guards
 /// read a `.tsx` file.
 fn sentence_around(text: &str, at: usize) -> &str {
+    let (start, end) = sentence_span(text, at);
+    text[start..end].trim()
+}
+
+/// The same window as [`sentence_around`], as byte offsets into `text`.
+///
+/// A guard that has to decide *where inside the window* a second needle sits —
+/// „is this denial the one the paragraph withdraws, or the one it makes?“ —
+/// cannot answer it from a `&str` it can no longer locate. Offsets are what
+/// [`inside_a_serbian_quotation`] takes.
+fn sentence_span(text: &str, at: usize) -> (usize, usize) {
     const BREAKS: [char; 5] = ['<', '>', '{', '}', '|'];
 
     let start = text[..at]
@@ -110,7 +121,7 @@ fn sentence_around(text: &str, at: usize) -> &str {
         .find(|(index, ch)| BREAKS.contains(ch) || ends_a_sentence(text, at + index))
         .map_or(text.len(), |(index, _)| at + index);
 
-    text[start..end].trim()
+    (start, end)
 }
 
 /// The markdown block the byte offset `at` falls inside, collapsed onto one
@@ -876,6 +887,11 @@ fn no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move() {
 /// withdraws the reader's only pointer to a guard the shop is running.
 #[test]
 fn no_document_says_the_cl_87_weekly_leg_is_still_unbuilt() {
+    /// Lower-case, per [`match_indices_ci`]'s contract. They were compared with
+    /// `str::contains` until 08.08.2026, which is how „Gap“ was written and a
+    /// lower-case „gap“ — or a „Not enforced“ opening a table cell — walked
+    /// past. Same defect, same file, as the „Arhiv mora…“ one that put
+    /// `match_indices_ci` here in the first place.
     const UNBUILT: [&str; 10] = [
         "is not checked",
         "nije proveren",
@@ -886,7 +902,7 @@ fn no_document_says_the_cl_87_weekly_leg_is_still_unbuilt() {
         "not enforced",
         "nije sprovedeno",
         "nema proveru",
-        "Gap",
+        "gap",
     ];
     let cap: i64 = crate::worktime::MINOR_WEEKLY_CAP_MINUTES;
     assert_eq!(cap, 35 * 60, "ZoR čl. 87 — 35 časova nedeljno, in minutes");
@@ -904,7 +920,7 @@ fn no_document_says_the_cl_87_weekly_leg_is_still_unbuilt() {
                     let stale: Vec<&str> = UNBUILT
                         .iter()
                         .copied()
-                        .filter(|marker| clause.contains(marker))
+                        .filter(|marker| !match_indices_ci(clause, marker).is_empty())
                         .collect();
                     assert!(
                         stale.is_empty(),
@@ -1363,6 +1379,158 @@ fn no_document_says_the_reset_dialog_still_carries_the_two_withdrawn_claims() {
          week of citing ZPDV čl. 47, and a register silent about a correction is how the same \
          miscitation comes back. Name the screen and both članovi in one block."
     );
+}
+
+/// No document may say the shared retention schema does not exist. v17 built it.
+///
+/// The sibling above catches the reset dialog's two withdrawn claims; this one
+/// catches the third stale sentence in the very same bullets, which `2c415b8`
+/// edited without touching. Both residual lists read *„No `retention_class`,
+/// `retain_until`, `legal_hold` or upward-only extension exists anywhere in the
+/// schema“* while `retention_policies` (v17, `db/migrations.rs:734`) declares all
+/// four columns, `retention::extend_retain_until` is the upward-only extension
+/// itself — it **refuses** a shortening rather than clamping it — and
+/// `docs/SERBIAN-LAW-COMPLIANCE.md` row 120 says in terms that *„`retention.rs`
+/// is the shared retention table SW11-SW15 §3 req. 42 mandates“*. The repository
+/// asserted a control in one document and denied it in another, which is the
+/// state that let a survey agent re-open closed work on 07.08.2026.
+///
+/// **The window is the column name's own neighbours, and it is that narrow on
+/// purpose.** Register row 20's *„there is still no general upward-only
+/// `retain_until` engine over trading data“* is TRUE, names `retain_until`, and
+/// must stay statable; so must *„Genuinely unbuilt: the čl. 32 objekti register
+/// (req 37)“* three clauses further along the same bullet. A sentence window is
+/// no help — markdown prose ends sentences on a backtick or an asterisk, so
+/// [`ends_a_sentence`]'s capital-letter lookahead runs the window across half a
+/// section — and a markdown block is wider still. What is judged instead is the
+/// **word immediately before the column name** and the clause immediately after
+/// it: *„No `retention_class`“* is the shape that stood for a week, *„`retain_until`
+/// does not exist“* is the same claim inverted, and *„no general upward-only
+/// `retain_until` engine“* is neither, because the word before the name is
+/// „upward-only“. A quoted denial is exempt for [`inside_a_serbian_quotation`]'s
+/// reason: both bullets now quote the sentence they withdraw, and a dated
+/// correction that cannot show what it corrected is worth nothing.
+///
+/// Bound to the crate three ways, so the prose cannot outlive the code: the four
+/// needles are the fields of `retention::RetentionPolicy`, destructured here so
+/// a rename is a compile error rather than a stale paragraph; `RecordClass::ALL`
+/// and `extend_retain_until` are referenced as items. Presence is asserted before
+/// wording, like every sibling — deleting the paragraph is not a way to pass.
+#[test]
+fn no_document_denies_the_retention_schema_v17_created() {
+    /// The `retention_policies` columns v17 creates. `retention_class` is not
+    /// one of them and never was — it is the name both residual lists used for
+    /// the thing they said did not exist, so it is swept as written.
+    const KOLONE: [&str; 5] = [
+        "record_class",
+        "retention_class",
+        "retain_until",
+        "legal_hold",
+        "never_purge",
+    ];
+
+    /// The word that, standing immediately before a column name, denies it.
+    /// Lower-case; the backtick and the markdown around the name are trimmed
+    /// before the comparison.
+    const PRE: [&str; 6] = ["no", "not", "nema", "nijedan", "bez", "without"];
+
+    /// The same claim inverted — a denial that follows the name instead. Matched
+    /// against the clause after it, so *„`retain_until` engine over trading data
+    /// does not exist“* is reached and the next sentence is not.
+    const POSLE: [&str; 4] = ["does not exist", "do not exist", "ne postoji", "ne postoje"];
+
+    /// How far after the name `POSLE` is looked for. One clause, not one
+    /// paragraph — see the doc comment on why a wider window cannot work here.
+    const POSLE_PROZOR: usize = 48;
+
+    // Renaming any of the four stops this file compiling instead of leaving the
+    // needles above pointing at a column nothing declares.
+    let crate::retention::RetentionPolicy {
+        record_class: _,
+        retain_until: _,
+        legal_hold: _,
+        never_purge: _,
+    } = crate::retention::RetentionPolicy {
+        record_class: crate::retention::RecordClass::WorktimeClassification,
+        retain_until: None,
+        legal_hold: false,
+        never_purge: true,
+    };
+    let klase = crate::retention::RecordClass::ALL;
+    let _upward_only = crate::retention::extend_retain_until;
+    assert!(
+        klase.len() >= 7,
+        "the declared classes both residual lists enumerate are these: {:?}",
+        klase.map(crate::retention::RecordClass::key)
+    );
+
+    let mut pomena = 0usize;
+    for (doc, text) in [
+        ("docs/SERBIAN-LAW-COMPLIANCE.md", REGISTER),
+        ("docs/PROGRESS.md", PROGRESS),
+    ] {
+        for kolona in KOLONE {
+            for at in match_indices_ci(text, kolona) {
+                pomena += 1;
+                if inside_a_serbian_quotation(text, at) {
+                    continue;
+                }
+
+                // The word immediately before the name, with the opening
+                // backtick and the markdown emphasis around it trimmed off.
+                let pre = text[..at].trim_end_matches(['`', '*', '_']).trim_end();
+                let rec_pre = pre
+                    .rsplit(|ch: char| ch.is_whitespace())
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches(|ch: char| !ch.is_alphanumeric())
+                    .to_lowercase();
+
+                // The clause after the name, cut at the first full stop so a
+                // denial in the *next* sentence is not charged to this one.
+                let posle_od = at + kolona.len();
+                let kraj = text.len().min(posle_od + POSLE_PROZOR);
+                let mut posle = &text[posle_od..kraj];
+                while !text.is_char_boundary(posle_od + posle.len()) {
+                    posle = &posle[..posle.len() - 1];
+                }
+                let posle = posle.split('.').next().unwrap_or_default().to_lowercase();
+
+                let poricanje = if PRE.contains(&rec_pre.as_str()) {
+                    format!("„{rec_pre}“ immediately before it")
+                } else if let Some(marker) = POSLE.into_iter().find(|m| posle.contains(m)) {
+                    format!("„{marker}“ immediately after it")
+                } else {
+                    continue;
+                };
+
+                let line = text[..at].lines().count();
+                let (start, end) = sentence_span(text, at);
+                panic!(
+                    "{doc}:{line} denies that the retention schema has „{kolona}“ — {poricanje}, \
+                     in „{}“. `retention_policies` shipped with **v17** on 01.08.2026 carrying \
+                     `record_class`, `retain_until`, `legal_hold` and `never_purge`; \
+                     `retention::extend_retain_until` is the upward-only extension and refuses a \
+                     shortening rather than clamping it; `retention::RecordClass::ALL` declares \
+                     {} classes. Re-state the sentence with what shipped and what within req. 36 \
+                     is still owed — register row 20 puts it as „no general upward-only \
+                     `retain_until` engine over trading data“ — rather than denying a retention \
+                     control the crate runs.",
+                    text[start..end].trim(),
+                    klase.len()
+                );
+            }
+        }
+
+        assert!(
+            pomena > 0,
+            "{doc} names none of the `retention_policies` columns {KOLONE:?}. The shared \
+             retention table SW11-SW15 §3 req. 42 mandates is `retention.rs`, and a register \
+             silent about a control the shop is running is the same defect as one that denies \
+             it. Re-state the paragraph rather than deleting it."
+        );
+        pomena = 0;
+    }
 }
 
 /// `worktime::assess_caps` hard-codes `preraspodela_weekly_cap_exceeded` to
@@ -2068,11 +2236,24 @@ fn no_document_records_sw_14_req_12_as_closed_while_the_night_leg_is_unbuilt() {
 /// **prints nothing receipt-like**, never talks to a PFR“* — the fiscal posture
 /// this whole document rests on, true and load-bearing. A guard that fires on it
 /// is the failure [`clause_around`]'s doc comment calls the worse one, because
-/// the way out of it is to phrase a true statement around the guard. A following
-/// word narrows the denial to a class of document and is left alone; a full
-/// stop, a comma or a closing bracket leaves it standing about the application,
-/// which is how SW-8 carried *„app currently prints nothing)“* for three weeks
-/// after the printing stack shipped.
+/// the way out of it is to phrase a true statement around the guard. A full
+/// stop, a comma or a closing bracket leaves the denial standing about the
+/// application, which is how SW-8 carried *„app currently prints nothing)“* for
+/// three weeks after the printing stack shipped.
+///
+/// **`NARROWS` is a whitelist, and it was a blanket exemption until 08.08.2026.**
+/// The rule read *„a following word narrows the denial“* and was implemented as
+/// „any following word at all“, which exempts *„prints nothing today“*, *„prints
+/// nothing whatsoever“*, *„prints nothing of its own“*, *„ne štampa ništa danas“*
+/// — every intensifier except the two that had needles of their own. The stale
+/// sentence this guard was written for, *„app currently prints nothing)“*, was
+/// caught only because a `)` happened to follow it; at *„…prints nothing at
+/// present)“* the guard was silent. Two words are whitelisted, because two words
+/// legitimately narrow the claim in this repository today, and the failure
+/// message names the word it found so that a third is a decision somebody takes
+/// rather than a hole somebody falls through. The match is case-insensitive for
+/// [`match_indices_ci`]'s own reason: *„Prints nothing.“* opening a sentence is
+/// the ordinary way a denial comes back.
 #[test]
 fn no_document_says_this_application_prints_nothing() {
     /// The renderers behind `PrintService.openForPrint`. Referenced as function
@@ -2085,22 +2266,39 @@ fn no_document_says_this_application_prints_nothing() {
     }
     renderers_exist();
 
-    /// The bare denial, plus the two intensifiers that do not narrow it.
-    const PORICANJA: [&str; 5] = [
-        "prints nothing",
-        "print nothing",
-        "ne štampa ništa",
-        "prints nothing at all",
-        "prints nothing yet",
-    ];
+    /// The bare denial. Lower-case, per [`match_indices_ci`]'s contract.
+    ///
+    /// The intensifiers („at all“, „yet“) no longer need needles of their own:
+    /// they are the word after the needle and `NARROWS` does not carry them.
+    const PORICANJA: [&str; 3] = ["prints nothing", "print nothing", "ne štampa ništa"];
+
+    /// The only words that narrow the denial to a class of document.
+    ///
+    /// „receipt-like“ is `docs/SERBIAN-LAW-COMPLIANCE.md` §1; „nalik“ is the
+    /// memo's *„ne štampa ništa **nalik** fiskalnom računu“*. Both are true and
+    /// both are load-bearing. Everything else — „today“, „yet“, „whatsoever“,
+    /// „at all“, „of its own“, „so far“, „danas“ — leaves the claim standing
+    /// about the application and is reported with the word that was found.
+    const NARROWS: [&str; 2] = ["receipt-like", "nalik"];
 
     for (label, text) in prose_sources() {
         for poricanje in PORICANJA {
-            for (at, _) in text.match_indices(poricanje) {
+            for at in match_indices_ci(&text, poricanje) {
                 let ostatak = &text[at + poricanje.len()..];
-                // A word after the needle narrows the claim („receipt-like“);
-                // punctuation or the end of the text leaves it standing.
-                if ostatak.starts_with(' ') {
+                // The word after the needle, stripped of the markdown and the
+                // punctuation that wrap it — §1's own „receipt-like“ is written
+                // **bold** where `docs/PROGRESS.md` quotes it. A needle followed
+                // by punctuation or by the end of the text has no next word at
+                // all, and the claim stands unqualified.
+                let sledeca = if ostatak.starts_with(char::is_whitespace) {
+                    ostatak.split_whitespace().next().unwrap_or_default()
+                } else {
+                    ""
+                };
+                let rec = sledeca
+                    .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-')
+                    .to_lowercase();
+                if NARROWS.contains(&rec.as_str()) {
                     continue;
                 }
                 // A quoted denial is a dated record of what a document used to
@@ -2110,15 +2308,21 @@ fn no_document_says_this_application_prints_nothing() {
                     continue;
                 }
                 let line = text[..at].lines().count();
+                let nastavak = if rec.is_empty() {
+                    "with no word after it".to_string()
+                } else {
+                    format!("followed by „{rec}“, which does not narrow it")
+                };
                 panic!(
-                    "{label}:{line} says „{poricanje}“ of the application, unqualified. This app \
+                    "{label}:{line} says „{poricanje}“ of the application, {nastavak}. This app \
                      has printed since 19.07.2026: `popis_print`, `kep_close::render_book_html`, \
                      `kep_kalkulacija::render_kalkulacija_html`, `reklamacije_docs`, \
                      `campaign_evidence` and `cl47` render, and `PrintService.openForPrint` is \
                      the one hand-off seven modules use. A stale denial withdraws the reader's \
                      only pointer to a control the shop is running, which is the half of this \
                      rule that is easier to leave standing. Narrow the claim to the class of \
-                     document it is really about, or re-state it."
+                     document it is really about — the words this guard accepts are \
+                     {NARROWS:?} — or re-state it."
                 );
             }
         }

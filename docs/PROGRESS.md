@@ -124,13 +124,23 @@ D1 residual. (Requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3.)
   written archive approval to the **public sector**; the memo (§1 row 5) required the claim removed, and
   it was — deleted outright, with the neutral ZAG čl. 9 st. 1 custody note req. 39 asks for beside it in
   place of silence. Pre-existing (SW-3, `062250d`), not introduced by this batch.
-- **Req 35–38, 42, 43 — retention engine.** No `retention_class`, `retain_until`, `legal_hold` or
-  upward-only extension exists anywhere in the schema; the čl. 32 objekti/ulaganja register (req 37) and
-  the documented plain-text archival export (req 43) are not built. The KEP book carries its own 5-year
-  floor in `kep_close.rs::retention_floor`. The same screen line (`SettingsScreen.tsx:1771`) attributed
-  the 10-year floor to **ZPDV čl. 47** until 07.08.2026 (`41dc298`), when the dialog was bound to
-  `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` — ZoRač čl. 28 st. 4; ZPPPA čl. 114ž — the string the
-  go-live tombstone had carried since 31.07.2026.
+- **Req 35–38, 42, 43 — retention: the shared table shipped 01.08.2026 (v17); the general engine did
+  not. Re-stated 08.08.2026** — this bullet read *„No `retention_class`, `retain_until`, `legal_hold` or
+  upward-only extension exists anywhere in the schema“* for a week after v17 built all four, which is the
+  same defect as a false promise pointed the other way. `retention_policies` (`db/migrations.rs:734`)
+  carries `record_class`, `retain_until`, `legal_hold` and `never_purge`; `retention.rs` is the shared
+  table req. 42 mandates, with nine declared classes in `retention::RecordClass::ALL`, and v18 gives
+  `processing_activities` a `retention_record_class` foreign key onto it so the čl. 47 register cannot
+  state a rok the app does not apply. `retention::extend_retain_until` is req. 36's upward-only
+  extension: it **refuses** a candidate earlier than the stored floor rather than clamping it, and
+  refuses a `trajno` class outright. What is still owed within req. 36 is register row 20's own residual
+  — no general upward-only `retain_until` engine over trading data; the declared classes are the
+  worktime, personnel, credential, access-log, čl. 47, cenovnik and popis ones only, and the KEP book
+  carries its own 5-year floor in `kep_close.rs::retention_floor`. Genuinely unbuilt, and unchanged: the
+  čl. 32 objekti/ulaganja register (req 37) and the documented plain-text archival export (req 43). The
+  same screen line (`SettingsScreen.tsx:1771`) attributed the 10-year floor to **ZPDV čl. 47** until
+  07.08.2026 (`41dc298`), when the dialog was bound to `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` —
+  ZoRač čl. 28 st. 4; ZPPPA čl. 114ž — the string the go-live tombstone had carried since 31.07.2026.
 - **Req 5(b)(c) — one-year aggregation.** The limitation is now disclosed, but the optional buyer tag and
   the rolling 365-day running total are not built. `[PRUDENTIAL]` mechanism; blocked on §5 Q-3 (lawful
   ZZPL basis for a customer-identity store).
@@ -182,13 +192,22 @@ Latest migration: **v16**.
   you“ (§4 item 8). Pre-existing (SW-3, `062250d`); untouched by *this* batch. **What req. 39 leaves
   open:** the pravno-lice half — lista kategorija sa saglasnošću nadležnog javnog arhiva, arhivska
   knjiga, 30 April prepis — is profile-aware copy nobody has written, although `pravna_forma` is stored.
-- **Req 35–38, 42, 43 — retention engine.** No `retention_class`, `retain_until`, `legal_hold` or
-  upward-only extension in the schema; no čl. 32 objekti/ulaganja register (req 37); no documented
-  plain-text archival export (req 43). `SettingsScreen.tsx:1771` attributed the 10-year floor to
-  **ZPDV čl. 47**, and framed it as a ceiling („do 10 godina“), until 07.08.2026 (`41dc298`): the dialog
-  now prints `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` — ZoRač čl. 28 st. 4; ZPPPA čl. 114ž — as a
-  **floor** („najmanje 10 godina … rok se može produžiti, a nikada se ne skraćuje“), which is what §1
-  row 7 corrected and what req. 36's upward-only `retain_until` will have to implement.
+- **Req 35–38, 42, 43 — retention: the shared table shipped 01.08.2026 (v17); the general engine did
+  not. Re-stated 08.08.2026** — like its twin in the batch above, this bullet read *„No
+  `retention_class`, `retain_until`, `legal_hold` or upward-only extension in the schema“* after v17 had
+  built all four. `retention_policies` (`db/migrations.rs:734`) carries `record_class`, `retain_until`,
+  `legal_hold` and `never_purge`; `retention.rs` is the shared table req. 42 mandates, with nine classes
+  in `retention::RecordClass::ALL` and a `retention_record_class` foreign key from v18's
+  `processing_activities`. `retention::extend_retain_until` is req. 36's upward-only extension and
+  refuses a shortening rather than clamping it — so *„what req. 36's upward-only `retain_until` will
+  have to implement“*, as this bullet used to end, is owed only for the part row 20 still names: no
+  general engine over trading data, the declared classes being the worktime, personnel, credential,
+  access-log, čl. 47, cenovnik and popis ones. Still genuinely unbuilt: the čl. 32 objekti/ulaganja
+  register (req 37) and the documented plain-text archival export (req 43). `SettingsScreen.tsx:1771`
+  attributed the 10-year floor to **ZPDV čl. 47**, and framed it as a ceiling („do 10 godina“), until
+  07.08.2026 (`41dc298`): the dialog now prints `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` — ZoRač
+  čl. 28 st. 4; ZPPPA čl. 114ž — as a **floor** („najmanje 10 godina … rok se može produžiti, a nikada
+  se ne skraćuje“), which is what §1 row 7 corrected.
 - **Req 5(b)(c) — one-year aggregation.** Disclosed in writing, but the optional buyer tag and the rolling
   365-day running total are not built. `[PRUDENTIAL]`; blocked on §5 Q-3.
 - **Req 15, second half — the 3-day advance announcement** for withdrawals over 1.500.000 RSD
@@ -1278,14 +1297,14 @@ pass.
 
 | Gate | Result | Exit |
 |---|---|---|
-| `bun run test` | **546 passed** / 0 failed, 35 files (was 539 / 35) | `0` |
+| `bun run test` | **547 passed** / 0 failed, 35 files (was 539 / 35) | `0` |
 | `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | **1012 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 988) | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | **1016 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 988) | `0` |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
 | `git diff --check` | clean, no output | `0` |
 
-Net **+24 cargo / +7 bun** over `c93e28e`, in `worktime.rs`, `commands/worktime.rs`, `docs_guard.rs`,
+Net **+28 cargo / +8 bun** over `c93e28e`, in `worktime.rs`, `commands/worktime.rs`, `docs_guard.rs`,
 `legal.rs`, `commands/backup.rs`, `WorkTimeModule.test.tsx`, `SettingsScreen.test.tsx`,
 `UserDialog.test.tsx` and `ReceiptsScreen.test.tsx`.
 The cargo figure is net of **two deletions**: `worktime::tests::the_cl_87_weekly_leg_is_not_checked` and
@@ -1296,6 +1315,55 @@ second was **inverted rather than dropped** —
 leg is unbuilt, sweeps ten markers including the register's own idiom *„Gap“*, judges the **clause**
 rather than the line, and asserts per document that the leg is still *named*. Latest migration: **v22**,
 unchanged.
+
+**Whole-branch review fixes (08.08.2026).** Eight findings, seven distinct defects, every one closed
+with a regression test whose red was proven by mutation before the fix landed. Four are worth naming
+because of what they were: three tests that could not fail for the reason their own failure message
+gives, and a guard defeated by any following word.
+
+1. **`worktime::tests::the_stored_row_for_the_day_under_assessment_is_not_double_counted` passed with
+   the de-duplication removed.** Written against a correction that *lowers* the day, it could not: the
+   raise-gate added in Task 1's review makes `unos_minuta > evidentirano_za_dan` false by construction
+   for every lowering write, so deleting `d.dan != day` pushed the sum over the cap and no block was
+   pushed anyway. It had become a behavioural duplicate of
+   `a_correction_that_lowers_a_minors_week_is_not_refused`, which pins that gate on purpose and still
+   does. Re-pointed at a correction that **raises** a day inside an under-cap week — Mon–Thu 8 h with a
+   2 h Friday corrected up to 3 h, exactly 35 h de-duplicated and 37 h without — and verified red by
+   deleting the filter. The de-duplication was previously pinned by nothing but a string figure in a
+   command test about the correction path.
+2. **`strictly_in_same_iso_week`'s conjunct inside `check_protection` could be deleted with the whole
+   suite green.** The age filter beside it was `is_younger_than`, which also answers `false` for a `dan`
+   it cannot read, so the two were not merely overlapping — they were provably redundant, and
+   `an_unreadable_stored_day_does_not_silently_refuse_a_minors_week` passed for the age filter's reason.
+   The age conjunct now asks the positive question (`!is_at_least` — a new private helper: „was the
+   employee already 18 on this day?“), so an unreadable row is dropped by the week predicate and by
+   nothing else. Behaviour is unchanged; **both** conjuncts are now load-bearing and each was verified
+   red by deletion, and `the_two_age_predicates_are_not_complements_on_a_day_that_does_not_parse`
+   asserts the property the split rests on.
+3. **`load_week`'s live-rows-only contract had no test at any layer.** The `MAX(verzija)` subquery was
+   shared with `assess_caps`, where a superseded row costs an override prompt; this cycle made it
+   load-bearing for a hard refusal and added nothing.
+   `commands::worktime::tests::a_superseded_verzija_does_not_feed_the_cl_87_weekly_total` records a 35 h
+   week, corrects the Friday **down** to one hour and then saves a two-hour Saturday that lands on
+   exactly the cap; counting both Friday versions refuses it permanently, since `correct_entry` has
+   nothing to correct. Red proven by dropping the subquery.
+4. **A čl. 87 refusal still survived an attempt that never left the screen.** Task 2's review fix drops
+   the assessment at the top of `WorkTimeModule`'s catch, and `submitEntry` has a **second** exit above
+   it: `toRequest` returns early on a client-side validation failure, setting `saveError` and clearing
+   nothing. Clearing the Datum field after a refused Saturday left „Unos nije dozvoljen … 35 časova
+   nedeljno“ standing over „Datum mora biti u obliku gggg-MM-dd“ with nothing submitted at all. The drop
+   moved above `toRequest`; the catch keeps its own for the one case the move does not cover, a throw
+   after the success path has already applied a saved day's findings.
+
+The other four: the over-cap dead end is now recorded rather than emergent (residual below, register
+row SW-14, and `an_over_cap_minors_week_admits_no_further_worked_day`); both *„No `retention_class`,
+`retain_until`, `legal_hold` or upward-only extension exists anywhere in the schema“* bullets are
+re-stated against the v17 schema that carries all four and bound by
+`docs_guard::no_document_denies_the_retention_schema_v17_created`, scoped so register row 20's true
+*„no general upward-only `retain_until` engine over trading data“* stays statable; and
+`no_document_says_this_application_prints_nothing` no longer exempts every following word — the
+exemption is a two-word whitelist („receipt-like“, „nalik“) and the sweep is case-insensitive, as is
+the `UNBUILT` marker list, whose *„Gap“* was matched case-sensitively.
 
 **Where SW-14 stands after this cycle, requirement by requirement, because a partial recorded as a tick
 is the defect above pointed the other way.**
@@ -1346,6 +1414,23 @@ Both documents state the night leg as unbuilt in a clause of its own, which is w
 
 **Residuals carried out of this cycle.**
 
+- **A minor's week that is already over 35 h admits no further worked day, at any value — recorded
+  08.08.2026 as a known dead end, not as a finished rule.** `evidentirano_za_dan` is 0 for a day with no
+  stored row, so the raise-gate `unos_minuta > evidentirano_za_dan` collapses to `unos_minuta > 0` and
+  the Saturday a minor actually worked is refused at eight hours, at one hour and at one minute alike;
+  `correct_entry` is no way round it, because `write_entry`'s `(Some(_), None)` arm returns `not_found`
+  when there is no version to supersede. The operator's remaining routes are to omit the day (ZoR čl. 55
+  / ZEOR čl. 24 incompleteness, čl. 276) or to first correct **other** days downwards — that is, to
+  record fewer hours than were worked on days the write does not touch, which is the outcome
+  `check_protection`'s own doc comment names as the reason the raise-gate exists. It is reachable by
+  each of the three routes that leave an over-cap week standing when the guard turns on: a
+  `datum_rodjenja` filled in late through `commands/users.rs`, a restored backup, and rows written
+  before 07.08.2026. **Not changed, and why:** the alternative — gate on whether the week is over the
+  cap *without* this day, so that what is refused is the write which *crosses* it — inverts
+  `worktime::tests::raising_a_day_in_an_already_over_week_is_still_refused`, which bars the „once over,
+  anything goes“ reading on purpose, and it needs a čl. 274 disclosure decided with it. Pinned as it
+  stands by `commands::worktime::tests::an_over_cap_minors_week_admits_no_further_worked_day`, and
+  stated in register row SW-14.
 - **Whether čl. 87's 35 časova counts časovi čekanja, zastoja i prekida u radu and časovi obustave rada
   zbog štrajka is UNRESOLVED, and the leg takes the narrower reading until it is answered.**
   `derive_totals` books all three into the ZEOR čl. 24 tač. 1 b) `ukupno_ostvareni_minuta` while both

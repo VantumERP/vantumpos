@@ -2239,6 +2239,217 @@ mod tests {
         });
     }
 
+    /// `load_week` must hand `check_protection` **live rows only**, and this is
+    /// the only test at any layer that decides it.
+    ///
+    /// `worktime::check_protection`'s doc comment states the precondition in
+    /// terms — the `dan != day` filter drops the superseded version of the day
+    /// being assessed and of no other day, so a stale row anywhere else in the
+    /// week is added to a figure that **refuses a write**. Before this leg landed
+    /// the same subquery served `assess_caps` alone, where over-counting costs an
+    /// override prompt; nothing was added when the consequence changed.
+    ///
+    /// The scenario separates the two implementations exactly. The week is
+    /// Mon–Thu at 8 h plus a 3 h Friday — 35 h, the cap itself — and the Friday is
+    /// then corrected **down** to one hour, which is lawful and records
+    /// (`verzija 2` at 60 min, `verzija 1` at 180 min superseded beside it). The
+    /// Saturday that follows is two hours: 32 h + 1 h + 2 h = exactly 35 h and it
+    /// must record. Count both Friday versions and the other days come to 34 h,
+    /// the Saturday makes 36 h, `unos > evidentirano` is true on an original, and
+    /// the shop is refused a day it lawfully worked — permanently, because
+    /// `correct_entry` has nothing to correct. Red proven 08.08.2026 by dropping
+    /// `AND e.verzija = (SELECT MAX(...))` from `load_week`'s SQL.
+    #[test]
+    fn a_superseded_verzija_does_not_feed_the_cl_87_weekly_total() {
+        with_state("worktime_cl87_superseded_verzija", |state| {
+            sign_in_admin(state);
+            let maloletnik = seed_employee(state, "radnik8e", "Radnik Osam E");
+            // Seventeen for the whole of that week, on file before the first write.
+            set_datum_rodjenja(state, maloletnik, "2009-01-15");
+
+            // Ponedeljak–četvrtak eight hours each and a three-hour Friday: the
+            // week stands at exactly the 35 časova čl. 87 allows.
+            for (dan, minuta) in [
+                ("2026-08-03", 480),
+                ("2026-08-04", 480),
+                ("2026-08-05", 480),
+                ("2026-08-06", 480),
+                ("2026-08-07", 180),
+            ] {
+                save_entry(
+                    state,
+                    radni_dan(maloletnik, dan, minuta, 0),
+                    &format!("{dan}T20:00:00Z"),
+                )
+                .expect("a week that lands on exactly 35 časova records in full");
+            }
+
+            // The Friday is corrected down to one hour: 33 h, strictly toward the
+            // cap. `verzija 1` stays in the table — nothing is ever updated here.
+            let ispravka = correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: radni_dan(maloletnik, "2026-08-07", 60, 0),
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-08-08T09:00:00Z",
+            )
+            .expect("a correction toward the čl. 87 cap must be recordable");
+            assert_eq!(ispravka.entry.verzija, 2);
+            assert_eq!(ispravka.entry.minuti.efektivno_izvrseni_minuta, 60);
+
+            // Two hours on the Saturday: 32 h + 1 h + 2 h = exactly 35 h. It
+            // records only if the superseded three-hour Friday is out of the sum.
+            let subota = save_entry(
+                state,
+                radni_dan(maloletnik, "2026-08-08", 120, 0),
+                "2026-08-08T20:00:00Z",
+            )
+            .expect(
+                "the superseded Friday was counted beside the version replacing it, so a \
+                 35 h week reads as 36 h and a lawful day is refused",
+            );
+            assert!(
+                subota.protections.is_empty(),
+                "35 časova is the cap, not a breach of it: {:?}",
+                subota.protections
+            );
+
+            // Six live rows, one superseded beside them, and the register holds
+            // exactly the 35 h the cap allows.
+            let mesec = list_month(state, maloletnik, 2026, 8).expect("the month should list");
+            let live: Vec<_> = mesec.entries.iter().filter(|e| !e.zamenjen).collect();
+            assert_eq!(
+                live.len(),
+                6,
+                "six days were recorded and every one of them stands: {:?}",
+                live.iter()
+                    .map(|e| (e.dan.as_str(), e.verzija))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                mesec.entries.iter().filter(|e| e.zamenjen).count(),
+                1,
+                "the superseded Friday is still in the table — nothing is updated here"
+            );
+            assert_eq!(
+                mesec.ukupno.efektivno_izvrseni_minuta,
+                crate::worktime::MINOR_WEEKLY_CAP_MINUTES,
+                "the live week is exactly the čl. 87 cap"
+            );
+        });
+    }
+
+    /// **A minor's week that is already over 35 h admits no further worked day,
+    /// at any value.** Recorded here as a dead end rather than left emergent —
+    /// this test asserts today's behaviour, and it is not a statement that today's
+    /// behaviour is the right one.
+    ///
+    /// `evidentirano_za_dan` is 0 for a day with no stored row, so the raise-gate
+    /// `unos_minuta > evidentirano_za_dan` collapses to `unos_minuta > 0` and
+    /// every original above zero is refused: eight hours, one hour, one minute.
+    /// `correct_entry` is no way round it either — `write_entry`'s `(Some(_),
+    /// None)` arm returns `not_found`, because there is no version of that day to
+    /// supersede. The register therefore cannot describe a day that happened, and
+    /// the operator's only routes are to omit it (ZoR čl. 55 / ZEOR čl. 24
+    /// incompleteness, čl. 276) or to first correct other days **down** — that is,
+    /// to record fewer hours than were worked on days this write does not touch,
+    /// which is the outcome `check_protection`'s own doc comment names as the
+    /// reason the raise-gate exists.
+    ///
+    /// It is reachable exactly as the guard's three dormancy routes are: v17
+    /// leaves `datum_rodjenja` nullable and unbackfilled, so filling a profile in
+    /// through `commands/users.rs` switches the guards on over rows already
+    /// recorded; a restored backup does the same; and so do rows written before
+    /// 07.08.2026. This test drives the first.
+    ///
+    /// **Why the behaviour was not changed instead.** The alternative is to gate
+    /// the leg on whether the week is over the cap *without* this day, so that
+    /// what is refused is the write which crosses it. That inverts
+    /// `worktime::tests::raising_a_day_in_an_already_over_week_is_still_refused`,
+    /// which pins the opposite rule deliberately — „once over, anything goes“ is
+    /// the reading it exists to bar — and it needs the čl. 274 disclosure that
+    /// would have to go with it. The residual is stated in `docs/PROGRESS.md` and
+    /// in register row SW-14 instead, in the terms this doc comment uses.
+    #[test]
+    fn an_over_cap_minors_week_admits_no_further_worked_day() {
+        with_state("worktime_cl87_over_cap_week_dead_end", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik8f", "Radnik Osam F");
+
+            // Mon–Fri at 8 h with no birth date on file: 40 h, nothing blocks.
+            for dan in [
+                "2026-08-03",
+                "2026-08-04",
+                "2026-08-05",
+                "2026-08-06",
+                "2026-08-07",
+            ] {
+                save_entry(
+                    state,
+                    radni_dan(radnik, dan, 480, 0),
+                    &format!("{dan}T20:00:00Z"),
+                )
+                .expect("an eight-hour day records while the profile is empty");
+            }
+
+            // HR fills the profile in: seventeen for the whole of that week. The
+            // guards turn on over a week that is already at 40 h.
+            set_datum_rodjenja(state, radnik, "2009-01-15");
+
+            // The Saturday the minor actually worked. Refused at every value —
+            // one hour, and one minute, are refused for the same arithmetic as
+            // eight hours, because the week without this day is already over.
+            for minuta in [480, 60, 1] {
+                let error = save_entry(
+                    state,
+                    radni_dan(radnik, "2026-08-08", minuta, 0),
+                    "2026-08-08T20:00:00Z",
+                )
+                .expect_err("an over-cap week refuses every worked minute of a further day");
+                assert_eq!(error.code(), "protection_block");
+                assert!(
+                    error.to_string().contains("35 časova nedeljno"),
+                    "refused on the čl. 87 weekly leg: {error}"
+                );
+            }
+
+            // And the ispravka path is not a way round it: there is no version of
+            // that day to correct, so the day cannot be described at all.
+            let error = correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: radni_dan(radnik, "2026-08-08", 60, 0),
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-08-08T20:30:00Z",
+            )
+            .expect_err("a day with no stored version cannot be corrected into existence");
+            assert_eq!(error.code(), "not_found");
+
+            // Zero worked hours still records — an absence adds nothing to the
+            // total — which is the one thing the operator can still say about the
+            // day, and it is not what happened.
+            let mut odmor = radni_dan(radnik, "2026-08-08", 0, 0);
+            odmor.kategorija_odsustva = Some("godisnji_odmor".to_string());
+            odmor.odsustvo_minuta = 480;
+            save_entry(state, odmor, "2026-08-08T21:00:00Z")
+                .expect("a day of zero worked hours breaches no weekly cap");
+
+            let mesec = list_month(state, radnik, 2026, 8).expect("the month should list");
+            let subota = mesec
+                .entries
+                .iter()
+                .find(|entry| entry.dan == "2026-08-08")
+                .expect("the absence row stands");
+            assert_eq!(
+                subota.minuti.efektivno_izvrseni_minuta, 0,
+                "the register holds zero worked hours for a Saturday that was worked"
+            );
+            assert_eq!(mesec.ukupno.efektivno_izvrseni_minuta, 5 * 480);
+        });
+    }
+
     /// The one place the čl. 87 weekly total and the ZEOR čl. 24 tač. 1 b) total
     /// of the same write can be read side by side — and they are made of
     /// different buckets.

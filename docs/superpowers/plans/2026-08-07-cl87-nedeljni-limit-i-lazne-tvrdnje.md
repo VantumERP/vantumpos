@@ -465,6 +465,125 @@ exposes exhaustively.
 
 ---
 
+## Whole-branch review fixes (08.08.2026)
+
+Eight findings, seven distinct defects, each closed with a regression test whose red was proven by
+mutation before the fix landed. cargo **1016 passed / 0 failed** (1012 + 4), `bun run test` **547
+passed / 35 files** (546 + 1), `bun run build` clean bar the pre-existing chunk advisory, clippy,
+`cargo fmt --check` and `git diff --check` clean. Net **+28 cargo / +8 bun** over `c93e28e` for the
+cycle. Migration head **v22**, unchanged; `legal.rs` is not in this diff and no fine figure, currency
+amount or ZEOR figure was added anywhere.
+
+**The shape of these findings is worth stating.** Three of them are tests that could not fail for the
+reason their own failure message gives — a mutation-proof discipline applied to the *behaviour* and not
+to the *test*, twice over, in a cycle whose subject is claims nothing stands behind.
+
+1. **The de-duplication test passed with the de-duplication removed.**
+   `the_stored_row_for_the_day_under_assessment_is_not_double_counted` drove a correction that *lowers*
+   the day, and the raise-gate that landed in Task 1's review makes `unos_minuta > evidentirano_za_dan`
+   false by construction for every lowering write — so deleting `d.dan != day` pushed the sum over the
+   cap and no block was pushed anyway. The test had silently become a behavioural duplicate of
+   `a_correction_that_lowers_a_minors_week_is_not_refused` (`worktime.rs:1112`), which pins the
+   raise-gate on purpose and still does. **Re-pointed at the only shape that separates the two
+   implementations** — Mon–Thu at 8 h with a 2 h Friday corrected **up** to 3 h: 35 h exactly when the
+   superseded row is dropped, 37 h and a refused lawful ispravka when it is not. Verified red by
+   deleting `d.dan != day &&` at `worktime.rs:451`. **Deviation:** the finding offered keeping the old
+   lowering case under a truthful name; it was folded into its existing duplicate instead, and the
+   test's doc comment records why in full. No coverage was lost — the lowering shape is asserted by
+   `a_correction_that_lowers_a_minors_week_is_not_refused` and, end to end, by
+   `a_birth_date_filled_in_later_does_not_lock_a_minors_recorded_week`.
+2. **`strictly_in_same_iso_week`'s conjunct could be deleted with the whole suite green.** The plan's
+   Task 1 review note disclosed the overlap with the age filter and understated it: `is_younger_than`
+   also answers `false` for a `dan` it cannot read, so the two were **provably redundant** and
+   `an_unreadable_stored_day_does_not_silently_refuse_a_minors_week` passed for the age filter's
+   reason. The age conjunct now asks the positive question — a new private `is_at_least`
+   (`worktime.rs:606`), negated: *drop the day only when we know the employee had turned 18* — so an
+   unreadable row reaches the week predicate and is dropped there, once, by the helper whose documented
+   job it is. **Behaviour is identical** on every readable pair and on the unreadable one; what changed
+   is that each conjunct now answers one question. Both were verified red by deletion
+   (`an_unreadable_stored_day_…` for the week predicate,
+   `the_cl_87_weekly_total_counts_only_the_days_the_employee_was_under_eighteen` for the age one), and
+   `the_two_age_predicates_are_not_complements_on_a_day_that_does_not_parse` asserts the property the
+   split rests on, because a reviewer meeting `!is_at_least(..)` will reasonably want to simplify it
+   back. This is option (b) of the finding; option (a) — documenting the redundancy as defensive — was
+   rejected because the finding's own acceptance test (delete the conjunct, require red) is
+   unsatisfiable under it.
+3. **`load_week`'s live-rows-only contract had no test at any layer.** `check_protection`'s doc comment
+   states it as a precondition in terms; the `MAX(verzija)` subquery was written for `assess_caps`,
+   where a superseded row costs an override prompt, and this cycle made it load-bearing for a hard
+   refusal without adding anything.
+   `commands::worktime::tests::a_superseded_verzija_does_not_feed_the_cl_87_weekly_total`
+   (`commands/worktime.rs:2269`) records a 35 h week, corrects the Friday **down** to one hour and then
+   saves a two-hour Saturday that lands on exactly the cap. Red proven by dropping the subquery from
+   `load_week`'s SQL: the Saturday is refused at 36 h, and `correct_entry` cannot rescue it because
+   there is no version to supersede. It was the only test in the suite that moved.
+4. **A čl. 87 refusal still survived an attempt that never left the screen.** Task 2's review fix drops
+   the assessment at the top of `WorkTimeModule`'s catch; `submitEntry` has a **second** exit above it,
+   where `toRequest` returns early on a client-side validation failure setting `saveError` and clearing
+   nothing. Clearing the Datum field after a refused Saturday left the destructive „Unos nije dozvoljen
+   … 35 časova nedeljno … već je evidentirano 35 č 00 min“ standing over „Dan nije evidentiran — Datum
+   mora biti u obliku gggg-MM-dd“, with nothing submitted at all. The drop moved above `toRequest`
+   (`WorkTimeModule.tsx:375`); the catch keeps its own for the one case the move does not cover — a
+   throw after the success path has already applied a saved day's findings — and both comments now say
+   which case each covers. Vitest: „does not let a čl. 87 refusal survive an attempt that never leaves
+   the screen“, red before the fix on the surviving alert, and it asserts `saveEntry` was called once.
+5. **The over-cap dead end is recorded rather than emergent.** In a week already above 35 h no further
+   worked day can be recorded at any value — `evidentirano_za_dan` is 0 for a day with no stored row,
+   so the raise-gate collapses to `unos_minuta > 0`, and `correct_entry` returns `not_found`. **The
+   behaviour was deliberately not changed**, which is option (b) of the finding: option (a) — refuse
+   only the write that *crosses* the cap — inverts
+   `worktime::tests::raising_a_day_in_an_already_over_week_is_still_refused`, which bars the „once
+   over, anything goes“ reading on purpose, so taking it would have meant deleting a test this plan
+   does not name and deciding a čl. 274 disclosure alongside. What shipped is
+   `commands::worktime::tests::an_over_cap_minors_week_admits_no_further_worked_day`, driving the
+   finding's exact scenario (five 8-hour days with no birth date, backfill, then the Saturday at 480,
+   60 and 1 minute, then the ispravka, then the absence that does record), plus the residual in
+   `docs/PROGRESS.md` and a dated paragraph in register row SW-14.
+6. **Two `docs/PROGRESS.md` bullets still denied the retention schema in the present tense.** Both read
+   *„No `retention_class`, `retain_until`, `legal_hold` or upward-only extension exists anywhere in the
+   schema“* while v17 (`db/migrations.rs:734`) declares all four columns, `retention.rs` is the shared
+   table req. 42 mandates with nine classes, v18's `processing_activities` carries a
+   `retention_record_class` foreign key onto it, and `retention::extend_retain_until` **refuses** a
+   shortening rather than clamping it. `2c415b8` edited exactly these blocks and left the denial
+   standing. Both are re-stated with what shipped and what within req. 36 is still owed, in register
+   row 20's own words, and reqs. 37 and 43 are kept open because they genuinely are. Pinned by
+   `docs_guard::no_document_denies_the_retention_schema_v17_created`, bound to the crate three ways —
+   the four needles are `retention::RetentionPolicy`'s fields, destructured so a rename is a compile
+   error, and `RecordClass::ALL` and `extend_retain_until` are referenced as items.
+7. **`no_document_says_this_application_prints_nothing` was defeated by any following word, and by
+   capitalisation.** `ostatak.starts_with(' ')` exempted every following word rather than the narrowing
+   ones, so *„prints nothing today“*, *„prints nothing whatsoever“* and *„ne štampa ništa danas“* all
+   passed, and the stale sentence the guard exists for was caught only because a `)` happened to follow
+   it. The exemption is now a two-word whitelist — „receipt-like“ (§1) and „nalik“ (the memo) — the
+   failure message names the word it found, and matching moved to `match_indices_ci`. The sibling
+   `UNBUILT` list had the same case bug in `"Gap"` and is lower-cased and matched the same way. All
+   four holes were verified red by planting the sentence and reverting.
+
+**Deviations, four, all recorded rather than hidden.**
+
+1. **`docs_guard::sentence_span` was extracted from `sentence_around`.** The new retention guard has to
+   decide *where inside a window* a second needle sits, which a `&str` it can no longer locate cannot
+   answer. `sentence_around` now calls it and is otherwise unchanged.
+2. **The retention guard does not judge a sentence, and the first version that did was wrong.** It
+   failed on its own dated correction, because markdown prose ends sentences on a backtick or an
+   asterisk and [`ends_a_sentence`]'s capital-letter lookahead then runs the window across half a
+   section, swallowing the *true* denials three clauses away („Genuinely unbuilt: the čl. 32 objekti
+   register“). What is judged is the word immediately before the column name and the clause
+   immediately after it. Register row 20's *„no general upward-only `retain_until` engine over trading
+   data“* is green under it, which is the point.
+3. **`worktime::is_at_least` is a new private helper**, and the plan's Task 1 said the weekly leg is
+   four fields' worth of arithmetic beside an existing one. It is six lines and it exists so that a
+   deletion is detectable; the alternative was a doc comment saying the guard cannot be tested.
+4. **`docs/PROGRESS.md`'s gate table and net counts were re-stated** (1012 → 1016 cargo, 546 → 547
+   bun), and the cycle section gained a review-fix paragraph. Register row SW-14 gained the dead-end
+   paragraph. No other document moved.
+
+**One thing not closed.** The two čl. 87 legs still count `efektivno_minuta + prekovremeni_minuta` and
+not the ZEOR čl. 24 tač. 1 b) total; that question is unresolved, disclosed in the poruka and in
+`check_protection`'s doc comment, and stays the first residual of this cycle.
+
+---
+
 ## Self-review
 
 **Spec coverage.** SW-14 §4 req. 12 weekly leg → Tasks 1 and 2 (Task 1 the rule, Task 2 the write path, because a computed-and-discarded guard is the failure mode this codebase names by hand). SW11-SW15 §3 req. 39 / §4 item 8 → Task 3. The §2 Q4 retention citation → Task 3. Register accuracy → Task 4.
