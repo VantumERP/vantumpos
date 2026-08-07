@@ -2860,7 +2860,7 @@ mod tests {
     use tauri::Manager;
 
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     /// The commands take a Tauri `State`, so a headless mock app is needed to
@@ -2872,13 +2872,12 @@ mod tests {
     /// popisna-lista file name is a pure function of the popis id and the phase,
     /// which in a fresh database is always `popisne-liste-1-faza-{a|b}.html`. Under
     /// a plain `cargo test` the export tests then wrote, read back and deleted each
-    /// other's sheets. So the database goes one level down, the way
-    /// `cenovnik::with_publish_folder` does it, and the teardown takes the folder
-    /// whole: the WAL sidecars and every exported sheet go with it, and no test
-    /// needs to clean up a file by hand.
+    /// other's sheets. This helper established the folder shape locally; it is now
+    /// what [`test_database_path`] gives every test, so the shape lives there and
+    /// [`remove_test_database`] takes the folder whole — the WAL sidecars and every
+    /// exported sheet go with it, and no test needs to clean up a file by hand.
     fn with_app(test_name: &str, test: impl FnOnce(&tauri::App<tauri::test::MockRuntime>)) {
-        let folder = test_database_path(test_name).with_extension("");
-        let path = folder.join("popis.sqlite3");
+        let path = test_database_path(test_name);
 
         {
             let db = Db::new(&path).expect("database should initialize");
@@ -2889,7 +2888,7 @@ mod tests {
             test(&app);
         }
 
-        std::fs::remove_dir_all(&folder).expect("test folder should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) {

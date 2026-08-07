@@ -351,7 +351,7 @@ pub fn post_nivelacija(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::kep::list_ledger;
     use rusqlite::Connection;
 
@@ -364,7 +364,7 @@ mod tests {
             let mut connection = db.open().expect("open");
             test(&mut connection);
         }
-        std::fs::remove_file(&path).expect("cleanup");
+        remove_test_database(&path);
     }
 
     /// Seeds a tax rate and a product with the given retail price.

@@ -1483,7 +1483,7 @@ CREATE TABLE IF NOT EXISTS _migrations (
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
 
     fn table_exists(conn: &Connection, table: &str) -> bool {
         let count: i64 = conn
@@ -1911,7 +1911,7 @@ mod tests {
                 "a signature over no snapshot attests to nothing"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// PoP čl. 8 st. 5 — „Подаци из књиговодства … о количинама, не могу се давати
@@ -2032,7 +2032,7 @@ mod tests {
                 "the guard follows the session's current state, not the row's history"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// Req. 41 / PoP čl. 14 st. 3 with ZoRač čl. 8 st. 4: once the popis result is
@@ -2206,7 +2206,7 @@ mod tests {
             conn.execute("DELETE FROM popis_sessions WHERE id = 1", [])
                 .expect("an expired popis session must remain purgeable");
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// The installed-base path: a till already running v19 gets the popis stores
@@ -2348,7 +2348,7 @@ mod tests {
                 "the v19 immutability trigger must survive the v20 upgrade"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// SW-16 follow-on, req. 35 / PoP čl. 8 st. 1–2: the plan rada is not merely
@@ -2526,7 +2526,7 @@ mod tests {
                 );
             }
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// The installed-base path: a till already running v20 gains the čl. 8 st. 2
@@ -2717,7 +2717,7 @@ mod tests {
                 "the v20 blind-count trigger must survive the v21 upgrade"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -2817,7 +2817,7 @@ CREATE TABLE _migrations (
             assert_eq!(applied_again, MIGRATIONS.len() as i64);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// Migration v10 rebuilds price_history to widen the `source` CHECK. The log is
@@ -2950,7 +2950,7 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
             );
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -2997,7 +2997,7 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
             )
             .expect("non_working_days should accept a row");
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// v15 is the first rebuild in this schema's history to touch tables that hold
@@ -3045,7 +3045,7 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
             assert_eq!(attested, 0, "the default must be UNattested");
             assert!(attested_at.is_none());
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -3216,7 +3216,7 @@ VALUES (11, 900, 'cash', 120000, '2026-06-01T09:30:00Z'),
             );
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -3306,7 +3306,7 @@ VALUES (11, 900, 'cash', 120000, '2026-06-01T09:30:00Z'),
                 .expect("a cash payment must still round-trip through the v15 table");
             assert_eq!(cash_kept, 120000);
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// v16 rebuilds `compliance_log` — the never-deleted audit trail whose rows are
@@ -3515,7 +3515,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             );
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -3602,7 +3602,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "a movement written without the flag must stay unasserted, not default to 1"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -3855,7 +3855,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             )
             .expect("period and retention rows should insert");
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// Every `kategorija_odsustva` value must name its own minute bucket: the column
@@ -3926,7 +3926,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "a category with no bucket column of the same name must be rejected"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -3990,7 +3990,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "new profile columns are nullable, not backfilled"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -4083,7 +4083,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "a breach without saznanje_at must be rejected"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]
@@ -4147,7 +4147,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "the personnel FK must RESTRICT the account delete, not cascade it away"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// The two structural guarantees v18 exists to make unbypassable.
@@ -4232,7 +4232,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             conn.execute("DELETE FROM audit_events WHERE id = 900", [])
                 .expect("an expired audit row must remain deletable");
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// SW-12 req. 10 and 14. The published cenovnik is an archive, not a cache:
@@ -4439,7 +4439,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "čl. 6 st. 5: a publication is never overwritten by the next one"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// A published cenovnik is evidence of what the shop offered at a moment in
@@ -4570,7 +4570,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
             conn.execute("DELETE FROM cenovnik_snapshots WHERE id = 10", [])
                 .expect("an expired snapshot must remain purgeable");
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// The installed-base path: a till already running v18 gets the archive and the
@@ -4714,7 +4714,7 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "the rebuild drops the table, so the index the trail is read through must be back"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// Req. 12. The divergence between a rung price and the published one is a
@@ -4753,6 +4753,6 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
                 "the trail's vocabulary is closed"
             );
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 }

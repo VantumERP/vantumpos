@@ -92,14 +92,64 @@ fn ensure_parent_directory(path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
+/// A database path for one test — **inside a directory of its own**.
+///
+/// The directory is the load-bearing half. `campaigns::write_export` resolves
+/// `exports/` beside the database, and an export file name is typically a pure
+/// function of a row id that every fresh test database restarts at 1. While every
+/// test database shared `std::env::temp_dir()` directly, they therefore shared one
+/// `exports/` and computed identical absolute paths, so under a plain
+/// `cargo test` the export tests wrote, read back and deleted each other's files.
+/// That is what `-- --test-threads=1` has been paying for: measured on 07.08.2026
+/// at one failure in six parallel runs of the full suite
+/// (`commands::audit::tests::the_izvod_is_recorded_as_a_disclosure_to_the_poverenik`,
+/// whose izvod was removed by a sibling between the write and the read), against
+/// 187 s serial versus 87 s parallel.
+///
+/// The directory is created HERE rather than left to [`ensure_parent_directory`]
+/// on the `Db::new` path, because not every test reaches its database that way:
+/// the migration tests open a raw `rusqlite::Connection` on this path to build an
+/// installed-base database up version by version, and `Connection::open` creates
+/// no directories. While the path was a file directly in `$TMPDIR` its parent
+/// always existed and the distinction could not show. [`remove_test_database`]
+/// takes the directory away whole, sidecars and exports with it.
+/// `commands::popis`'s `with_app` established this shape locally in `f89814a` and
+/// this is that fix made general.
+///
+/// Uniqueness is the clock **and** a counter: two tests entering in the same
+/// nanosecond is not hypothetical once the suite runs on 16 threads, and a
+/// collision here would silently reintroduce exactly the sharing this removes.
 #[cfg(test)]
 pub fn test_database_path(test_name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system time should be after unix epoch")
         .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    std::env::temp_dir().join(format!("vantumpos-{test_name}-{unique}.sqlite3"))
+    let folder = std::env::temp_dir().join(format!("vantumpos-{test_name}-{unique}-{seq}"));
+    std::fs::create_dir_all(&folder).expect("the test database folder should be created");
+
+    folder.join("test.sqlite3")
+}
+
+/// The teardown that matches [`test_database_path`]: removes the test's whole
+/// directory rather than the database file alone, so the WAL sidecars and
+/// anything the test exported go with it instead of accumulating in `$TMPDIR`.
+///
+/// Takes the database path the test was handed — never the directory — so a call
+/// site cannot drift into removing a parent it does not own. Best-effort by
+/// design: a test that never opened its database has nothing to remove, and a
+/// teardown is not a place to fail a passing test.
+#[cfg(test)]
+pub fn remove_test_database(path: &Path) {
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::remove_dir_all(folder);
+    }
 }
 
 #[cfg(test)]
@@ -216,12 +266,7 @@ mod tests {
             test(&db);
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     fn seed_shift(connection: &Connection) -> (i64, i64) {

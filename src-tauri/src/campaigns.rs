@@ -1656,7 +1656,7 @@ pub fn list_campaigns(conn: &Connection, now: &str) -> Result<Vec<CampaignSummar
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use rusqlite::params;
 
     fn with_campaign_db(test_name: &str, test: impl FnOnce(&Connection)) {
@@ -1678,7 +1678,7 @@ mod tests {
                 .expect("seed tax rate");
             test(&mut connection);
         }
-        std::fs::remove_file(&path).expect("cleanup");
+        remove_test_database(&path);
     }
 
     fn seed_product(conn: &Connection, id: i64, price: i64, active: bool, created_at: &str) {

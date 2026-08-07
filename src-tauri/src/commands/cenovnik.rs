@@ -775,7 +775,7 @@ mod tests {
     use crate::commands::catalog::{
         create_product, set_product_active, update_product, SaveProductRequest,
     };
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::retention::{
         extend_retain_until, seed_retention_policies, RecordClass, CENOVNIK_ARCHIVE_RETENTION_YEARS,
     };
@@ -798,7 +798,7 @@ mod tests {
             test(&db);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// The same shop, plus the shared retention table the archive resolves its
@@ -814,7 +814,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// The same shop reached through an `AppState`, so the admin gate on the
@@ -828,7 +828,7 @@ mod tests {
             test(&AppState::new(db));
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// A folder of this test's own, removed afterwards — `std::env::temp_dir`

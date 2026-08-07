@@ -863,7 +863,7 @@ mod tests {
         InventoryAdjustmentRequest, InventoryMovementType, StockListQuery, StockMovementWrite,
     };
     use crate::commands::settings::{PravnaForma, ShopProfile};
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     fn with_connection(test_name: &str, test: impl FnOnce(&mut Connection)) {
@@ -876,12 +876,7 @@ mod tests {
             test(&mut connection);
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) -> i64 {
@@ -1535,12 +1530,7 @@ mod tests {
             assert_eq!(receive_result.new_quantity_milli, 1000);
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     #[test]
@@ -1901,12 +1891,7 @@ mod tests {
             assert_eq!(by, admin_id);
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     /// §3 req 25 puts the čl. 69a tač. 4 record at goods receipt because that is
@@ -1961,11 +1946,6 @@ mod tests {
             );
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 }

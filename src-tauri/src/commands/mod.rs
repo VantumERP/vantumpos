@@ -29,7 +29,7 @@ mod auth_shift_tests {
     use crate::commands::shifts::{
         close_shift_for_user, open_shift_for_user, CloseShiftRequest, OpenShiftRequest,
     };
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     #[test]
@@ -49,7 +49,7 @@ mod auth_shift_tests {
 
         assert_eq!(session.user.username, "admin");
 
-        let _ = std::fs::remove_file(db_path);
+        remove_test_database(&db_path);
     }
 
     #[test]
@@ -69,7 +69,7 @@ mod auth_shift_tests {
 
         assert_eq!(error.code, "invalid_credentials");
 
-        let _ = std::fs::remove_file(db_path);
+        remove_test_database(&db_path);
     }
 
     #[test]
@@ -108,7 +108,7 @@ mod auth_shift_tests {
 
         assert_eq!(error.code, "validation_error");
 
-        let _ = std::fs::remove_file(db_path);
+        remove_test_database(&db_path);
     }
 
     #[test]
@@ -149,6 +149,6 @@ mod auth_shift_tests {
         assert_eq!(closed.counted_cash_minor, Some(50000));
         assert_eq!(closed.difference_minor, Some(0));
 
-        let _ = std::fs::remove_file(db_path);
+        remove_test_database(&db_path);
     }
 }

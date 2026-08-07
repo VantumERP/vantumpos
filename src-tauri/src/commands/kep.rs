@@ -344,7 +344,7 @@ fn parse_adjustment_cause(cause: &str) -> Result<StornoCause, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
     use rusqlite::params;
     use tauri::Manager;
@@ -364,7 +364,7 @@ mod tests {
             test(&app);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) {

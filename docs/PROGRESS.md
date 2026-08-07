@@ -1078,11 +1078,7 @@ SW-16's forward unchanged, because nothing here touched them.
 - **The čl. 48 audit trail is lopsided, and this cycle is what made it visible.** The plan approval
   writes an `audit_events` row; opening a popis, recording the komisija and taking either potpis still
   write none, though each of them stores names too. Pre-existing, out of this cycle's scope, and it
-  should be decided deliberately rather than left to drift. Related and smaller:
-  `db::test_database_path` still puts every test database directly in `std::env::temp_dir()`. Task 3
-  fixed the popis tests locally instead, because moving it would move ~60 teardowns across the crate in
-  a commit meant to close a popis finding; it remains the better global fix and is recorded here as an
-  open option, not as a closed one.
+  should be decided deliberately rather than left to drift.
 - **The čl. 2 st. 6 delivery is still the shop's — and only the delivery.** This bullet first read
   *„the module now prints the signed lista and sends it to nobody“*, which over-credited on both
   limbs: what the module prints carries blank ruled lines, and what it printed was the whole popis
@@ -1168,6 +1164,38 @@ bun **539 passed** / 35 files, 0 failed (was 536); `bun run build` ✓; clippy c
 reminder test now reads its three facts out of the warning element rather than off the whole page,
 because the rok is cited beside the new per-lista button too; and the `„b“` sweep widened from two
 button names to every print button on the panel.
+
+### Test isolation — `--test-threads=1` is retired (07.08.2026)
+
+Not a compliance item. The suite had run serially since the earliest module spec, and the flag was
+copied forward into every plan since without its reason ever being written down. It turned out to have
+one, and the reason was a defect rather than a constraint.
+
+`db::test_database_path` returned a database file directly in `std::env::temp_dir()`.
+`campaigns::write_export` resolves `exports/` **beside the database**, and an export file name is
+typically a pure function of a row id that every fresh test database restarts at 1 — so every test in
+the process shared one `exports/` and computed identical absolute paths. Under a plain `cargo test`
+the export tests wrote, read back and deleted each other's files. The popis cycle above hit this and
+fixed it locally in `f89814a` (`commands::popis`'s `with_app` took a folder of its own); this is that
+fix made general.
+
+| | |
+|---|---|
+| `test_database_path` | now returns `$TMPDIR/vantumpos-{test}-{nanos}-{seq}/test.sqlite3` — a directory per test, created eagerly. Uniqueness is the clock **and** an `AtomicU64`: two tests entering in the same nanosecond stops being hypothetical at 16 threads, and a collision would silently restore the sharing. The directory is created in the helper rather than left to `Db::new`'s `ensure_parent_directory`, because the migration tests build an installed-base database through a raw `rusqlite::Connection::open`, which creates no directories — a gap that could not show while the parent was always `$TMPDIR` |
+| `remove_test_database(path)` | the matching teardown, takes the **database path** and removes its parent whole. 91 hand-written `remove_file` teardowns across 38 files now call it. Best-effort by design — a teardown is not a place to fail a passing test. It also closes a pre-existing leak: nothing in the crate ever removed the `-wal`/`-shm` sidecars |
+
+**Measured, before and after.** Before: 1 failure in 6 parallel full-suite runs —
+`commands::audit::tests::the_izvod_is_recorded_as_a_disclosure_to_the_poverenik`, whose izvod a sibling
+removed between the write and the read. After: **8 parallel full-suite runs green (988 passed each)**,
+plus 25 consecutive parallel runs of `commands::audit` and 20 of `commands::popis`. **187 s serial →
+83 s parallel**, on the same machine, same commit.
+
+The gate list in `docs/module-specs/00-shared-foundation.md` drops the flag and now states the rule and
+the measurement, so the next person to hit a parallel-only failure reads it as a shared-path bug in
+that test rather than as a reason to put the flag back. Two pre-existing patterns stay outside the
+scheme and are recorded there: `cenovnik`'s `with_publish_folder` (no database involved) and
+`commands/backup.rs`'s `test_backup_dir`, whose folder names are fixed rather than unique and which
+leaves ~20 directories in `$TMPDIR` per run. Neither collides today.
 
 ---
 

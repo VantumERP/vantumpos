@@ -729,7 +729,7 @@ pub fn render_correction_html(report: &CorrectionReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use rusqlite::{params, Connection};
 
     fn with_db(test_name: &str, test: impl FnOnce(&Connection)) {
@@ -744,7 +744,7 @@ mod tests {
             .expect("seed tax");
             test(&conn);
         }
-        std::fs::remove_file(&path).expect("cleanup");
+        remove_test_database(&path);
     }
 
     fn seed_product(conn: &Connection, id: i64, name: &str, price: i64, created_at: &str) {

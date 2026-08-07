@@ -1527,7 +1527,7 @@ mod tests {
     use rusqlite::params;
 
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
 
     fn mapping(entries: &[(&str, &str)]) -> HashMap<String, String> {
         entries
@@ -1553,12 +1553,7 @@ mod tests {
             test(&db);
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     fn seed_tax_rate(db: &Db, name: &str, basis_points: i64) {

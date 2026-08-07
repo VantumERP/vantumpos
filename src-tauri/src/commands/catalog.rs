@@ -1790,7 +1790,7 @@ mod tests {
     use crate::commands::settings::{
         save_shop_profile, PravnaForma, ShopProfile, ShopProfileRequest, SHOP_PROFILE_KEY,
     };
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     fn with_catalog_database(test_name: &str, test: impl FnOnce(&Db)) {
@@ -1802,12 +1802,7 @@ mod tests {
             test(&db);
         }
 
-        std::fs::remove_file(&db_path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                db_path.display()
-            )
-        });
+        remove_test_database(&db_path);
     }
 
     fn seed_catalog(db: &Db) {
@@ -1932,12 +1927,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&db_path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                db_path.display()
-            )
-        });
+        remove_test_database(&db_path);
     }
 
     fn sign_in_admin(state: &AppState) {
@@ -2829,12 +2819,7 @@ mod tests {
             assert_eq!(error.code, "forbidden");
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     #[test]
@@ -2862,12 +2847,7 @@ mod tests {
             assert_eq!(error.code, "forbidden");
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     #[test]
@@ -2898,12 +2878,7 @@ mod tests {
             assert_eq!(error.code, "forbidden");
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     #[test]
@@ -3317,11 +3292,6 @@ mod tests {
             assert_eq!(error.code, "forbidden");
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 }

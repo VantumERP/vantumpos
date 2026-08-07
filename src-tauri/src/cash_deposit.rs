@@ -859,7 +859,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::commands::settings::ShopProfile;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
 
     fn holidays(days: &[&str]) -> BTreeSet<String> {
         days.iter().map(|d| (*d).to_string()).collect()
@@ -874,7 +874,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn admin_id(state: &AppState) -> i64 {

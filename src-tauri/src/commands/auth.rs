@@ -254,7 +254,7 @@ fn invalid_credentials_error() -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::security::hash_credential;
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
@@ -266,7 +266,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn seed_admin_session(state: &AppState) -> i64 {

@@ -211,7 +211,7 @@ pub fn campaigns_export_correction_report(
 mod tests {
     use super::*;
     use crate::campaigns::CampaignItemInput;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
     use rusqlite::params;
     use tauri::Manager;
@@ -232,7 +232,7 @@ mod tests {
             test(&app);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// One non-perishable product with a clean offered-price history, so the

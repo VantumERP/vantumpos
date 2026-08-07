@@ -1131,7 +1131,7 @@ fn recipient_label(code: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
         let path = test_database_path(test_name);
@@ -1142,7 +1142,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) -> i64 {

@@ -1407,7 +1407,7 @@ mod tests {
         close_period, correct_entry, export_month_csv, list_month, my_hours, notices,
         parse_iso_date, save_entry, worktime_save_entry, CorrectEntryRequest, SaveEntryRequest,
     };
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
@@ -1419,7 +1419,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn seed_employee(state: &AppState, username: &str, display_name: &str) -> i64 {
@@ -1819,7 +1819,7 @@ mod tests {
             my_hours(state, 2026, 8).expect("a cashier may read their own hours");
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]

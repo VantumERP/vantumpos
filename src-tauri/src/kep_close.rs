@@ -410,7 +410,7 @@ pub fn list_closures(conn: &Connection, today: &str) -> Result<Vec<KepClosureVie
 mod tests {
     use super::*;
     use crate::commands::settings::CompanySettings;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::kep::{KepEntryView, KepLedger};
 
     /// Opens a migrated connection over a throwaway database.
@@ -421,7 +421,7 @@ mod tests {
             let mut conn = db.open().expect("database should open");
             test(&mut conn);
         }
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// Seeds a receipt zaduženje so the closed saldo is a real figure.

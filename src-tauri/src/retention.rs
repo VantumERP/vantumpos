@@ -845,7 +845,7 @@ mod tests {
         ACCESS_LOG_RETENTION_YEARS, CENOVNIK_ARCHIVE_RETENTION_YEARS, POPIS_RETENTION_YEARS,
         STANDALONE_OVERTIME_LOG_FLOOR_YEARS,
     };
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
@@ -857,7 +857,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]

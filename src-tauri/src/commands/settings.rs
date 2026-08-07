@@ -858,7 +858,7 @@ fn default_reset_policy() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::nbs_rate::{EurRate, RateSource};
     use crate::state::AppState;
 
@@ -871,7 +871,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) {

@@ -935,7 +935,7 @@ mod tests {
     use rusqlite::{params, Connection};
     use tauri::Manager;
 
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     fn sign_in_cashier(state: &AppState) {
@@ -963,12 +963,7 @@ mod tests {
             test(&connection);
         }
 
-        fs::remove_file(&db_path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                db_path.display()
-            )
-        });
+        remove_test_database(&db_path);
     }
 
     fn seed_reports_data(connection: &Connection) {
@@ -1219,12 +1214,7 @@ mod tests {
             test(&connection);
         }
 
-        fs::remove_file(&db_path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                db_path.display()
-            )
-        });
+        remove_test_database(&db_path);
     }
 
     /// Seeds two shifts on the SAME day whose owners differ from the cashier who
@@ -1471,7 +1461,7 @@ mod tests {
             assert_eq!(report.rows[0].refunds_or_voids_minor, -300);
             assert_eq!(report.rows[0].refunds_or_voids_count, 1);
         }
-        std::fs::remove_file(&db_path).expect("test database should be removed");
+        remove_test_database(&db_path);
     }
 
     fn with_reports_state(test_name: &str, test: impl FnOnce(&Connection)) {
@@ -1497,12 +1487,7 @@ mod tests {
             test(&connection);
         }
 
-        fs::remove_file(&db_path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                db_path.display()
-            )
-        });
+        remove_test_database(&db_path);
     }
 
     fn seed_sale_on(connection: &Connection, day: &str, payment_method: &str, amount_minor: i64) {
@@ -2100,11 +2085,6 @@ mod tests {
             assert_eq!(shifts_error.code, "forbidden");
         }
 
-        fs::remove_file(&db_path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                db_path.display()
-            )
-        });
+        remove_test_database(&db_path);
     }
 }

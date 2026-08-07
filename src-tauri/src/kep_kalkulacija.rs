@@ -422,7 +422,7 @@ pub fn render_kalkulacija_html(view: &KalkulacijaView) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use rusqlite::Connection;
 
     /// Runs `test` against a freshly migrated temp DB (`Db::new` seeds admin id 1).
@@ -433,7 +433,7 @@ mod tests {
             let mut connection = db.open().expect("open");
             test(&mut connection);
         }
-        std::fs::remove_file(&path).expect("cleanup");
+        remove_test_database(&path);
     }
 
     /// Seeds a tax rate (20% PDV) and a product priced at 156,00 retail / 100,00

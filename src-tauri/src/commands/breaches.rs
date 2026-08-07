@@ -1186,7 +1186,7 @@ mod tests {
         BreachDraft, Cl53Izuzetak, NotifyDecision, RiskOutcome,
     };
     use crate::commands::settings::CompanySettings;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     /// 09:00 on 1 August 2026 — every instant in these tests is an offset from
@@ -1206,7 +1206,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) -> i64 {

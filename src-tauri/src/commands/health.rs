@@ -37,7 +37,7 @@ pub fn build_health_response(
 #[cfg(test)]
 mod tests {
     use crate::commands::health::build_health_response;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     #[test]
@@ -54,6 +54,6 @@ mod tests {
         assert!(response.database_path.ends_with(".sqlite3"));
         assert!(response.migrated);
 
-        let _ = std::fs::remove_file(db_path);
+        remove_test_database(&db_path);
     }
 }

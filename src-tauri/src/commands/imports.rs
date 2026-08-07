@@ -53,7 +53,7 @@ mod tests {
     use tauri::Manager;
 
     use crate::commands::imports::import_commit;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::importer::{CommitImportRequest, ImportType};
     use crate::state::AppState;
 
@@ -103,11 +103,6 @@ mod tests {
             assert_eq!(error.code, "forbidden");
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 }

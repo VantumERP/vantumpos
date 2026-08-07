@@ -1287,7 +1287,7 @@ mod tests {
     use rusqlite::{params, Connection};
 
     use crate::commands::shifts::current_shift_for_user;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     use super::{
@@ -1312,12 +1312,7 @@ mod tests {
             test(&db, seeded);
         }
 
-        std::fs::remove_file(&path).unwrap_or_else(|error| {
-            panic!(
-                "test database file {} should be removed: {error}",
-                path.display()
-            )
-        });
+        remove_test_database(&path);
     }
 
     fn seed_completed_receipt(connection: &Connection) -> SeededReceipt {

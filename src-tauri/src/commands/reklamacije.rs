@@ -199,7 +199,7 @@ pub fn reklamacija_export_notice(state: State<'_, AppState>) -> Result<ExportedF
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::reklamacije::ReklamacijaInput;
     use crate::state::AppState;
     use rusqlite::params;
@@ -221,7 +221,7 @@ mod tests {
             test(&app);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) {

@@ -754,7 +754,7 @@ mod tests {
     use crate::commands::settings::{
         load_shop_profile, save_shop_profile, PravnaForma, ShopProfileRequest,
     };
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
@@ -766,7 +766,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn test_backup_dir(test_name: &str) -> std::path::PathBuf {

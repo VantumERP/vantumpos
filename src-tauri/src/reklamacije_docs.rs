@@ -181,7 +181,7 @@ pub fn render_notice_html() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::reklamacije::{create_reklamacija, get_reklamacija, ReklamacijaInput};
     use rusqlite::Connection;
 
@@ -192,7 +192,7 @@ mod tests {
             let mut connection = db.open().expect("open");
             test(&mut connection);
         }
-        std::fs::remove_file(&path).expect("cleanup");
+        remove_test_database(&path);
     }
 
     fn intake_input(filed_at: &str, filer: &str) -> ReklamacijaInput {

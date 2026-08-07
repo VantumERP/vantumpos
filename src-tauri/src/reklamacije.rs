@@ -984,7 +984,7 @@ pub fn resolve_reklamacija(
 mod tests {
     use super::*;
     use crate::commands::settings::{PravnaForma, ShopProfile, SHOP_PROFILE_KEY};
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
 
     fn ev(t: &str, d: &str) -> DeadlineEvent {
         DeadlineEvent {
@@ -1153,7 +1153,7 @@ mod tests {
             let mut connection = db.open().expect("open");
             test(&mut connection);
         }
-        std::fs::remove_file(&path).expect("cleanup");
+        remove_test_database(&path);
     }
 
     fn intake_input(filed_at: &str) -> ReklamacijaInput {

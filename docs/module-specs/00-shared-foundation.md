@@ -146,10 +146,16 @@ Required gates for module work:
 
 - `bun run test`
 - `bun run build`
-- `cd src-tauri; cargo test -- --test-threads=1`
+- `cd src-tauri; cargo test`
 - `cd src-tauri; cargo clippy --all-targets --all-features --locked -- -D warnings`
 - `cd src-tauri; cargo fmt --check`
 - `git diff --check`
 
 Frontend tests should use the mock service adapter and assert user-visible behavior. Backend tests should use temp SQLite databases and verify persisted rows, constraints, and transaction rollback for failure paths.
+
+**Backend tests take their database path from `db::test_database_path` and tear it down with `db::remove_test_database`, never by removing the file by hand.** The path is a database inside a directory of its own, and the directory is the point: `campaigns::write_export` resolves `exports/` beside the database, and an export file name is usually a pure function of a row id that every fresh database restarts at 1. While every test database sat directly in `std::env::temp_dir()` they shared one `exports/` and computed identical absolute paths, so the export tests wrote, read back and deleted each other's files — which is why this gate list carried `-- --test-threads=1` until 07.08.2026. That flag is gone; do not reintroduce it, and do not hand-roll a path into `temp_dir()`.
+
+Measured on 07.08.2026 when the flag was dropped: before the fix, one failure in six parallel full-suite runs (`commands::audit::tests::the_izvod_is_recorded_as_a_disclosure_to_the_poverenik`, whose izvod a sibling removed between the write and the read); after it, **eight parallel full-suite runs green**, plus 25 of `commands::audit` and 20 of `commands::popis`. **187 s serial → 83 s parallel.** A test that starts failing only under parallelism is a shared-path bug in that test, not a reason to put the flag back.
+
+Two pre-existing patterns still build their own folders and are out of that scheme: `cenovnik`'s `with_publish_folder` (no database is involved) and `commands/backup.rs`'s `test_backup_dir`, whose folder names are fixed rather than unique and which leaves about 20 directories in `$TMPDIR` per run. Neither collides today; both are worth folding in if they are touched.
 

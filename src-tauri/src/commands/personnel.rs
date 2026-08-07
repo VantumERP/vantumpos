@@ -767,7 +767,7 @@ mod tests {
     };
     use crate::commands::audit::{search, AuditQuery};
     use crate::commands::users::{create_user, deactivate_user, SaveUserRequest};
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::retention::{
         extend_retain_until, is_purgeable, load_policy, seed_retention_policies, RecordClass,
     };
@@ -782,7 +782,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) -> i64 {

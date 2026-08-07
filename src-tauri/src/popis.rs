@@ -1053,7 +1053,7 @@ mod tests {
         NIVELACIJA_OBAVEZA_PRAVNI_OSNOV,
     };
     use crate::app_error::AppError;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
 
     fn with_test_database(test_name: &str, test: impl FnOnce(&Connection)) {
         let path = test_database_path(test_name);
@@ -1064,7 +1064,7 @@ mod tests {
             test(&connection);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     /// Seed one popis session directly in `status`. `posted_at` follows the

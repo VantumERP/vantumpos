@@ -278,7 +278,7 @@ pub fn retention_extend_policy(
 mod tests {
     use super::{extend_policy, list_policies, AdjustableClass};
     use crate::cl47;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::retention::{load_policy, seed_retention_policies, RecordClass};
     use crate::state::AppState;
 
@@ -295,7 +295,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) -> i64 {

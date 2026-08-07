@@ -901,7 +901,7 @@ mod tests {
     use crate::app_error::CommandError;
     use crate::commands::reports::ExportedFile;
     use crate::commands::settings::CompanySettings;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::retention::{
         is_purgeable, load_policy, seed_retention_policies, RecordClass, NEVER_PURGE_TABLES,
     };
@@ -927,7 +927,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) -> i64 {

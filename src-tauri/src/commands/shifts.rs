@@ -469,7 +469,7 @@ mod tests {
         record_cash_movement, shift_admin_close, CashMovementRequest, CloseShiftRequest,
         OpenShiftRequest,
     };
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
@@ -481,7 +481,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn seed_cashier(state: &AppState) -> i64 {
@@ -864,7 +864,7 @@ mod tests {
             assert_eq!(error.code, "forbidden");
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     #[test]

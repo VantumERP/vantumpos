@@ -1188,7 +1188,7 @@ mod tests {
         save_eur_rate, save_shop_profile, PravnaForma, ShopProfile, ShopProfileRequest,
         EUR_RATE_KEY, SHOP_PROFILE_KEY,
     };
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
     use crate::nbs_rate::{EurRate, RateSource};
     use crate::state::AppState;
 
@@ -1285,7 +1285,7 @@ mod tests {
             test(&state);
         }
 
-        std::fs::remove_file(&path).expect("test database should be removed");
+        remove_test_database(&path);
     }
 
     fn sign_in_admin(state: &AppState) {
@@ -1414,7 +1414,7 @@ mod tests {
         assert_eq!(preview.tax_minor, 4000);
         assert_eq!(preview.total_minor, 24000);
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1464,7 +1464,7 @@ mod tests {
         assert_eq!(stored_cash_payment, 24000);
         assert_eq!(movement_quantity, -2000);
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1486,7 +1486,7 @@ mod tests {
 
         assert_eq!(error.code(), "shift_required");
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1523,7 +1523,7 @@ mod tests {
         assert_eq!(sale_count, 0);
         assert_eq!(balance, 1000);
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1558,7 +1558,7 @@ mod tests {
         assert_eq!(balance, -1000);
         assert_eq!(sale_count, 1);
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1589,7 +1589,7 @@ mod tests {
         complete_sale_transaction(&seeded.db, request, None)
             .expect("shop-enabled oversell should succeed");
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1610,7 +1610,7 @@ mod tests {
             .expect_err("default should still block oversell");
         assert_eq!(error.code(), "insufficient_stock");
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1659,7 +1659,7 @@ mod tests {
             .expect("movement count should query");
         assert_eq!(movement_count, 2);
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1688,7 +1688,7 @@ mod tests {
         assert_eq!(completed.total_minor, 24000);
         assert_eq!(completed.change_due_minor, 0);
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]
@@ -1710,7 +1710,7 @@ mod tests {
 
         assert_eq!(error.code(), "payment_mismatch");
 
-        let _ = std::fs::remove_file(seeded.db_path);
+        remove_test_database(&seeded.db_path);
     }
 
     #[test]

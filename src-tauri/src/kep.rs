@@ -414,7 +414,7 @@ pub fn correct_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{test_database_path, Db};
+    use crate::db::{remove_test_database, test_database_path, Db};
 
     /// Runs `test` against a freshly migrated temp DB. `Db::new` seeds the admin
     /// user (id 1), which the `user_id` FK references.
@@ -425,7 +425,7 @@ mod tests {
             let mut connection = db.open().expect("open");
             test(&mut connection);
         }
-        std::fs::remove_file(&path).expect("cleanup");
+        remove_test_database(&path);
     }
 
     /// Seeds the open shift that completed sales reference (FK backstop).
