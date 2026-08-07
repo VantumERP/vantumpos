@@ -24,6 +24,8 @@ mod legal;
 mod nbs_rate;
 /// The popis state machine and the PoP čl. 8 st. 5 blind-count property.
 mod popis;
+/// The printed popisne liste — the čl. 8 st. 5 sheet withholds structurally.
+mod popis_print;
 mod price_history;
 mod reklamacije;
 mod reklamacije_docs;

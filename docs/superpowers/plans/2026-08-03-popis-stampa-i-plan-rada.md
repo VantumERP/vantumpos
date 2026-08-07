@@ -73,7 +73,7 @@ Columns by phase:
 | **razlika** | ❌ | ✅ |
 | **cena / vrednosti** (ostale liste) | ❌ | ✅ |
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     /// PoP čl. 8 st. 5 forbids releasing book data to the commission before the
@@ -149,7 +149,23 @@ Columns by phase:
     }
 ```
 
-- [ ] **Steps 2–5:** run red, implement, run green, commit.
+- [x] **Steps 2–5:** run red, implement, run green, commit.
+
+**Shipped.** `render_popisna_lista(company, view, faza)` over `PopisSessionView`, with the čl. 8 st. 5 sheet built by `red_faza_a` — a function that never names `knjigovodstvena_kolicina_milli` or `razlika_milli`, asserted against its own source. The red state was two failures: `sekcija` sent **both** phases to `red_faza_b`, so the čl. 8 st. 5 sheet printed the book quantity and the razlika, and `zaglavlje_kolona` matched on the constant `PrintFaza::B` instead of on its `faza` parameter, so every phase got the Faza B headings. Each defect was re-introduced on its own afterwards to confirm which tests catch it: the row defect trips three, the heading defect four.
+
+**Deviation 1 — `sekcija_nerazvrstanih` now uses its phase instead of ignoring it.** The plan says nothing about the unclassified bucket; the file arrived with `_faza`. The columns stay the Faza A set on both sheets, and that is now argued rather than asserted: `iznos_kolona` reads the meaning of the money column off the lista — apoen (čl. 11 st. 1), iznos (čl. 12 st. 2), otherwise the čl. 9 st. 1 t. 5 cena — so a stavka whose lista nobody could decode has no heading its figure could truthfully sit under. Over-withholding breaches nothing, but a čl. 9 st. 3 sheet that silently drops the obračun for one stavka reads identically to a stavka whose razlika was zero, so Faza B now carries a sentence naming the omission and what closes it.
+
+**Deviation 1a — that sentence shipped wrong the first time and was corrected under review.** As first committed it read „Razvrstajte ih u odgovarajuću popisnu listu, pa ponovo odštampajte obračunate popisne liste“ — an instruction the engine refuses in every state that can produce a čl. 9 st. 3 sheet: `save_line` counts `lista_vrsta` as a moved identity field on `computed` (`PotpisanaStavka::pomerena_polja`) and refuses the write outright on `counted_signed`, `computed_signed` and `posted`, and there is no delete path at all. That is the house-rule-9 class verbatim, and the first commit's message („no new operator-facing promise“) was wrong about it. It now states the engine's own remedy in the engine's own words — „Posle potpisa stvarnog stanja potpisana stavka se više ne menja, pa ni popisna lista kojoj pripada (PoP čl. 8 st. 5, čl. 9 st. 1 t. 1) — ispravka se sprovodi novim popisom.“ — and the reasoning is now on `sekcija_nerazvrstanih`'s doc comment, which previously argued only for the column choice. Pinned by `the_unclassified_napomena_names_the_remedy_the_engine_actually_offers`.
+
+**Deviation 1b — the čl. 6 single person was written out of the sheet and is now written back in.** The čl. 9 st. 3 napomena stopped at „…koje potpisuju članovi komisije za popis“, dropping the statute's own next limb — „односно једно лице из члана 6. овог правилника“ (REMAINING-SW-VERIFIED-RULES.md §3 V5) — and `potpisni_blok` hardcoded „Potpisi članova komisije za popis“ over a signer whose uloga line already read „jedno lice koje vrši popis (PoP čl. 6 st. 1)“. `jedno_lice` is a first-class `popis_commission.uloga` since v20 and is the pilot's own shape, so this was a preduzetnik reading, over an attributed citation, that the print-and-sign path belongs to a body he does not have. Fixed three ways: the čl. 9 st. 3 quotation carries its limb; the čl. 8 st. 5 napomena gains the čl. 6 st. 1–2 *shodna primena* as a sentence of its own with its own citation (čl. 8 st. 5 reaches that person only through that gateway, so it is quoted as written rather than paraphrased into one sentence); and the signature heading is derived by `potpisni_naslov` — „Potpis lica koje vrši popis (PoP čl. 6 st. 1)“ when the whole roster is `jedno_lice`, otherwise both limbs in the construction `cl47.rs` already registers the data subjects under. The empty-roster line carries both limbs too. Pinned by `a_single_person_popis_is_never_called_a_commission_on_its_own_sheet`, which sweeps every prose block of both phases and fails any block that names the komisija without the čl. 6 limb.
+
+**Deviation 2 — three tests beyond the plan's six**, because the six can all pass while the sheet is wrong: `the_phase_a_document_carries_no_phase_b_heading_and_no_derived_figure` (all six Faza B headings and all six Faza B figures, absent from Faza A **and** present on Faza B from the same view — the absence half alone passes on a renderer that prints nothing, the presence half alone passes on the broken renderer this task started from; needles built with `kolicina_celija` / `iznos_celija` / `vrednost_minor`, since a raw `8_000` needle would sail past a document that prints „8“), `every_row_carries_exactly_as_many_cells_as_its_heading_promises` (both phases, across a lista whose money column is counted, one whose is not, and the unclassified bucket — the exact mismatch the two defects produced), and `an_unclassified_stavka_keeps_the_count_columns_on_the_computed_sheet_and_says_so`.
+
+**Deviation 2a — a fourth test, added under review, because nothing pinned column ORDER.** Every document-level assertion in the module was a `contains`, a `!contains` or a count, and all three are invariant under a permutation of the cells: swapping the „Vrednost po popisu“ and „Vrednost po knjigama“ cells in `red_faza_b` printed a manjak as a višak on the fixture's own numbers with all 18 tests green, and so did swapping the stvarna količina with the čl. 11 st. 1 apoen in `red_faza_a`. `the_cells_of_a_row_sit_in_the_order_their_headings_promise` re-parses the heading row and the first body row of one section back out of the emitted markup, in emission order, and compares both against the čl. 9 st. 1 t. 1–6 sequence written out literally — one section per phase. Both permutations were re-introduced in isolation afterwards and each trips exactly this test and nothing else, which is the point: the renderer was already correct, the guard was missing.
+
+**OPEN — req. 32's „editable default template“ limb did NOT ship.** Req. 32 reads „Ship the derived column set as an **editable default template**“ and design §2 opens with „An **editable default template**, not a statutory-form renderer“. What shipped is a fixed layout: `zaglavlje_kolona` and the two row renderers emit a hardcoded column set with no template, no setting and no operator control, and no later task in this cycle adds one. Everything else req. 32 asks for — header, the čl. 8 st. 4 / čl. 9 st. 1 t. 1–6 column set, the signature block, the no-obrazac claim — is built and tested. **Nothing operator-facing overstates this**: the footer says the layout is internal and that no obrazac exists, which is true either way. The limb is a product gap, not a false claim, and Task 6 must leave it in the „Still open“ list rather than closing req. 32 whole.
+
+**The `#![allow(dead_code)]` cannot be narrowed yet — measured, not assumed.** Removing it reports every one of the fifteen items in the file as unused, `render_popisna_lista` included, because nothing outside the module calls in until Task 3's export commands land. Narrowing would mean fifteen attributes and would have to come straight back off. It stays module-level, as in `kep_close.rs` and `reklamacije_docs.rs`.
 
 ---
 
@@ -212,6 +228,7 @@ Per phase, a „Štampaj popisne liste“ action calling the export then `openFo
 ### Task 6: Docs + full gate run
 
 - [ ] Move reqs. 31, 32 and 35 out of the „Still open“ lists in `docs/PROGRESS.md` and out of register row 19 / the §3 SW-16 row in `docs/SERBIAN-LAW-COMPLIANCE.md`, replacing them with what shipped — and **leave req. 34's *usvojen* limb and req. 40's second limb where they are**, because this cycle does not touch them.
+- [ ] **Req. 32 moves only in part.** Its header, column set, signature block and no-obrazac limbs shipped in Task 2; its **„editable default template“ limb did not** — `zaglavlje_kolona` and the row renderers are a fixed layout with no operator control, and no task in this cycle adds one (see Task 2's OPEN note). Leave that limb in the „Still open“ list with a one-line reason. Closing req. 32 whole would put a false claim in two compliance documents, which is the exact class this plan's constraints forbid.
 - [ ] Record honestly that the izveštaj is still screen-only if that remains true after Task 4.
 - [ ] Run all six gates; report exact counts. Commit.
 
@@ -219,7 +236,7 @@ Per phase, a „Štampaj popisne liste“ action calling the export then `openFo
 
 ## Self-review
 
-**Coverage.** Req. 31 (print-and-sign is the compliant path) → Tasks 2, 3, 5. Req. 32 (header, columns, editable default, no obrazac claim) → Task 2. Req. 35 (generate + approve) → Tasks 1, 4, 5. The §2c „no obrazac“ rule → Task 2's dedicated test. The čl. 8 st. 5 extension to print → Task 2's first test, which is the load-bearing one.
+**Coverage.** Req. 31 (print-and-sign is the compliant path) → Tasks 2, 3, 5. Req. 32 (header, columns, editable default, no obrazac claim) → Task 2 — **except the „editable default“ limb, which Task 2 records as unbuilt and Task 6 must leave open.** Req. 35 (generate + approve) → Tasks 1, 4, 5. The §2c „no obrazac“ rule → Task 2's dedicated test. The čl. 8 st. 5 extension to print → Task 2's first test, which is the load-bearing one.
 
 **Placeholders.** Tasks 3, 4 and 6 name required behaviours rather than pasting bodies, following the established repo seeding pattern; every behaviour is a concrete assertion. Tasks 2 and 5 carry full code.
 
