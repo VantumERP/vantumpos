@@ -2137,6 +2137,191 @@ mod tests {
         });
     }
 
+    /// The same refusal on the **correction** path, which is the only path that
+    /// exercises the whole of the guard.
+    ///
+    /// [`the_cl_87_weekly_leg_refuses_the_write_and_leaves_no_row_behind`] drives
+    /// originals only, and on an original the stored row for the day is absent,
+    /// so `evidentirano_za_dan` is 0 and the `unos_minuta > evidentirano_za_dan`
+    /// half of `worktime::check_protection`'s condition is true for every worked
+    /// day without ever being tested. A correction is where that comparison
+    /// actually decides something, and where the two halves can come apart: the
+    /// week already stands at the cap, the day already carries hours, and the
+    /// question is whether *raising* it is refused.
+    ///
+    /// Its neighbour [`a_birth_date_filled_in_later_does_not_lock_a_minors_recorded_week`]
+    /// is the same layer pointed the other way — it asserts that a correction
+    /// which **lowers** a minor's day records — and `worktime::tests::raising_a_day_in_an_already_over_week_is_still_refused`
+    /// pins the rule itself. Neither pins the **wiring**: with the refusal at
+    /// `write_entry` narrowed to `if korekcija.is_none()`, every one of them
+    /// stays green while an ispravka becomes a way around čl. 87. That is the
+    /// distinction this task exists to close — a guard the write path computes
+    /// and discards is the same as no guard.
+    #[test]
+    fn a_correction_that_raises_a_minors_week_past_the_cl_87_cap_is_refused() {
+        with_state("worktime_cl87_weekly_correction_refused", |state| {
+            sign_in_admin(state);
+            let maloletnik = seed_employee(state, "radnik8d", "Radnik Osam D");
+            // Seventeen for the whole of that week, on file before the first write.
+            set_datum_rodjenja(state, maloletnik, "2009-01-15");
+
+            // Ponedeljak–četvrtak eight hours each and a three-hour Friday: the
+            // week stands at exactly the 35 časova čl. 87 allows.
+            for (dan, minuta) in [
+                ("2026-08-03", 480),
+                ("2026-08-04", 480),
+                ("2026-08-05", 480),
+                ("2026-08-06", 480),
+                ("2026-08-07", 180),
+            ] {
+                save_entry(
+                    state,
+                    radni_dan(maloletnik, dan, minuta, 0),
+                    &format!("{dan}T20:00:00Z"),
+                )
+                .expect("a week that lands on exactly 35 časova records in full");
+            }
+
+            // The ispravka takes Friday from three hours to eight: the other days
+            // hold 32 h, so the week would become 40 h. Refused — an ispravka may
+            // not do anything an original could not.
+            let error = correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: radni_dan(maloletnik, "2026-08-07", 480, 0),
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-08-08T09:00:00Z",
+            )
+            .expect_err("an ispravka that raises the week past 35 časova breaches ZoR čl. 87");
+            assert_eq!(error.code(), "protection_block");
+            let poruka = error.to_string();
+            assert!(
+                poruka.contains("35 časova nedeljno") && poruka.contains("čl. 87"),
+                "the refusal must name the article and the figure: {poruka}"
+            );
+            // 32 h from the other four days plus the three-hour row that stands is
+            // 35 h; with this version in its place it would be 40 h. The first
+            // figure is what the register holds, and it is the one the stored row
+            // for the day being corrected belongs in.
+            assert!(
+                poruka.contains("već je evidentirano 35 č 00 min")
+                    && poruka.contains("bilo bi 40 č 00 min"),
+                "the refusal names what stands and what this ispravka would make it: {poruka}"
+            );
+
+            // And no superseding version was appended. The register is append-only:
+            // a version this leg let through could never be withdrawn, and the day
+            // it supersedes could never be brought back.
+            let mesec = list_month(state, maloletnik, 2026, 8).expect("the month should list");
+            assert_eq!(
+                mesec.entries.len(),
+                5,
+                "a refused ispravka may not leave a version behind: {:?}",
+                mesec
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.dan.as_str(), entry.verzija))
+                    .collect::<Vec<_>>()
+            );
+            let petak = mesec
+                .entries
+                .iter()
+                .find(|entry| entry.dan == "2026-08-07")
+                .expect("the corrected day is still in the register");
+            assert_eq!(
+                petak.verzija, 1,
+                "the original Friday is still the only version"
+            );
+            assert_eq!(petak.minuti.efektivno_izvrseni_minuta, 180);
+            assert!(!petak.zamenjen, "nothing superseded it");
+            assert_eq!(mesec.ukupno.efektivno_izvrseni_minuta, 4 * 480 + 180);
+        });
+    }
+
+    /// The one place the čl. 87 weekly total and the ZEOR čl. 24 tač. 1 b) total
+    /// of the same write can be read side by side — and they are made of
+    /// different buckets.
+    ///
+    /// [`derive_totals`] books `ukupno_ostvareni_minuta` as efektivno izvršeni +
+    /// časovi čekanja, zastoja i prekida + časovi obustave rada zbog štrajka,
+    /// while `DayHours` — which is all `worktime::check_protection` and
+    /// `assess_caps` ever see — carries efektivno and prekovremeni only. Seven
+    /// hours of work plus two hours of čekanje is therefore booked as nine hours
+    /// ostvarenih and reaches the čl. 87 total as seven.
+    ///
+    /// **This test asserts what the code does, not what čl. 87 requires.** Whether
+    /// the 35 časova is measured over the b) total or over its efektivno indent is
+    /// not resolved by SW14-VERIFIED-RULES §4 req. 12 or the §3 W4b row, and
+    /// nothing here invents an answer — see `worktime::check_protection`, which
+    /// records the question as open. What is pinned is that the divergence is
+    /// visible rather than silent: the poruka names the buckets its figures count
+    /// and the ones it left out, so an operator looking at a 45 h month cannot be
+    /// told „već je evidentirano 35 č“ with no way to reconcile the two. If the
+    /// answer turns out to be the b) total, this test is the one that has to
+    /// change, and it says so here rather than failing mysteriously.
+    #[test]
+    fn the_cl_87_weekly_total_leaves_out_the_cekanje_the_same_write_books_as_ostvareni() {
+        with_state("worktime_cl87_weekly_cekanje_scope", |state| {
+            sign_in_admin(state);
+            let maloletnik = seed_employee(state, "radnik8e", "Radnik Osam E");
+            set_datum_rodjenja(state, maloletnik, "2009-01-15");
+
+            // Ponedeljak–petak: seven hours of work and two hours of čekanja i
+            // zastoja each. čl. 87 reads 5 × 420 = 35 h and is silent; the
+            // register books 5 × 540 = 45 h ostvarenih.
+            for dan in [
+                "2026-08-03",
+                "2026-08-04",
+                "2026-08-05",
+                "2026-08-06",
+                "2026-08-07",
+            ] {
+                let mut zahtev = radni_dan(maloletnik, dan, 420, 0);
+                zahtev.casovi_cekanja_i_zastoja_minuta = 120;
+                let saved = save_entry(state, zahtev, &format!("{dan}T20:00:00Z"))
+                    .expect("the čl. 87 weekly leg does not see the čekanje bucket");
+                assert!(
+                    saved.protections.is_empty(),
+                    "nothing is raised on this week today: {:?}",
+                    saved.protections
+                );
+                assert_eq!(saved.entry.minuti.ukupno_ostvareni_minuta, 540);
+            }
+
+            let mesec = list_month(state, maloletnik, 2026, 8).expect("the month should list");
+            assert_eq!(
+                mesec.ukupno.ukupno_ostvareni_minuta, 2700,
+                "the register holds 45 h of ostvareni časovi for this minor's week"
+            );
+            assert_eq!(mesec.ukupno.efektivno_izvrseni_minuta, 2100);
+
+            // Subota, eight hours of plain work: 2100 + 480 over the efektivno
+            // buckets, so the leg fires — and its figure is 35 h against a
+            // register that already holds 45. The poruka has to say which is
+            // which, or the operator is handed two irreconcilable numbers.
+            let error = save_entry(
+                state,
+                radni_dan(maloletnik, "2026-08-08", 480, 0),
+                "2026-08-08T20:00:00Z",
+            )
+            .expect_err("the sixth day breaches the čl. 87 weekly leg");
+            assert_eq!(error.code(), "protection_block");
+            let poruka = error.to_string();
+            assert!(
+                poruka.contains("već je evidentirano 35 č 00 min"),
+                "the figure is the efektivno-and-prekovremeni sum: {poruka}"
+            );
+            assert!(
+                poruka.contains("efektivnog i prekovremenog rada")
+                    && poruka.contains("čekanja")
+                    && poruka.contains("štrajka"),
+                "the refusal must say what its figures count and what they leave out — \
+                 this register holds 45 č ostvarenih for the same week: {poruka}"
+            );
+        });
+    }
+
     #[test]
     fn absence_minutes_land_in_the_bucket_derived_from_the_category() {
         with_state("worktime_absence_bucket_derived", |state| {

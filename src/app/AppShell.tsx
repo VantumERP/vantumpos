@@ -1961,8 +1961,9 @@ export function UserDialog({
               />
               <FieldDescription>
                 ZoR čl. 87 i ZoR čl. 88 st. 1 — zaposleni mlađi od 18 godina
-                života ne radi duže od osam časova dnevno, a prekovremeni rad i
-                preraspodela radnog vremena su mu zabranjeni.
+                života ne radi duže od osam časova dnevno ni duže od 35 časova
+                nedeljno, a prekovremeni rad i preraspodela radnog vremena su
+                mu zabranjeni.
               </FieldDescription>
             </Field>
 

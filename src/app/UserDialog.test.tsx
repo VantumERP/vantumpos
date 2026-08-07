@@ -92,6 +92,28 @@ describe("UserDialog — profil zaposlenog", () => {
     }
   });
 
+  it("uz Datum rođenja navodi obe granice čl. 87 — i dnevnu i nedeljnu", () => {
+    // Ovo polje uključuje obe granice iz čl. 87: 8 časova dnevno i 35 časova
+    // nedeljno (`worktime::MINOR_WEEKLY_CAP_MINUTES`, blokirajuća provera od
+    // 07.08.2026). Dok je tekst navodio samo dnevnu, administrator koji
+    // maloletniku rasporedi šest šestočasovnih dana nije imao odakle da zna da
+    // će šesti dan biti odbijen: svaki od tih dana zadovoljava granicu koju
+    // ekran imenuje. Tekst koji članu 87 pripiše pola njegove sopstvene
+    // rečenice je isti nedostatak kao i obećanje provere koja ne postoji.
+    renderDialog();
+
+    const polje = screen
+      .getByLabelText(/Datum rođenja$/)
+      .closest("[data-slot=field]");
+    expect(polje).not.toBeNull();
+    expect(
+      within(polje as HTMLElement).getByText(/osam časova dnevno/),
+    ).toBeInTheDocument();
+    expect(
+      within(polje as HTMLElement).getByText(/35 časova nedeljno/),
+    ).toBeInTheDocument();
+  });
+
   it("nosi drugu alternativu čl. 91 st. 2, koja nema starosnu granicu", () => {
     renderDialog();
 

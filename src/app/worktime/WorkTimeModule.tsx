@@ -416,6 +416,22 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
     } catch (error) {
       const code = errorCode(error);
 
+      // Every finding on screen was raised by an attempt that is now over, so
+      // the whole assessment is dropped before this one states its own. The
+      // branches below each set a different subset of it, and a finding that
+      // outlives the attempt that raised it is the defect the
+      // `[employeeId, godina, mesec]` effect above already guards against for a
+      // selector change: a čl. 87 „Unos nije dozvoljen“ left standing over an
+      // `entry_exists` refusal asserts a prohibition that did not happen and
+      // names a weekly figure for a week this attempt never touched — and left
+      // standing over a čl. 53 cap warning it says the day cannot be recorded
+      // at all, when the module is in fact asking for a razlog that would
+      // record it.
+      setProtections([]);
+      setCaps(null);
+      setCapWarning(null);
+      setSaveError(null);
+
       if (code === "cap_override_required") {
         // Not a refusal — the day is recordable once a ground is chosen. The
         // assessment rides along so the alert can name the ceiling that was
@@ -424,7 +440,6 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
           errorMessage(error, "Prekoračen je zakonski limit iz ZoR čl. 53."),
         );
         setCaps(capsFrom(error));
-        setSaveError(null);
       } else if (code === "protection_block") {
         setProtections(protectionsFrom(error));
         setSaveError(errorMessage(error, "Unos nije dozvoljen."));

@@ -674,6 +674,80 @@ fn no_document_says_the_cl_87_weekly_leg_is_still_unbuilt() {
     }
 }
 
+/// The screen that explains čl. 87 to the operator must state **both** of its
+/// legs, because the code enforces both.
+///
+/// `AppShell.tsx`'s „Datum rođenja“ field is the only place in the application
+/// that says what filling that column in does, and the paragraph above it says
+/// the čl. 87–91 checks are derived from these fields. Since 07.08.2026 the same
+/// column also switches on `MINOR_WEEKLY_CAP_MINUTES`, a hard refusal at 35
+/// časova nedeljno. A description that names only the eight-hour daily leg
+/// attributes to čl. 87 half of its own sentence, and the half it drops is the
+/// one that actually binds a scheduled minor: six six-hour days satisfy the leg
+/// the screen names on every single day and are refused on the sixth save with a
+/// figure the operator was never shown.
+///
+/// This is the **denial** direction of the rule this module exists for. A screen
+/// is prose in exactly the sense the register is — it is the reader's only
+/// account of what the code does — and a stale denial is no safer for being
+/// rendered in a dialog instead of a markdown table. `UserDialog.test.tsx` pins
+/// the field's label and its article citations; nothing pinned the figures.
+///
+/// JSX wraps a sentence across source lines, so the file is judged with its
+/// whitespace collapsed and each claim is judged inside the `FieldDescription`
+/// it belongs to — the same reasoning as [`clause_around`], with the element
+/// boundary standing in for the punctuation. Bound to both constants so that
+/// renaming either cap stops this file compiling rather than leaving the screen
+/// unbacked.
+#[test]
+fn the_profile_screen_states_both_legs_of_cl_87() {
+    const APP_SHELL: &str = include_str!("../../src/app/AppShell.tsx");
+    /// The daily leg's figure, in the words the screen uses.
+    const DNEVNO: &str = "osam časova dnevno";
+    /// The weekly one's.
+    const NEDELJNO: &str = "35 časova nedeljno";
+
+    assert_eq!(
+        crate::worktime::MINOR_DAILY_CAP_MINUTES,
+        8 * 60,
+        "ZoR čl. 87 — osam časova dnevno, in minutes"
+    );
+    assert_eq!(
+        crate::worktime::MINOR_WEEKLY_CAP_MINUTES,
+        35 * 60,
+        "ZoR čl. 87 — 35 časova nedeljno, in minutes"
+    );
+
+    let text = APP_SHELL.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut pomena = 0usize;
+    for (at, _) in text.match_indices(DNEVNO) {
+        pomena += 1;
+        let start = text[..at]
+            .rfind("<FieldDescription>")
+            .map_or(0, |index| index);
+        let end = text[at..]
+            .find("</FieldDescription>")
+            .map_or(text.len(), |index| at + index);
+        let opis = text[start..end].trim();
+        assert!(
+            opis.contains(NEDELJNO),
+            "src/app/AppShell.tsx tells the operator that ZoR čl. 87 caps an employee under 18 \
+             at „{DNEVNO}“ and stops there — „{opis}“. `worktime::MINOR_WEEKLY_CAP_MINUTES` \
+             refuses the write at „{NEDELJNO}“ on the strength of the very field this text \
+             describes, and six six-hour days satisfy the daily leg on every day and are still \
+             refused. State both legs: denying a protection the code runs is the same defect as \
+             promising one it lacks."
+        );
+    }
+    assert!(
+        pomena > 0,
+        "src/app/AppShell.tsx no longer tells the operator what filling „Datum rođenja“ in does. \
+         That field switches on both legs of ZoR čl. 87 plus the čl. 88 st. 1 bans, and it is \
+         nullable and unbackfilled — silence about a guard the shop is running is the same harm \
+         as a stale denial. Re-state the description rather than deleting it."
+    );
+}
+
 /// `worktime::assess_caps` hard-codes `preraspodela_weekly_cap_exceeded` to
 /// `false` — it cannot see whether the employee is in preraspodela. The čl. 57
 /// st. 5 branch is taken by the caller,

@@ -206,6 +206,12 @@ pub const MINOR_DAILY_CAP_MINUTES: i64 = 8 * 60;
 /// The čl. 88 st. 1 bans limit how the total can be reached, they do not replace
 /// this cap: a minor records no prekovremeni and no preraspodela, so the whole of
 /// the 35 h is plain scheduled work.
+///
+/// **What the 35 h is measured over is stated in [`check_protection`], and one
+/// half of that question is open.** The total is summed from the two buckets
+/// [`DayHours`] carries, which is not the same set of hours the same write books
+/// as ZEOR čl. 24 tač. 1 b) ukupno ostvareni časovi. Read that note before
+/// changing either leg of čl. 87 or [`assess_caps`], which shares the convention.
 pub const MINOR_WEEKLY_CAP_MINUTES: i64 = 35 * 60;
 
 /// ZoR čl. 88 st. 1 — the prohibition runs to „mlađi od 18 godina života“.
@@ -316,6 +322,37 @@ pub struct ProtectionBlock {
 ///   construction SW14-VERIFIED-RULES §4 req. 12 does not state, applied as a
 ///   hard refusal.
 ///
+/// **Which buckets both čl. 87 legs count, and the half of that question this
+/// module cannot answer.** [`DayHours`] carries `efektivno_minuta` and
+/// `prekovremeni_minuta`, and the daily leg, the weekly leg and [`assess_caps`]
+/// all sum exactly those two. The same `write_entry` that calls this function
+/// books ZEOR čl. 24 tač. 1 b) `ukupno_ostvareni_minuta` out of three buckets —
+/// efektivno izvršeni, časovi čekanja/zastoja/prekida, and časovi obustave rada
+/// zbog štrajka (`commands::worktime::derive_totals`) — and `casovi_cekanja_i_zastoja_minuta`
+/// is a field the operator fills in on the same form. So seven hours of work plus
+/// two hours of čekanje is booked as nine hours ostvarenih and reaches this total
+/// as seven, and a minor's week can stand in the register at 45 č while this leg
+/// reads 35 č and says nothing.
+///
+/// **Whether čl. 87's „35 časova nedeljno“ is measured over the b) total or over
+/// its efektivno indent is not resolved.** SW14-VERIFIED-RULES §4 req. 12 and the
+/// §3 W4b row state only ≤ 35 h/week and ≤ 8 h/day, and no pass has read a
+/// provision that settles it — so nothing here decides it either, in the
+/// direction of a hard refusal, on a construction no document carries. Until it
+/// is answered:
+///
+/// - the legs count what `DayHours` carries, unchanged;
+/// - the weekly poruka names both the buckets its two figures are the sum of and
+///   the recorded buckets they leave out, because an operator handed „već je
+///   evidentirano 35 č 00 min“ against a month total of 45 č ostvarenih otherwise
+///   has two irreconcilable numbers and no way to tell which one the guard used;
+/// - the divergence is pinned end to end by
+///   `commands::worktime::tests::the_cl_87_weekly_total_leaves_out_the_cekanje_the_same_write_books_as_ostvareni`.
+///
+/// If the answer turns out to be the b) total, `DayHours` needs a third field and
+/// this leg, the daily leg and `assess_caps` must all sum it — the change is not
+/// local, which is the other reason it is not being guessed at here.
+///
 /// **The refusal fires only on a write that raises the week.** `unos_minuta >
 /// evidentirano_za_dan` is the whole of that rule and it is not a softening of
 /// čl. 87: an entry that adds nothing to the register — a correction downwards, a
@@ -397,11 +434,14 @@ pub fn check_protection(
                     .to_string(),
             });
         }
-        // The čl. 87 weekly leg. Both buckets are summed: čl. 88 st. 1 bans a
-        // minor's overtime separately and this module refuses it above, but a day
-        // that carried it is still hours worked, and čl. 87's figure is the week's
-        // total. Reading efektivno alone would let a refused-but-recorded minute
-        // fall out of the very total it belongs in.
+        // The čl. 87 weekly leg. Both of `DayHours`'s buckets are summed: čl. 88
+        // st. 1 bans a minor's overtime separately and this module refuses it
+        // above, but a day that carried it is still hours worked, and čl. 87's
+        // figure is the week's total. Reading efektivno alone would let a
+        // refused-but-recorded minute fall out of the very total it belongs in.
+        // The buckets `DayHours` does NOT carry — čekanje/zastoj and štrajk, both
+        // inside the same write's ZEOR čl. 24 tač. 1 b) total — are the open half
+        // of the doc comment above, and the poruka discloses their absence.
         //
         // Two filters, each narrower than `assess_caps`'s and each for a reason
         // this leg has and that one does not — see the doc comment above.
@@ -433,8 +473,10 @@ pub fn check_protection(
                 poruka: format!(
                     "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova \
                      nedeljno (ZoR čl. 87). Za dane ove kalendarske nedelje u kojima je \
-                     zaposleni mlađi od 18 godina već je evidentirano {} č {:02} min, a sa \
-                     ovim danom bilo bi {} č {:02} min.",
+                     zaposleni mlađi od 18 godina već je evidentirano {} č {:02} min \
+                     efektivnog i prekovremenog rada, a sa ovim danom bilo bi {} č {:02} min. \
+                     U oba zbira nisu uračunati časovi čekanja, zastoja i prekida u radu ni \
+                     časovi obustave rada zbog štrajka.",
                     vec_evidentirano / 60,
                     vec_evidentirano % 60,
                     nedeljno_minuta / 60,
@@ -1095,6 +1137,53 @@ mod tests {
                 .iter()
                 .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit && b.blocking),
             "raising the hours of an over-cap week must still be refused: {blocks:?}"
+        );
+    }
+
+    /// The čl. 87 poruka states **which buckets its two figures are made of**.
+    ///
+    /// `DayHours` carries `efektivno_minuta` and `prekovremeni_minuta` and this
+    /// leg sums those two, but the same `write_entry` books ZEOR čl. 24 tač. 1 b)
+    /// `ukupno_ostvareni_minuta` out of three buckets — efektivno izvršeni, časovi
+    /// čekanja/zastoja/prekida, and časovi obustave rada zbog štrajka. So a week
+    /// this figure calls 35 č can stand in the register as 45 č ostvarenih, and an
+    /// operator handed a bare „već je evidentirano 35 č 00 min“ cannot reconcile it
+    /// with the day totals on their own screen. Naming the buckets is not a claim
+    /// about what čl. 87 measures — see [`check_protection`], which records that
+    /// question as open — it is the figure describing itself.
+    #[test]
+    fn the_cl_87_poruka_names_the_buckets_its_figures_count() {
+        let p = protection_born("2009-09-01");
+        let week: Vec<DayHours> = [
+            "2026-08-03",
+            "2026-08-04",
+            "2026-08-05",
+            "2026-08-06",
+            "2026-08-07",
+        ]
+        .iter()
+        .map(|dan| DayHours {
+            dan: (*dan).to_string(),
+            efektivno_minuta: 480,
+            prekovremeni_minuta: 0,
+        })
+        .collect();
+
+        let blocks = check_protection(&p, "2026-08-08", &day(480, 0), &week);
+        let poruka = &blocks
+            .iter()
+            .find(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit)
+            .expect("48 h in one week raises the weekly leg")
+            .poruka;
+
+        assert!(
+            poruka.contains("efektivnog i prekovremenog rada"),
+            "the poruka must say what its two figures are the sum of: {poruka}"
+        );
+        assert!(
+            poruka.contains("čekanja") && poruka.contains("štrajka"),
+            "the poruka must name the recorded buckets it left out, or the figure \
+             cannot be reconciled with the day's own ukupno ostvareni: {poruka}"
         );
     }
 

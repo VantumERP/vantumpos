@@ -561,7 +561,7 @@ describe("WorkTimeModule protection findings", () => {
     const user = userEvent.setup();
     const services = mockServices();
     const poruka =
-      "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova nedeljno (ZoR čl. 87). Za dane ove kalendarske nedelje u kojima je zaposleni mlađi od 18 godina već je evidentirano 35 č 00 min, a sa ovim danom bilo bi 43 č 00 min.";
+      "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova nedeljno (ZoR čl. 87). Za dane ove kalendarske nedelje u kojima je zaposleni mlađi od 18 godina već je evidentirano 35 č 00 min efektivnog i prekovremenog rada, a sa ovim danom bilo bi 43 č 00 min. U oba zbira nisu uračunati časovi čekanja, zastoja i prekida u radu ni časovi obustave rada zbog štrajka.";
     vi.spyOn(services.worktime, "saveEntry").mockRejectedValue({
       code: "protection_block",
       message: poruka,
@@ -587,6 +587,13 @@ describe("WorkTimeModule protection findings", () => {
     // The figures the refusal names: what the week already holds, and what this
     // day would have made it. The register holds neither 43 h nor this day.
     expect(within(alert!).getByText(/već je evidentirano 35 č 00 min/)).toBeInTheDocument();
+    // And what those two figures are made of. The same write books časovi
+    // čekanja i zastoja into the ZEOR čl. 24 tač. 1 b) total and this figure
+    // does not carry them, so the operator can be looking at a 45 č month while
+    // the refusal says 35 č. The message reaching them has to say which is which.
+    expect(
+      within(alert!).getByText(/efektivnog i prekovremenog rada/),
+    ).toBeInTheDocument();
 
     // A prohibition must not be dressed as a note — that is the title the čl. 90
     // advisory carries, and it is the wrong one here.
@@ -595,6 +602,111 @@ describe("WorkTimeModule protection findings", () => {
     ).not.toBeInTheDocument();
     // And the operator is told the day did not go in.
     expect(screen.getByText(/Dan nije evidentiran/i)).toBeInTheDocument();
+  });
+
+  /**
+   * A finding belongs to the attempt that raised it and must not outlive it.
+   *
+   * That is the rule the `[employeeId, godina, mesec]` effect already states for
+   * a selector change, and the catch of `submitEntry` broke it within one
+   * employee and one month: each branch set its own subset of the five pieces of
+   * assessment state and cleared none of the others. Two clicks reach it — a
+   * minor's Saturday refused on čl. 87, then a date that already has a row — and
+   * the operator is left reading „Unos nije dozvoljen“ with a weekly figure
+   * above „Dan nije evidentiran — Za ovaj dan već postoji unos“. A destructive
+   * alert asserting a čl. 87 refusal that did not happen, and naming hours for a
+   * week the second attempt never touched, is the same defect as a document
+   * claiming a guard the code lacks.
+   */
+  it("does not let a čl. 87 refusal survive the next attempt", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    const poruka =
+      "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova nedeljno (ZoR čl. 87). Za dane ove kalendarske nedelje u kojima je zaposleni mlađi od 18 godina već je evidentirano 35 č 00 min efektivnog i prekovremenog rada, a sa ovim danom bilo bi 43 č 00 min. U oba zbira nisu uračunati časovi čekanja, zastoja i prekida u radu ni časovi obustave rada zbog štrajka.";
+    vi.spyOn(services.worktime, "saveEntry")
+      .mockRejectedValueOnce({
+        code: "protection_block",
+        message: poruka,
+        details: {
+          protections: [
+            { kind: "maloletanNedeljniLimit", blocking: true, poruka },
+          ],
+        },
+      })
+      .mockRejectedValueOnce({
+        code: "entry_exists",
+        message:
+          "Za ovaj dan već postoji unos. Izmena se evidentira kao ispravka.",
+      });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+
+    await setMinutes(user, /efektivno izvršeni/i, "480");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+    expect(await screen.findByText(/Unos nije dozvoljen/i)).toBeInTheDocument();
+
+    // The second attempt is refused for an entirely unrelated reason.
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+    expect(await screen.findByText(/već postoji unos/i)).toBeInTheDocument();
+
+    expect(screen.queryByText(/Unos nije dozvoljen/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/35 časova nedeljno/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The same rule in the branch that is worse, because it also clears
+   * `saveError`: a čl. 53 cap is *not* a refusal — the day is recordable once a
+   * ground is chosen — so a stale „Unos nije dozvoljen“ standing beside
+   * „Prekoračen limit radnog vremena“ tells the operator the day is prohibited
+   * outright when the module is in fact asking them for a razlog. The employee
+   * who turns 18 mid-month reaches it with no unusual data at all: refused on
+   * čl. 87 early in the month, over twelve hours later in it.
+   */
+  it("does not leave a čl. 87 refusal standing beside a čl. 53 cap warning", async () => {
+    const user = userEvent.setup();
+    const services = mockServices();
+    const poruka =
+      "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova nedeljno (ZoR čl. 87). Za dane ove kalendarske nedelje u kojima je zaposleni mlađi od 18 godina već je evidentirano 35 č 00 min efektivnog i prekovremenog rada, a sa ovim danom bilo bi 43 č 00 min. U oba zbira nisu uračunati časovi čekanja, zastoja i prekida u radu ni časovi obustave rada zbog štrajka.";
+    vi.spyOn(services.worktime, "saveEntry")
+      .mockRejectedValueOnce({
+        code: "protection_block",
+        message: poruka,
+        details: {
+          protections: [
+            { kind: "maloletanNedeljniLimit", blocking: true, poruka },
+          ],
+        },
+      })
+      .mockRejectedValueOnce({
+        code: "cap_override_required",
+        message:
+          "Prekoračen je zakonski limit iz ZoR čl. 53. Dan se može evidentirati, ali morate izabrati razlog prekoračenja.",
+        details: {
+          caps: {
+            ...nulaCaps,
+            dailyTotalMinutes: 780,
+            weeklyTotalMinutes: 780,
+            dailyCapExceeded: true,
+            requiresOverride: true,
+          },
+        },
+      });
+
+    render(<WorkTimeModule services={services} currentUser={admin} />);
+    await screen.findByText(/zakon ne propisuje obrazac/i);
+
+    await setMinutes(user, /efektivno izvršeni/i, "480");
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+    expect(await screen.findByText(/Unos nije dozvoljen/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /sačuvaj dan/i }));
+    expect(
+      await screen.findByText(/Prekoračen limit radnog vremena/i),
+    ).toBeInTheDocument();
+
+    expect(screen.queryByText(/Unos nije dozvoljen/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ZoR čl\. 87/)).not.toBeInTheDocument();
   });
 });
 
