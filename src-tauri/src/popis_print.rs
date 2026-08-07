@@ -34,7 +34,16 @@
 //! where none is recorded they say so, and where only half of one is recorded they
 //! still say so. Nothing here supplies an approver, a date of issue or a schedule
 //! of its own — the obveznik's registered name is on file precisely so that it
-//! cannot be mistaken for the person who approved anything.
+//! cannot be mistaken for the person who approved anything — and an approval
+//! recorded over a schedule the application never received is printed as exactly
+//! that, since čl. 8 st. 1 puts the plan rada in the komisija's hands and a shop
+//! may lawfully keep it on paper.
+//!
+//! **Neither document decides who takes the popis.** [`sastav_popisa`] reads the
+//! roster into three states and not two: an empty roster is the ordinary state of
+//! the odluka, which *is* the appointment, so resolving that silence into
+//! „komisija“ would tell a preduzetnik on his own appointment paper that the
+//! popis belongs to a body he does not have.
 //!
 //! Rendering only. Nothing here reads the database, writes a row, or promises that
 //! anything is sent anywhere. What puts a document on disk is
@@ -486,10 +495,11 @@ fn potpisni_blok(view: &PopisSessionView, faza: PrintFaza) -> String {
 /// both limbs, because a heading may not decide the popis is a komisija when the
 /// evidencija does not say so.
 fn potpisni_naslov(view: &PopisSessionView) -> &'static str {
-    if jedno_lice_popis(view) {
-        "Potpis lica koje vrši popis (PoP čl. 6 st. 1)"
-    } else {
-        "Potpisi članova komisije za popis, odnosno jednog lica koje vrši popis"
+    match sastav_popisa(view) {
+        Sastav::JednoLice => "Potpis lica koje vrši popis (PoP čl. 6 st. 1)",
+        Sastav::Komisija | Sastav::Neodredjen => {
+            "Potpisi članova komisije za popis, odnosno jednog lica koje vrši popis"
+        }
     }
 }
 
@@ -571,11 +581,14 @@ fn iznos_prebrojan(lista: PopisLista) -> bool {
 /// command in this build, and a document that filled its own date in would date an
 /// act nobody recorded.
 pub fn render_odluka(company: &CompanySettings, view: &PopisSessionView) -> String {
-    let jedno_lice = jedno_lice_popis(view);
-    let naslov = if jedno_lice {
-        "ODLUKA O POPISU I ODREĐIVANJU LICA KOJE VRŠI POPIS"
-    } else {
-        "ODLUKA O POPISU I OBRAZOVANJU KOMISIJE ZA POPIS"
+    let sastav = sastav_popisa(view);
+    let naslov = match sastav {
+        Sastav::JednoLice => "ODLUKA O POPISU I ODREĐIVANJU LICA KOJE VRŠI POPIS",
+        Sastav::Komisija => "ODLUKA O POPISU I OBRAZOVANJU KOMISIJE ZA POPIS",
+        Sastav::Neodredjen => {
+            "ODLUKA O POPISU I OBRAZOVANJU KOMISIJE ZA POPIS, ODNOSNO ODREĐIVANJU JEDNOG LICA KOJE \
+             VRŠI POPIS"
+        }
     };
 
     let mut html = doc_head(&format!("Odluka o popisu — popis br. {}", view.id));
@@ -608,12 +621,25 @@ pub fn render_odluka(company: &CompanySettings, view: &PopisSessionView) -> Stri
     ));
     html.push_str(&format!(
         "<p class=\"meta\">{}</p>\n",
-        escape_html(if jedno_lice {
-            "Popis vrši jedno lice koje se određuje ovom odlukom (PoP čl. 6 st. 1). Odredbe koje \
-             se odnose na komisiju za popis shodno se primenjuju i na to lice (PoP čl. 6 st. 2)."
-        } else {
-            "Popis vrši komisija za popis koja se obrazuje ovom odlukom, u sastavu navedenom u \
-             nastavku."
+        escape_html(match sastav {
+            Sastav::JednoLice => {
+                "Popis vrši jedno lice koje se određuje ovom odlukom (PoP čl. 6 st. 1). Odredbe \
+                 koje se odnose na komisiju za popis shodno se primenjuju i na to lice (PoP čl. 6 \
+                 st. 2)."
+            }
+            Sastav::Komisija => {
+                "Popis vrši komisija za popis koja se obrazuje ovom odlukom, u sastavu navedenom u \
+                 nastavku."
+            }
+            // Neither limb may be dropped where the evidencija does not say which
+            // one this popis is, and neither may the sastav be described: an empty
+            // roster has none to point at and a mixed one is not the sastav of
+            // either body. The section below states what is recorded.
+            Sastav::Neodredjen => {
+                "Popis vrši komisija za popis koja se obrazuje ovom odlukom, odnosno jedno lice \
+                 koje se ovom odlukom određuje (PoP čl. 6 st. 1). Odredbe koje se odnose na \
+                 komisiju za popis shodno se primenjuju i na to lice (PoP čl. 6 st. 2)."
+            }
         })
     ));
     html.push_str("</section>\n");
@@ -640,10 +666,10 @@ pub fn render_odluka(company: &CompanySettings, view: &PopisSessionView) -> Stri
 /// in a sentence rather than printing an empty table, because an empty schedule on
 /// a document somebody signs reads as „there is no work to do“.
 pub fn render_plan_rada(company: &CompanySettings, view: &PopisSessionView) -> String {
-    let naslov = if jedno_lice_popis(view) {
-        "PLAN RADA LICA KOJE VRŠI POPIS"
-    } else {
-        "PLAN RADA KOMISIJE ZA POPIS"
+    let naslov = match sastav_popisa(view) {
+        Sastav::JednoLice => "PLAN RADA LICA KOJE VRŠI POPIS",
+        Sastav::Komisija => "PLAN RADA KOMISIJE ZA POPIS",
+        Sastav::Neodredjen => "PLAN RADA KOMISIJE ZA POPIS, ODNOSNO JEDNOG LICA KOJE VRŠI POPIS",
     };
 
     let mut html = doc_head(&format!("Plan rada — popis br. {}", view.id));
@@ -708,18 +734,44 @@ const ULOGA_CL_4_ST_2: &str =
 /// row — a cached view or a regressed query could carry one without the other — and
 /// čl. 8 st. 2 is satisfied by an approver AND a time, so anything less prints as
 /// unapproved.
+///
+/// **And the approval says what it was recorded over.** Čl. 8 st. 1 makes the plan
+/// rada the komisija's own artefact, not this application's: `plan_rada_json` is an
+/// optional field on the open form and nothing else in the crate writes it, so a
+/// shop that keeps its schedule on paper is the ordinary case rather than an edge,
+/// and `odobri_plan_rada` rightly does not refuse it — refusing would deny a čl. 8
+/// st. 2 act that really happened. What may not happen is „Plan rada je odobren“
+/// standing a few lines under „Plan rada nije unet u aplikaciju“ with nothing
+/// connecting them, on a sheet somebody signs. Presence is decided by
+/// [`raspored_html`], the same function that lays the schedule out, so the two
+/// sections cannot disagree about whether there is one.
 fn odobrenje_sekcija(view: &PopisSessionView) -> String {
     let mut html = String::from("<section class=\"odobrenje\">\n<h2>Odobrenje plana rada</h2>\n");
     match (
         view.plan_rada_odobrio.as_deref(),
         view.plan_rada_odobreno_at.as_deref(),
     ) {
-        (Some(ko), Some(kada)) => html.push_str(&format!(
-            "<p class=\"napomena\">Plan rada je odobren (PoP čl. 8 st. 2). Odobrio: {}. \
-             Odobrenje evidentirano: {}.</p>\n",
-            escape_html(ko),
-            escape_html(kada)
-        )),
+        (Some(ko), Some(kada)) => {
+            let mut recenica = format!(
+                "Plan rada je odobren (PoP čl. 8 st. 2). Odobrio: {ko}. Odobrenje evidentirano: \
+                 {kada}."
+            );
+            // What the app holds, and nothing beyond it: that the schedule is on
+            // paper somewhere is what čl. 8 st. 1 requires of the komisija, not
+            // something this row records — a document that asserted the primerak
+            // exists would vouch for a paper nobody here has seen.
+            if !plan_rada_u_aplikaciji(view) {
+                recenica.push_str(
+                    " U aplikaciji je evidentirano odobrenje, a ne i sadržina plana rada — \
+                     raspored i zaduženja na koje se odobrenje odnosi nisu uneti u aplikaciju \
+                     (PoP čl. 8 st. 1).",
+                );
+            }
+            html.push_str(&format!(
+                "<p class=\"napomena\">{}</p>\n",
+                escape_html(&recenica)
+            ));
+        }
         _ => html.push_str(&format!(
             "<p class=\"prazno\">{}</p>\n",
             escape_html(
@@ -738,10 +790,11 @@ fn odobrenje_sekcija(view: &PopisSessionView) -> String {
 fn sastav_sekcija(view: &PopisSessionView) -> String {
     let mut html = format!(
         "<section class=\"sastav\">\n<h2>{}</h2>\n",
-        escape_html(if jedno_lice_popis(view) {
-            "Lice koje vrši popis (PoP čl. 6 st. 1)"
-        } else {
-            "Komisija za popis"
+        escape_html(match sastav_popisa(view) {
+            Sastav::JednoLice => "Lice koje vrši popis (PoP čl. 6 st. 1)",
+            Sastav::Komisija => "Komisija za popis",
+            Sastav::Neodredjen =>
+                "Komisija za popis, odnosno jedno lice koje vrši popis (PoP čl. 6 st. 1)",
         })
     );
 
@@ -811,6 +864,16 @@ fn sastav_sekcija(view: &PopisSessionView) -> String {
 /// is built here without `preserve_order`, so an object's fields print in key
 /// order rather than in the order they were typed; an array keeps its order, which
 /// is the shape a sequence of steps belongs in anyway.
+/// Whether the application holds the čl. 8 st. 1 schedule itself, as opposed to
+/// holding only a record about it. Asked of the layout function rather than of the
+/// column, so „the app has no schedule“ means exactly what the plan rada prints.
+fn plan_rada_u_aplikaciji(view: &PopisSessionView) -> bool {
+    view.plan_rada_json
+        .as_deref()
+        .and_then(raspored_html)
+        .is_some()
+}
+
 fn raspored_html(plan: &str) -> Option<String> {
     let plan = plan.trim();
     if plan.is_empty() {
@@ -876,12 +939,41 @@ fn datum_donosenja(view: &PopisSessionView) -> String {
     }
 }
 
-/// Whether this popis is the PoP čl. 6 st. 1 single-person shape. A roster that is
-/// entirely `jedno_lice` is that shape; anything else — a komisija, a mixed roster,
-/// or a roster nobody has filled in yet — is not, because a document may not decide
-/// the popis is one thing when the evidencija does not say so.
-fn jedno_lice_popis(view: &PopisSessionView) -> bool {
-    !view.komisija.is_empty() && view.komisija.iter().all(|clan| clan.uloga == "jedno_lice")
+/// Which of the two čl. 6 shapes this popis has — and the third state, where the
+/// evidencija does not say.
+///
+/// PoP čl. 6 st. 1 lets the popis of a mikro pravno lice or a preduzetnik be taken
+/// by one person, and čl. 6 st. 2 extends the commission provisions to that person
+/// only *shodno*, so the two are not interchangeable names for one body.
+/// [`Sastav::Neodredjen`] is not a tidy-up: `open_popis` imposes no non-empty
+/// roster and the odluka **is** the appointment, so printing it before anybody is
+/// appointed is the ordinary way to reach these documents. A renderer that
+/// resolved that silence — or a roster that mixes the two ulogas — into „komisija“
+/// would tell a preduzetnik, on the paper that appoints him, that the popis
+/// belongs to a body he does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sastav {
+    /// Every recorded member is the čl. 6 st. 1 single person.
+    JednoLice,
+    /// Nobody recorded is, so this is the komisija the pravilnik speaks of.
+    Komisija,
+    /// Nobody is recorded at all, or the roster carries both ulogas at once.
+    Neodredjen,
+}
+
+fn sastav_popisa(view: &PopisSessionView) -> Sastav {
+    let ukupno = view.komisija.len();
+    let pojedinacno = view
+        .komisija
+        .iter()
+        .filter(|clan| clan.uloga == "jedno_lice")
+        .count();
+    match pojedinacno {
+        _ if ukupno == 0 => Sastav::Neodredjen,
+        0 => Sastav::Komisija,
+        isto if isto == ukupno => Sastav::JednoLice,
+        _ => Sastav::Neodredjen,
+    }
 }
 
 /// What every generated document of this module ends with. Pravilnik 89/2020 runs
@@ -1208,6 +1300,37 @@ mod tests {
             }
         }
         blokovi
+    }
+
+    /// Wherever a document names the komisija, the čl. 6 st. 1 limb has to be in
+    /// the same block — the sweep Deviation 1b introduced, hoisted so both the
+    /// sheet and the pre-count pair run the identical rule.
+    ///
+    /// **Case-folded, which the first version was not.** The titles are set in
+    /// capitals, so a `contains("komisij")` over „ODLUKA O POPISU I OBRAZOVANJU
+    /// KOMISIJE ZA POPIS“ found no mention of a komisija at all and swept the one
+    /// line of the document nobody can miss.
+    fn komisija_nikad_bez_cl_6_limba(html: &str, opis: &str) {
+        for blok in prozni_blokovi(html) {
+            let presavijen = blok.to_lowercase();
+            if !presavijen.contains("komisij") {
+                continue;
+            }
+            assert!(
+                presavijen.contains("jedno lice") || presavijen.contains("jednog lica"),
+                "„{blok}“ names the komisija without the čl. 6 limb ({opis})"
+            );
+        }
+    }
+
+    /// The `<section class="odobrenje">` of either generated document — the čl. 8
+    /// st. 2 block, read on its own so an assertion about it cannot be satisfied
+    /// by a sentence somewhere else on the page.
+    fn odobrenje_markup(html: &str) -> &str {
+        html.split("<section class=\"odobrenje\">")
+            .nth(1)
+            .and_then(|deo| deo.split("</section>").next())
+            .unwrap_or_else(|| panic!("both generated documents carry an odobrenje block: {html}"))
     }
 
     /// The `<section class="lista">` whose markup carries `naslov`.
@@ -1609,15 +1732,7 @@ mod tests {
 
             // Wherever the sheet still names the komisija — and it must, because
             // both articles are quoted — the čl. 6 limb is in the same block.
-            for blok in prozni_blokovi(&html) {
-                if !blok.contains("komisij") {
-                    continue;
-                }
-                assert!(
-                    blok.contains("jedno lice") || blok.contains("jednog lica"),
-                    "„{blok}“ names the komisija without the čl. 6 limb ({faza:?})"
-                );
-            }
+            komisija_nikad_bez_cl_6_limba(&html, &format!("{faza:?}"));
         }
 
         let faza_b = render_popisna_lista(&company(), &view_jedno_lice(), PrintFaza::B);
@@ -2065,6 +2180,65 @@ mod tests {
         }
     }
 
+    /// Čl. 8 st. 1 puts the plan rada in the komisija's hands, not in this
+    /// application's: `plan_rada_json` is an optional field on the open form,
+    /// nothing else in the crate ever writes it, and a shop that keeps its
+    /// schedule on paper has broken nothing. So the čl. 8 st. 2 approval of such
+    /// a plan is a real record and is not refused — but the document may not
+    /// print „Plan rada je odobren“ a few lines under „Plan rada nije unet u
+    /// aplikaciju“ with nothing connecting them, because the sheet somebody signs
+    /// then asserts an approval over a schedule that was blank when it was
+    /// stamped. The approval says what it was recorded over.
+    #[test]
+    fn an_approval_over_a_schedule_the_application_does_not_hold_says_so_on_both_documents() {
+        for prazno in [
+            None,
+            Some(String::new()),
+            Some("   ".to_string()),
+            Some("{}".to_string()),
+        ] {
+            let mut view = view_odobren();
+            view.plan_rada_json = prazno.clone();
+
+            for (dokument, html) in [
+                ("odluka", render_odluka(&company(), &view)),
+                ("plan rada", render_plan_rada(&company(), &view)),
+            ] {
+                let odobrenje = odobrenje_markup(&html);
+                assert!(
+                    odobrenje.contains("Plan rada je odobren"),
+                    "the čl. 8 st. 2 record is real and still prints ({dokument}, {prazno:?}): \
+                     {html}"
+                );
+                assert!(
+                    odobrenje.contains(
+                        "U aplikaciji je evidentirano odobrenje, a ne i sadržina plana rada"
+                    ),
+                    "an approval over a schedule the app does not hold must say so ({dokument}, \
+                     {prazno:?}): {html}"
+                );
+            }
+
+            let plan = render_plan_rada(&company(), &view);
+            assert!(
+                plan.contains("Plan rada nije unet u aplikaciju"),
+                "the schedule section still reports the absence ({prazno:?}): {plan}"
+            );
+        }
+
+        // …and the qualification is not printed over a schedule the app does hold,
+        // which would be the same defect facing the other way.
+        for (dokument, html) in [
+            ("odluka", render_odluka(&company(), &view_odobren())),
+            ("plan rada", render_plan_rada(&company(), &view_odobren())),
+        ] {
+            assert!(
+                !html.contains("a ne i sadržina plana rada"),
+                "the app holds this schedule, so the {dokument} must not disown it: {html}"
+            );
+        }
+    }
+
     /// Nothing in this cycle writes `odluka_doneta_at`, so on every popis the
     /// pilot has it is NULL — and a generated odluka that dated itself would date
     /// an act nobody recorded. It says so and leaves the line to the pen; when a
@@ -2146,13 +2320,41 @@ mod tests {
                 "the {dokument} forms a komisija the popis does not have: {html}"
             );
 
-            for blok in prozni_blokovi(&html) {
-                if !blok.contains("komisij") {
-                    continue;
-                }
+            komisija_nikad_bez_cl_6_limba(&html, dokument);
+        }
+    }
+
+    /// The same reading, on the state the pilot actually reaches these documents
+    /// in. `open_popis` imposes no non-empty roster and `OpenPopisRequest.komisija`
+    /// is `#[serde(default)]`, and the odluka **is** the appointment — so printing
+    /// it before anybody is appointed is the primary use case, not an edge. A
+    /// roster that mixes the two ulogas says as little as an empty one. Neither
+    /// may be resolved into „komisija“: that would tell a preduzetnik, on the
+    /// paper that appoints him, that the popis belongs to a body he does not have,
+    /// and it drops the čl. 6 st. 1 limb from the title, the operative sentence
+    /// and the roster heading at once. The popisna lista already carries both
+    /// limbs in this state (`potpisni_naslov`); these two documents did not.
+    #[test]
+    fn a_popis_whose_roster_is_not_recorded_is_declared_neither_a_komisija_nor_a_single_person() {
+        let mut mesovit = view_with_lines();
+        mesovit.komisija = vec![
+            clan(1, "Vlasnik lično", "jedno_lice"),
+            clan(2, "Petar Petrović", "clan"),
+        ];
+
+        for (stanje, view) in [
+            ("prazan sastav", prazan_view()),
+            ("mešovit sastav", mesovit),
+        ] {
+            for (dokument, html) in [
+                ("odluka", render_odluka(&company(), &view)),
+                ("plan rada", render_plan_rada(&company(), &view)),
+            ] {
+                komisija_nikad_bez_cl_6_limba(&html, &format!("{dokument}, {stanje}"));
                 assert!(
-                    blok.contains("jedno lice") || blok.contains("jednog lica"),
-                    "„{blok}“ names the komisija without the čl. 6 limb ({dokument})"
+                    html.to_lowercase().contains("jednog lica")
+                        || html.to_lowercase().contains("jedno lice"),
+                    "the {dokument} must leave the čl. 6 st. 1 limb open ({stanje}): {html}"
                 );
             }
         }

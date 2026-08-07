@@ -7035,6 +7035,61 @@ mod tests {
         });
     }
 
+    /// The two facts are independent inputs and compose: `plan_rada_json` is set
+    /// once by `open_popis` and by nothing else in the crate, while
+    /// `odobri_plan_rada` looks only at the approver and the write-lock. So the
+    /// ordinary path — open a popis leaving the plan rada field blank, then record
+    /// the čl. 8 st. 2 approval of the plan the komisija made on paper — produced
+    /// a document that said the schedule was missing and that the plan was
+    /// approved, on one page, with nothing connecting them. The write is not
+    /// refused: čl. 8 st. 1 makes the plan the komisija's, not the application's,
+    /// and the approval of a plan kept on paper is real. The document says what
+    /// the approval was recorded over.
+    #[test]
+    fn an_approval_over_a_plan_kept_on_paper_is_qualified_on_the_exported_documents() {
+        with_app("popis_odobri_plan_bez_rasporeda", |app| {
+            let state = app.state::<AppState>();
+            seed_article(state.inner(), "KOS-1");
+            let mut request = open_request();
+            request.plan_rada_json = None;
+            let mut connection = state.db().open().expect("database should open");
+            let session = open_popis(&mut connection, &request, "2026-12-31T08:00:00Z")
+                .expect("the popis should open");
+            drop(connection);
+            sign_in_admin(state.inner());
+
+            odobri_plan_rada(
+                state.inner(),
+                session.id,
+                "Miloš Đurđević",
+                "2026-12-31T08:30:00Z",
+            )
+            .expect("a plan the komisija keeps on paper may still be approved under čl. 8 st. 2");
+
+            for exported in [
+                popis_export_plan_rada(app.state::<AppState>(), session.id)
+                    .expect("the plan rada should export"),
+                popis_export_odluka(app.state::<AppState>(), session.id)
+                    .expect("the odluka should export"),
+            ] {
+                let html =
+                    std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+                assert!(
+                    html.contains("Plan rada je odobren"),
+                    "{} drops a čl. 8 st. 2 record that was made: {html}",
+                    exported.file_name
+                );
+                assert!(
+                    html.contains(
+                        "U aplikaciji je evidentirano odobrenje, a ne i sadržina plana rada"
+                    ),
+                    "{} asserts an approval over a schedule it does not hold: {html}",
+                    exported.file_name
+                );
+            }
+        });
+    }
+
     /// ZZPL čl. 48 — the approval writes a person's name into the popis, so the
     /// act is logged. Req. 4 governs what the line may carry: the popis id and
     /// nothing else, never the name it recorded.
