@@ -27,12 +27,16 @@
 //! is built elsewhere, in `commands::popis::compose_izvestaj`.
 //!
 //! Rendering only. Nothing here reads the database, writes a row, or promises that
-//! anything is sent anywhere.
+//! anything is sent anywhere. What puts a document on disk is
+//! `commands::popis::popis_export_lista`, and that command — not this module —
+//! decides which of the two sheets a given popis may be printed as.
 //!
-//! Consumed by the export commands of a later task in this cycle, so `dead_code`
-//! is allowed here — mirroring `kep_close.rs` and `reklamacije_docs.rs`.
+//! Unlike `kep_close.rs` and `reklamacije_docs.rs` this module carries no
+//! `#![allow(dead_code)]`: since the export command landed, every item here is on
+//! a path that starts at a registered `#[tauri::command]`, so the compiler is left
+//! free to say when one stops being.
 
-#![allow(dead_code)]
+use serde::{Deserialize, Serialize};
 
 use crate::commands::popis::{KomisijaClanView, PopisLineView, PopisSessionView};
 use crate::commands::settings::CompanySettings;
@@ -45,7 +49,12 @@ use crate::popis::{vrednost_minor, PopisLista, MILLI};
 /// picks the wrong one does not produce an ugly document, it produces a čl. 8
 /// st. 5 breach — which is why the export command derives this from the session
 /// rather than accepting it from the frontend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// It crosses the IPC boundary all the same, as `„a“` / `„b“` — but as a *request*
+/// the command checks against the session's own potpis, never as an instruction it
+/// carries out. See `commands::popis::faza_stampe`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PrintFaza {
     /// The natural count, signed before any book quantity is released.
     A,

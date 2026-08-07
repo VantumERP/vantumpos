@@ -264,6 +264,12 @@ pub fn run() {
             commands::popis::popis_compute,
             commands::popis::popis_sign_phase_b,
             commands::popis::popis_post,
+            // Reqs. 31 / 32 — the printed popisne liste. One command for both
+            // statutory sheets, because which of the two a popis may be printed
+            // as is derived from its own čl. 8 st. 5 potpis: two commands would
+            // let the caller pick the phase by picking the command, and that is
+            // the choice čl. 8 st. 5 does not leave open.
+            commands::popis::popis_export_lista,
             commands::popis::popis_izvestaj,
             commands::popis::popis_podesavanja_get,
             commands::popis::popis_podesavanja_set,

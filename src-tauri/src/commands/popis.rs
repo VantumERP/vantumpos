@@ -31,11 +31,13 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
+use crate::commands::reports::ExportedFile;
 use crate::popis::{
     advance, book_quantities_released, ensure_izvestaj_kompletan, izvestaj_due, konsignacija_rok,
     nedostajuce_liste, vrednost_minor, IzvestajElement, IzvestajNarativ, NivelacijaObuhvat,
     PopisEvent, PopisLista, PopisStatus, PopisVrsta,
 };
+use crate::popis_print::PrintFaza;
 use crate::state::AppState;
 
 /// The three `popis_commission.uloga` values of migration v20. `jedno_lice` is the
@@ -2544,6 +2546,86 @@ pub fn popis_nivelacija_obuhvat(
     super::auth::require_admin(state.inner())?;
     let connection = state.db().open().map_err(CommandError::from)?;
     nivelacija_obuhvat(&connection, id, obuhvat).map_err(Into::into)
+}
+
+/// Which of the two statutory sheets a popis may be printed as, and the one place
+/// that decides it.
+///
+/// **The phase is not the caller's to choose.** PoP čl. 8 st. 5 forbids the book
+/// quantities reaching the komisija before the counted state is written into the
+/// liste and those liste are signed, and a printed sheet put in a member's hand is
+/// that release. If the frontend named the phase and the backend obeyed, the whole
+/// property would sit one frontend bug away from gone — so `trazena` is a request
+/// that gets checked, and a čl. 9 st. 3 sheet asked for on a popis with no čl. 8
+/// st. 5 potpis is refused rather than quietly answered with the other document.
+///
+/// **Both limbs, and neither read off a convenience field.** `status` is a claim
+/// any UPDATE can make, so the guard runs [`book_quantities_released`] over the
+/// status **and** the potpis — the same released predicate the read path uses. It
+/// deliberately does not take [`PopisSessionView::knjigovodstvo_dostupno`], which
+/// is that predicate already evaluated by [`load_session`]: a guard whose answer
+/// comes from a boolean somebody else computed is a guard by convention.
+///
+/// **Asking for the čl. 8 st. 5 sheet is always honoured**, potpis or no potpis.
+/// That is not a hedge. PoP čl. 2 st. 6 gives the owner of tuđa roba ten days to
+/// receive a primerak of the *signed* posebna popisna lista, and the signed
+/// document is the counted state — so the reprint has to stay available after the
+/// obračun opens. Over-withholding breaches nothing; refusing it would refuse a
+/// duty the bylaw imposes.
+///
+/// Nor is `draft` gated. Čl. 8 st. 4 has the liste with the nomenklaturni brojevi,
+/// nazivi, vrste and jedinice mere given to the komisija **before** the count
+/// begins, so a čl. 8 st. 5 sheet with nothing counted on it yet is a document the
+/// bylaw asks for and not an accident.
+fn faza_stampe(
+    status: PopisStatus,
+    faza_a_potpisana: bool,
+    trazena: Option<PrintFaza>,
+) -> Result<PrintFaza, AppError> {
+    if !book_quantities_released(status, faza_a_potpisana) {
+        if trazena == Some(PrintFaza::B) {
+            return Err(AppError::business(
+                "popis_obracunate_liste_pre_potpisa",
+                "Obračunate popisne liste ne mogu da se odštampaju pre nego što se stvarno stanje \
+                 unese u popisne liste i pre nego što članovi komisije potpišu te liste (PoP čl. 8 \
+                 st. 5) — odštampana lista se daje komisiji, pa bi štampanje bilo davanje \
+                 knjigovodstvenih podataka pre potpisa. Odštampajte popisne liste stvarnog stanja, \
+                 potpišite ih, pa ponovite.",
+            ));
+        }
+        return Ok(PrintFaza::A);
+    }
+
+    Ok(trazena.unwrap_or(PrintFaza::B))
+}
+
+/// Reqs. 31 / 32 — writes one of the two popisna-lista documents into `exports/`
+/// and returns the descriptor the frontend opens for print, in the shape
+/// `kep_export_book` established.
+///
+/// `faza` omitted prints the sheet this popis currently has; a named faza is put
+/// through [`faza_stampe`] and is never obeyed on trust. The check runs before the
+/// render and therefore before the write, so a refused export leaves no document
+/// on disk for somebody to find and sign.
+///
+/// There is no izveštaj export here and none anywhere: čl. 13 st. 1's izveštaj is
+/// still composed on request and shown on screen, which is what the operator
+/// strings around it say.
+#[tauri::command]
+pub fn popis_export_lista(
+    state: State<'_, AppState>,
+    id: i64,
+    faza: Option<PrintFaza>,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let session = load_session(&connection, id)?;
+    let faza = faza_stampe(session.status, session.faza_a_potpisana, faza)?;
+    let company = super::settings::load_company_settings(state.inner())?;
+    let html = crate::popis_print::render_popisna_lista(&company, &session, faza);
+    let file_name = format!("popisne-liste-{id}-faza-{}.html", faza.kljuc());
+    super::campaigns::write_export(state.inner(), &file_name, &html, session.linije.len())
+        .map_err(Into::into)
 }
 
 /// Req. 37. Read-only: the izveštaj is composed from the popis and the narrative
@@ -6049,5 +6131,390 @@ mod tests {
                 id
             );
         });
+    }
+
+    // -----------------------------------------------------------------
+    // Reqs. 31 / 32 — the printed popisne liste leave the application
+    // -----------------------------------------------------------------
+
+    /// Where an export lands, resolved the way `campaigns::write_export` resolves
+    /// it — beside the database — so a „no file was written“ assertion is about
+    /// the path the code uses and not one the test invented.
+    fn izvezena_putanja(state: &AppState, file_name: &str) -> std::path::PathBuf {
+        state
+            .db()
+            .path()
+            .parent()
+            .expect("the test database sits in a directory")
+            .join("exports")
+            .join(file_name)
+    }
+
+    /// A popis counted, signed under čl. 8 st. 5 and taken into the obračun — the
+    /// only state in which a čl. 9 st. 3 sheet lawfully exists. `sign_phase_a`
+    /// fills the book column from the perpetual record, so the row afterwards
+    /// really does hold [`KNJIGOVODSTVENO_STANJE_MILLI`].
+    fn seeded_computed(state: &AppState, sifra: &str) -> i64 {
+        let id = seeded_count(state, sifra);
+        let mut connection = state.db().open().expect("database should open");
+        sign_phase_a(
+            &mut connection,
+            id,
+            &["Miloš Đurđević".to_string()],
+            "2026-12-31T17:00:00Z",
+        )
+        .expect("the čl. 8 st. 5 potpis should record");
+        compute_differences(&connection, id, "2027-01-02T09:00:00Z")
+            .expect("the obračun should open");
+        id
+    }
+
+    /// Rewrites `status` behind the state machine's back. Nothing in the product
+    /// does this — but čl. 8 st. 5 names exactly the case of a session claiming a
+    /// state its potpisi do not support, so the print guard is tested against a row
+    /// that makes that claim rather than only against rows the engine produced.
+    fn podmetni_status(state: &AppState, id: i64, status: PopisStatus) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .execute(
+                "UPDATE popis_sessions SET status = ?2 WHERE id = ?1",
+                params![id, status.as_db_str()],
+            )
+            .expect("the status should rewrite");
+    }
+
+    /// The load-bearing test of the whole module, end to end and on the bytes: the
+    /// `popis_lines` row still holds the perpetual quantity, the session claims to
+    /// be back in `counting`, and the paper that comes out carries neither the
+    /// quantity, nor the razlika, nor even the column heading. Asserted against the
+    /// file, because what čl. 8 st. 5 forbids releasing is the sheet somebody is
+    /// handed and not the value a function returned.
+    #[test]
+    fn the_counting_export_withholds_a_book_quantity_the_row_still_holds() {
+        with_app("popis_export_faza_a_uskracuje", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_computed(state.inner(), "KOS-1");
+            podmetni_status(state.inner(), id, PopisStatus::Counting);
+            assert_eq!(
+                stored_book_quantity(state.inner(), id),
+                Some(KNJIGOVODSTVENO_STANJE_MILLI),
+                "the fixture is worth nothing unless the DATABASE still holds the book quantity"
+            );
+            sign_in_admin(state.inner());
+
+            let exported = popis_export_lista(app.state::<AppState>(), id, None)
+                .expect("the counted-state sheet should export");
+
+            assert!(
+                exported.file_name.contains("faza-a"),
+                "a counting popis prints the čl. 8 st. 5 sheet, said: {}",
+                exported.file_name
+            );
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(
+                !html.contains("61,237"),
+                "the book quantity reached the printed čl. 8 st. 5 sheet: {html}"
+            );
+            assert!(
+                !html.contains("-54,237"),
+                "the razlika reached the printed čl. 8 st. 5 sheet: {html}"
+            );
+            assert!(
+                !html.to_lowercase().contains("knjigovodstven"),
+                "the čl. 8 st. 5 sheet must not even carry the heading: {html}"
+            );
+            assert!(
+                !html.to_lowercase().contains("razlik"),
+                "…nor name the razlika at all: {html}"
+            );
+            assert!(
+                html.contains("Košulja"),
+                "the sheet still has to carry what was counted: {html}"
+            );
+            std::fs::remove_file(&exported.path).ok();
+        });
+    }
+
+    /// The refusal the phase derivation exists for. A caller that names the čl. 9
+    /// st. 3 sheet on a popis with no čl. 8 st. 5 potpis is told so — never quietly
+    /// given the other document, because a sheet that came back when the čl. 9
+    /// st. 3 one was asked for is a sheet somebody will sign as the čl. 9 st. 3 one.
+    #[test]
+    fn the_computed_sheet_is_refused_before_the_cl_8_st_5_potpis() {
+        with_app("popis_export_faza_b_pre_potpisa", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+            let putanja =
+                izvezena_putanja(state.inner(), &format!("popisne-liste-{id}-faza-b.html"));
+            std::fs::remove_file(&putanja).ok();
+
+            let error = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::B))
+                .expect_err("the čl. 9 st. 3 sheet does not exist before the čl. 8 st. 5 potpis");
+
+            assert_eq!(error.code, "popis_obracunate_liste_pre_potpisa");
+            assert!(
+                error.message.contains("čl. 8 st. 5"),
+                "the refusal has to name the article it enforces, said: {}",
+                error.message
+            );
+            assert!(
+                error
+                    .message
+                    .contains("Odštampajte popisne liste stvarnog stanja"),
+                "…and the remedy the engine actually offers, said: {}",
+                error.message
+            );
+            assert!(
+                !putanja.exists(),
+                "a refused export must leave no document behind: {}",
+                putanja.display()
+            );
+        });
+    }
+
+    /// The other half: once the potpis exists and the obračun is open, the čl. 9
+    /// st. 3 sheet carries the book side. A test that only proved the withholding
+    /// would pass on a renderer that prints nothing at all.
+    #[test]
+    fn a_computed_popis_exports_the_cl_9_st_3_sheet_with_the_book_column() {
+        with_app("popis_export_faza_b", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_computed(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            let exported = popis_export_lista(app.state::<AppState>(), id, None)
+                .expect("the obračunate liste should export");
+
+            assert_eq!(exported.mime_type, "text/html");
+            assert_eq!(exported.row_count, 1, "one counted stavka is one row");
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(html.contains("Knjigovodstvena količina"), "{html}");
+            assert!(html.contains("Razlika (višak/manjak)"), "{html}");
+            assert!(
+                html.contains("61,237"),
+                "the book quantity itself belongs on the čl. 9 st. 3 sheet: {html}"
+            );
+            assert!(
+                html.contains("-54,237"),
+                "7 counted against 61,237 in the books is a manjak: {html}"
+            );
+            assert!(
+                html.contains("čl. 9 st. 3"),
+                "the sheet names the provision it is printed under: {html}"
+            );
+            std::fs::remove_file(&exported.path).ok();
+        });
+    }
+
+    /// Two popisi and two phases share one `exports/` directory, so a file name
+    /// that dropped either would have one sheet overwrite another — and the
+    /// overwritten one is evidence.
+    #[test]
+    fn the_export_file_name_carries_the_session_and_the_phase() {
+        with_app("popis_export_ime_fajla", |app| {
+            let state = app.state::<AppState>();
+            let prvi = seeded_count(state.inner(), "KOS-1");
+            let drugi = seeded_computed(state.inner(), "KOS-2");
+            assert_ne!(prvi, drugi, "two distinct popisi");
+            sign_in_admin(state.inner());
+
+            let a = popis_export_lista(app.state::<AppState>(), prvi, None)
+                .expect("the čl. 8 st. 5 sheet should export");
+            let b = popis_export_lista(app.state::<AppState>(), drugi, None)
+                .expect("the čl. 9 st. 3 sheet should export");
+
+            assert_eq!(a.file_name, format!("popisne-liste-{prvi}-faza-a.html"));
+            assert_eq!(b.file_name, format!("popisne-liste-{drugi}-faza-b.html"));
+            std::fs::remove_file(&a.path).ok();
+            std::fs::remove_file(&b.path).ok();
+        });
+    }
+
+    #[test]
+    fn a_cashier_cannot_export_the_popisne_liste() {
+        with_app("popis_export_admin_gate", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_cashier(state.inner());
+
+            let error = popis_export_lista(app.state::<AppState>(), id, None)
+                .expect_err("a cashier must not export the popisne liste");
+
+            assert_eq!(error.code, "forbidden");
+        });
+    }
+
+    #[test]
+    fn exporting_a_popis_that_does_not_exist_is_refused_as_not_found() {
+        with_app("popis_export_nepostojeci", |app| {
+            sign_in_admin(app.state::<AppState>().inner());
+
+            let error = popis_export_lista(app.state::<AppState>(), 404, None)
+                .expect_err("a popis that does not exist has no popisne liste");
+
+            assert_eq!(error.code, "not_found");
+        });
+    }
+
+    /// `status` is a claim any UPDATE can make, and čl. 8 st. 5 makes the potpis a
+    /// condition of its own. A session sitting in `computed` with no potpis behind
+    /// it is exactly the state the two-limb predicate exists for, so it gets the
+    /// čl. 8 st. 5 sheet and its request for the other one is refused.
+    #[test]
+    fn a_session_claiming_computed_without_the_potpis_still_gets_the_faza_a_sheet() {
+        with_app("popis_export_status_bez_potpisa", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            podmetni_status(state.inner(), id, PopisStatus::Computed);
+            assert_eq!(
+                signature_count(state.inner(), id),
+                0,
+                "the whole point of the fixture: a state with no potpis behind it"
+            );
+            sign_in_admin(state.inner());
+            let putanja_b =
+                izvezena_putanja(state.inner(), &format!("popisne-liste-{id}-faza-b.html"));
+            std::fs::remove_file(&putanja_b).ok();
+
+            let error = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::B))
+                .expect_err("a status nobody signed for must not release the book side");
+            assert_eq!(error.code, "popis_obracunate_liste_pre_potpisa");
+            assert!(
+                !putanja_b.exists(),
+                "a refused export must leave no document behind"
+            );
+
+            let exported = popis_export_lista(app.state::<AppState>(), id, None)
+                .expect("the counted-state sheet is still printable");
+            assert!(
+                exported.file_name.contains("faza-a"),
+                "{}",
+                exported.file_name
+            );
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(!html.to_lowercase().contains("knjigovodstven"), "{html}");
+            std::fs::remove_file(&exported.path).ok();
+        });
+    }
+
+    /// PoP čl. 2 st. 6 gives the owner of tuđa roba ten days to receive a copy of
+    /// the **signed** posebna popisna lista, and the signed document is the counted
+    /// state — so the čl. 8 st. 5 sheet has to stay printable after the potpis.
+    /// Over-withholding breaches nothing; refusing this reprint would refuse a duty
+    /// the bylaw imposes.
+    #[test]
+    fn the_counted_state_sheet_stays_printable_after_the_obracun_has_opened() {
+        with_app("popis_export_ponovna_stampa_faze_a", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_computed(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            let exported = popis_export_lista(app.state::<AppState>(), id, Some(PrintFaza::A))
+                .expect("the signed counted-state sheet should reprint");
+
+            assert!(
+                exported.file_name.contains("faza-a"),
+                "{}",
+                exported.file_name
+            );
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(
+                !html.to_lowercase().contains("knjigovodstven"),
+                "the reprint is the čl. 8 st. 5 document, columns and all: {html}"
+            );
+            assert!(html.contains("Košulja"), "{html}");
+            std::fs::remove_file(&exported.path).ok();
+        });
+    }
+
+    /// The derivation itself, over every state the v20 CHECK admits and both values
+    /// of the potpis limb.
+    ///
+    /// The expected column is written out literally rather than computed from
+    /// `book_quantities_released`: a table that re-derived the rule from the same
+    /// function the implementation calls would agree with any rule at all.
+    #[test]
+    fn the_print_phase_is_derived_from_both_limbs_of_cl_8_st_5() {
+        let ocekivano: [(PopisStatus, bool, PrintFaza); 12] = [
+            (PopisStatus::Draft, false, PrintFaza::A),
+            (PopisStatus::Draft, true, PrintFaza::A),
+            (PopisStatus::Counting, false, PrintFaza::A),
+            (PopisStatus::Counting, true, PrintFaza::A),
+            (PopisStatus::CountedSigned, false, PrintFaza::A),
+            (PopisStatus::CountedSigned, true, PrintFaza::B),
+            (PopisStatus::Computed, false, PrintFaza::A),
+            (PopisStatus::Computed, true, PrintFaza::B),
+            (PopisStatus::ComputedSigned, false, PrintFaza::A),
+            (PopisStatus::ComputedSigned, true, PrintFaza::B),
+            (PopisStatus::Posted, false, PrintFaza::A),
+            (PopisStatus::Posted, true, PrintFaza::B),
+        ];
+        assert_eq!(
+            ocekivano.len(),
+            PopisStatus::ALL.len() * 2,
+            "every state the CHECK admits, against both limbs of čl. 8 st. 5"
+        );
+
+        for (status, potpisana, faza) in ocekivano {
+            assert_eq!(
+                faza_stampe(status, potpisana, None).expect("an unasked phase is derived"),
+                faza,
+                "{status:?} with faza_a_potpisana={potpisana}"
+            );
+            assert_eq!(
+                faza_stampe(status, potpisana, Some(PrintFaza::A))
+                    .expect("the čl. 8 st. 5 sheet is always printable"),
+                PrintFaza::A,
+                "{status:?} with faza_a_potpisana={potpisana}"
+            );
+
+            let trazena_b = faza_stampe(status, potpisana, Some(PrintFaza::B));
+            if faza == PrintFaza::B {
+                assert_eq!(
+                    trazena_b.expect("the čl. 9 st. 3 sheet is printable once it exists"),
+                    PrintFaza::B,
+                    "{status:?} with faza_a_potpisana={potpisana}"
+                );
+            } else {
+                assert_eq!(
+                    trazena_b
+                        .expect_err("the čl. 9 st. 3 sheet must be refused")
+                        .code(),
+                    "popis_obracunate_liste_pre_potpisa",
+                    "{status:?} with faza_a_potpisana={potpisana}"
+                );
+            }
+        }
+    }
+
+    /// The phase crosses the IPC boundary as [`PrintFaza::kljuc`], which is also
+    /// what the export file name is built from — one vocabulary, asserted rather
+    /// than kept in step by hand, for the reason the stored vocabularies are.
+    #[test]
+    fn the_print_phase_wire_form_is_the_frontend_contract() {
+        for faza in [PrintFaza::A, PrintFaza::B] {
+            assert_eq!(
+                serde_json::to_string(&faza).expect("a phase should serialize"),
+                format!("\"{}\"", faza.kljuc()),
+                "{faza:?} must reach the backend as its own key"
+            );
+            assert_eq!(
+                serde_json::from_str::<PrintFaza>(&format!("\"{}\"", faza.kljuc()))
+                    .expect("a phase should deserialize"),
+                faza,
+                "{faza:?} should survive the round trip through its key"
+            );
+        }
+        assert!(
+            serde_json::from_str::<PrintFaza>("\"c\"").is_err(),
+            "an unknown phase must not resolve to one"
+        );
     }
 }
