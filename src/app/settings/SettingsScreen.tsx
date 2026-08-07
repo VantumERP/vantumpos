@@ -1830,29 +1830,62 @@ function GoLiveResetCard({
               </AlertDialogDescription>
             </AlertDialogHeader>
             {/*
-              Two claims stood here from SW-3 until 07.08.2026 and both were
-              false. The floor was attributed to „ZoRač čl. 28; ZPDV čl. 47“,
-              the very string `reset_trading_data`'s compliance tombstone
-              withdrew on 31.07.2026 — ZPDV čl. 47 supplies no general period,
-              so the app stated two floors for one duty and showed the owner the
-              wrong one. It now prints what the tombstone records; the two are
-              pinned together by `docs_guard`.
+              Three claims stood here from SW-3 (`062250d`) until 07.08.2026 and
+              every one of them was wrong.
 
-              The second was a sentence telling pravna lica they may not destroy
-              dokumentarni materijal without the arhiv's written approval. ZAG
-              čl. 16 st. 2 confines that approval to državni organi, organi TA i
-              JLS, ustanove, javna preduzeća i imaoci javnih ovlašćenja; this
-              shop is a preduzetnik, and the sentence sent him for a permission
-              no article asks of him, immediately above an irreversible delete.
-              It is deleted rather than hedged — a hedge is still an assertion he
-              cannot act on. Nothing here says archive law does not reach him:
-              ZAG čl. 9 st. 1 has no carve-out, and the čuvanje sentence below
-              is exactly that custody duty in the terms he can act on.
+              The floor was attributed to ZoRač čl. 28 together with ZPDV čl. 47
+              — the very string `reset_trading_data`'s compliance tombstone
+              withdrew on 31.07.2026, because čl. 47 supplies no general period
+              at all (SW11-SW15-VERIFIED-RULES §2 Q4). For a week the app stated
+              two floors for one duty and showed the owner the wrong one. It now
+              prints `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV`, and
+              `docs_guard` pins the screen, the tombstone and the memo together.
+
+              The period itself was framed with „do“ — up to ten years, a
+              ceiling. ZPPPA čl. 114z st. 2 keeps a zastoj out of the absolute
+              period and čl. 114ž ends „osim ako ovim zakonom nije drukčije
+              propisano“, so ten years is a floor that only ever moves upward,
+              which is why `retain_until` is upward-only (§3 req. 36) and why §1
+              row 7 rates the ceiling framing a defect beside the miscitation.
+              The first correction of this sentence fixed the citation and left
+              the framing standing.
+
+              The third told pravna lica they may not destroy dokumentarni
+              materijal without the arhiv's prior written permission. ZAG čl. 16
+              st. 2 confines that to državni organi, organi TA i JLS, ustanove,
+              javna preduzeća i imaoci javnih ovlašćenja; this shop is a
+              preduzetnik, and the sentence sent him for a permission no article
+              asks of him, immediately above an irreversible delete. It is
+              deleted rather than hedged — a hedge is still an assertion he
+              cannot act on.
+
+              What stands in its place is the neutral ZAG čl. 9 st. 1 custody
+              note §3 req. 39 asks for in the same breath. It is deliberately a
+              paragraph of its own and **not** the čuvanje sentence above: that
+              one is an accounting and tax retention period under ZoRač and
+              ZPPPA, while čl. 9 st. 1 is a different duty under a different
+              statute, and only čl. 9 st. 2 carries the „osim fizičkih lica“
+              carve-out (§1 row 12). Answering the withdrawal with silence would
+              have told the preduzetnik archive law does not reach him, which
+              §4 item 8 forbids as squarely as the claim that was removed. No
+              penalty figure travels with it — ZAG čl. 65 has no preduzetnik
+              tier, and every figure in this application lives in `legal.rs`.
+
+              This note is in English on purpose, and the withdrawn sentences are
+              described rather than quoted: `docs_guard` sweeps the comments in
+              this file along with the copy, and restating a withdrawn duty in
+              Serbian beside the dialog it was removed from is how it finds its
+              way back into the dialog.
             */}
             <p className="text-sm text-muted-foreground">
-              Zakon zahteva čuvanje evidencija do 10 godina (ZoRač čl. 28 st. 4;
-              ZPPPA čl. 114ž). Pre brisanja se obavezno pravi rezervna kopija —
-              čuvajte je trajno.
+              Zakon zahteva čuvanje evidencija najmanje 10 godina (ZoRač čl. 28
+              st. 4; ZPPPA čl. 114ž) — rok se može produžiti, a nikada se ne
+              skraćuje. Pre brisanja se obavezno pravi rezervna kopija — čuvajte
+              je trajno.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Dokumentaciju čuvajte savesno, u sređenom i bezbednom stanju (ZAG
+              čl. 9 st. 1).
             </p>
             {/*
               `reset_trading_data` also runs DELETE FROM kalkulacije. The

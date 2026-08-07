@@ -118,16 +118,19 @@ defects (D1, D3, D5, D6–D8) plus four documentation errors. All are now closed
 **Still open after that batch** — superseded by the residuals batch below, which closed D2, D4 and the
 D1 residual. (Requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3.)
 
-- **Req 39 / §4 item 8 — false archive duty still on screen.** `src/app/settings/SettingsScreen.tsx:1773`
-  tells the operator „Pravna lica ne smeju uništavati dokumentarni materijal bez pismenog odobrenja
-  arhiva.“ ZAG čl. 16 st. 2 confines prior written archive approval to the **public sector**; the memo
-  (§1 row 5) requires that claim removed. Pre-existing (SW-3, `062250d`), not introduced by this batch.
+- **Req 39 / §4 item 8 — false archive duty on screen: closed 07.08.2026 (`41dc298`).** At the time of
+  this batch `src/app/settings/SettingsScreen.tsx:1773` told the operator „Pravna lica ne smeju
+  uništavati dokumentarni materijal bez pismenog odobrenja arhiva.“ ZAG čl. 16 st. 2 confines prior
+  written archive approval to the **public sector**; the memo (§1 row 5) required the claim removed, and
+  it was — deleted outright, with the neutral ZAG čl. 9 st. 1 custody note req. 39 asks for beside it in
+  place of silence. Pre-existing (SW-3, `062250d`), not introduced by this batch.
 - **Req 35–38, 42, 43 — retention engine.** No `retention_class`, `retain_until`, `legal_hold` or
   upward-only extension exists anywhere in the schema; the čl. 32 objekti/ulaganja register (req 37) and
   the documented plain-text archival export (req 43) are not built. The KEP book carries its own 5-year
-  floor in `kep_close.rs::retention_floor`. The same screen line (`SettingsScreen.tsx:1771`) still
-  attributes the 10-year floor to **ZPDV čl. 47** — the miscitation corrected in `backup.rs` was not
-  carried into the UI copy.
+  floor in `kep_close.rs::retention_floor`. The same screen line (`SettingsScreen.tsx:1771`) attributed
+  the 10-year floor to **ZPDV čl. 47** until 07.08.2026 (`41dc298`), when the dialog was bound to
+  `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` — ZoRač čl. 28 st. 4; ZPPPA čl. 114ž — the string the
+  go-live tombstone had carried since 31.07.2026.
 - **Req 5(b)(c) — one-year aggregation.** The limitation is now disclosed, but the optional buyer tag and
   the rolling 365-day running total are not built. `[PRUDENTIAL]` mechanism; blocked on §5 Q-3 (lawful
   ZZPL basis for a customer-identity store).
@@ -169,14 +172,23 @@ Latest migration: **v16**.
 
 **Still open after this batch** (requirement numbers are `docs/SW11-SW15-VERIFIED-RULES.md` §3):
 
-- **Req 39 / §4 item 8 — false archive duty still on screen.** `src/app/settings/SettingsScreen.tsx:1773`
-  still tells the operator „Pravna lica ne smeju uništavati dokumentarni materijal bez pismenog odobrenja
-  arhiva.“ ZAG čl. 16 st. 2 confines prior written archive approval to the public sector. Pre-existing
-  (SW-3, `062250d`); untouched by this batch.
+- **Req 39 / §4 item 8 — false archive duty on screen: closed 07.08.2026 (`41dc298`).** When this batch
+  shipped, `src/app/settings/SettingsScreen.tsx:1773` told the operator „Pravna lica ne smeju uništavati
+  dokumentarni materijal bez pismenog odobrenja arhiva.“ ZAG čl. 16 st. 2 confines prior written archive
+  approval to the public sector, so the sentence sent a preduzetnik for a permission no article asks of
+  him, one click above an irreversible delete. It was deleted outright rather than hedged, and the
+  neutral ZAG čl. 9 st. 1 custody note req. 39 asks for in the same breath — savesno čuvanje u sređenom i
+  bezbednom stanju — stands in its place, so the withdrawal does not read as „archive law does not reach
+  you“ (§4 item 8). Pre-existing (SW-3, `062250d`); untouched by *this* batch. **What req. 39 leaves
+  open:** the pravno-lice half — lista kategorija sa saglasnošću nadležnog javnog arhiva, arhivska
+  knjiga, 30 April prepis — is profile-aware copy nobody has written, although `pravna_forma` is stored.
 - **Req 35–38, 42, 43 — retention engine.** No `retention_class`, `retain_until`, `legal_hold` or
   upward-only extension in the schema; no čl. 32 objekti/ulaganja register (req 37); no documented
-  plain-text archival export (req 43). `SettingsScreen.tsx:1771` still attributes the 10-year floor to
-  **ZPDV čl. 47** — the miscitation corrected in `backup.rs` was never carried into the UI copy.
+  plain-text archival export (req 43). `SettingsScreen.tsx:1771` attributed the 10-year floor to
+  **ZPDV čl. 47**, and framed it as a ceiling („do 10 godina“), until 07.08.2026 (`41dc298`): the dialog
+  now prints `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` — ZoRač čl. 28 st. 4; ZPPPA čl. 114ž — as a
+  **floor** („najmanje 10 godina … rok se može produžiti, a nikada se ne skraćuje“), which is what §1
+  row 7 corrected and what req. 36's upward-only `retain_until` will have to implement.
 - **Req 5(b)(c) — one-year aggregation.** Disclosed in writing, but the optional buyer tag and the rolling
   365-day running total are not built. `[PRUDENTIAL]`; blocked on §5 Q-3.
 - **Req 15, second half — the 3-day advance announcement** for withdrawals over 1.500.000 RSD
@@ -363,7 +375,7 @@ been refused.
 
 | Commit | Defect | What shipped |
 |---|---|---|
-| `b495425` | Three compliance rows credited the code with legs it does not have — the čl. 87 weekly cap, the čl. 57 st. 5 ceiling attributed to `assess_caps` rather than to its caller, and an unqualified „no fine figure outside `legal.rs`“ | The rows were re-stated, and the defect class got a guard: **`src-tauri/src/docs_guard.rs`** (test-only, `#[cfg(test)]` in `lib.rs`) embeds `SERBIAN-LAW-COMPLIANCE.md`, `PROGRESS.md`, both `docs/compliance/` templates **and** the `retention.rs` `napomena` strings, and fails when a line claims more than the code delivers |
+| `b495425` | Three compliance rows credited the code with legs it does not have — the čl. 87 weekly cap, the čl. 57 st. 5 ceiling attributed to `assess_caps` rather than to its caller, and an unqualified „no fine figure outside `legal.rs`“ | The rows were re-stated, and the defect class got a guard: **`src-tauri/src/docs_guard.rs`** (test-only, `#[cfg(test)]` in `lib.rs`) embeds `SERBIAN-LAW-COMPLIANCE.md`, `PROGRESS.md`, three `docs/compliance/` templates — the čl. 23 notice, the čl. 47 evidencija, and the anti-evazioni memo since 07.08.2026 — **and** the `retention.rs` `napomena` strings, and fails when a line claims more than the code delivers |
 | `66636a3` | The čl. 23 notice told the employee the trajno classification could not be reached by a restore or by backup pruning. `assert_never_purge_intact` runs only inside the `reset_trading_data` transaction; `restore_backup` swaps the database file, and no backup-prune path exists in the crate at all | The notice, the register row and the stored `napomena` now claim only what is true — the `pre_restore` safety copy is the protection on that path, `backup_restored` records the never-purge row counts on both sides, and automatic cleanup of old backups „ne postoji“. Two `docs_guard` tests pin both halves |
 | `1c33bf1` (D2) | `docs/compliance/evidencija-obrade-cl47.md` — the document SW-14 req. 27 names — printed a „fiksna kazna 100.000 RSD“ (the čl. 95 st. 2 *pravno-lice* tier, double the pilot's real exposure) in a record shown to the Poverenik, headed the obrađivač record „čl. 47 **st. 2**“ (the disapplication for nadležni organi; the obrađivač record is **st. 4**), and invoked only one limb of čl. 47 st. 9 | Preduzetnik tier **fiksna 50.000 (čl. 95 st. 6)**, st. 4 heading, **both** st. 9 limbs (tač. 2 — obrada nije povremena; tač. 3 — posebne vrste podataka). Three new `docs_guard` tests |
 | `1216194` (D3, D4) | **D3** — a preraspodela day refused on the čl. 57 st. 5 60 h weekly ceiling appended `capsExceeded`, whose summary states the čl. 53 8 h/12 h caps that čl. 58 makes **inapplicable** to that employee and whose citation is čl. 274 st. 1 tač. 3. Preraspodela is **tač. 4**. Both tačke resolve through the same st. 2 for a preduzetnik, so no wrong figure ever shipped. **D4** — a 13 h preraspodela day saved without the čl. 53 st. 1 ground being asked for | `legal::preraspodela_caps_exceeded` — duty čl. 57 st. 5, preduzetnik čl. 274 st. 1 tač. 4 u vezi sa st. 2 — is the **eighth** notice, enumerated in `all_notices`, in the duplicated inline list in `every_notice_function_is_enumerated_in_the_guard`, and the asserted count is bumped to **8** |

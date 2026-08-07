@@ -245,7 +245,7 @@ describe("SettingsScreen", () => {
     );
 
     expect(
-      await screen.findByText(/do 10 godina/i),
+      await screen.findByText(/najmanje 10 godina/i),
     ).toBeInTheDocument();
 
     // SW11-SW15-VERIFIED-RULES §2 Q4 — the floor is ZoRač čl. 28 st. 4 (dnevnik
@@ -257,6 +257,12 @@ describe("SettingsScreen", () => {
     expect(dialog).toHaveTextContent("ZoRač čl. 28 st. 4");
     expect(dialog).toHaveTextContent("ZPPPA čl. 114ž");
     expect(dialog).not.toHaveTextContent("ZPDV");
+    // §1 row 7 records two defects in the old sentence and the citation was only
+    // the first: „do 10 godina“ is „up to 10 years“, a ceiling. ZPPPA čl. 114z
+    // st. 2 keeps zastoj out of the absolute period and čl. 114ž ends „osim ako
+    // ovim zakonom nije drukčije propisano“, so the period only ever moves up —
+    // which is also why `retain_until` is upward-only (req. 36).
+    expect(dialog).not.toHaveTextContent(/do 10 godina/i);
   });
 
   it("does not send the shop for an archive approval ZAG čl. 16 st. 2 asks only of the public sector", async () => {
@@ -274,12 +280,61 @@ describe("SettingsScreen", () => {
     // preduzetnik: the withdrawn sentence sent him for a permission no article
     // asks of him, in front of a delete he cannot undo. A hedge would have been
     // the same assertion, so the claim is gone rather than softened.
+    //
+    // What is asserted is the approval claim, not the word „arhiv“. Req. 39 asks
+    // in the same breath for the neutral čl. 9 st. 1 custody note below, and
+    // names the real duties of a pravno lice — the lista kategorija **sa
+    // saglasnošću** nadležnog javnog arhiva, the arhivska knjiga, the 30 April
+    // prepis — as things this screen may one day state. A ban on the stem, or on
+    // the stem beside „saglasnost“, fails every one of them against a test whose
+    // title promises to bar something else, and the way out of that is to phrase
+    // a true sentence around the guard.
+    //
+    // So the claim is judged the way `docs_guard::
+    // claims_an_archive_destruction_approval` judges it: an arhiv, a permission
+    // and a destruction inside **one sentence**. The archive's consent to the
+    // lista kategorija is then statable; the archive's consent as a precondition
+    // of destroying something is not — which is exactly the conflation §1 row 5
+    // corrects. `textContent` runs the paragraphs together with no separator, so
+    // the split takes a full stop followed by a capital, which leaves „čl. 9
+    // st. 1“ whole.
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).not.toHaveTextContent(/arhiv/i);
-    expect(dialog).not.toHaveTextContent(/odobren/i);
+    const sporne = (dialog.textContent ?? "")
+      .split(/(?<=\.)\s*(?=[A-ZČĆŠŽĐ])/)
+      .filter(
+        (recenica) =>
+          /arhiv/i.test(recenica) &&
+          /(odobr|saglasn|dozvol)/i.test(recenica) &&
+          /(uništ|unis|briš|bris)/i.test(recenica),
+      );
+    expect(sporne).toEqual([]);
     // The sentence that is true and useful stays: the copy the reset makes is
     // the only remaining record of what is about to be deleted.
     expect(dialog).toHaveTextContent(/rezervna kopija/i);
+  });
+
+  it("keeps the neutral ZAG čl. 9 st. 1 custody note req. 39 asks for in place of the withdrawn claim", async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(await screen.findByRole("tab", { name: "Backup" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Obriši probne podatke" }),
+    );
+
+    // §3 req. 39 has two limbs. Withdrawing the destruction-approval claim and
+    // leaving nothing in its place satisfies the first and quietly breaches
+    // §4 item 8 — never tell a preduzetnik archive law does not reach him. Only
+    // ZAG čl. 9 st. 2 carries the „osim fizičkih lica“ carve-out (§1 row 12);
+    // st. 1 has none, so savesno čuvanje u sređenom i bezbednom stanju binds
+    // this shop. It is a different duty under a different statute from the
+    // ZoRač/ZPPPA retention period above it, which is an accounting and tax
+    // period — so the čuvanje sentence does not discharge it. No penalty figure
+    // travels with it: ZAG čl. 65 has no preduzetnik tier at all, and every
+    // figure in this application lives in `legal.rs`.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("ZAG čl. 9 st. 1");
+    expect(dialog).toHaveTextContent(/u sređenom i bezbednom stanju/i);
   });
 
   it("discloses that the reset clears the deklaracija checks on the catalog", async () => {

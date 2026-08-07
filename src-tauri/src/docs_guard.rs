@@ -20,6 +20,12 @@ const REGISTER: &str = include_str!("../../docs/SERBIAN-LAW-COMPLIANCE.md");
 const PROGRESS: &str = include_str!("../../docs/PROGRESS.md");
 const NOTICE: &str = include_str!("../../docs/compliance/obavestenje-zaposlenima.md");
 const EVIDENCIJA_CL47: &str = include_str!("../../docs/compliance/evidencija-obrade-cl47.md");
+/// The anti-evazioni memo (SW-4). Its stated purpose is a standing written
+/// rebuttal handed to an inspector, and its §4 describes, feature by feature,
+/// what the go-live reset shows the operator — so it is a description of this
+/// crate in exactly the sense the module doc means, and it went a week
+/// describing a dialog the app no longer had. Embedded 07.08.2026.
+const MEMO: &str = include_str!("../../docs/compliance/memo-uskladjenost-fiskalizacije.md");
 
 /// Every line of `text` containing `needle`, numbered from 1 the way an editor
 /// numbers them so a failure message points straight at the line to fix.
@@ -60,6 +66,151 @@ fn clause_around(line: &str, at: usize) -> &str {
     line[start..end].trim()
 }
 
+/// `true` when the byte offset `at` holds a full stop that actually ends a
+/// sentence — one followed by a space and a capital letter.
+///
+/// [`clause_around`] refuses the full stop outright because „čl. 87“ carries
+/// one. The lookahead buys the character back: „čl. 28 st. 4“ is followed by a
+/// digit and „čl. 16 st. 2 confines“ by a lower-case word, so neither is cut in
+/// half, while „…rezervna kopija. Pravna lica ne smeju…“ splits where a reader
+/// would split it.
+fn ends_a_sentence(text: &str, at: usize) -> bool {
+    let mut rest = text[at..].chars();
+    rest.next() == Some('.')
+        && rest.next() == Some(' ')
+        && rest.next().is_some_and(char::is_uppercase)
+}
+
+/// The sentence the byte offset `at` falls inside.
+///
+/// A claim is made in a sentence, and judging a wider window is how a guard
+/// starts accusing a developer of a statement three paragraphs away — the
+/// failure [`clause_around`]'s doc comment calls the worse one, because the way
+/// out of it is to phrase a true statement around the guard. The breaks are the
+/// end of a sentence plus the structure that ends a statement as firmly as a
+/// full stop does: a JSX element boundary, an interpolation brace, a markdown
+/// cell pipe. Text is expected whitespace-collapsed, the way the JSX guards
+/// read a `.tsx` file.
+fn sentence_around(text: &str, at: usize) -> &str {
+    const BREAKS: [char; 5] = ['<', '>', '{', '}', '|'];
+
+    let start = text[..at]
+        .char_indices()
+        .rev()
+        .find(|(index, ch)| BREAKS.contains(ch) || ends_a_sentence(text, *index))
+        .map_or(0, |(index, ch)| index + ch.len_utf8());
+    let end = text[at..]
+        .char_indices()
+        .find(|(index, ch)| BREAKS.contains(ch) || ends_a_sentence(text, at + index))
+        .map_or(text.len(), |(index, _)| at + index);
+
+    text[start..end].trim()
+}
+
+/// The markdown block the byte offset `at` falls inside, collapsed onto one
+/// line, with the block's own first line number.
+///
+/// [`lines_with`] is right for the register, where a row is a line. It is wrong
+/// for `PROGRESS.md`, whose residual lists wrap one bullet across four lines:
+/// „…`SettingsScreen.tsx:1771` still“ ends a line and „attributes the 10-year
+/// floor to **ZPDV čl. 47**“ opens the next, so a line-local guard sees the
+/// file reference and the claim about it as two unrelated statements and passes
+/// on both. A block ends at the next bullet, table row, heading or blank line.
+fn markdown_block_around(text: &str, at: usize) -> (usize, String) {
+    fn starts_a_block(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        line.trim().is_empty()
+            || trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with('|')
+            || trimmed.starts_with('#')
+    }
+
+    let mut offset = 0usize;
+    let lines: Vec<(usize, &str)> = text
+        .lines()
+        .map(|line| {
+            let entry = (offset, line);
+            offset += line.len() + 1;
+            entry
+        })
+        .collect();
+
+    let index = lines
+        .iter()
+        .rposition(|(start, _)| *start <= at)
+        .unwrap_or(0);
+    let mut start = lines[..=index]
+        .iter()
+        .rposition(|(_, line)| starts_a_block(line))
+        .unwrap_or(0);
+    if lines[start].1.trim().is_empty() && start < index {
+        start += 1;
+    }
+    let end = lines[index + 1..]
+        .iter()
+        .position(|(_, line)| starts_a_block(line))
+        .map_or(lines.len(), |ahead| index + 1 + ahead);
+
+    let block = lines[start..end]
+        .iter()
+        .map(|(_, line)| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    (start + 1, block)
+}
+
+/// Every byte offset in `text` at which `needle` occurs, ignoring case.
+///
+/// `str::match_indices` is case-sensitive, which is how a guard on the stem
+/// „arhiv“ passes a sentence that opens „Arhiv mora…“ — the ordinary way a
+/// Serbian sentence starts, and therefore the ordinary way a withdrawn claim
+/// comes back. `needle` must already be lower-case; the offsets are into `text`
+/// itself, so a failure message still quotes the copy in its real casing rather
+/// than a folded copy of it.
+fn match_indices_ci(text: &str, needle: &str) -> Vec<usize> {
+    debug_assert!(
+        needle == needle.to_lowercase(),
+        "match_indices_ci folds the haystack only: „{needle}“"
+    );
+    let folded: Vec<char> = needle.chars().collect();
+
+    text.char_indices()
+        .filter(|(at, _)| {
+            let mut haystack = text[*at..].chars().flat_map(char::to_lowercase);
+            folded
+                .iter()
+                .all(|expected| haystack.next() == Some(*expected))
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// The stems that turn a mention of an arhiv into the claim ZAG čl. 16 st. 2
+/// does not support: that material may not be destroyed without the archive's
+/// prior approval. Returns the pair that fired, for the failure message.
+///
+/// Two stems, not one phrase. „bez pismenog odobrenja **nadležnog javnog**
+/// arhiva“ is the statute's own wording and walks straight past a literal, and
+/// „odobren“ alone is blind to „odobri“, „odobriti“, „odobrava“ and to
+/// „saglasnost“, which is the word the register itself uses for the archive's
+/// real consent. The destruction stem is what keeps the guard off the duties
+/// that are **real**: the lista kategorija sa saglasnošću nadležnog javnog
+/// arhiva, the arhivska knjiga and the 30 April prepis are all statable, as
+/// long as they are not stated as a precondition of destroying anything —
+/// which is precisely the conflation §1 row 5 corrects.
+fn claims_an_archive_destruction_approval(recenica: &str) -> Option<(&'static str, &'static str)> {
+    const ODOBRENJE: [&str; 3] = ["odobr", "saglasn", "dozvol"];
+    const UNISTENJE: [&str; 4] = ["uništ", "unis", "briš", "bris"];
+
+    let lowered = recenica.to_lowercase();
+    let odobrenje = ODOBRENJE.into_iter().find(|stem| lowered.contains(stem))?;
+    let unistenje = UNISTENJE.into_iter().find(|stem| lowered.contains(stem))?;
+
+    Some((odobrenje, unistenje))
+}
+
 /// Every piece of prose this crate is answerable for: the three documents, plus
 /// the `napomena` strings the retention table stores beside each class. The
 /// notes are prose in exactly the sense this module guards — they are written
@@ -79,6 +230,10 @@ fn prose_sources() -> Vec<(String, String)> {
         (
             "docs/compliance/evidencija-obrade-cl47.md".to_string(),
             EVIDENCIJA_CL47.to_string(),
+        ),
+        (
+            "docs/compliance/memo-uskladjenost-fiskalizacije.md".to_string(),
+            MEMO.to_string(),
         ),
     ];
     sources.extend(crate::retention::RecordClass::ALL.into_iter().map(|class| {
@@ -773,36 +928,79 @@ fn the_profile_screen_states_both_legs_of_cl_87() {
 /// asserting a duty the law does not impose, which is the same defect as one
 /// denying a duty it does.
 ///
-/// Judged on the stems `arhiv` + `odobren` inside one paragraph rather than on
-/// the exact phrase that was withdrawn, because „bez pismenog odobrenja
-/// nadležnog javnog arhiva“ is the statute's own wording and would walk straight
-/// back past a literal. Nothing here bars the archive duties that are **real** —
-/// the lista kategorija with the arhiv's saglasnost, the arhivska knjiga, the
+/// **The floor is a floor.** §1 row 7 records two defects in the SW-3 sentence,
+/// not one: the ZPDV attribution *and* „10y absolute“ presented as a **ceiling**.
+/// „do 10 godina“ is „up to 10 years“. ZPPPA čl. 114z st. 2 excludes zastoj from
+/// the absolute period and čl. 114ž itself ends „osim ako ovim zakonom nije
+/// drukčije propisano“, which is why req. 36 makes `retain_until` upward-only and
+/// why `SERBIAN-LAW-COMPLIANCE.md:76` says it in terms — „10 years is a floor,
+/// NOT a wall-clock ceiling“. A ceiling printed one click above an irreversible
+/// delete is a number the shop cannot act on, so the ceiling markers are barred
+/// as well as required — the first correction of this sentence fixed the citation
+/// and left the framing, and a guard that pinned only the citation would have
+/// held the framing in place.
+///
+/// **The custody note.** §3 req. 39 has two limbs, and the second is „keep a
+/// neutral čl. 9 st. 1 custody note — do not tell him archive law does not
+/// apply“. ZAG čl. 9 st. 1 (savesno čuvanje u sređenom i bezbednom stanju)
+/// carries none of the „osim fizičkih lica“ carve-out that st. 2 does (§1 row
+/// 12), so it reaches this shop; the ZoRač/ZPPPA čuvanje sentence is an
+/// accounting and tax retention period under different statutes and is not that
+/// duty. Withdrawing the false claim and leaving nothing satisfies half of req.
+/// 39, so the note is required here rather than merely permitted.
+///
+/// The archive claim is judged per [`claims_an_archive_destruction_approval`],
+/// on stems inside **one sentence** rather than on the phrase that was
+/// withdrawn. It deliberately does not bar the archive duties that are **real**
+/// — the lista kategorija with the arhiv's saglasnost, the arhivska knjiga, the
 /// 30 April prepis — nor may the screen ever tell a preduzetnik that archive law
-/// does not reach him (§4 item 8). Only the approval-before-destruction claim is
-/// barred.
+/// does not reach him (§4 item 8). Only approval-as-a-precondition-of-destruction
+/// is barred, and stating a real duty in a sentence of its own is the way to
+/// state it.
 ///
 /// JSX wraps a sentence across source lines, so the file is judged with its
-/// whitespace collapsed and each claim inside the `<p>` it belongs to — the same
-/// reasoning as [`clause_around`], with the element boundary standing in for the
-/// punctuation. Source comments are swept along with the copy, deliberately: the
-/// note recording why the claim was withdrawn is written in English for exactly
-/// that reason, and restating the withdrawn duty in Serbian beside the dialog it
-/// was removed from is how it would find its way back into the dialog.
+/// whitespace collapsed. The retention citation is judged inside the `<p>` it
+/// belongs to, because a citation belongs to its paragraph; the archive claim is
+/// judged inside its sentence, because the only lower-case „arhiv“ in this file
+/// sits in a JSX comment inside no `<p>` at all, and the enclosing-paragraph
+/// search then spanned 267 lines — the passphrase card, the whole backup form and
+/// two dialogs — so any „odobren“ anywhere in that span accused the developer of
+/// a claim about an arhiv. Source comments are swept along with the copy,
+/// deliberately: the note recording why the claim was withdrawn is written in
+/// English for exactly that reason, and restating the withdrawn duty in Serbian
+/// beside the dialog it was removed from is how it would find its way back into
+/// the dialog.
 #[test]
 fn the_reset_dialog_matches_the_tombstone_and_claims_no_archive_approval() {
     const SETTINGS_SCREEN: &str = include_str!("../../src/app/settings/SettingsScreen.tsx");
     /// The sentence carrying the floor, in the words the dialog uses.
-    const ROK: &str = "čuvanje evidencija do 10 godina";
+    const ROK: &str = "čuvanje evidencija najmanje 10 godina";
+    /// Ways of writing the same period as a wall-clock ceiling.
+    const TAVANICA: [&str; 4] = [
+        "do 10 godina",
+        "najviše 10 godina",
+        "najduže 10 godina",
+        "maksimalno 10 godina",
+    ];
+    /// The čl. 9 st. 1 custody duty, in the statute's own terms.
+    const CUVANJE: [&str; 2] = ["ZAG čl. 9 st. 1", "u sređenom i bezbednom stanju"];
 
-    /// The paragraph `at` falls inside. The fallbacks widen the window rather
-    /// than narrowing it: a claim outside any `<p>` is still judged.
-    fn paragraph_around(text: &str, at: usize) -> &str {
-        let start = text[..at].rfind("<p ").unwrap_or(0);
-        let end = text[at..]
-            .find("</p>")
-            .map_or(text.len(), |index| at + index);
-        text[start..end].trim()
+    /// The `<p>` element `at` falls inside, or `None` when it falls inside no
+    /// paragraph — a JSX comment, an attribute, a `<title>`. A `</p>` between
+    /// the opening tag and `at` is the proof that the candidate closed before
+    /// `at` was reached; without that test the search silently walks backwards
+    /// past every intervening paragraph and judges the whole file.
+    fn paragraph_around(text: &str, at: usize) -> Option<&str> {
+        let start = text[..at]
+            .rmatch_indices("<p")
+            .find(|(index, _)| matches!(text[index + 2..].chars().next(), Some('>' | ' ')))
+            .map(|(index, _)| index)?;
+        if text[start..at].contains("</p>") {
+            return None;
+        }
+        let end = text[at..].find("</p>").map(|ahead| at + ahead)?;
+
+        Some(text[start..end].trim())
     }
 
     let osnov = crate::commands::backup::ROK_CUVANJA_PRAVNI_OSNOV;
@@ -818,11 +1016,14 @@ fn the_reset_dialog_matches_the_tombstone_and_claims_no_archive_approval() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    let claim_around = |at: usize| -> &str {
+        paragraph_around(&text, at).unwrap_or_else(|| sentence_around(&text, at))
+    };
 
     let mut pomena = 0usize;
-    for (at, _) in text.match_indices(ROK) {
+    for at in match_indices_ci(&text, &ROK.to_lowercase()) {
         pomena += 1;
-        let odlomak = paragraph_around(&text, at);
+        let odlomak = claim_around(at);
         for clan in osnov.split(';').map(str::trim) {
             assert!(
                 odlomak.contains(clan),
@@ -848,17 +1049,216 @@ fn the_reset_dialog_matches_the_tombstone_and_claims_no_archive_approval() {
          citation was. Re-state the sentence rather than deleting it."
     );
 
-    for (at, _) in text.match_indices("arhiv") {
-        let odlomak = paragraph_around(&text, at);
+    for tavanica in TAVANICA {
+        // The first occurrence is the whole finding: one ceiling on this screen
+        // is one too many, and quoting it is what the message is for.
+        if let Some(&at) = match_indices_ci(&text, tavanica).first() {
+            let recenica = sentence_around(&text, at);
+            panic!(
+                "src/app/settings/SettingsScreen.tsx prints the retention period as a ceiling \
+                 („{tavanica}“) — „{recenica}“. SW11-SW15-VERIFIED-RULES.md §1 row 7 rates that \
+                 framing a defect of its own: ZPPPA čl. 114z st. 2 keeps zastoj out of the \
+                 absolute period and čl. 114ž ends „osim ako ovim zakonom nije drukčije \
+                 propisano“, so 10 years is a floor that only ever moves up. Say „najmanje“."
+            );
+        }
+    }
+
+    for stem in CUVANJE {
         assert!(
-            !odlomak.contains("odobren"),
-            "src/app/settings/SettingsScreen.tsx tells the shop an arhiv has to approve a \
-             destruction — „{odlomak}“. ZAG čl. 16 st. 2 confines that approval to the public \
-             sector (§1 row 5, §3 req. 39) and the pilot is a preduzetnik, so the sentence sends \
-             him for a permission no article asks of him. Withdraw the claim; a hedged version is \
-             still an assertion he cannot act on."
+            text.contains(stem),
+            "src/app/settings/SettingsScreen.tsx dropped the neutral ZAG čl. 9 st. 1 custody note \
+             („{stem}“). §3 req. 39 asks for two things and the second is this one: withdraw the \
+             destruction-approval claim **and** keep a neutral custody note, because čl. 9 st. 1 \
+             carries no „osim fizičkih lica“ carve-out (§1 row 12) and a screen that answers the \
+             withdrawal with silence tells the preduzetnik archive law does not reach him — \
+             §4 item 8, the thing this file may never say."
         );
     }
+
+    for at in match_indices_ci(&text, "arhiv") {
+        let recenica = sentence_around(&text, at);
+        if let Some((odobrenje, unistenje)) = claims_an_archive_destruction_approval(recenica) {
+            panic!(
+                "src/app/settings/SettingsScreen.tsx tells the shop an arhiv has to approve a \
+                 destruction — „{recenica}“ (stems „{odobrenje}“ + „{unistenje}“). ZAG čl. 16 \
+                 st. 2 confines that approval to državni organi, organi TA i JLS, ustanove, javna \
+                 preduzeća i imaoci javnih ovlašćenja (§1 row 5, §3 req. 39), and the pilot is a \
+                 preduzetnik, so the sentence sends him for a permission no article asks of him. \
+                 Withdraw the claim; a hedged version is still an assertion he cannot act on. The \
+                 archive duties that are real — lista kategorija sa saglasnošću, arhivska knjiga, \
+                 30 April prepis — are statable, in a sentence that does not make one of them the \
+                 precondition of a destruction."
+            );
+        }
+    }
+}
+
+/// A template under `docs/compliance/` may not describe a reset warning the
+/// dialog does not show.
+///
+/// The memo's §4 is a feature-by-feature account of the go-live reset, written
+/// to be handed to an inspector as a standing rebuttal, and it went a week
+/// stating the withdrawn citation and the withdrawn archive duty after the
+/// dialog stopped showing either. Nothing could see it: the module doc says the
+/// templates under `docs/compliance/` are read as a description of what the code
+/// does, but only two of them were embedded, and the memo — the one written for
+/// a reader outside the company — was not among them.
+///
+/// Scoped to a line that describes the reset **and** names the horizon, so the
+/// register's own SW-3 requirement row, which legitimately cites ZPDV čl. 47 for
+/// the čl. 32 objekti limb while correcting the general period, is not swept up
+/// in it. Bound to [`crate::commands::backup::ROK_CUVANJA_PRAVNI_OSNOV`] like the
+/// dialog is: three surfaces now print one string, and the next correction cannot
+/// land on two of them.
+#[test]
+fn no_compliance_template_states_a_reset_warning_the_dialog_does_not_show() {
+    /// The reset, in the words these templates use for it.
+    const RESET: [&str; 2] = ["reset", "brisanj"];
+    /// A dated correction states what the application **stopped** saying, and
+    /// has to quote the withdrawn wording to be worth anything — `PROGRESS.md`
+    /// stamps its own residuals the same way. It is a different speech act from
+    /// a description of the live screen, and judging the two alike would leave a
+    /// memo that may not show its work. The correction must therefore say so in
+    /// terms; a sentence that merely mentions the past does not qualify.
+    const ISPRAVKA: &str = "Ispravka";
+
+    let osnov = crate::commands::backup::ROK_CUVANJA_PRAVNI_OSNOV;
+    let mut pomena = 0usize;
+
+    for (label, text) in prose_sources()
+        .into_iter()
+        .filter(|(label, _)| label.starts_with("docs/compliance/"))
+    {
+        for (line_no, line) in lines_with(&text, "10 godina") {
+            let lowered = line.to_lowercase();
+            if !RESET.iter().any(|needle| lowered.contains(needle)) || line.contains(ISPRAVKA) {
+                continue;
+            }
+            pomena += 1;
+
+            for clan in osnov.split(';').map(str::trim) {
+                assert!(
+                    line.contains(clan),
+                    "{label}:{line_no} describes the retention warning the reset dialog shows and \
+                     does not name „{clan}“. The dialog and the `compliance_log` tombstone both \
+                     print `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` („{osnov}“); a template \
+                     handed to a lawyer as a description of this app has to print the same one."
+                );
+            }
+            assert!(
+                !line.contains("ZPDV"),
+                "{label}:{line_no} attributes the reset warning's retention horizon to ZPDV. \
+                 §2 Q4: čl. 47 supplies no general period, `backup.rs` stopped citing it on \
+                 31.07.2026 and the dialog stopped on 07.08.2026. Cite „{osnov}“."
+            );
+
+            for at in match_indices_ci(line, "arhiv") {
+                let recenica = sentence_around(line, at);
+                if let Some((odobrenje, unistenje)) =
+                    claims_an_archive_destruction_approval(recenica)
+                {
+                    panic!(
+                        "{label}:{line_no} says the reset warning states an archive approval duty \
+                         — „{recenica}“ (stems „{odobrenje}“ + „{unistenje}“). ZAG čl. 16 st. 2 \
+                         confines that approval to the public sector (§1 row 5), so no shop \
+                         profile owes it; and the dialog has not shown any archive obligation \
+                         since 07.08.2026, so the sentence also describes a screen that does not \
+                         exist. Withdraw it."
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(
+        pomena > 0,
+        "no template under docs/compliance/ describes the reset's retention warning any more. \
+         The memo's §4 is the written answer to „why does this application delete trading data at \
+         all“ and the warning is one of the three things that answer rests on. Re-state the \
+         sentence rather than deleting it."
+    );
+}
+
+/// The residual lists may not say the reset dialog still carries the two claims
+/// it withdrew.
+///
+/// This is the defect this cycle exists to remove, pointed at the cycle's own
+/// work: on 07.08.2026 a stale register led a survey agent to rank two long-fixed
+/// bugs as pilot blockers. `PROGRESS.md`'s **Still open** lists said in the
+/// present tense that `SettingsScreen.tsx` tells the operator pravna lica need
+/// the arhiv's written odobrenje, and that the same screen attributes the 10-year
+/// floor to ZPDV čl. 47. `41dc298` made both sentences false and did not touch
+/// the lists.
+///
+/// Judged over the markdown **block**, per [`markdown_block_around`]: these
+/// bullets wrap across four lines and the file reference, the denial and the
+/// citation land on three different ones. The markers are the register's own
+/// present-tense idiom rather than the bare word „still“, because a block may
+/// perfectly well say a different thing is still open beside this one — req. 43's
+/// archival export genuinely is.
+#[test]
+fn no_document_says_the_reset_dialog_still_carries_the_two_withdrawn_claims() {
+    /// „This is on screen right now“, in the words these lists use.
+    const STALE: [&str; 7] = [
+        "still tells",
+        "still says",
+        "still carries",
+        "still attributes",
+        "still on screen",
+        "carried into the ui",
+        "nije preneto",
+    ];
+
+    let osnov = crate::commands::backup::ROK_CUVANJA_PRAVNI_OSNOV;
+    let mut zapis = 0usize;
+
+    for (doc, text) in [
+        ("docs/SERBIAN-LAW-COMPLIANCE.md", REGISTER),
+        ("docs/PROGRESS.md", PROGRESS),
+    ] {
+        for at in match_indices_ci(text, "settingsscreen.tsx") {
+            let (line_no, blok) = markdown_block_around(text, at);
+            let lowered = blok.to_lowercase();
+            if osnov.split(';').all(|clan| blok.contains(clan.trim())) {
+                zapis += 1;
+            }
+
+            let Some(marker) = STALE.into_iter().find(|marker| lowered.contains(marker)) else {
+                continue;
+            };
+            assert!(
+                !blok.contains("ZPDV"),
+                "{doc}:{line_no} says („{marker}“) the reset dialog still attributes the retention \
+                 floor to ZPDV — „{blok}“. It stopped on 07.08.2026 (`41dc298`); the dialog now \
+                 prints `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` („{osnov}“), the string the \
+                 tombstone carries. Stamp the bullet closed. A register that reports a fixed \
+                 defect as live is the same defect as one that reports a live defect as fixed, \
+                 and it costs the next reader the same day."
+            );
+            if lowered.contains("arhiv") {
+                if let Some((odobrenje, unistenje)) = claims_an_archive_destruction_approval(&blok)
+                {
+                    panic!(
+                        "{doc}:{line_no} says („{marker}“) the reset dialog still sends the shop \
+                         for an archive approval — „{blok}“ (stems „{odobrenje}“ + \
+                         „{unistenje}“). The sentence was deleted outright on 07.08.2026 \
+                         (`41dc298`) and the neutral ZAG čl. 9 st. 1 custody note §3 req. 39 asks \
+                         for stands in its place. Stamp the bullet closed rather than leaving a \
+                         survey to rank it a pilot blocker."
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(
+        zapis > 0,
+        "no line of docs/PROGRESS.md or docs/SERBIAN-LAW-COMPLIANCE.md records what the reset \
+         dialog cites. It prints `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` („{osnov}“) after a \
+         week of citing ZPDV čl. 47, and a register silent about a correction is how the same \
+         miscitation comes back. Name the screen and both članovi in one block."
+    );
 }
 
 /// `worktime::assess_caps` hard-codes `preraspodela_weekly_cap_exceeded` to
