@@ -31,6 +31,35 @@ fn lines_with<'a>(text: &'a str, needle: &str) -> Vec<(usize, &'a str)> {
         .collect()
 }
 
+/// The clause of `line` that the byte offset `at` falls inside.
+///
+/// A register row is one line, but it is also a paragraph's worth of separate
+/// claims about six different articles. A guard that judges the whole line
+/// cannot tell *which* claim a word belongs to, so it either misses the wording
+/// it exists to catch or fires on a neighbouring statement that is perfectly
+/// true — and the second failure is the worse one, because the way out of it is
+/// to phrase the true statement around the guard.
+///
+/// The breaks are the separators this repository's prose actually uses: `;`, the
+/// em dash (never the en dash, which sits inside „čl. 87–91“), the parentheses,
+/// and the markdown cell pipe. A full stop is deliberately not one — „čl. 87“
+/// carries one, and splitting there would cut a citation in half.
+fn clause_around(line: &str, at: usize) -> &str {
+    const BREAKS: [char; 5] = [';', '—', '(', ')', '|'];
+
+    let start = line[..at]
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| BREAKS.contains(ch))
+        .map_or(0, |(index, ch)| index + ch.len_utf8());
+    let end = line[at..]
+        .char_indices()
+        .find(|(_, ch)| BREAKS.contains(ch))
+        .map_or(line.len(), |(index, _)| at + index);
+
+    line[start..end].trim()
+}
+
 /// Every piece of prose this crate is answerable for: the three documents, plus
 /// the `napomena` strings the retention table stores beside each class. The
 /// notes are prose in exactly the sense this module guards — they are written
@@ -571,13 +600,35 @@ fn no_notice_row_claims_an_adjustable_period_for_a_class_no_command_can_move() {
 /// landing in exactly the place the last one did.
 ///
 /// Bound to the constant rather than only to the words, so renaming the cap
-/// stops this file compiling instead of leaving the prose unbacked. The check is
-/// line-local for the same reason `popis_register_rows` is: a markdown row is one
-/// line, and a correction filed three sections away leaves the row itself reading
-/// as an open gap.
+/// stops this file compiling instead of leaving the prose unbacked. The search
+/// is line-local for the same reason `popis_register_rows` is — a markdown row
+/// is one line, and a correction filed three sections away leaves the row itself
+/// reading as an open gap — but it is judged *clause*-local, per
+/// [`clause_around`]: the SW-14 row states the čl. 87 weekly leg as shipped and
+/// the čl. 88 st. 2 night leg as unbuilt on the same line, and the second denial
+/// is TRUE. Judged line-wide, the marker list has to stay so thin that the
+/// repository's own word for a gap („Gap“) slips through it, and a true denial
+/// has to be phrased around the guard — which is how a check becomes decorative.
+///
+/// Each document must also still *name* the leg. Every other guard in this file
+/// asserts presence before it judges wording (`:174`, `:362`, `:654`) and this
+/// one was the exception: with no hits the loop simply did not run, so deleting
+/// the prose passed green. Silence is the same harm as a stale denial — it
+/// withdraws the reader's only pointer to a guard the shop is running.
 #[test]
 fn no_document_says_the_cl_87_weekly_leg_is_still_unbuilt() {
-    const UNBUILT: [&str; 3] = ["is not checked", "nije proveren", "not implemented"];
+    const UNBUILT: [&str; 10] = [
+        "is not checked",
+        "nije proveren",
+        "not implemented",
+        "nije implementiran",
+        "not built",
+        "unbuilt",
+        "not enforced",
+        "nije sprovedeno",
+        "nema proveru",
+        "Gap",
+    ];
     let cap: i64 = crate::worktime::MINOR_WEEKLY_CAP_MINUTES;
     assert_eq!(cap, 35 * 60, "ZoR čl. 87 — 35 časova nedeljno, in minutes");
 
@@ -585,25 +636,41 @@ fn no_document_says_the_cl_87_weekly_leg_is_still_unbuilt() {
         ("docs/SERBIAN-LAW-COMPLIANCE.md", REGISTER),
         ("docs/PROGRESS.md", PROGRESS),
     ] {
+        let mut pomena = 0usize;
         for needle in ["35 h", "35 časova"] {
             for (line_no, line) in lines_with(text, needle) {
-                let stale: Vec<&str> = UNBUILT
-                    .iter()
-                    .copied()
-                    .filter(|marker| line.contains(marker))
-                    .collect();
-                assert!(
-                    stale.is_empty(),
-                    "{doc}:{line_no} names the ZoR čl. 87 weekly leg (\"{needle}\") and still \
-                     says {stale:?}. The leg shipped 07.08.2026 — \
-                     `worktime::MINOR_WEEKLY_CAP_MINUTES`, \
-                     `ProtectionKind::MaloletanNedeljniLimit`, and a blocking refusal in \
-                     `commands::worktime::write_entry`. Re-state the line: a document that \
-                     denies a čl. 87 protection the code runs is the same defect as one that \
-                     promises a protection it lacks."
-                );
+                for (at, _) in line.match_indices(needle) {
+                    pomena += 1;
+                    let clause = clause_around(line, at);
+                    let stale: Vec<&str> = UNBUILT
+                        .iter()
+                        .copied()
+                        .filter(|marker| clause.contains(marker))
+                        .collect();
+                    assert!(
+                        stale.is_empty(),
+                        "{doc}:{line_no} names the ZoR čl. 87 weekly leg (\"{needle}\") and the \
+                         clause it sits in still says {stale:?} — „{clause}“. The leg shipped \
+                         07.08.2026: `worktime::MINOR_WEEKLY_CAP_MINUTES`, \
+                         `ProtectionKind::MaloletanNedeljniLimit`, and a blocking refusal in \
+                         `commands::worktime::write_entry` pinned by \
+                         `commands::worktime::tests::\
+                         a_birth_date_filled_in_later_does_not_lock_a_minors_recorded_week`. \
+                         Re-state the clause: a document that denies a čl. 87 protection the \
+                         code runs is the same defect as one that promises a protection it \
+                         lacks. A denial about a *different* leg — čl. 88 st. 2 night work is \
+                         genuinely unbuilt — belongs in a clause of its own."
+                    );
+                }
             }
         }
+        assert!(
+            pomena > 0,
+            "{doc} must keep naming the ZoR čl. 87 weekly leg („35 h“ / „35 časova“) — \
+             `worktime::MINOR_WEEKLY_CAP_MINUTES` refuses a minor's row on it, and a register \
+             that says nothing about a protection the shop is running is the same defect as one \
+             that denies it. Re-state the line rather than deleting it."
+        );
     }
 }
 

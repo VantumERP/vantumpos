@@ -1920,6 +1920,81 @@ mod tests {
         });
     }
 
+    /// The čl. 87 weekly leg through the real write path, in the state
+    /// `worktime::check_protection`'s own limit 2 says to expect: v17 leaves
+    /// `datum_rodjenja` nullable and does not backfill it, so the minor guards
+    /// are dormant until someone fills the profile in — and `commands/users.rs`
+    /// lets that happen at any time, after the week is already recorded.
+    ///
+    /// Two things have to hold at once from that moment. A *new* sixth day is
+    /// refused, because that write is what puts the minor over 35 h. And the
+    /// week that is already over must stay correctable **downwards**: the
+    /// register is append-only, čl. 87 has no override, and a refusal there
+    /// would leave the shop with „leave the 40 h standing“ or „record 3 h for a
+    /// day the employee worked 8“ as its only options — hiding the čl. 274
+    /// exposure instead of surfacing it.
+    #[test]
+    fn a_birth_date_filled_in_later_does_not_lock_a_minors_recorded_week() {
+        with_state("worktime_minor_week_stays_correctable", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik8b", "Radnik Osam B");
+
+            // Mon–Fri at 8 h with no birth date on file: 40 h, nothing blocks.
+            for dan in [
+                "2026-08-03",
+                "2026-08-04",
+                "2026-08-05",
+                "2026-08-06",
+                "2026-08-07",
+            ] {
+                let saved = save_entry(
+                    state,
+                    radni_dan(radnik, dan, 480, 0),
+                    &format!("{dan}T20:00:00Z"),
+                )
+                .expect("an eight-hour day records while the profile is empty");
+                assert!(saved.protections.is_empty());
+            }
+
+            // HR fills the profile in: seventeen for the whole of that week.
+            set_datum_rodjenja(state, radnik, "2009-01-15");
+
+            // A sixth eight-hour day is the write that raises the week — refused.
+            let error = save_entry(
+                state,
+                radni_dan(radnik, "2026-08-08", 480, 0),
+                "2026-08-08T20:00:00Z",
+            )
+            .expect_err("a sixth eight-hour day breaches ZoR čl. 87");
+            assert_eq!(error.code(), "protection_block");
+            let poruka = error.to_string();
+            assert!(
+                poruka.contains("35 časova nedeljno") && poruka.contains("čl. 87"),
+                "the refusal must name the article and the figure: {poruka}"
+            );
+
+            // The same day at zero worked hours adds nothing and records.
+            let mut odmor = radni_dan(radnik, "2026-08-08", 0, 0);
+            odmor.kategorija_odsustva = Some("godisnji_odmor".to_string());
+            odmor.odsustvo_minuta = 480;
+            save_entry(state, odmor, "2026-08-08T20:00:00Z")
+                .expect("a day of zero worked hours breaches no weekly cap");
+
+            // And the recorded week can still be walked down.
+            let saved = correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: radni_dan(radnik, "2026-08-05", 240, 0),
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-08-09T09:00:00Z",
+            )
+            .expect("a correction toward the čl. 87 cap must be recordable");
+            assert_eq!(saved.entry.verzija, 2);
+            assert_eq!(saved.entry.minuti.efektivno_izvrseni_minuta, 240);
+        });
+    }
+
     #[test]
     fn absence_minutes_land_in_the_bucket_derived_from_the_category() {
         with_state("worktime_absence_bucket_derived", |state| {

@@ -140,16 +140,47 @@ pub fn assess_caps(day: &str, entry: &DayHours, week: &[DayHours]) -> CapAssessm
 /// „Nedeljno“ in čl. 53 st. 2 is the calendar week, so the counter resets on
 /// Monday rather than sliding over the last seven days.
 ///
-/// A day that does not parse counts as *inside* the week. Both directions are
-/// wrong, but only one is dangerous: dropping an unreadable day under-counts
-/// the weekly overtime and can report a čl. 53 st. 2 breach as lawful, while
-/// keeping it merely over-counts and asks for an override that turns out to be
-/// unnecessary. Over-reporting is the safe direction.
+/// A day that does not parse counts as *inside* the week. **That choice is safe
+/// for [`assess_caps`] and for that consumer only**, so this function is the
+/// čl. 53 one and is not the predicate the čl. 87 weekly leg uses. Dropping an
+/// unreadable day under-counts the weekly overtime and can report a čl. 53 st. 2
+/// breach as lawful, while keeping it merely over-counts and asks for an
+/// override that turns out to be unnecessary — the operator records the day
+/// either way, so over-reporting costs a prompt.
+///
+/// [`check_protection`] has no override: a figure it over-counts **refuses the
+/// write**, and an unreadable row would then lock a lawful day out of an
+/// append-only register with no diagnostic at all. v17's column CHECK is a GLOB
+/// shape test — `2026-08-32` satisfies it — so such a row can arrive from a
+/// restored or hand-edited database even though `write_entry` cannot create one.
+/// The safe direction inverts with the consequence, and the čl. 87 leg therefore
+/// counts only rows it can actually read: [`strictly_in_same_iso_week`].
 pub fn in_same_iso_week(a: &str, b: &str) -> bool {
     match (monday_of_week(a), monday_of_week(b)) {
         (Some(left), Some(right)) => left == right,
         _ => true,
     }
+}
+
+/// True only when **both** days parse and fall in the same Monday-anchored week.
+///
+/// The counterpart of [`in_same_iso_week`] for a total that refuses a write
+/// rather than asking for a ground. An unreadable day is dropped, because a row
+/// nobody can read must not be the reason a minor's lawful day cannot be
+/// recorded — and an unreadable `day` drops the whole week for the same reason.
+///
+/// Stated plainly because it is worth knowing: in [`check_protection`] this
+/// currently overlaps the age filter beside it, which fails closed on the same
+/// input (`is_younger_than` cannot order an unreadable day against a birthday
+/// and answers `false`). The overlap is incidental — one predicate asks whether
+/// a row is in the week and the other whether čl. 87 reaches it — and a total
+/// that refuses a write should not depend on a coincidence between two
+/// unrelated helpers to stay safe.
+fn strictly_in_same_iso_week(a: &str, b: &str) -> bool {
+    matches!(
+        (monday_of_week(a), monday_of_week(b)),
+        (Some(left), Some(right)) if left == right
+    )
 }
 
 /// The Monday on or before `day`, or `None` if `day` is not a civil date.
@@ -265,25 +296,55 @@ pub struct ProtectionBlock {
 /// overtime. čl. 58 keeps preraspodela out of the overtime derivation, which
 /// means nothing else in this module would ever notice the prohibition.
 ///
-/// `week` is the employee's other stored days around `day`, and it carries the
-/// čl. 87 weekly leg — 35 časova nedeljno. It is filtered exactly as `assess_caps`
-/// filters it: rows outside `day`'s calendar week are dropped, and so is the
-/// stored row for `day` itself, because `entry` is the version being assessed and
-/// counting the superseded row beside it would read a correction that *lowers* a
-/// day's hours as a breach. That filter is `assess_caps`'s and is reused rather
-/// than re-derived — two copies of the same week arithmetic drift apart.
+/// `week` is the employee's stored days around `day`, and it carries the čl. 87
+/// weekly leg — 35 časova nedeljno. Three things are dropped from that total, and
+/// each is narrower than the filter `assess_caps` uses, because a figure that
+/// **refuses a write** is not a figure that asks for a ground:
+///
+/// - **The stored row for `day` itself.** `entry` is the version being assessed,
+///   and counting the superseded row beside it would read a correction that
+///   *lowers* a day's hours as a breach. This half is `assess_caps`'s own
+///   `dan != day`.
+/// - **Rows whose `dan` is not a civil date**, via [`strictly_in_same_iso_week`]
+///   rather than [`in_same_iso_week`]. `assess_caps` keeps them on purpose —
+///   over-reporting an overridable cap is safe. Here an unreadable row would
+///   refuse a lawful day with no diagnostic, and v17's GLOB CHECK lets
+///   `2026-08-32` into the column.
+/// - **Days on which the employee was already 18.** čl. 87 caps „zaposleni mlađi
+///   od 18 godina života“, so in the week the eighteenth birthday falls the adult
+///   days are ordinary čl. 53 hours. Counting them into the minor's total is a
+///   construction SW14-VERIFIED-RULES §4 req. 12 does not state, applied as a
+///   hard refusal.
+///
+/// **The refusal fires only on a write that raises the week.** `unos_minuta >
+/// evidentirano_za_dan` is the whole of that rule and it is not a softening of
+/// čl. 87: an entry that adds nothing to the register — a correction downwards, a
+/// day of pure absence, an unchanged re-statement — cannot be the write that puts
+/// a minor over 35 h, and every write that *can* is still refused outright with
+/// no override. Without it a week that is already over the cap becomes
+/// permanently unwritable: the guards are dormant until `datum_rodjenja` is
+/// filled in (limit 2 below), so an over-cap week can already be sitting in an
+/// append-only register when the leg turns on, and refusing every correction
+/// would leave the shop with „leave the 40 h standing“ or „record 3 h for a day
+/// the employee worked 8“ — hiding the čl. 274 exposure instead of surfacing it,
+/// which is the failure mode [`assess_caps`] names by hand.
 ///
 /// **`week` must carry live rows only — `MAX(verzija)` per `dan`** — precondition 1
-/// of [`assess_caps`], and it bites harder here. There a superseded row inflates a
-/// figure that merely asks the operator for a čl. 53 st. 1 ground; here it inflates
-/// a figure that **refuses the write**, so a shop correcting a minor's week
-/// downwards would be locked out of recording days that actually happened. The
-/// `dan != day` filter protects the assessed date only, never the other six.
+/// of [`assess_caps`]. There a superseded row inflates a figure that merely asks
+/// the operator for a čl. 53 st. 1 ground; here it inflates a figure that refuses
+/// the write, and the `dan != day` filter protects the assessed date only, never
+/// the other six.
 ///
 /// The weekly leg is deliberately not routed through `assess_caps`: čl. 87 states
 /// the prohibition itself, so it blocks, while every leg `assess_caps` reports is
 /// an overridable cap the operator walks through with a recorded ground. Putting
 /// the 35 h beside the 60 h would make it look like the second kind.
+///
+/// Its poruka names two figures and never confuses them. The block refuses the
+/// write, so nothing is recorded: stating the resulting total as „evidentirano“
+/// would tell the operator the register holds hours it does not hold and will not
+/// hold. What stands is `vec_evidentirano`; what this day would make it is
+/// `nedeljno_minuta`.
 ///
 /// Two limits of this function, both deliberate:
 ///
@@ -341,21 +402,41 @@ pub fn check_protection(
         // that carried it is still hours worked, and čl. 87's figure is the week's
         // total. Reading efektivno alone would let a refused-but-recorded minute
         // fall out of the very total it belongs in.
-        let nedeljno_minuta: i64 = week
+        //
+        // Two filters, each narrower than `assess_caps`'s and each for a reason
+        // this leg has and that one does not — see the doc comment above.
+        let ostali_dani_minuta: i64 = week
             .iter()
-            .filter(|d| d.dan != day && in_same_iso_week(&d.dan, day))
+            .filter(|d| {
+                d.dan != day
+                    && strictly_in_same_iso_week(&d.dan, day)
+                    && is_younger_than(p.datum_rodjenja.as_deref(), &d.dan, PUNOLETSTVO_GODINA)
+            })
             .map(|d| d.efektivno_minuta + d.prekovremeni_minuta)
-            .sum::<i64>()
-            + entry.efektivno_minuta
-            + entry.prekovremeni_minuta;
-        if nedeljno_minuta > MINOR_WEEKLY_CAP_MINUTES {
+            .sum();
+        // The stored version of the day being assessed — 0 for an original. The
+        // `dan != day` filter drops it from the total above precisely so that
+        // `entry` can replace it, and it is read back here to answer the only
+        // question that matters once a week is already over the cap: does this
+        // write make it worse?
+        let evidentirano_za_dan: i64 = week
+            .iter()
+            .find(|d| d.dan == day)
+            .map_or(0, |d| d.efektivno_minuta + d.prekovremeni_minuta);
+        let unos_minuta = entry.efektivno_minuta + entry.prekovremeni_minuta;
+        let vec_evidentirano = ostali_dani_minuta + evidentirano_za_dan;
+        let nedeljno_minuta = ostali_dani_minuta + unos_minuta;
+        if nedeljno_minuta > MINOR_WEEKLY_CAP_MINUTES && unos_minuta > evidentirano_za_dan {
             blocks.push(ProtectionBlock {
                 kind: ProtectionKind::MaloletanNedeljniLimit,
                 blocking: true,
                 poruka: format!(
                     "Zaposleni mlađi od 18 godina života ne može da radi duže od 35 časova \
-                     nedeljno (ZoR čl. 87). Za kalendarsku nedelju ovog dana evidentirano je \
-                     {} č {:02} min.",
+                     nedeljno (ZoR čl. 87). Za dane ove kalendarske nedelje u kojima je \
+                     zaposleni mlađi od 18 godina već je evidentirano {} č {:02} min, a sa \
+                     ovim danom bilo bi {} č {:02} min.",
+                    vec_evidentirano / 60,
+                    vec_evidentirano % 60,
                     nedeljno_minuta / 60,
                     nedeljno_minuta % 60
                 ),
@@ -770,6 +851,30 @@ mod tests {
                 .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit && b.blocking),
             "čl. 87 is a prohibition, not an overridable cap: {blocks:?}"
         );
+
+        // The refusal writes nothing, so the poruka must not state the refused
+        // hours as evidentirane. „Evidentirano“ is this application's word for
+        // the čl. 55 evidencija — the register holds 40 h and will keep holding
+        // 40 h, and an operator sent looking for 48 h finds hours that are not
+        // there. Both figures are named: what stands, and what this day would
+        // make it.
+        let poruka = &blocks
+            .iter()
+            .find(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit)
+            .expect("the weekly leg was raised above")
+            .poruka;
+        assert!(
+            poruka.contains("već je evidentirano 40 č 00 min"),
+            "the poruka must state the week the register actually holds: {poruka}"
+        );
+        assert!(
+            poruka.contains("bilo bi 48 č 00 min"),
+            "the poruka must state the refused total as prospective: {poruka}"
+        );
+        assert!(
+            !poruka.contains("evidentirano 48"),
+            "the refused entry is never recorded — the poruka claims it is: {poruka}"
+        );
     }
 
     /// Exactly 35 h is lawful — the cap is „do 35 časova“, so the breach is
@@ -887,6 +992,191 @@ mod tests {
                 .iter()
                 .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
             "čl. 87 reaches „zaposleni mlađi od 18 godina“ only: {blocks:?}"
+        );
+    }
+
+    /// A week already over 35 h must still be *describable*. The refusal is
+    /// aimed at the write that puts a minor over the cap, not at every write
+    /// touching a week that is already over it: a shop that fills in a birth
+    /// date after the fact (limit 2 of `check_protection` — v17 leaves the
+    /// column nullable and unbackfilled), restores a backup, or holds rows
+    /// written before this leg landed would otherwise be locked out of
+    /// correcting the week *downwards*, which is the one direction čl. 87
+    /// wants. Refusing it hides the čl. 274 exposure instead of surfacing it.
+    #[test]
+    fn a_correction_that_lowers_a_minors_week_is_not_refused() {
+        let p = protection_born("2009-09-01");
+        // 5 × 8 h = 40 h stored, already over the cap before anyone writes.
+        let week: Vec<DayHours> = [
+            "2026-08-03",
+            "2026-08-04",
+            "2026-08-05",
+            "2026-08-06",
+            "2026-08-07",
+        ]
+        .iter()
+        .map(|dan| DayHours {
+            dan: (*dan).to_string(),
+            efektivno_minuta: 480,
+            prekovremeni_minuta: 0,
+        })
+        .collect();
+
+        // Wednesday corrected 8 h → 4 h: the week moves 40 h → 36 h, strictly
+        // toward the cap, and is still above it.
+        let blocks = check_protection(&p, "2026-08-05", &day(240, 0), &week);
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "a correction that lowers the week must be recordable: {blocks:?}"
+        );
+    }
+
+    /// A day of zero worked hours breaches nothing at all. Refusing it because
+    /// five other rows are over the cap would refuse to record an absence on the
+    /// grounds of days the write does not touch.
+    #[test]
+    fn a_zero_hour_row_is_never_refused_by_the_weekly_leg() {
+        let p = protection_born("2009-09-01");
+        let week: Vec<DayHours> = [
+            "2026-08-03",
+            "2026-08-04",
+            "2026-08-05",
+            "2026-08-06",
+            "2026-08-07",
+        ]
+        .iter()
+        .map(|dan| DayHours {
+            dan: (*dan).to_string(),
+            efektivno_minuta: 480,
+            prekovremeni_minuta: 0,
+        })
+        .collect();
+
+        // Saturday, godišnji odmor: no worked minute of any kind.
+        let blocks = check_protection(&p, "2026-08-08", &day(0, 0), &week);
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "a day of zero worked hours adds nothing to the čl. 87 total: {blocks:?}"
+        );
+    }
+
+    /// The other side of the same rule: a write that *raises* an already-over
+    /// week is still refused. Without this the fix above would read as „once
+    /// over, anything goes“, which is the opposite of čl. 87.
+    #[test]
+    fn raising_a_day_in_an_already_over_week_is_still_refused() {
+        let p = protection_born("2009-09-01");
+        let week: Vec<DayHours> = [
+            "2026-08-03",
+            "2026-08-04",
+            "2026-08-05",
+            "2026-08-06",
+            "2026-08-07",
+        ]
+        .iter()
+        .map(|dan| DayHours {
+            dan: (*dan).to_string(),
+            efektivno_minuta: 480,
+            prekovremeni_minuta: 0,
+        })
+        .collect();
+
+        // Wednesday corrected 8 h → 10 h: 40 h → 42 h, away from the cap.
+        let blocks = check_protection(&p, "2026-08-05", &day(600, 0), &week);
+
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit && b.blocking),
+            "raising the hours of an over-cap week must still be refused: {blocks:?}"
+        );
+    }
+
+    /// A stored `dan` that is not a civil date must not be counted into a total
+    /// that refuses the write. v17's column CHECK is a GLOB shape test, so
+    /// `2026-08-32` satisfies the schema and a restored or hand-edited database
+    /// can carry one. `in_same_iso_week` keeps such a row on purpose for the
+    /// čl. 53 caps, where over-reporting only asks for a ground — here it would
+    /// lock a lawful day out of the register with no diagnostic at all.
+    #[test]
+    fn an_unreadable_stored_day_does_not_silently_refuse_a_minors_week() {
+        let p = protection_born("2009-09-01");
+        let week = vec![DayHours {
+            dan: "2026-08-32".to_string(),
+            efektivno_minuta: 2400,
+            prekovremeni_minuta: 0,
+        }];
+
+        let blocks = check_protection(&p, "2026-08-31", &day(480, 0), &week);
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "a row whose `dan` is not a date fed the čl. 87 total: {blocks:?}"
+        );
+    }
+
+    /// The two week predicates part company on exactly one input, and this is
+    /// the whole of the difference: `in_same_iso_week` keeps an unreadable day
+    /// because over-counting an overridable čl. 53 cap costs a prompt, and
+    /// `strictly_in_same_iso_week` drops it because over-counting a čl. 87 total
+    /// refuses a write. Asserted directly so the strict one cannot quietly
+    /// become a synonym of the other.
+    #[test]
+    fn the_two_week_predicates_differ_only_on_a_day_that_does_not_parse() {
+        assert!(in_same_iso_week("2026-08-31", "2026-09-01"));
+        assert!(strictly_in_same_iso_week("2026-08-31", "2026-09-01"));
+        assert!(!in_same_iso_week("2026-08-03", "2026-08-10"));
+        assert!(!strictly_in_same_iso_week("2026-08-03", "2026-08-10"));
+
+        // v17's column CHECK is a GLOB shape test, so this satisfies the schema.
+        assert!(
+            in_same_iso_week("2026-08-32", "2026-08-31"),
+            "the čl. 53 caps keep an unreadable day on purpose"
+        );
+        assert!(
+            !strictly_in_same_iso_week("2026-08-32", "2026-08-31"),
+            "a row nobody can read must not refuse a minor's lawful day"
+        );
+        assert!(
+            !strictly_in_same_iso_week("2026-08-31", "2026-08-32"),
+            "and neither must an unreadable day under assessment"
+        );
+    }
+
+    /// čl. 87 caps „zaposleni mlađi od 18 godina života“, so only the days on
+    /// which the employee actually was one belong in its weekly total. In the
+    /// week the eighteenth birthday falls, the adult days are ordinary čl. 53
+    /// hours and counting them here would refuse a lawful day on a construction
+    /// SW14-VERIFIED-RULES §4 req. 12 does not state.
+    #[test]
+    fn the_cl_87_weekly_total_counts_only_the_days_the_employee_was_under_eighteen() {
+        // Eighteen from Wednesday 2026-08-05 on.
+        let p = protection_born("2008-08-05");
+        let week: Vec<DayHours> = ["2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"]
+            .iter()
+            .map(|dan| DayHours {
+                dan: (*dan).to_string(),
+                efektivno_minuta: 480,
+                prekovremeni_minuta: 0,
+            })
+            .collect();
+
+        // Monday, entered last. Only Tuesday is a minor day: 8 h + 8 h = 16 h.
+        let blocks = check_protection(&p, "2026-08-03", &day(480, 0), &week);
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.kind == ProtectionKind::MaloletanNedeljniLimit),
+            "days after the eighteenth birthday fed the čl. 87 minor total: {blocks:?}"
         );
     }
 
