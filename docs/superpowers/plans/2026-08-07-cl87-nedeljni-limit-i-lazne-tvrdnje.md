@@ -317,10 +317,76 @@ The register understates in at least five rows. This is the **mirror** of the fa
 | 20 | „Gap: reset/restore delete trading data with no retention guard“ | `retention.rs` + `assert_never_purge_intact` inside `reset_trading_data` |
 | 24 | „Gap (**no price history at all**)“ | `price_history.rs` is a full module; `campaigns.rs` consumes `prethodna_cena` |
 
-- [ ] **Step 1:** For each row, grep the named symbol and record what you found. **If the code does not support restating the row, leave the row alone and say so** — an over-corrected register is the defect this task exists to remove.
-- [ ] **Step 2:** Restate only the verified rows, in the register's existing voice, each with a `Re-stated 07.08.2026` stamp like the rows above them. State what ships **and what within that row still does not** — several of these are partials, not completions.
-- [ ] **Step 3:** Add the cycle's section to `docs/PROGRESS.md`: what shipped, the six gates with exact measured counts, the residuals, and the note that req. 12's weekly leg is now closed while reqs. 10, 14, 15, 16, 21, 26, 27, 28 of SW-14 remain open.
-- [ ] **Step 4:** Run `cargo test docs_guard` — it embeds both documents and will catch a row that now claims more than the code delivers. **Step 5: Full gates, commit.**
+- [x] **Step 1:** For each row, grep the named symbol and record what you found. **If the code does not support restating the row, leave the row alone and say so** — an over-corrected register is the defect this task exists to remove.
+- [x] **Step 2:** Restate only the verified rows, in the register's existing voice, each with a `Re-stated 07.08.2026` stamp like the rows above them. State what ships **and what within that row still does not** — several of these are partials, not completions.
+- [x] **Step 3:** Add the cycle's section to `docs/PROGRESS.md`: what shipped, the six gates with exact measured counts, the residuals, and the note that req. 12's weekly leg is now closed while reqs. 10, 14, 15, 16, 21, 26, 27, 28 of SW-14 remain open.
+- [x] **Step 4:** Run `cargo test docs_guard` — it embeds both documents and will catch a row that now claims more than the code delivers. **Step 5: Full gates, commit.**
+
+**Shipped.** All five candidate rows were re-verified against the code before anything was written, and
+all five were re-stated — **none of them as a tick**. Each carries a `Re-stated 07.08.2026` stamp, what
+ships with the symbol that ships it, and what within the row still does not. Row **6**: `NonFiscalBanner`
+(`RegisterScreen.tsx:1289`) renders at `:922` **and** `:983` — above the stavke and below the ESIR nudge —
+plus `ReceiptsScreen.tsx:632`, pinned by `RegisterScreen.test.tsx:471`/`:486` and
+`ReceiptsScreen.test.tsx:263`; still open are SW-1's export limb, which has **no subject in this build**
+(nothing the crate writes or prints itemizes a sale), and the ≥2× ratio, which is asserted by presence and
+never measured. Row **17**: `kep.rs`, thirteen commands in `lib.rs:240–252`, `navigation.ts:55`; still open
+is the per-prodajno-mesto book — `kep_entries` (v12) is partitioned by `book_year` alone. Row **18**:
+`list_ledger` / `render_book_html`, `post_receipt_zaduzenje` at retail-with-PDV, the **fourteen** elements
+in `derive_kalkulacija`, the exhaustive `kep_storno::posting_for`, `kep_status`'s T+1 list, and
+`ensure_year_open` on all seven production insert paths (`kep.rs:84`/`:241`/`:358–359`,
+`kep_kalkulacija.rs:110`, `kep_storno.rs:210`/`:270`); still open is that the čl. 18 lock is a domain gate
+rather than a storage-layer trigger, and that nothing sweeps the book. Row **20**: `reset_trading_data`
+(`backup.rs:483`) forces a snapshot at `:493`, takes `never_purge_row_counts` at `:510`, calls
+`assert_never_purge_intact` at `:590` and tombstones with `ROK_CUVANJA_PRAVNI_OSNOV` (`:39`); still open
+are the unfenced restore (by design), the non-existent prune path, the general `retain_until` engine, and
+the second location. Row **24**: `price_history.rs` with NULL-as-offering-gap and the typed
+`IncomputableReason`, `campaigns.rs`'s closed four-type enum and `snapshot_anchors`, and
+`campaign_evidence.rs`'s three renderers wired at `lib.rs:220–223`; still open are the čl. 67 st. 1 tač. 8
+penalty copy (absent from `legal.rs`) and a declared `RecordClass` for the offered-price log. The §2
+preamble gained a dated revision note recording the sweep and why the understatement direction is the more
+dangerous half. `docs/PROGRESS.md` gained the cycle's section: Tasks 1–3, the six gates with measured
+counts, the SW-14 requirement-by-requirement status, the night legs as a decision, and seven residuals.
+
+**Deviations, four, all recorded rather than hidden.**
+
+1. **The brief listed SW-14 req. 27 as open and it is not — it closed 02.08.2026.** `cl47.rs` ships the
+   čl. 47 evidencija radnji obrade as a generated artefact, driving the st. 1 t. 6 rok per vrsta podataka
+   out of `retention_policies`; register row 9 has said *„Re-stated 02.08.2026 — now generated“* since
+   then. Writing it into `PROGRESS.md` as open would have been the exact defect this task exists to
+   remove, so the section states it as **closed** and says in terms that it appears there only because the
+   brief carried it in as open. Of the eight requirements named, **10, 14, 15, 16 and 28 are wholly open**
+   (each verified by grep: `kolektivni_ugovor` has zero occurrences, no čl. 62 st. 2 threshold is computed
+   over `nocni_minuta`, čl. 64/66/67 are cited nowhere in `worktime.rs`, there is no praznik calendar or
+   čl. 108 exclusion set, and no masking exists), and **21 and 26 are partials** — req. 21's CSV ships and
+   its printable monthly sheet and XLSX do not; req. 26's notice was re-issued and the activation gate on
+   a recorded acknowledgement does not exist.
+2. **Register rows 16 and 21 were read in the same pass and deliberately left alone**, per Step 1's own
+   instruction. Row 21's residual is already current. Row 16 (*„Gap (no goods-receipt documents)“*) is the
+   one this pass could **not** settle: `kep_kalkulacija.rs` does generate a goods-receipt document, but ZoT
+   čl. 29 st. 1 is a duty to *possess the supplier's isprava* and `kalkulacije` (v13) carries no adresa, no
+   matični broj/BPG and no supplier document broj/datum — so the denial understates the code while a tick
+   would overstate it, and re-stating it needs a field-by-field čl. 29 read this task did not perform. The
+   §2 revision note records that decision and its reason rather than leaving the row silently skipped.
+3. **The plan's Global Constraints say `all_notices` stays 9; it is in fact 13** (`legal.rs:502` —
+   SW-12 bumped it to 10 and SW-16 to 11, and `reklamacija_breach` counts twice). The constraint's *intent*
+   was satisfied exactly: **`legal.rs` is not in this task's diff at all**, no fine figure or currency
+   amount was added anywhere, and no ZEOR figure appears. The stale figure is recorded here so the next
+   plan does not copy it forward.
+4. **Two mutations were run against the finished documents to prove the guards are not passing vacuously**,
+   and both were reverted immediately with the diff checked back to zero. Planting *„is not enforced“*
+   beside „35 h/week“ in the new `PROGRESS.md` section failed
+   `no_document_says_the_cl_87_weekly_leg_is_still_unbuilt` at `docs/PROGRESS.md:1294`; replacing row 20's
+   *„the `pre_restore` safety copy is the protection on that path“* with an immunity claim failed
+   `no_trajno_claim_promises_immunity_from_restore_or_backup_pruning` at
+   `docs/SERBIAN-LAW-COMPLIANCE.md:77`. The second is the more useful of the two: it proves the restated
+   row sits **inside** a guarded class rather than beside one, and that its caveats are load-bearing.
+
+**Gates measured at this commit** (`DEVELOPER_DIR=/Library/Developer/CommandLineTools` prefixed, per Task
+1's environment note): `bun run test` **545 passed / 35 files** (was 539), `bun run build` clean bar the
+pre-existing chunk-size advisory, `cargo test` **1007 passed / 0 failed** (was 988), `docs_guard` alone
+**21 passed**, clippy clean, `cargo fmt --check` clean, `git diff --check` clean. Net **+19 cargo / +6
+bun** over `c93e28e` for the whole cycle. **This task added no test and changed no Rust** — it is a
+documentation task, and inventing a guard to look busy is what deviation 4 was run instead of.
 
 ---
 

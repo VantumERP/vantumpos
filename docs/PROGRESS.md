@@ -1224,6 +1224,145 @@ scheme and are recorded there: `cenovnik`'s `with_publish_folder` (no database i
 `commands/backup.rs`'s `test_backup_dir`, whose folder names are fixed rather than unique and which
 leaves ~20 directories in `$TMPDIR` per run. Neither collides today.
 
+### SW-14 req. 12's weekly leg, and three false claims withdrawn (2026-08-07)
+
+One protection built and three statements withdrawn, as a four-task TDD plan
+(`docs/superpowers/plans/2026-08-07-cl87-nedeljni-limit-i-lazne-tvrdnje.md`) against
+`docs/SW14-VERIFIED-RULES.md` §4 req. 12 and the §3 W4b row, and `docs/SW11-SW15-VERIFIED-RULES.md`
+§3 req. 39 / §4 item 8 / §2 Q4. Baseline `c93e28e` — cargo **988**, bun **539** / 35 files, migration
+**v22**. **No migration was added; the head stays v22**, because every column the cycle needed already
+existed.
+
+**The cycle's own subject, stated first.** Three of the four tasks are about a defect this project has
+now shipped in both directions: a document, a generated artefact or an operator string that **denies**
+behaviour the code has is the same defect as one that promises behaviour the code lacks, and the denial
+is the more dangerous half. It withdraws the reader's only pointer to a control the shop is actually
+running, and on 07.08.2026 it did exactly that — a survey agent reading this file and the register
+ranked two long-fixed defects as pilot blockers. The čl. 87 weekly leg in Task 1 is the one thing here
+that is new behaviour; Tasks 2–4 are proof, withdrawal and re-statement.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — the čl. 87 weekly leg | `worktime::MINOR_WEEKLY_CAP_MINUTES` (35 × 60) beside `MINOR_DAILY_CAP_MINUTES`, `ProtectionKind::MaloletanNedeljniLimit` beside `MaloletanDnevniLimit`, and the leg itself inside `check_protection`'s existing `is_younger_than(…)` branch — **blocking, never overridable**, because čl. 87 states the prohibition itself while every leg `assess_caps` reports is a čl. 53 cap the operator walks through with a recorded ground. Signature widened to `check_protection(p, day, entry, week)`; the sole production caller is `commands/worktime.rs`, where `load_week` was hoisted so both gates read one week inside one transaction, and 26 test call sites pass `&[]`. **Three filters, each narrower than `assess_caps`'s and each for a reason this leg has and that one does not:** the stored row for `day` itself (a correction that *lowers* the day is not a breach), rows whose `dan` is not a civil date (via a new private `strictly_in_same_iso_week` — v17's GLOB CHECK lets `2026-08-32` in, and `in_same_iso_week`'s fail-open rationale is written for a cap that asks for a ground, not for a refusal), and days on which the employee was already 18. **The refusal fires only on the write that *raises* the week** (`unos_minuta > evidentirano_za_dan`): `datum_rodjenja` is nullable and unbackfilled, so the guard switches on over rows already recorded, and refusing every correction would leave the shop with „leave the 40 h standing“ or „record 3 h for a day the employee worked 8“ — hiding the čl. 274 exposure instead of surfacing it. The poruka names **two** figures and confuses neither, since the block records nothing: „već je evidentirano {} č {:02} min … a sa ovim danom bilo bi {} č {:02} min“ | `2f0e76b`, `6cd568e` |
+| 2 — it reaches the write path and the screen | **A regression test only, in both halves, and the note says so rather than inventing a change.** `write_entry` already refused on *any* blocking `ProtectionBlock` and that `find(\|block\| block.blocking)` predates the cycle; `WorkTimeModule.tsx` maps every finding off `blocking` and `poruka` with **no switch over `kind`**. What landed is one test per side of the wire — `the_cl_87_weekly_leg_refuses_the_write_and_leaves_no_row_behind` (refused, poruka names „35 časova nedeljno“, „čl. 87“ and both figures, a `cap_override_razlog` buys nothing, and `list_month` still holds **five** rows) and the first test the `code === "protection_block"` branch ever had. **Red was proven by mutation, because the feature was already wired:** flipping `blocking` to `false` saved the sixth day with the finding computed and handed back on the success path, which is precisely the failure mode the task exists to bar. Two defects surfaced and were closed: a čl. 87 refusal **outlived the attempt that raised it** in `WorkTimeModule`'s catch (a minor's refused Saturday still shouting „Unos nije dozvoljen“ over the next day's „Dan nije evidentiran“), and both legs are **blind to `casovi_cekanja_i_zastoja_minuta`**, which the same write books into the ZEOR čl. 24 tač. 1 b) total — the arithmetic was deliberately **not** changed, and what shipped is the disclosure, in `check_protection`'s doc comment and in the poruka itself | `bf87ff2`, `0dd6065` |
+| 3 — the two false claims on Podešavanja | The reset dialog's archive sentence is **gone, not hedged** — ZAG čl. 16 st. 2 confines prior written archive approval to the public sector and the pilot is a preduzetnik — and the retention citation moved off **ZPDV čl. 47** onto the one `backup.rs` already had right. Neither is a literal on either surface any more: `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` holds *„ZoRač čl. 28 st. 4; ZPPPA čl. 114ž“*, the tombstone formats it, and `docs_guard` requires every `;`-separated član of that constant to appear in the dialog's own `<p>`, so correcting one surface and leaving the other fails the crate. Four further defects were closed in review: the floor was **printed as a ceiling** („do 10 godina“ — SW11-SW15 §1 row 7 rates that framing HIGH beside the miscitation), req. 39's **second limb had never shipped** and three artefacts said it had (the neutral ZAG čl. 9 st. 1 custody note is now a paragraph of its own), the archive sweep was **blind to capitalisation, to verb forms and to „saglasnost“** and judged a 267-line window, and the compliance memo plus four `PROGRESS.md` residual blocks still described the withdrawn dialog | `41dc298`, `2c415b8` |
+| 4 — the register said „Gap“ for things that shipped | This section, plus **five re-stated rows** in `docs/SERBIAN-LAW-COMPLIANCE.md` and the §2 revision note that records the sweep. Each of rows 6, 17, 18, 20 and 24 was re-verified against the named symbol before it was touched, and **not one was flipped to a tick** — every one is a partial and each now states what within it is still not built. Rows 16 and 21 were read in the same pass and left alone, which is the other half of the instruction: an over-corrected register is this defect pointed the other way | this commit |
+
+**What the five rows now say, and what each still owes.** Row **6** — the „OVO NIJE FISKALNI RAČUN“
+banner renders twice in the post-sale dialog and once on the receipt detail panel, with tests; SW-1's
+*„every export that itemizes a sale“* limb has **no subject in this build**, and the ≥2× ratio is
+asserted by presence rather than measured. Row **17** — the KEP module, thirteen commands and a shell
+module of its own; **one book, not one per prodajno mesto**, `kep_entries` being partitioned by
+`book_year` alone. Row **18** — the five-column obrazac, the retail-with-PDV zaduženje, the **fourteen**
+kalkulacija elements, the exhaustive `posting_for` cause→column map, the T+1 warning and the čl. 18
+lock on all seven production insert paths; that lock is a **domain gate each writer calls, not a
+storage-layer trigger**, and nothing sweeps the book. Row **20** — the go-live reset forces a snapshot,
+fences its transaction with `assert_never_purge_intact` and writes the tombstone; the **restore is
+deliberately unfenced**, no backup-prune path exists at all, there is still no general upward-only
+`retain_until` engine over trading data, and čl. 28's second location is operator configuration the app
+never verifies. Row **24** — the append-only offered-price log with explicit offering gaps, the closed
+four-type campaign enum with frozen anchors, and all three evidence/label/correction exports; the **čl.
+67 st. 1 tač. 8 penalty copy does not exist in `legal.rs`**, and the 5-year retention is discharged by
+nothing deleting the rows rather than by a declared `RecordClass`.
+
+**Verification gates — all six run from the repo root, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **545 passed** / 0 failed, 35 files (was 539 / 35) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | **1007 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 988) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+19 cargo / +6 bun** over `c93e28e`, in `worktime.rs`, `commands/worktime.rs`, `docs_guard.rs`,
+`commands/backup.rs`, `WorkTimeModule.test.tsx`, `SettingsScreen.test.tsx` and `UserDialog.test.tsx`.
+The cargo figure is net of **two deletions**: `worktime::tests::the_cl_87_weekly_leg_is_not_checked` and
+`docs_guard::no_document_claims_the_cl_87_weekly_leg_is_enforced`, both of which existed to pin the gap
+this cycle closed and whose own doc comments instructed their removal at exactly this moment. The
+second was **inverted rather than dropped** —
+`docs_guard::no_document_says_the_cl_87_weekly_leg_is_still_unbuilt` now fails a document that says the
+leg is unbuilt, sweeps ten markers including the register's own idiom *„Gap“*, judges the **clause**
+rather than the line, and asserts per document that the leg is still *named*. Latest migration: **v22**,
+unchanged.
+
+**Where SW-14 stands after this cycle, requirement by requirement, because a partial recorded as a tick
+is the defect above pointed the other way.**
+
+- **Req. 12 — CLOSED 07.08.2026.** Both čl. 87 legs are now enforced: 8 h/day since 01.08.2026 and
+  **35 h/week from this cycle**, the latter refusing the write rather than asking for a ground. The čl.
+  88 st. 1 prekovremeni and preraspodela bans and the čl. 90 / čl. 91 consent guards shipped with
+  SW-14. **One limb of req. 12 is still open and is named below with req. 14:** čl. 88 st. 2's night
+  prohibition.
+- **Req. 27 — CLOSED 02.08.2026, and this file says so rather than repeating a brief that called it
+  open.** The čl. 47 evidencija radnji obrade ships as a generated artefact: `cl47.rs` writes
+  `processing_activities` at launch and on demand, driving the st. 1 t. 6 rok **per vrsta podataka**
+  out of the shared `retention_policies` rows. Nothing in this cycle touched it; it is listed here
+  because it was carried into the cycle's brief as an open item and is not one.
+- **Reqs. 10, 14, 15, 16 and 28 — wholly open.** Req. **10**: the 9-month reference period behind an
+  explicit `kolektivni_ugovor_postoji` flag, and the čl. 61 mid-period choice — the identifier has zero
+  occurrences in the crate. Req. **14**: the čl. 62 st. 2 night threshold (≥ 3 h/day or ⅓ of the week)
+  as an advisory flag; `nocni_minuta` is stored and correctly tagged
+  *„izračunato radi provere usklađenosti“*, and no threshold is computed over it anywhere. Req. **15**:
+  the čl. 64 / 66 / 67 rest-period warnings, with the preraspodela variants — none of the three articles
+  is cited in `worktime.rs`. Req. **16**: the praznik calendar and the čl. 108 st. 1 tač. 1 exclusion
+  set; `rad_na_praznik_minuta` is an operator-entered advisory bucket and `non_working_days` is the
+  `cash_deposit` working-day table, which is a different question. Req. **28**: remote-support masking
+  of the absence-reason column with the unmask logged — stated as open here since 02.08.2026 and still
+  open.
+- **Reqs. 21 and 26 — partials, and recorded as partials.** Req. **21**'s CSV half ships:
+  `worktime_export_csv` writes a per-employee month into `exports/` with the columns mapped 1:1 onto the
+  ZEOR čl. 24 tač. 1 buckets, offline from the till and never labelled a propisani obrazac. What does
+  not ship is the *„plain per-employee monthly sheet“* — the worktime module has no print path at all —
+  and XLSX. Req. **26**'s notice half ships: `docs/compliance/obavestenje-zaposlenima.md` was re-issued
+  01.08.2026 for the working-time record and again 02.08.2026. What does not ship is the **gate**: the
+  module does not refuse to activate for an employee until an acknowledgement dated on or after the
+  feature's introduction is recorded, and no column stores one.
+
+**This cycle deliberately did not build the night legs, and that is a decision rather than an
+oversight.** čl. 88 st. 2 (the minor's night prohibition and its exceptions) and the čl. 62 st. 2
+threshold stay unenforced, and with them the night limbs of čl. 90 and čl. 91 — all four for the same
+structural reason, stated in `check_protection`'s own doc comment: night hours are a čl. 62 computation
+over clock times, `DayHours` carries `efektivno_minuta` and `prekovremeni_minuta` and no night bucket,
+and building the leg means deciding what a night hour is before there is a verified rule that says.
+Both documents state the night leg as unbuilt in a clause of its own, which is what lets the widened
+`docs_guard` sweep pass on a denial that is **true**.
+
+**Residuals carried out of this cycle.**
+
+- **Whether čl. 87's 35 časova counts časovi čekanja, zastoja i prekida u radu and časovi obustave rada
+  zbog štrajka is UNRESOLVED, and the leg takes the narrower reading until it is answered.**
+  `derive_totals` books all three into the ZEOR čl. 24 tač. 1 b) `ukupno_ostvareni_minuta` while both
+  čl. 87 legs and `assess_caps` sum efektivno + prekovremeni, so a minor's week can stand in the
+  register at 45 č ostvarenih and reach this guard as 35 č. SW14-VERIFIED-RULES §4 req. 12 and the §3
+  W4b row say only *„≤ 35 h/week and ≤ 8 h/day“* and settle nothing, so deciding it here would apply an
+  invented construction as a **hard refusal**. It needs the same treatment as a §6 W-item. The
+  divergence is disclosed in the poruka and pinned end to end by
+  `the_cl_87_weekly_total_leaves_out_the_cekanje_the_same_write_books_as_ostvareni`.
+- **An unreadable stored `dan` is dropped silently from a minor's weekly total** and nothing in the app
+  reports it. A non-blocking `NeispravanDatumUProfilu` was considered and rejected: that variant's
+  poruka tells the operator to fix the **birth date in the profile**, and pointing it at a stored `dan`
+  would make an operator string false.
+- **The mock adapter implements no čl. 87–91 guard at all.** `createMockServices().worktime.saveEntry`
+  returns `protections: []` unconditionally. Pre-existing, and it *under*-states the backend rather than
+  over-stating it, so nothing there asserts behaviour the code lacks.
+- **Register row 16 could not be settled and was left alone.** `kep_kalkulacija.rs` generates a
+  goods-receipt document, but ZoT čl. 29 st. 1 is a duty to *possess the supplier's isprava* and the
+  `kalkulacije` table (v13) carries no adresa, no matični broj/BPG and no supplier document broj/datum.
+  *„Gap (no goods-receipt documents)“* understates the code and a tick would overstate it; re-stating it
+  needs the field-by-field čl. 29 read this pass did not perform.
+- **Req. 39's pravno-lice limb stays open**, unchanged from Task 3's review: the real archive duties —
+  lista kategorija with the archive's saglasnost, arhivska knjiga, the 30 April prepis — are
+  profile-aware copy branching on `pravna_forma`, and both guards were measured to **permit** them.
+- **Four `docs/compliance/` templates are still unguarded** — `checklist-onboarding-pilota.md`,
+  `pitanje-purs.md`, `runbook-povreda-podataka.md`, `ugovor-o-obradi-nacrt.md`. One thing seen and
+  deliberately not changed: `checklist-onboarding-pilota.md:19` reads *„(PDV obveznik: retencioni prag
+  10 godina…)“*, which reads as though PDV status gates the floor — SW11-SW15 §1 row 6 rates that a
+  HIGH defect, and register row 21 says in terms that PDV status does **not** gate it.
+- **The čl. 48 audit trail is still lopsided** and reklamacije reads are still not access-logged. Both
+  carry forward from earlier cycles untouched.
+
 ---
 
 ## Executive Summary
