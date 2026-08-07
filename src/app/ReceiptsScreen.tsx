@@ -628,9 +628,19 @@ interface ReceiptDetailPanelProps {
 function ReceiptDetailPanel({ detail, onVoid, onReturn }: ReceiptDetailPanelProps) {
   return (
     <div className="flex flex-col gap-4 rounded-md border border-border p-4">
+      {/*
+        Legal: PVFR cl. 2 st. 8-10 - the banner must be at least twice the
+        line-item font, and that is arithmetic rather than a look. The stavke
+        below are a <Table>, whose root is text-xs (0.75rem), so text-2xl
+        (1.5rem) is exactly 2x. This was text-xl until 07.08.2026, which is
+        1.6x and measurably short;
+        docs_guard::the_non_fiscal_banner_is_at_least_twice_the_line_item_font
+        computes the ratio from these class names, so lowering either one fails
+        the crate rather than quietly breaking the Pravilnik.
+      */}
       <div
         role="note"
-        className="rounded-md border-2 border-destructive bg-destructive/10 px-3 py-2 text-center text-xl font-bold uppercase tracking-wide text-destructive"
+        className="rounded-md border-2 border-destructive bg-destructive/10 px-3 py-2 text-center text-2xl font-bold uppercase tracking-wide text-destructive"
       >
         OVO NIJE FISKALNI RAČUN
       </div>

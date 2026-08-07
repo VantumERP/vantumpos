@@ -1246,12 +1246,17 @@ that is new behaviour; Tasks 2–4 are proof, withdrawal and re-statement.
 | 1 — the čl. 87 weekly leg | `worktime::MINOR_WEEKLY_CAP_MINUTES` (35 × 60) beside `MINOR_DAILY_CAP_MINUTES`, `ProtectionKind::MaloletanNedeljniLimit` beside `MaloletanDnevniLimit`, and the leg itself inside `check_protection`'s existing `is_younger_than(…)` branch — **blocking, never overridable**, because čl. 87 states the prohibition itself while every leg `assess_caps` reports is a čl. 53 cap the operator walks through with a recorded ground. Signature widened to `check_protection(p, day, entry, week)`; the sole production caller is `commands/worktime.rs`, where `load_week` was hoisted so both gates read one week inside one transaction, and 26 test call sites pass `&[]`. **Three filters, each narrower than `assess_caps`'s and each for a reason this leg has and that one does not:** the stored row for `day` itself (a correction that *lowers* the day is not a breach), rows whose `dan` is not a civil date (via a new private `strictly_in_same_iso_week` — v17's GLOB CHECK lets `2026-08-32` in, and `in_same_iso_week`'s fail-open rationale is written for a cap that asks for a ground, not for a refusal), and days on which the employee was already 18. **The refusal fires only on the write that *raises* the week** (`unos_minuta > evidentirano_za_dan`): `datum_rodjenja` is nullable and unbackfilled, so the guard switches on over rows already recorded, and refusing every correction would leave the shop with „leave the 40 h standing“ or „record 3 h for a day the employee worked 8“ — hiding the čl. 274 exposure instead of surfacing it. The poruka names **two** figures and confuses neither, since the block records nothing: „već je evidentirano {} č {:02} min … a sa ovim danom bilo bi {} č {:02} min“ | `2f0e76b`, `6cd568e` |
 | 2 — it reaches the write path and the screen | **A regression test only, in both halves, and the note says so rather than inventing a change.** `write_entry` already refused on *any* blocking `ProtectionBlock` and that `find(\|block\| block.blocking)` predates the cycle; `WorkTimeModule.tsx` maps every finding off `blocking` and `poruka` with **no switch over `kind`**. What landed is one test per side of the wire — `the_cl_87_weekly_leg_refuses_the_write_and_leaves_no_row_behind` (refused, poruka names „35 časova nedeljno“, „čl. 87“ and both figures, a `cap_override_razlog` buys nothing, and `list_month` still holds **five** rows) and the first test the `code === "protection_block"` branch ever had. **Red was proven by mutation, because the feature was already wired:** flipping `blocking` to `false` saved the sixth day with the finding computed and handed back on the success path, which is precisely the failure mode the task exists to bar. Two defects surfaced and were closed: a čl. 87 refusal **outlived the attempt that raised it** in `WorkTimeModule`'s catch (a minor's refused Saturday still shouting „Unos nije dozvoljen“ over the next day's „Dan nije evidentiran“), and both legs are **blind to `casovi_cekanja_i_zastoja_minuta`**, which the same write books into the ZEOR čl. 24 tač. 1 b) total — the arithmetic was deliberately **not** changed, and what shipped is the disclosure, in `check_protection`'s doc comment and in the poruka itself | `bf87ff2`, `0dd6065` |
 | 3 — the two false claims on Podešavanja | The reset dialog's archive sentence is **gone, not hedged** — ZAG čl. 16 st. 2 confines prior written archive approval to the public sector and the pilot is a preduzetnik — and the retention citation moved off **ZPDV čl. 47** onto the one `backup.rs` already had right. Neither is a literal on either surface any more: `commands::backup::ROK_CUVANJA_PRAVNI_OSNOV` holds *„ZoRač čl. 28 st. 4; ZPPPA čl. 114ž“*, the tombstone formats it, and `docs_guard` requires every `;`-separated član of that constant to appear in the dialog's own `<p>`, so correcting one surface and leaving the other fails the crate. Four further defects were closed in review: the floor was **printed as a ceiling** („do 10 godina“ — SW11-SW15 §1 row 7 rates that framing HIGH beside the miscitation), req. 39's **second limb had never shipped** and three artefacts said it had (the neutral ZAG čl. 9 st. 1 custody note is now a paragraph of its own), the archive sweep was **blind to capitalisation, to verb forms and to „saglasnost“** and judged a 267-line window, and the compliance memo plus four `PROGRESS.md` residual blocks still described the withdrawn dialog | `41dc298`, `2c415b8` |
-| 4 — the register said „Gap“ for things that shipped | This section, plus **five re-stated rows** in `docs/SERBIAN-LAW-COMPLIANCE.md` and the §2 revision note that records the sweep. Each of rows 6, 17, 18, 20 and 24 was re-verified against the named symbol before it was touched, and **not one was flipped to a tick** — every one is a partial and each now states what within it is still not built. Rows 16 and 21 were read in the same pass and left alone, which is the other half of the instruction: an over-corrected register is this defect pointed the other way | this commit |
+| 4 — the register said „Gap“ for things that shipped | This section, plus **six re-stated rows** in `docs/SERBIAN-LAW-COMPLIANCE.md`, five stamped §3 build rows and the §2 revision note that records the sweep. Each of rows 6, 16, 17, 18, 20 and 24 was re-verified against the named symbol before it was touched, and **exactly one limb anywhere in the sweep was flipped to a tick** — row 6's ≥2× ratio, and only after it was computed from the class names and the receipt-detail banner was raised to meet it. Everything else is a partial and each cell states what within it is still not built. Row 21 was read in the same pass and left alone, which is the other half of the instruction: an over-corrected register is this defect pointed the other way. **Row 16 was left alone in the first pass and re-stated in review** — the commit had already written the correction into the §2 note and left the false cell standing in the column an inspector reads | this commit |
 
-**What the five rows now say, and what each still owes.** Row **6** — the „OVO NIJE FISKALNI RAČUN“
-banner renders twice in the post-sale dialog and once on the receipt detail panel, with tests; SW-1's
-*„every export that itemizes a sale“* limb has **no subject in this build**, and the ≥2× ratio is
-asserted by presence rather than measured. Row **17** — the KEP module, thirteen commands and a shell
+**What the six rows now say, and what each still owes.** Row **6** — the „OVO NIJE FISKALNI RAČUN“
+banner renders twice in the post-sale dialog and once on the receipt detail panel, with tests; the
+**≥2× ratio is now computed rather than assumed** (`text-2xl` over the `text-xs` the stavke inherit,
+2.0× on both surfaces, after the receipt-detail banner was raised from `text-xl` — 1.6× — in review),
+and SW-1's *„every export that itemizes a sale“* limb has **no subject in this build**. Row **16** —
+`kep_kalkulacija.rs::create_kalkulacija` does write a goods-receipt document inside the goods-receipt
+transaction, so *„Gap (no goods-receipt documents)“* understated the code; what the shop does not hold
+is the **supplier's** isprava, because `kalkulacije` (v13) carries no adresa, no matični broj/BPG and no
+supplier document broj/datum, and the field-by-field čl. 29 read is still owed. Row **17** — the KEP module, thirteen commands and a shell
 module of its own; **one book, not one per prodajno mesto**, `kep_entries` being partitioned by
 `book_year` alone. Row **18** — the five-column obrazac, the retail-with-PDV zaduženje, the **fourteen**
 kalkulacija elements, the exhaustive `posting_for` cause→column map, the T+1 warning and the čl. 18
@@ -1262,22 +1267,27 @@ deliberately unfenced**, no backup-prune path exists at all, there is still no g
 `retain_until` engine over trading data, and čl. 28's second location is operator configuration the app
 never verifies. Row **24** — the append-only offered-price log with explicit offering gaps, the closed
 four-type campaign enum with frozen anchors, and all three evidence/label/correction exports; the **čl.
-67 st. 1 tač. 8 penalty copy does not exist in `legal.rs`**, and the 5-year retention is discharged by
-nothing deleting the rows rather than by a declared `RecordClass`.
+67 st. 1 tač. 8 penalty copy does not exist in `legal.rs`**, the 5-year retention is discharged by
+nothing deleting the rows rather than by a declared `RecordClass`, and the log is keyed on `product_id`
+alone — `price_history` (v9) has **no prodajno-mesto column**, though §3's SW-6 line specifies
+`(sku, prodajno_mesto)`, so a second outlet would share one offered-price history and one prethodna
+cena. That is the single-book limitation row 17 records for the KEP, and it was missed in the first
+pass.
 
 **Verification gates — all six run from the repo root, every command exited `0`:**
 
 | Gate | Result | Exit |
 |---|---|---|
-| `bun run test` | **545 passed** / 0 failed, 35 files (was 539 / 35) | `0` |
+| `bun run test` | **546 passed** / 0 failed, 35 files (was 539 / 35) | `0` |
 | `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | **1007 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 988) | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | **1012 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 988) | `0` |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
 | `git diff --check` | clean, no output | `0` |
 
-Net **+19 cargo / +6 bun** over `c93e28e`, in `worktime.rs`, `commands/worktime.rs`, `docs_guard.rs`,
-`commands/backup.rs`, `WorkTimeModule.test.tsx`, `SettingsScreen.test.tsx` and `UserDialog.test.tsx`.
+Net **+24 cargo / +7 bun** over `c93e28e`, in `worktime.rs`, `commands/worktime.rs`, `docs_guard.rs`,
+`legal.rs`, `commands/backup.rs`, `WorkTimeModule.test.tsx`, `SettingsScreen.test.tsx`,
+`UserDialog.test.tsx` and `ReceiptsScreen.test.tsx`.
 The cargo figure is net of **two deletions**: `worktime::tests::the_cl_87_weekly_leg_is_not_checked` and
 `docs_guard::no_document_claims_the_cl_87_weekly_leg_is_enforced`, both of which existed to pin the gap
 this cycle closed and whose own doc comments instructed their removal at exactly this moment. The
@@ -1290,11 +1300,16 @@ unchanged.
 **Where SW-14 stands after this cycle, requirement by requirement, because a partial recorded as a tick
 is the defect above pointed the other way.**
 
-- **Req. 12 — CLOSED 07.08.2026.** Both čl. 87 legs are now enforced: 8 h/day since 01.08.2026 and
-  **35 h/week from this cycle**, the latter refusing the write rather than asking for a ground. The čl.
-  88 st. 1 prekovremeni and preraspodela bans and the čl. 90 / čl. 91 consent guards shipped with
-  SW-14. **One limb of req. 12 is still open and is named below with req. 14:** čl. 88 st. 2's night
-  prohibition.
+- **Req. 12 — PARTIAL. The čl. 87 weekly leg closed 07.08.2026**, and the requirement did not close
+  with it. Both čl. 87 legs are now enforced: 8 h/day since 01.08.2026 and **35 h/week from this
+  cycle**, the latter refusing the write rather than asking for a ground. The čl. 88 st. 1
+  prekovremeni and preraspodela bans and the čl. 90 / čl. 91 consent guards shipped with SW-14.
+  **One limb of the four is still open:** čl. 88 st. 2's night prohibition, which is stated as a
+  decision in the night-legs paragraph below and not with req. 14. Recorded as a partial for the
+  reason this section opens with, and pinned by
+  `docs_guard::no_document_records_sw_14_req_12_as_closed_while_the_night_leg_is_unbuilt`, which
+  fails any block of either document that records this requirement as closed while no
+  `ProtectionKind` decides a minor's night hours.
 - **Req. 27 — CLOSED 02.08.2026, and this file says so rather than repeating a brief that called it
   open.** The čl. 47 evidencija radnji obrade ships as a generated artefact: `cl47.rs` writes
   `processing_activities` at launch and on demand, driving the st. 1 t. 6 rok **per vrsta podataka**
@@ -1347,11 +1362,13 @@ Both documents state the night leg as unbuilt in a clause of its own, which is w
 - **The mock adapter implements no čl. 87–91 guard at all.** `createMockServices().worktime.saveEntry`
   returns `protections: []` unconditionally. Pre-existing, and it *under*-states the backend rather than
   over-stating it, so nothing there asserts behaviour the code lacks.
-- **Register row 16 could not be settled and was left alone.** `kep_kalkulacija.rs` generates a
-  goods-receipt document, but ZoT čl. 29 st. 1 is a duty to *possess the supplier's isprava* and the
-  `kalkulacije` table (v13) carries no adresa, no matični broj/BPG and no supplier document broj/datum.
-  *„Gap (no goods-receipt documents)“* understates the code and a tick would overstate it; re-stating it
-  needs the field-by-field čl. 29 read this pass did not perform.
+- **Register row 16 was re-stated in review, and the čl. 29 field-by-field read is still owed.**
+  `kep_kalkulacija.rs` generates a goods-receipt document, but ZoT čl. 29 st. 1 is a duty to *possess
+  the supplier's isprava* and the `kalkulacije` table (v13) carries no adresa, no matični broj/BPG and
+  no supplier document broj/datum. The first pass established that *„Gap (no goods-receipt documents)“*
+  was false and then left the false cell in the column an inspector reads, parking the correction in a
+  preamble note — which is the same defect as the staleness the sweep exists to remove. The cell now
+  states both halves; what it does not do is resolve the čl. 29 read.
 - **Req. 39's pravno-lice limb stays open**, unchanged from Task 3's review: the real archive duties —
   lista kategorija with the archive's saglasnost, arhivska knjiga, the 30 April prepis — are
   profile-aware copy branching on `pravna_forma`, and both guards were measured to **permit** them.
@@ -1362,6 +1379,71 @@ Both documents state the night leg as unbuilt in a clause of its own, which is w
   HIGH defect, and register row 21 says in terms that PDV status does **not** gate it.
 - **The čl. 48 audit trail is still lopsided** and reklamacije reads are still not access-logged. Both
   carry forward from earlier cycles untouched.
+
+**Review fixes shipped (07.08.2026) — seven findings on Task 4, and the task that was about stale
+denials had shipped five new ones with nothing behind them.** cargo **1012 passed / 0 failed** (1007 +
+5), `docs_guard` alone **25** (was 21), bun **546 passed / 35 files** (was 545). Every guard added below
+was proven non-vacuous by mutation and reverted.
+
+1. **Row 6 ticked SW-1 while one of its limbs was measurably unmet, and the tick has been earned rather
+   than removed.** The cell said *„the ≥2× ratio is asserted by presence, never measured“* — but the
+   ratio is written in the class names, and one surface was **short**: the receipt detail banner was
+   `text-xl` (1.25rem) over a `<Table>` root of `text-xs` (0.75rem), which is 1.6×. „Nobody measured it“
+   and „it falls short“ are not the same claim. The banner was raised to `text-2xl`, so both surfaces
+   are now exactly 2.0× of the line item, and
+   `docs_guard::the_non_fiscal_banner_is_at_least_twice_the_line_item_font` computes both ratios from
+   the class names in integers (milli-rem, never floating point) **and requires row 6 to state what it
+   computes**, so neither the classes nor the sentence can move alone. Red was real, not mutated: the
+   guard failed on `ReceiptsScreen.tsx` before the class changed. `ReceiptsScreen.test.tsx` pins the
+   class on the rendered element as well, and was verified red against `text-xl`. The cell's bolded lead
+   also contradicted its own body — it named one open limb four sentences above *„Two limbs are not
+   closed“* — and now names what is really open: the export limb, which has no subject in this build.
+2. **Req. 12 was recorded as a tick in the paragraph that says a partial recorded as a tick is the
+   defect.** Its own bullet said *„One limb of req. 12 is still open“* four lines below the header
+   *„Req. 12 — CLOSED 07.08.2026.“*, and `:283` of this file and register row 120 already said it
+   correctly. SW14-VERIFIED-RULES §4 states req. 12 as four limbs and the third — *„block night hours
+   except the čl. 88 st. 2 exceptions“* — is unbuilt. Restated as a **PARTIAL** in the voice reqs. 21
+   and 26 use, with the cross-reference pointed at the night-legs paragraph rather than at req. 14's
+   bullet, which names only the čl. 62 st. 2 threshold. Pinned by
+   `docs_guard::no_document_records_sw_14_req_12_as_closed_while_the_night_leg_is_unbuilt`, bound
+   exhaustively to `worktime::ProtectionKind` so the day a night variant lands the file stops compiling
+   and the author decides whether the requirement may finally be recorded closed. It is scoped to blocks
+   arguing about čl. 87 or čl. 88, because SW-12's own requirement 12 is the cenovnik duty and its
+   register row opens „✅ SHIPPED“ — firing on that would be the guard accusing a true sentence.
+3. **§3 of the swept file still carried its 16.07.2026 baseline, and SW-8 denied the printing stack.**
+   The sweep stopped at §2. `SW-8` read *„app currently prints nothing“* in the same commit as a row 18
+   crediting the KEP mechanics to the SW-8 printing stack — five renderers write documents and seven
+   modules hand them to `PrintService.openForPrint`. `SW-9` still specified *„all 13 PEP čl. 15 st. 5
+   tač. 1 elements“*, the miscount row 18 corrects and `kep_kalkulacija.rs` contradicts in its first
+   line. All five unstamped rows that §2 had just re-stated — SW-1, SW-3, SW-6, SW-8, SW-9 — now carry
+   dated stamps pointing at the §2 row that holds the detail, and the §2 revision note records that §3
+   was swept with it. `docs_guard::no_document_says_this_application_prints_nothing` fails that class of
+   sentence, bound to the four renderers so a rename is a compile error. It is deliberately narrow:
+   §1's *„prints nothing **receipt-like**“* is true and load-bearing, and a **module** with no print
+   path is a useful thing to write, so only the unqualified claim is barred.
+4. **Row 16's denial was left standing in the cell after the same commit proved it false.** Recorded
+   above with the residual.
+5. **Row 24 called `price_history.rs` „the log this row asks for“ without naming the missing key.**
+   Recorded above; the row now states three open limbs rather than two.
+6. **Five new denials shipped into the register with no guard behind any of them**, which is what
+   `docs_guard`'s own module doc bars — two of them decidable in one line each against lists the crate
+   exposes exhaustively. `docs_guard::no_register_row_denies_a_retention_class_the_crate_now_declares`
+   clears rows 18 and 24 against `retention::RecordClass::ALL` two ways: an exhaustive `match`, so a new
+   variant costs a compile error and a decision, and a sweep over `key()`, so a variant answered
+   carelessly is still caught. Proven red by renaming `CenovnikArchive`'s key to `price_history_archive`.
+   `legal::tests::no_register_row_denies_a_snizenje_notice_this_module_carries` does the same for row
+   24's *„the penalty copy does not exist“* against `all_notices` — it lives in `legal.rs` because that
+   list is private to its test module by design, and reads the register through
+   `docs_guard::REGISTER`, now `pub(crate)`, so there is one embedded copy and not two. Proven red by
+   re-citing `declaration_defective` at čl. 67 st. 1 tač. 8. Both lists demonstrably grow:
+   `PopisDokumentacija` joined `RecordClass::ALL` and `popis_not_conducted` joined `all_notices` within
+   the last three weeks.
+7. **What the SW-8 row used to say is recorded here rather than in the register.** The 16.07.2026 cell
+   read *„Printing/PDF stack (hard prerequisite for KEP print-on-demand, popis lists, potvrda o
+   prijemu; app currently prints nothing)“* and stood for three weeks after the stack shipped. It is
+   quoted in this file and not in `docs/SERBIAN-LAW-COMPLIANCE.md`, on that document's own convention —
+   *„the denial is restated and not annotated“* — and because the new guard would (correctly) fail the
+   register for carrying the sentence verbatim.
 
 ---
 

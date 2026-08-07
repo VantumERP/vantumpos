@@ -388,6 +388,81 @@ pre-existing chunk-size advisory, `cargo test` **1007 passed / 0 failed** (was 9
 bun** over `c93e28e` for the whole cycle. **This task added no test and changed no Rust** — it is a
 documentation task, and inventing a guard to look busy is what deviation 4 was run instead of.
 
+**Review fixes shipped (08.08.2026, dated 07.08.2026 in the documents with the rest of the cycle).**
+Seven findings, seven defects, and the shape of them is worth stating: the task whose whole subject is
+that a stale denial is as bad as a false promise shipped a false tick, a false status header, an
+unswept §3, a cell it had itself proved false, a missing limb and five unguarded denials. cargo
+**1012 passed / 0 failed** (1007 + 5), `docs_guard` alone **25** (was 21), `bun run test` **546 passed
+/ 35 files** (was 545), `bun run build` clean bar the pre-existing chunk advisory, clippy,
+`cargo fmt --check` and `git diff --check` clean. Net **+24 cargo / +7 bun** over `c93e28e` for the
+cycle. **This task now does change Rust and does add tests, which reverses deviation 4** — the finding
+that mattered most was that five new denials went into the inspector-facing register with nothing
+behind any of them, and two of them were decidable in one line each against lists the crate already
+exposes exhaustively.
+
+1. **Row 6's ✓ stood over a measurably unmet limb, and the limb was closed rather than recorded.** The
+   cell said the ≥2× ratio is *„asserted by presence, never measured“*; it is written in the class
+   names, and the receipt detail banner was `text-xl` (1.25rem) over a `<Table>` root of `text-xs`
+   (0.75rem) — **1.6×**. „Nobody measured it“ and „it falls short“ are different claims and only the
+   second was true. `ReceiptsScreen.tsx`'s banner is now `text-2xl`, so both surfaces are exactly 2.0×
+   of the line item, and `docs_guard::the_non_fiscal_banner_is_at_least_twice_the_line_item_font`
+   computes both ratios from the class names **in integers** (milli-rem — a comparison that decides a
+   compliance claim by a rounding mode is the house rule's defect wherever it sits) and requires row 6
+   to state what it computes, so neither the classes nor the sentence moves alone. Red was real rather
+   than mutated. `ReceiptsScreen.test.tsx` pins the class on the rendered element and was verified red
+   against `text-xl`. The row's bolded lead also contradicted its own body four sentences later and now
+   names the one limb that is genuinely open. **Correction to the finding as written:** it computed the
+   dialog at 1.5×, on the premise that the stavka rows inherit the Tailwind base 1rem. They do not —
+   `DialogContent` carries `text-xs/relaxed` (`src/components/ui/dialog.tsx:54`), so the dialog was
+   already at exactly 2.0× and the receipt detail was the only short surface.
+2. **`docs/PROGRESS.md` recorded req. 12 as CLOSED four lines above its own „one limb is still open“.**
+   Restated as a PARTIAL in reqs. 21/26's voice, cross-reference repointed at the night-legs paragraph
+   rather than req. 14's bullet. Pinned by
+   `docs_guard::no_document_records_sw_14_req_12_as_closed_while_the_night_leg_is_unbuilt`, bound
+   exhaustively to `worktime::ProtectionKind`, and scoped to blocks arguing about čl. 87 or čl. 88
+   because SW-12's *own* requirement 12 is the cenovnik duty and its register row opens „✅ SHIPPED“.
+3. **§3 was never swept.** SW-8 said the app prints nothing while row 18 credited the KEP mechanics to
+   the SW-8 printing stack in the same commit; SW-9 still specified 13 kalkulacija elements. SW-1,
+   SW-3, SW-6, SW-8 and SW-9 now carry dated stamps pointing at their §2 rows, and
+   `docs_guard::no_document_says_this_application_prints_nothing` bars the class of sentence, bound to
+   four renderers. It is narrow on purpose: §1's *„prints nothing **receipt-like**“* is true and
+   load-bearing, and a **module** with no print path is a useful thing to write.
+4. **Row 16 was re-stated.** The first pass wrote the correction into the §2 note and left the false
+   cell in the column an inspector reads; the note's own sentence now sits in the cell, and the čl. 29
+   field-by-field read is still recorded as owed.
+5. **Row 24 gained its third open limb** — `price_history` (v9) has no prodajno-mesto column, though
+   §3's SW-6 line specifies `(sku, prodajno_mesto)` and the row's duty is a display at the prodajno
+   mesto. Exactly the limb row 17 was scrupulous about for the KEP.
+6. **The five new denials are now pinned.**
+   `docs_guard::no_register_row_denies_a_retention_class_the_crate_now_declares` clears rows 18 and 24
+   against `retention::RecordClass::ALL` two ways — an exhaustive `match` (a new variant is a compile
+   error and a decision) and a sweep over `key()` (a variant answered carelessly is still caught) —
+   proven red by renaming `CenovnikArchive`'s key. `legal::tests::no_register_row_denies_a_snizenje_notice_this_module_carries`
+   does the same for the *„penalty copy does not exist“* denial against `all_notices`; it lives in
+   `legal.rs` because that list is private to its test module by design, and reads the register through
+   `docs_guard::REGISTER`, now `pub(crate)`, so one copy is embedded and not two. Proven red by
+   re-citing `declaration_defective` at čl. 67 st. 1 tač. 8.
+
+**Deviations in the review fixes, four.**
+
+1. **`src/app/ReceiptsScreen.tsx` and `src/app/ReceiptsScreen.test.tsx` are in the diff**, although Task
+   4's file list is two markdown documents. The finding offered recording the gap or closing it; closing
+   it is a one-class change that removes a real shortfall from a shipping screen, and recording it would
+   have left the app knowingly short of the Pravilnik with the fix already written in the failure
+   message.
+2. **`markdown_block_around` now treats a numbered item as a block start.** Without it a seven-item
+   review list collapses into one block and a guard reports the whole list as the offending text —
+   the over-wide window `sentence_around`'s doc comment describes, one structure up. It changes the
+   scoping of one pre-existing guard as well, and the full suite is green.
+3. **Both new prose guards exempt a claim inside a Serbian quotation** (`inside_a_serbian_quotation`).
+   `docs/PROGRESS.md` is this repository's record of what was true when, and a dated correction that
+   cannot quote the sentence it withdraws is worth nothing — the same scoping decision the memo guard
+   makes for a line marked `Ispravka`, expressed as punctuation instead of a keyword. Both guards were
+   re-verified red **after** the exemption landed, against the real withdrawn sentences.
+4. **The SW-8 baseline sentence is quoted in `docs/PROGRESS.md` and not in the register.** That is the
+   register's own convention — *„the denial is restated and not annotated“* — and it is also what the
+   new guard requires, since the register carries no quotation exemption it would need to invoke.
+
 ---
 
 ## Self-review

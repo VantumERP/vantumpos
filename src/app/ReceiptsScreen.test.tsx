@@ -263,4 +263,24 @@ describe("ReceiptsScreen states", () => {
       await screen.findByText("OVO NIJE FISKALNI RAČUN"),
     ).toBeInTheDocument();
   });
+
+  // PVFR čl. 2 st. 8–10 states a ratio, not a look: the banner must be at least
+  // twice the line-item font. The stavke are a <Table>, whose root is text-xs
+  // (0.75rem), so text-2xl (1.5rem) is exactly 2×. It was text-xl until
+  // 07.08.2026 — 1.6×, measurably short, under a ✓ in the compliance register.
+  // docs_guard::the_non_fiscal_banner_is_at_least_twice_the_line_item_font
+  // computes the ratio from the source; this pins the class on the element the
+  // operator actually sees.
+  it("renders the non-fiscal banner at twice the stavka font (PVFR čl. 2 st. 8–10)", async () => {
+    const user = userEvent.setup();
+    render(<ReceiptsScreen receipts={buildReceiptsService()} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Detalji za R-2026-0001" }),
+    );
+
+    const banner = await screen.findByText("OVO NIJE FISKALNI RAČUN");
+    expect(banner).toHaveClass("text-2xl");
+    expect(banner).not.toHaveClass("text-xl");
+  });
 });

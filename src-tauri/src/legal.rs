@@ -562,6 +562,57 @@ mod tests {
         }
     }
 
+    /// Register row 24 says the čl. 67 st. 1 tač. 8 penalty copy **does not
+    /// exist** — *„`legal.rs` carries no sniženje notice, so the fixed 40.000
+    /// preduzetnik of čl. 67 st. 1 tač. 8 is stated in this row and rendered
+    /// nowhere in the application“*. That is true today, and it is a **denial**,
+    /// which this repository treats as the same class of defect as a false
+    /// promise: the day the notice ships, the row silently reverts to telling an
+    /// inspector the shop has no copy for a duty it now states on screen, with
+    /// nothing failing. `all_notices` demonstrably grows — `popis_not_conducted`
+    /// joined it within the last three weeks.
+    ///
+    /// The guard lives here rather than in `docs_guard` because `all_notices` is
+    /// private to this test module by design — it is the list every fine-figure
+    /// guard iterates — and the register is read through
+    /// [`crate::docs_guard::REGISTER`] so there is one embedded copy and not
+    /// two. Presence is asserted before wording, like every guard in
+    /// `docs_guard`: deleting the sentence from the row is not a way to pass.
+    #[test]
+    fn no_register_row_denies_a_snizenje_notice_this_module_carries() {
+        /// Row 24's denial, verbatim.
+        const PORICANJE: &str = "`legal.rs` carries no sniženje notice";
+        /// The offence the missing copy would cite. „tač. 6“ is
+        /// `declaration_defective` and is a different tačka of the same stav, so
+        /// the whole reference is matched and not the član alone.
+        const PREKRSAJ: &str = "čl. 67 st. 1 tač. 8";
+
+        let p = profile(Some(PravnaForma::Preduzetnik));
+        let snizenje: Vec<LegalNotice> = all_notices(&p)
+            .into_iter()
+            .filter(|notice| {
+                notice.citation.contains(PREKRSAJ)
+                    || notice.summary.to_lowercase().contains("sniženj")
+                    || notice.summary.to_lowercase().contains("prethodna cena")
+            })
+            .collect();
+
+        assert!(
+            snizenje.is_empty(),
+            "`legal.rs` now carries a sniženje notice ({snizenje:?}), so \
+             docs/SERBIAN-LAW-COMPLIANCE.md row 24's „{PORICANJE}“ has stopped being true. \
+             Re-state the row in this commit — name the function and where it renders — and \
+             retire this guard: a built leg loses its guard and gains a sentence."
+        );
+
+        assert!(
+            crate::docs_guard::REGISTER.contains(PORICANJE),
+            "docs/SERBIAN-LAW-COMPLIANCE.md row 24 no longer says „{PORICANJE}“. If the notice \
+             shipped, this guard should have failed first; if it did not, restore the sentence — \
+             silence about an unshipped penalty copy reads as though it is on screen."
+        );
+    }
+
     /// Every substring a preduzetnik must never be shown, in one place.
     ///
     /// The blanket guard below applies it to `all_notices`, and

@@ -16,7 +16,13 @@
 //! Test-only: the module is declared `#[cfg(test)]` in `lib.rs`, so the
 //! documents are embedded in the test binary and never in the shipped app.
 
-const REGISTER: &str = include_str!("../../docs/SERBIAN-LAW-COMPLIANCE.md");
+/// `pub(crate)` for one reader outside this module: `legal.rs`'s own test module
+/// holds `all_notices`, the exhaustive list of every fine figure this crate can
+/// render, and that list is private to it by design. Register row 24 denies that
+/// the list carries a sniženje notice, so the guard over that denial has to run
+/// where the list lives — and embedding the register a second time there would
+/// leave two copies to keep in step.
+pub(crate) const REGISTER: &str = include_str!("../../docs/SERBIAN-LAW-COMPLIANCE.md");
 const PROGRESS: &str = include_str!("../../docs/PROGRESS.md");
 const NOTICE: &str = include_str!("../../docs/compliance/obavestenje-zaposlenima.md");
 const EVIDENCIJA_CL47: &str = include_str!("../../docs/compliance/evidencija-obrade-cl47.md");
@@ -115,15 +121,26 @@ fn sentence_around(text: &str, at: usize) -> &str {
 /// „…`SettingsScreen.tsx:1771` still“ ends a line and „attributes the 10-year
 /// floor to **ZPDV čl. 47**“ opens the next, so a line-local guard sees the
 /// file reference and the claim about it as two unrelated statements and passes
-/// on both. A block ends at the next bullet, table row, heading or blank line.
+/// on both. A block ends at the next bullet, **numbered item**, table row,
+/// heading or blank line.
+///
+/// The numbered item was added 07.08.2026: this repository writes its review-fix
+/// records as `1.` … `7.`, and without it a seven-item list collapses into one
+/// block, so a guard reports the whole list as the offending text and cannot say
+/// which item it is about. That is the same over-wide window
+/// [`sentence_around`]'s doc comment describes, one structure up.
 fn markdown_block_around(text: &str, at: usize) -> (usize, String) {
     fn starts_a_block(line: &str) -> bool {
         let trimmed = line.trim_start();
+        let numbered = trimmed.split_once(". ").is_some_and(|(head, _)| {
+            !head.is_empty() && head.chars().all(|ch| ch.is_ascii_digit())
+        });
         line.trim().is_empty()
             || trimmed.starts_with("- ")
             || trimmed.starts_with("* ")
             || trimmed.starts_with('|')
             || trimmed.starts_with('#')
+            || numbered
     }
 
     let mut offset = 0usize;
@@ -185,6 +202,93 @@ fn match_indices_ci(text: &str, needle: &str) -> Vec<usize> {
         })
         .map(|(at, _)| at)
         .collect()
+}
+
+/// One Tailwind type-scale class, in **milli-rem**, or `None` when the token is
+/// not a size at all.
+///
+/// PVFR čl. 2 st. 8–10 states a ratio, and a ratio is arithmetic — so the two
+/// non-fiscal banners are measured rather than asserted to be present and called
+/// large enough. Milli-rem keeps it in integers, per the house rule that no
+/// decision in this crate is taken in floating point; a font size is not money,
+/// but a comparison that decides a compliance claim by a rounding mode is the
+/// same defect wherever it sits.
+///
+/// The figures are the framework defaults, and they are the shipped ones:
+/// `src/App.css` declares no `--text-*` in its `@theme inline` block and sets no
+/// `html`/`body` font-size, so nothing overrides them. A modifier after the
+/// slash is a line height — `text-xs/relaxed` is still `text-xs` — and the
+/// wrapping punctuation of a JSX class string is trimmed, because
+/// `cn("w-full caption-bottom text-xs", className)` ends the token with `",`.
+fn tailwind_type_scale(raw: &str) -> Option<(&str, i64)> {
+    let trimmed = raw.trim_matches(|ch: char| "\"'`(){},".contains(ch));
+    let token = trimmed.split('/').next()?;
+    let milli_rem = match token {
+        "text-xs" => 750,
+        "text-sm" => 875,
+        "text-base" => 1000,
+        "text-lg" => 1125,
+        "text-xl" => 1250,
+        "text-2xl" => 1500,
+        "text-3xl" => 1875,
+        "text-4xl" => 2250,
+        _ => return None,
+    };
+    Some((token, milli_rem))
+}
+
+/// The type-scale class of the element that **encloses** `anchor`, searching
+/// backwards from it to that element's own `className`.
+///
+/// The banner is written text-last — `className="… text-2xl …"` on one line and
+/// „OVO NIJE FISKALNI RAČUN“ on the next — so the size that applies to the
+/// anchor is the last one before it inside the same attribute. `text-center` and
+/// `text-destructive` sit in the same string and are not sizes, which is why the
+/// scan is by token and not by substring.
+fn type_scale_before<'a>(source: &'a str, anchor: &str) -> Option<(&'a str, i64)> {
+    let at = source.find(anchor)?;
+    let start = source[..at].rfind("className")?;
+    source[start..at]
+        .split_whitespace()
+        .filter_map(tailwind_type_scale)
+        .next_back()
+}
+
+/// The first type-scale class **after** `anchor`, within `tokens` whitespace-
+/// separated words of it.
+///
+/// The shadcn primitives are written attribute-first — `data-slot="dialog-content"`
+/// then the class string — so the size that a child inherits is the first one
+/// after the slot. The token budget keeps the scan inside the element it started
+/// in rather than running on into the next component in the file.
+fn type_scale_after<'a>(source: &'a str, anchor: &str, tokens: usize) -> Option<(&'a str, i64)> {
+    let at = source.find(anchor)?;
+    source[at..]
+        .split_whitespace()
+        .take(tokens)
+        .find_map(tailwind_type_scale)
+}
+
+/// `true` when the byte offset `at` sits inside a Serbian quotation.
+///
+/// A guard over a claim has to tell an **assertion** from a **report of one**.
+/// `docs/PROGRESS.md` is this repository's record of what was true when, and a
+/// dated correction that cannot quote the sentence it withdraws is worth
+/// nothing — the same reasoning
+/// [`no_compliance_template_states_a_reset_warning_the_dialog_does_not_show`]
+/// applies to a line marked `Ispravka`, expressed here as punctuation instead of
+/// a keyword. Judged on the nearest preceding quotation mark rather than by
+/// counting from the top of the file, so one unbalanced pair somewhere else in a
+/// 1500-line document cannot invert the answer for every later claim.
+///
+/// It does **not** weaken any guard that uses it: every stale sentence this
+/// module has caught — the register's *„app currently prints nothing“*, the
+/// *„Req. 12 — CLOSED“* header, the reset dialog's archive duty — was written as
+/// the document's own assertion, unquoted.
+fn inside_a_serbian_quotation(text: &str, at: usize) -> bool {
+    text[..at]
+        .rfind(['„', '“'])
+        .is_some_and(|index| text[index..].starts_with('„'))
 }
 
 /// The stems that turn a mention of an arhiv into the claim ZAG čl. 16 st. 2
@@ -1613,5 +1717,410 @@ fn nothing_exports_the_izvestaj_and_both_popis_cells_say_so() {
              Restate all of them in the same commit — a stale denial withdraws the reader's only \
              pointer to a capability the shop is now taken to have."
         );
+    }
+}
+
+/// „OVO NIJE FISKALNI RAČUN“ has to be at **least twice** the line-item font,
+/// and „at least twice“ is arithmetic — so this guard computes it.
+///
+/// Register row 6 stated the obligation as *„unerasable, ≥2× font“* and §3's
+/// SW-1 build line as *„≥2× line-item font“*, and until 07.08.2026 the row
+/// discharged both with a tick and the sentence *„the ≥2× ratio is asserted by
+/// presence, never measured“*. That sentence was the defect: the ratio is not
+/// unknowable, it is written in the class names, and one of the two surfaces was
+/// **short** — the receipt detail panel carried `text-xl` (1.25rem) over a
+/// `<Table>` root of `text-xs` (0.75rem), which is 1.6×, under a ✓ in a document
+/// an inspector reads. „Nobody measured it“ and „it falls short“ are not the
+/// same claim, and only the second one is true of a class name.
+///
+/// The reference element is the **line item**, per SW-1's own wording: the
+/// stavka rows of the post-sale dialog, which carry no size class of their own
+/// and inherit `DialogContent`'s `text-xs/relaxed`, and the stavka rows of the
+/// receipt detail panel, which are a `<Table>` whose root is `text-xs`. The
+/// dialog's Ukupno/Kusur summary lines are `text-sm` and its title `text-sm`;
+/// row 6 states that divergence rather than hiding behind it, because the
+/// Pravilnik's own reference element is not resolved in any verified-rules
+/// document and the narrower reading is the one the software is measured on.
+///
+/// Bound from both sides, the way every sibling guard is: the arithmetic fails
+/// if a class moves, and the register has to state the ratio the classes
+/// actually produce, so raising the banner without re-stating the row fails too.
+/// The two surfaces currently converge on one sentence, which is a property of
+/// today's classes and not of the guard — the moment they diverge, the register
+/// owes two.
+#[test]
+fn the_non_fiscal_banner_is_at_least_twice_the_line_item_font() {
+    const REGISTER_SCREEN: &str = include_str!("../../src/app/register/RegisterScreen.tsx");
+    const RECEIPTS_SCREEN: &str = include_str!("../../src/app/ReceiptsScreen.tsx");
+    const UI_DIALOG: &str = include_str!("../../src/components/ui/dialog.tsx");
+    const UI_TABLE: &str = include_str!("../../src/components/ui/table.tsx");
+    /// The banner itself. Serbian Latin with diacritics, as it renders.
+    const BANNER: &str = "OVO NIJE FISKALNI RAČUN";
+
+    for (surface, banner_source, banner_file, stavke_source, stavke_anchor, stavke_what) in [
+        (
+            "the post-sale dialog",
+            REGISTER_SCREEN,
+            "src/app/register/RegisterScreen.tsx",
+            UI_DIALOG,
+            "data-slot=\"dialog-content\"",
+            "`DialogContent` (src/components/ui/dialog.tsx), which the stavka rows inherit \
+             because they carry no size class of their own",
+        ),
+        (
+            "the receipt detail panel",
+            RECEIPTS_SCREEN,
+            "src/app/ReceiptsScreen.tsx",
+            UI_TABLE,
+            "data-slot=\"table\"",
+            "the `<Table>` root (src/components/ui/table.tsx), which is what the stavka rows are",
+        ),
+    ] {
+        let (banner_class, banner) =
+            type_scale_before(banner_source, BANNER).unwrap_or_else(|| {
+                panic!(
+                    "{banner_file} no longer carries „{BANNER}“ inside an element with a Tailwind \
+                 type-scale class. PVFR čl. 2 st. 8–10 is what puts the banner on {surface} at \
+                 all; if the markup moved, re-point this guard in the same commit rather than \
+                 letting the ratio go unmeasured again."
+                )
+            });
+        let (stavka_class, stavka) = type_scale_after(stavke_source, stavke_anchor, 60)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the line-item font of {surface} can no longer be read: {stavke_what} no \
+                     longer sets a Tailwind type-scale class within 60 tokens of \
+                     `{stavke_anchor}`. The ≥2× ratio is measured against it, so re-point this \
+                     guard rather than dropping the measurement."
+                )
+            });
+
+        assert!(
+            banner >= 2 * stavka,
+            "{surface} renders „{BANNER}“ at `{banner_class}` ({banner} milli-rem) over a \
+             line-item font of `{stavka_class}` ({stavka} milli-rem) — {ratio_tenths}.{ratio_rest}×, \
+             short of the ≥2× PVFR čl. 2 st. 8–10 requires and §3's SW-1 line states as \
+             „≥2× line-item font“. Raise the banner (or lower the line-item type) until the \
+             ratio is met, and re-state register row 6 in the same commit: a ✓ over a \
+             measurably unmet limb is a false claim in a compliance document. \
+             `{banner_file}`, line-item font from {stavke_what}",
+            ratio_tenths = banner * 10 / stavka / 10,
+            ratio_rest = banner * 10 / stavka % 10,
+        );
+
+        let izmereno = format!(
+            "{banner_class} over {stavka_class} = {}.{}×",
+            banner * 10 / stavka / 10,
+            banner * 10 / stavka % 10
+        );
+        assert!(
+            REGISTER.contains(&izmereno),
+            "docs/SERBIAN-LAW-COMPLIANCE.md row 6 must state the ratio {surface} actually renders \
+             — „{izmereno}“ — and it does not. The figure is knowable from the class names, so \
+             „asserted by presence, never measured“ is not an available answer, and a row that \
+             states a ratio the code no longer produces is the same defect as one that denies a \
+             control the code runs."
+        );
+    }
+}
+
+/// Two register rows deny that a body of data has a retention class, and
+/// `retention::RecordClass::ALL` is the whole of the shared retention table —
+/// so the day the list grows, the rows have to be re-stated in the same commit.
+///
+/// Row 18: *„the KEP has no `RecordClass` on the shared retention table“*.
+/// Row 24: *„`retention::RecordClass` has no price-history or campaign
+/// variant“*. Both are true today and both are the **denial** direction of this
+/// module's rule — a register that says a control is absent withdraws the
+/// reader's only pointer to it the moment it arrives. The list demonstrably
+/// grows: `PopisDokumentacija` joined `ALL` within the last three weeks, and on
+/// the day a price-history or a KEP class joins it, these two rows would
+/// silently revert to denying a control the shop is running with nothing
+/// failing. That is precisely the state rows 6, 17, 18, 20 and 24 were in on
+/// 16.07.2026, and it is why the 07.08.2026 sweep happened.
+///
+/// Pinned two ways on purpose. The `match` is **exhaustive**, so a new variant
+/// costs a compile error and a decision here rather than a reviewer's memory;
+/// the key sweep then catches a variant whose arm was answered carelessly,
+/// because `key()` is the string the class is stored under and cannot be
+/// answered away. Presence is asserted before wording, like every sibling guard:
+/// deleting the sentence is not a way to pass.
+#[test]
+fn no_register_row_denies_a_retention_class_the_crate_now_declares() {
+    use crate::retention::RecordClass;
+
+    /// The two denials, with the stem a class key would carry if it falsified
+    /// one. `campaign` covers `campaigns` as well; `kep` is the book.
+    const PORICANJA: [(&str, &str); 3] = [
+        (
+            "price_history",
+            "row 24 — „`retention::RecordClass` has no price-history or campaign variant“",
+        ),
+        (
+            "campaign",
+            "row 24 — „`retention::RecordClass` has no price-history or campaign variant“",
+        ),
+        (
+            "kep",
+            "row 18 — „the KEP has no `RecordClass` on the shared retention table“",
+        ),
+    ];
+
+    for (needle, row) in [
+        (
+            "`retention::RecordClass` has no price-history or campaign variant",
+            "row 24",
+        ),
+        (
+            "the KEP has no `RecordClass` on the shared retention table",
+            "row 18",
+        ),
+    ] {
+        assert!(
+            REGISTER.contains(needle),
+            "docs/SERBIAN-LAW-COMPLIANCE.md {row} no longer says „{needle}“. If the class shipped, \
+             re-state the row with what it holds and what sweeps it; if it did not, restore the \
+             sentence — silence about a five-year retention duty reads as though it is discharged."
+        );
+    }
+
+    for class in RecordClass::ALL {
+        // Exhaustive, so a new variant stops this file compiling and the author
+        // decides whether either row has stopped being true. Every arm below is
+        // a class whose data is neither the offered-price log, nor a campaign,
+        // nor the KEP book: the three worktime/personnel classes and the čl. 47
+        // register are ZEOR/ZZPL bodies, the credentials and the access log are
+        // SW-13 class C, the cenovnik archive is the ZoT čl. 35 published file,
+        // and the popis dokumentacija is the PoP čl. 14 stocktake papers.
+        let falsifies_a_row = match class {
+            RecordClass::WorktimeClassification
+            | RecordClass::WorktimeOvertimeLog
+            | RecordClass::WorktimeDraft
+            | RecordClass::Personnel
+            | RecordClass::Credentials
+            | RecordClass::AccessLog
+            | RecordClass::ProcessingRegister
+            | RecordClass::CenovnikArchive
+            | RecordClass::PopisDokumentacija => false,
+        };
+        assert!(
+            !falsifies_a_row,
+            "`retention::RecordClass::{class:?}` was answered as falsifying a register denial and \
+             the register was not re-stated in the same commit."
+        );
+
+        let key = class.key();
+        for (stem, row) in PORICANJA {
+            assert!(
+                !key.contains(stem),
+                "`retention::RecordClass::{class:?}` is stored as „{key}“, which reads as a class \
+                 for data docs/SERBIAN-LAW-COMPLIANCE.md {row} says has none. Re-state that row \
+                 in this commit — name the class, its period and what sweeps it — rather than \
+                 leaving the register denying a retention control the crate now declares."
+            );
+        }
+    }
+}
+
+/// No document may record SW-14 req. 12 as **CLOSED** while one of its four
+/// limbs is unbuilt.
+///
+/// SW14-VERIFIED-RULES.md §4 states req. 12 as one sentence with four limbs, and
+/// the third is *„block night hours except the čl. 88 st. 2 exceptions“*. It is
+/// not built: `worktime::ProtectionKind` carries no night variant for a minor,
+/// `DayHours` carries no night bucket, and `check_protection`'s own doc comment
+/// says so. `docs/PROGRESS.md` nevertheless carried the header
+/// *„**Req. 12 — CLOSED 07.08.2026.**“* four lines above its own sentence
+/// *„One limb of req. 12 is still open“*, in the very paragraph that states the
+/// standard being broken — *„because a partial recorded as a tick is the defect
+/// above pointed the other way“*.
+///
+/// The failure it enables is concrete and has already happened once in this
+/// repository, one document over: a survey agent greps the status headers, reads
+/// req. 12 as done, and retires the čl. 88 st. 2 night ban from the backlog. The
+/// uppercase word is what is barred, because it is this file's own convention
+/// for a status header — *„Req. 27 — CLOSED 02.08.2026“* is a true one. A leg
+/// closing is still statable in the ordinary lower-case way, which is what the
+/// corrected bullet says: *„PARTIAL. The čl. 87 weekly leg closed 07.08.2026“*.
+///
+/// Bound to `ProtectionKind` exhaustively, so the day the night leg ships this
+/// file stops compiling and the author decides whether req. 12 may finally be
+/// recorded closed — rather than the guard quietly outliving the gap it pins.
+#[test]
+fn no_document_records_sw_14_req_12_as_closed_while_the_night_leg_is_unbuilt() {
+    use crate::worktime::ProtectionKind;
+
+    /// The čl. 88 st. 2 limb, in the words both documents use for it.
+    const NOCNI: &str = "čl. 88 st. 2";
+    /// The status headers this repository writes for a finished requirement.
+    const ZATVORENO: [&str; 2] = ["CLOSED", "✅"];
+
+    fn blocks_a_night_entry(kind: ProtectionKind) -> bool {
+        match kind {
+            // čl. 88 st. 1 (prekovremeni, preraspodela), čl. 87 (dnevni,
+            // nedeljni), čl. 90–91 (saglasnost, trudnoća) and the profile-date
+            // finding. `TrudnocaNocniIPrekovremeni` names night work, but it is
+            // the čl. 90 pregnancy leg over an operator-entered advisory bucket
+            // — it decides nothing about a minor and does not discharge čl. 88
+            // st. 2, which is a prohibition with its own three exceptions.
+            ProtectionKind::MaloletanPrekovremeni
+            | ProtectionKind::MaloletanPreraspodela
+            | ProtectionKind::MaloletanDnevniLimit
+            | ProtectionKind::MaloletanNedeljniLimit
+            | ProtectionKind::SaglasnostRoditelja
+            | ProtectionKind::TrudnocaNocniIPrekovremeni
+            | ProtectionKind::NeispravanDatumUProfilu => false,
+        }
+    }
+
+    let night_leg_built = [
+        ProtectionKind::MaloletanPrekovremeni,
+        ProtectionKind::MaloletanPreraspodela,
+        ProtectionKind::MaloletanDnevniLimit,
+        ProtectionKind::MaloletanNedeljniLimit,
+        ProtectionKind::SaglasnostRoditelja,
+        ProtectionKind::TrudnocaNocniIPrekovremeni,
+        ProtectionKind::NeispravanDatumUProfilu,
+    ]
+    .into_iter()
+    .any(blocks_a_night_entry);
+    assert!(
+        !night_leg_built,
+        "a `ProtectionKind` now blocks a minor's night hours, so SW-14 req. 12 may finally be \
+         recorded as closed — re-state `docs/PROGRESS.md` and register row 120 in this commit and \
+         retire this guard, per this module's rule that a built leg loses its guard and gains a \
+         sentence."
+    );
+
+    let mut imenovan = 0usize;
+    for (label, text) in [
+        ("docs/PROGRESS.md", PROGRESS),
+        ("docs/SERBIAN-LAW-COMPLIANCE.md", REGISTER),
+    ] {
+        for at in match_indices_ci(text, "req. 12") {
+            let (line, block) = markdown_block_around(text, at);
+            // „req. 12“ is not a unique name: SW-12's own requirement 12 is the
+            // cenovnik publication duty and its register row opens „✅ SHIPPED
+            // 02.08.2026“, which is both true and none of this guard's
+            // business. What identifies SW-14's req. 12 is its subject matter —
+            // it is the čl. 87 / čl. 88 requirement — so a block that argues
+            // about neither article is a different requirement 12 and is left
+            // alone. Firing on it would be the failure `clause_around`'s doc
+            // comment calls the worse one.
+            if !block.contains("čl. 87") && !block.contains("čl. 88") {
+                continue;
+            }
+            if block.contains(NOCNI) {
+                imenovan += 1;
+            }
+            for marker in ZATVORENO {
+                // A quoted header is a report of what a document used to say,
+                // not a claim about the requirement — see
+                // [`inside_a_serbian_quotation`]. The occurrence is judged
+                // where it sits in the file, not in the collapsed block.
+                let tvrdi = text
+                    .match_indices(marker)
+                    .filter(|(index, _)| !inside_a_serbian_quotation(text, *index))
+                    .any(|(index, _)| {
+                        let (_, susedni) = markdown_block_around(text, index);
+                        susedni == block
+                    });
+                assert!(
+                    !tvrdi,
+                    "{label}:{line} records SW-14 req. 12 as „{marker}“. One of its four limbs is \
+                     unbuilt — čl. 88 st. 2's night prohibition, which no `ProtectionKind` \
+                     decides and which `DayHours` carries no bucket for. Record it the way reqs. \
+                     21 and 26 are recorded, as a PARTIAL naming the open limb: a partial \
+                     recorded as a tick is what withdraws the reader's only pointer to a real \
+                     gap. Block: „{block}“"
+                );
+            }
+        }
+    }
+    assert!(
+        imenovan > 0,
+        "no block of docs/PROGRESS.md or docs/SERBIAN-LAW-COMPLIANCE.md names SW-14 req. 12 \
+         beside „{NOCNI}“ any more. Deleting the disclosure is not how this guard is satisfied — \
+         the night prohibition is the limb that is still open, and the documents are where it is \
+         recorded."
+    );
+}
+
+/// No document may say this application prints nothing.
+///
+/// §3's SW-8 line read *„Printing/PDF stack (hard prerequisite for KEP
+/// print-on-demand, popis lists, potvrda o prijemu; **app currently prints
+/// nothing**)“* until 07.08.2026, in the same file and the same commit as a row
+/// 18 that said the KEP mechanics shipped *„on the SW-8 printing stack“*. Five
+/// renderers write documents and seven modules hand them to
+/// `PrintService.openForPrint`; the denial was a 16.07.2026 baseline that
+/// nobody swept when §2 was swept.
+///
+/// Bound to the renderers rather than to the prose alone, so renaming one stops
+/// this file compiling rather than leaving the register's claim unbacked. The
+/// needle is deliberately narrow — *„prints nothing“* and its two variants, not
+/// *„no print path“* — because a **module** with no print path is a true and
+/// useful thing to write, and `docs/PROGRESS.md` writes exactly that about the
+/// worktime module. What is barred is the claim about the application.
+///
+/// **Only the unqualified claim is barred**, and the word after the needle is
+/// what decides. §1 of the register opens with *„VantumPOS issues no receipts,
+/// **prints nothing receipt-like**, never talks to a PFR“* — the fiscal posture
+/// this whole document rests on, true and load-bearing. A guard that fires on it
+/// is the failure [`clause_around`]'s doc comment calls the worse one, because
+/// the way out of it is to phrase a true statement around the guard. A following
+/// word narrows the denial to a class of document and is left alone; a full
+/// stop, a comma or a closing bracket leaves it standing about the application,
+/// which is how SW-8 carried *„app currently prints nothing)“* for three weeks
+/// after the printing stack shipped.
+#[test]
+fn no_document_says_this_application_prints_nothing() {
+    /// The renderers behind `PrintService.openForPrint`. Referenced as function
+    /// items so a rename is a compile error, not a stale sentence.
+    fn renderers_exist() {
+        let _popis = crate::popis_print::render_popisna_lista;
+        let _kalkulacija = crate::kep_kalkulacija::render_kalkulacija_html;
+        let _reklamacija = crate::reklamacije_docs::render_potvrda_html;
+        let _kampanja = crate::campaign_evidence::render_evidence_html;
+    }
+    renderers_exist();
+
+    /// The bare denial, plus the two intensifiers that do not narrow it.
+    const PORICANJA: [&str; 5] = [
+        "prints nothing",
+        "print nothing",
+        "ne štampa ništa",
+        "prints nothing at all",
+        "prints nothing yet",
+    ];
+
+    for (label, text) in prose_sources() {
+        for poricanje in PORICANJA {
+            for (at, _) in text.match_indices(poricanje) {
+                let ostatak = &text[at + poricanje.len()..];
+                // A word after the needle narrows the claim („receipt-like“);
+                // punctuation or the end of the text leaves it standing.
+                if ostatak.starts_with(' ') {
+                    continue;
+                }
+                // A quoted denial is a dated record of what a document used to
+                // say — see [`inside_a_serbian_quotation`]. `docs/PROGRESS.md`
+                // is where this register's convention puts one.
+                if inside_a_serbian_quotation(&text, at) {
+                    continue;
+                }
+                let line = text[..at].lines().count();
+                panic!(
+                    "{label}:{line} says „{poricanje}“ of the application, unqualified. This app \
+                     has printed since 19.07.2026: `popis_print`, `kep_close::render_book_html`, \
+                     `kep_kalkulacija::render_kalkulacija_html`, `reklamacije_docs`, \
+                     `campaign_evidence` and `cl47` render, and `PrintService.openForPrint` is \
+                     the one hand-off seven modules use. A stale denial withdraws the reader's \
+                     only pointer to a control the shop is running, which is the half of this \
+                     rule that is easier to leave standing. Narrow the claim to the class of \
+                     document it is really about, or re-state it."
+                );
+            }
+        }
     }
 }
