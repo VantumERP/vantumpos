@@ -2097,6 +2097,19 @@ export interface PopisLineView {
   cenaMinor: number | null;
 }
 
+/**
+ * Which of the two popisna-lista documents an export produces —
+ * `crate::popis_print::PrintFaza`, `„a“` / `„b“` on the wire.
+ *
+ * **It crosses the boundary as a request the backend checks, never as an
+ * instruction it carries out.** `popis_export_lista` derives the phase from the
+ * session's own `status` and čl. 8 st. 5 potpis and refuses a `"b"` asked for
+ * before that potpis by name, so `null` — „print what this popis has“ — is the
+ * ordinary call. `"a"` can only ever narrow what the sheet carries, which is
+ * why the čl. 2 st. 6 reprint of the signed counted state may name it.
+ */
+export type PopisPrintFaza = "a" | "b";
+
 /** One of the six liste with what is on it. All six are always reported, empty ones included. */
 export interface ListaPregled {
   vrsta: PopisLista;

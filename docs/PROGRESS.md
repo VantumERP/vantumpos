@@ -924,6 +924,17 @@ statutory answer; the gates run at **cargo 901 / bun 505**, migration still **v2
 | **The čl. 8 st. 5 signature step cited čl. 9 st. 3.** `PopisModule` printed *„…ne zamenjuje potpis na papiru (PoP čl. 9 st. 3)“* under **every** `korak.potpis`, including `counting`, whose own `pravniOsnov` is čl. 8 st. 5 — two different articles for one act, and čl. 9 st. 3's *„uz štampanje“* governs the liste printed **after** the natural count, not the čl. 8 st. 5 potpis. The article is now `korak.pravniOsnov`, never a literal, and the test asserts both phases and that neither shows the other's article. The same sentence now also says the program does not print the liste |
 | **The čl. 12 st. 2 iznos was write-only during the count.** The blind read carved `cena_minor` out for `gotovina` only, on the ground that elsewhere it is an obračun figure — which does not hold for nedokumentovana potraživanja i obaveze, whose iznos is the commission's **own** figure, has no perpetual record behind it, and is the only substantive figure that lista carries. The till offered the field, the row came back „—“, the edit form reopened empty, and the Phase A `snapshot_hash` — taken from that same blind read — recorded the amount as absent under a potpis the commission had given over it. **Chosen fix: extend the carve-out**, on the identical čl. 11 st. 1 reasoning; withholding the input instead would have left the čl. 12 st. 2 lista with no amount on the document the commission signs, which is worse evidence, not better. The freeze follows the read — what the blind read carries, the potpis freezes — so a moved iznos is refused in the obračun by name (`popis_prebrojani_iznos_potpisan`; the shipped `popis_apoen_potpisan` code is unchanged), the obračun's „what you may still fill in“ string no longer offers a cena that lista does not have, and the count sheet calls the column **Iznos** with its own article and disables it in the obračun. The four liste where the cena really is the čl. 9 st. 1 t. 5 figure are untouched, asserted as the negative control |
 
+> **Superseded 07.08.2026 — two sentences in the table above have gone stale and are corrected here
+> rather than rewritten in place, because the batch is a dated record of what was true then.** The
+> first row's *„There is no print and no export anywhere in the popis module“* and the second row's
+> *„The same sentence now also says the program does not print the liste“* were both true at
+> **cargo 901 / bun 505**. `popis_export_lista`, `popis_export_odluka` and `popis_export_plan_rada`
+> write three documents into `exports/`, `PopisService` exports through four verbs, and `PopisModule`
+> calls `PrintService.openForPrint`. The **izveštaj** is still neither printed nor exported — nothing
+> in the crate writes one to a file — and that is the whole of what the three „program ga ne štampa i
+> ne izvozi“ sentences ever claimed, so all three stand, each now paired with a sentence naming what
+> the program *does* produce. Task 6 of the popis-štampa plan restates reqs. 31/32/35 below.
+
 **Still open after this batch.**
 
 - **Req. 31/32 — the printed popisna lista.** The single largest hole. Čl. 9 st. 3's *„uz štampanje“*

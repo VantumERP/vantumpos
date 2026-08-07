@@ -3,9 +3,11 @@ import {
   ClipboardListIcon,
   LockIcon,
   PlusIcon,
+  PrinterIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import { toast } from "sonner";
 
 import { CountSheet } from "./CountSheet";
 import { IzvestajPanel } from "./IzvestajPanel";
@@ -43,6 +45,7 @@ import {
 } from "@/components/ui/table";
 import type { PopisService, PosServices } from "@/services/ports";
 import type {
+  ExportedFile,
   KomisijaClanInput,
   NivelacijaObuhvatId,
   NivelacijaObuhvatView,
@@ -81,6 +84,16 @@ import type {
  * It never lets a click read as a signature. PoP čl. 9 st. 3 says *„uz
  * štampanje“*; what is recorded here is that the members signed the printed
  * liste, and a purely electronic signature is an unverified deviation (§6 R-6).
+ *
+ * It never picks which popisna lista gets printed. `popis_export_lista` derives
+ * the phase from the session's own status and čl. 8 st. 5 potpis; this module
+ * sends `null` — „print what this popis has“ — or, for the čl. 2 st. 6 reprint,
+ * `„a“`, which can only narrow. It never sends `„b“`, because that would be a
+ * screen instructing the backend to put book quantities on paper.
+ *
+ * It never approves the plan rada on the shop's behalf. The čl. 4 st. 2 field
+ * is pre-filled with the registered obveznik and nothing else happens until
+ * somebody reads it, corrects it if it is wrong and submits it.
  */
 
 const ULOGE: { uloga: PopisUloga; naziv: string }[] = [
@@ -155,14 +168,14 @@ const STATUS_NAZIV: Record<PopisStatus, string> = {
   posted: "proknjižen popis",
 };
 
-function poruka(cause: unknown): string {
+function poruka(cause: unknown, rezervna = "Radnja nije izvršena."): string {
   if (cause instanceof Error) {
     return cause.message;
   }
   if (typeof cause === "object" && cause !== null && "message" in cause) {
     return String((cause as { message: unknown }).message);
   }
-  return "Radnja nije izvršena.";
+  return rezervna;
 }
 
 export function PopisModule({ services }: { services: PosServices }) {
@@ -229,6 +242,26 @@ export function PopisModule({ services }: { services: PosServices }) {
     setError(undefined);
     try {
       setSelected(await next.run(popis, selected.id, potpisnici));
+      await refreshList();
+    } catch (cause) {
+      setError(poruka(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Req. 35 / PoP čl. 8 st. 2. The name travels exactly as it was typed —
+  // `odobri_plan_rada` trims it and refuses a blank one by name, and a screen
+  // that filled the blank in would be recording an approval nobody gave.
+  async function odobriPlan(odobrio: string) {
+    if (!selected) {
+      return;
+    }
+
+    setBusy(true);
+    setError(undefined);
+    try {
+      setSelected(await popis.odobriPlan(selected.id, odobrio));
       await refreshList();
     } catch (cause) {
       setError(poruka(cause));
@@ -358,6 +391,7 @@ export function PopisModule({ services }: { services: PosServices }) {
             session={selected}
             busy={busy}
             onKorak={korak}
+            onOdobriPlan={odobriPlan}
             onSaveLine={sacuvajStavku}
           />
         </>
@@ -702,12 +736,14 @@ function PopisDetail({
   session,
   busy,
   onKorak,
+  onOdobriPlan,
   onSaveLine,
 }: {
   services: PosServices;
   session: PopisSessionView;
   busy: boolean;
   onKorak: (potpisnici: string[]) => Promise<void>;
+  onOdobriPlan: (odobrio: string) => Promise<void>;
   onSaveLine: (lineId: number | null, input: PopisLineInput) => Promise<void>;
 }) {
   const korak = sledeciKorak(session.status);
@@ -903,6 +939,13 @@ function PopisDetail({
         </Alert>
       )}
 
+      <DokumentiPanel
+        services={services}
+        session={session}
+        busy={busy}
+        onOdobriPlan={onOdobriPlan}
+      />
+
       {session.vrsta === "nivelacioni" ? (
         <NivelacijaObuhvatPanel services={services} session={session} />
       ) : null}
@@ -929,6 +972,268 @@ function PopisDetail({
         session={session}
         prijavljene={prijavljene}
       />
+    </div>
+  );
+}
+
+/**
+ * Reqs. 31/32/35 — the four documents the module generates, and the čl. 8 st. 2
+ * approval.
+ *
+ * **The phase of the popisna lista is read off `knjigovodstvoDostupno` for the
+ * copy and off nothing at all for the request.** That field is the backend's
+ * own `book_quantities_released(status, fazaAPotpisana)`, which is the very
+ * predicate `faza_stampe` decides with, so the sentence beside the button and
+ * the document the click produces cannot disagree. The request itself carries
+ * `null`: the derivation stays in one place, and a screen that named the phase
+ * would be the one deciding when book quantities reach paper.
+ *
+ * **The čl. 8 st. 5 reprint is offered after the potpis and is not a hedge.**
+ * PoP čl. 2 st. 6 gives the owner of tuđa roba ten days for a primerak of the
+ * *signed* posebna popisna lista, and the signed document is the counted state,
+ * so without this button the module would state a rok it gives the shop no way
+ * to meet. `„a“` narrows and never widens, which is why naming it here is safe
+ * where naming `„b“` never is.
+ *
+ * **The approval control is absent on a posted popis** because `odobri_plan_rada`
+ * runs `posting_lock` and would refuse it (čl. 14 st. 3) — the module offers no
+ * action the state machine rejects. The documents stay printable: a reprint
+ * changes nothing about a popis, and čl. 14 st. 3 locks the record, not the
+ * paper.
+ */
+function DokumentiPanel({
+  services,
+  session,
+  busy,
+  onOdobriPlan,
+}: {
+  services: PosServices;
+  session: PopisSessionView;
+  busy: boolean;
+  onOdobriPlan: (odobrio: string) => Promise<void>;
+}) {
+  const popis = services.popis;
+  // `null` while the registered obveznik is still being read. Once the operator
+  // has touched the field it holds his text, empty string included — the
+  // suggestion is applied once and never re-applied over an edit.
+  const [odobravalac, setOdobravalac] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    services.settings
+      .getCompanySettings()
+      .then((podesavanja) => {
+        if (!cancelled) {
+          setOdobravalac((current) => current ?? podesavanja.shopName);
+        }
+      })
+      .catch(() => {
+        // A suggestion that failed to load is an empty field, never a blocked
+        // one: the approver's name is the operator's to give either way.
+        if (!cancelled) {
+          setOdobravalac((current) => current ?? "");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [services]);
+
+  // SW-8 export-then-open: export the document, then hand its path to the OS
+  // print handler. A failed open still leaves the saved file surfaced.
+  async function runPrint(
+    action: () => Promise<ExportedFile>,
+    fallback: string,
+  ) {
+    let exported: ExportedFile;
+    try {
+      exported = await action();
+    } catch (cause) {
+      toast.error("Izvoz nije uspeo", { description: poruka(cause, fallback) });
+      return;
+    }
+    try {
+      await services.print.openForPrint(exported.path);
+      toast.success("Otvoreno za štampu", { description: exported.path });
+    } catch {
+      toast.warning("Dokument je sačuvan — otvorite ga ručno za štampu", {
+        description: exported.path,
+      });
+    }
+  }
+
+  const dostupno = session.knjigovodstvoDostupno;
+  const proknjizen = session.status === "posted";
+  // Half a record is not an approval — v21 pairs the two columns in a CHECK,
+  // and a screen reading only the name would report an approval with no date
+  // behind it as one that happened.
+  const odobren =
+    session.planRadaOdobrio !== null && session.planRadaOdobrenoAt !== null;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div
+        role="group"
+        aria-label="Popisne liste za štampu"
+        className="flex flex-col gap-2 rounded-md border p-3"
+      >
+        <p className="text-sm font-medium">Popisne liste za štampu</p>
+        <p className="text-sm">
+          {dostupno
+            ? "Štampaju se obračunate popisne liste (PoP čl. 9 st. 3) — sa knjigovodstvenim stanjem, naturalnim razlikama, cenama i vrednostima."
+            : "Štampa se popisna lista stvarnog stanja (PoP čl. 8 st. 5) — bez knjigovodstvenih količina, bez razlika i bez vrednosti."}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Koja se od te dve liste štampa ne bira se ovde: aplikacija je izvodi
+          iz samog popisa, iz potpisa stvarnog stanja. Dok tog potpisa nema,
+          štampa se samo ono što je prebrojano — podaci iz knjigovodstva se
+          komisiji ne daju ni na papiru.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              void runPrint(
+                () => popis.exportLista(session.id, null),
+                "Popisne liste nisu izvezene.",
+              );
+            }}
+          >
+            <PrinterIcon data-icon="inline-start" aria-hidden="true" />
+            Štampaj popisne liste
+          </Button>
+          {dostupno ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                void runPrint(
+                  () => popis.exportLista(session.id, "a"),
+                  "Liste stvarnog stanja nisu izvezene.",
+                );
+              }}
+            >
+              <PrinterIcon data-icon="inline-start" aria-hidden="true" />
+              Štampaj potpisane liste stvarnog stanja
+            </Button>
+          ) : null}
+        </div>
+        {dostupno ? (
+          <p className="text-xs text-muted-foreground">
+            Potpisano stvarno stanje ostaje da se štampa i posle obračuna — taj
+            primerak nosi samo prebrojano stanje, onako kako je potpisano.
+          </p>
+        ) : null}
+      </div>
+
+      <div
+        role="group"
+        aria-label="Odluka o popisu i plan rada"
+        className="flex flex-col gap-2 rounded-md border p-3"
+      >
+        <p className="text-sm font-medium">Odluka o popisu i plan rada</p>
+        <p className="text-sm">
+          Odluku o popisu i obrazovanju komisije donosi, a plan rada po kome se
+          popis vrši odobrava, lice iz čl. 4 st. 2 Pravilnika o popisu — kod
+          preduzetnika sam preduzetnik (PoP čl. 8 st. 1–2).
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Datum donošenja odluke aplikacija ne evidentira — upišite ga na
+          štampanom primerku.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              void runPrint(
+                () => popis.exportOdluka(session.id),
+                "Odluka o popisu nije izvezena.",
+              );
+            }}
+          >
+            <PrinterIcon data-icon="inline-start" aria-hidden="true" />
+            Štampaj odluku o popisu
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              void runPrint(
+                () => popis.exportPlanRada(session.id),
+                "Plan rada nije izvezen.",
+              );
+            }}
+          >
+            <PrinterIcon data-icon="inline-start" aria-hidden="true" />
+            Štampaj plan rada
+          </Button>
+        </div>
+
+        {/*
+          The approval and the schedule are two separate facts, and the app can
+          hold the first without the second: nothing in the crate writes
+          `plan_rada_json` after the popis is opened. A page carrying „odobren“
+          over a plan it does not hold would read as though the schedule were on
+          file, so the gap is named — here and on the generated document, in the
+          same terms.
+        */}
+        {session.planRadaJson === null ? (
+          <p className="text-xs text-muted-foreground">
+            Sadržina plana rada nije uneta u aplikaciju (PoP čl. 8 st. 1) —
+            evidentira se odobrenje, a ne raspored i zaduženja na koja se
+            odobrenje odnosi.
+          </p>
+        ) : null}
+
+        {odobren ? (
+          <p className="text-sm">
+            Plan rada je odobren (PoP čl. 8 st. 2): {session.planRadaOdobrio}.
+            Odobrenje je evidentirano {session.planRadaOdobrenoAt}.
+          </p>
+        ) : (
+          <p className="text-sm">
+            Plan rada nije odobren (PoP čl. 8 st. 2). Aplikacija ga ne odobrava
+            sama — evidentira se odobrenje koje je neko dao.
+          </p>
+        )}
+
+        {proknjizen ? null : (
+          <>
+            <Field className="w-auto">
+              <FieldLabel htmlFor="popis-odobravalac">
+                Ime i prezime lica koje odobrava plan rada
+              </FieldLabel>
+              <Input
+                id="popis-odobravalac"
+                value={odobravalac ?? ""}
+                onChange={(event) => setOdobravalac(event.target.value)}
+              />
+              <FieldDescription>
+                Predložen je naziv obveznika iz podešavanja. Ispravite ga ako
+                plan rada odobrava drugo lice — naziv radnje nije ime lica.
+              </FieldDescription>
+            </Field>
+            <div>
+              <Button
+                type="button"
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  void onOdobriPlan(odobravalac ?? "");
+                }}
+              >
+                Evidentiraj odobrenje plana rada
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

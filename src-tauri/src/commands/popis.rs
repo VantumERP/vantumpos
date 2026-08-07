@@ -1920,10 +1920,21 @@ pub(crate) fn compose_izvestaj(
         upozorenja.push(podsetnik);
     }
 
+    // Req. 37 / čl. 13 st. 1. The denial is about **this document** and it is
+    // still true: `compose_izvestaj` returns a view for the screen and no command
+    // in the crate writes an izveštaj to a file. What changed around it is that
+    // `popis_export_lista`, `popis_export_odluka` and `popis_export_plan_rada`
+    // now write three documents that do — and this warning is read two panels
+    // away from the buttons that call them. A bare „program ga ne štampa i ne
+    // izvozi“ standing beside a printing module reads as a denial about the whole
+    // module, which is the same defect facing the other way, so the sentence
+    // draws the line itself instead of leaving the operator to guess where it
+    // falls.
     upozorenja.push(
         "Ovaj izveštaj se sastavlja u trenutku kada se zatraži, prikazuje se na ekranu i ne \
          čuva se u aplikaciji. Program ga ne štampa i ne izvozi — štampani primerak sastavite \
-         sami i čuvajte ga uz popisne liste."
+         sami i čuvajte ga uz popisne liste. Popisne liste, odluku o popisu i plan rada program \
+         izvozi u datoteku za štampu; izveštaj nije među njima."
             .to_string(),
     );
 
@@ -5210,9 +5221,23 @@ mod tests {
             );
             assert!(
                 poruke.contains("ne štampa") && poruke.contains("ne izvozi"),
-                "and that it does not print or export it either — the module has \
-                 neither, so an instruction to „odštampajte ga“ sends the shop \
-                 looking for a button that does not exist, said: {poruke}"
+                "and that it does not print or export it either — nothing in this \
+                 crate writes an izveštaj to a file, so an instruction to \
+                 „odštampajte ga“ sends the shop looking for a button that does \
+                 not exist, said: {poruke}"
+            );
+            // The denial above was the whole of this warning when the popis
+            // module had no output at all. It is still true of the izveštaj and
+            // false of everything beside it: `popis_export_lista`,
+            // `popis_export_odluka` and `popis_export_plan_rada` write three
+            // documents to `exports/`, and this warning sits two panels away
+            // from the buttons that call them. A bare „program ga ne štampa i ne
+            // izvozi“ read there says „this module prints nothing“ — so the
+            // sentence has to draw the line rather than leave the operator to.
+            assert!(
+                poruke.contains("izveštaj nije među njima"),
+                "the warning has to say what the program DOES export, or the \
+                 denial reads as a denial about the whole module, said: {poruke}"
             );
         });
     }

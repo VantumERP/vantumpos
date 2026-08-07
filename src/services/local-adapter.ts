@@ -475,6 +475,17 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         }),
       izvestaj: (id, request) =>
         invoke<IzvestajView>("popis_izvestaj", { id, request }),
+      // `faza` travels as given, `null` included. The command puts it through
+      // `faza_stampe` against the session's own čl. 8 st. 5 potpis, so an
+      // adapter that resolved it to a phase here would be answering the one
+      // question this module keeps backend-side on purpose.
+      exportLista: (id, faza) =>
+        invoke<ExportedFile>("popis_export_lista", { id, faza }),
+      exportOdluka: (id) => invoke<ExportedFile>("popis_export_odluka", { id }),
+      exportPlanRada: (id) =>
+        invoke<ExportedFile>("popis_export_plan_rada", { id }),
+      odobriPlan: (id, odobrio) =>
+        invoke<PopisSessionView>("popis_odobri_plan", { id, odobrio }),
     },
     print: {
       openForPrint: (path) => openPath(path),

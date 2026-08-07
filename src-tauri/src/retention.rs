@@ -427,7 +427,7 @@ impl RecordClass {
                 "Arhiva objavljenih cenovnika (ZZP čl. 6 st. 5 — poređenje ranije objavljenih cena sa cenama objavljenim u realnom vremenu). Podrazumevani rok je dve godine, koliko traje zastarelost prekršajnog gonjenja iz ZZP čl. 213; rok se pomera samo unapred. Automatsko čišćenje uklanja samo snimke starije od tog roka i nikada važeći cenovnik prodajnog objekta, koji ostaje bez obzira na starost. Ova arhiva ne sadrži podatke o ličnosti — u njoj su šifre, nazivi i cene artikala i naziv prodajnog mesta."
             }
             Self::PopisDokumentacija => {
-                "Popisne liste sa svim posebnim listama, podaci o popisu, sastav komisije za popis i potpisi na listama (ZoRač čl. 20 i čl. 21; Pravilnik o popisu). Rok čuvanja je pet godina, a računa se od poslednjeg dana poslovne godine na koju se popis odnosi (ZoRač čl. 28 st. 7 i st. 9) — zato popis izvršen u toku godine i popis na datum bilansa iste godine ističu istog dana. Rok se pomera samo unapred. Nijedan propis ne imenuje popisne liste izričito: rok od pet godina je zaključak po osnovu da su to isprave na osnovu kojih se unose podaci u poslovne knjige, a isti rok bi dao i čl. 28 st. 5 kada bi se posmatrale kao pomoćne knjige. Proknjižen popis se ne menja — ispravka ide kroz novi popis (PoP čl. 14 st. 3; ZoRač čl. 8 st. 4). Izveštaj o popisu se ne čuva u aplikaciji: sastavlja se na zahtev i prikazuje na ekranu, a program ga ne štampa i ne izvozi — štampani i potpisani primerak sastavlja i čuva sam obveznik. Automatsko brisanje popisne dokumentacije ne postoji — program samo računa najraniji dan od kog čuvanje više ne bi bilo obavezno."
+                "Popisne liste sa svim posebnim listama, podaci o popisu, sastav komisije za popis i potpisi na listama (ZoRač čl. 20 i čl. 21; Pravilnik o popisu). Rok čuvanja je pet godina, a računa se od poslednjeg dana poslovne godine na koju se popis odnosi (ZoRač čl. 28 st. 7 i st. 9) — zato popis izvršen u toku godine i popis na datum bilansa iste godine ističu istog dana. Rok se pomera samo unapred. Nijedan propis ne imenuje popisne liste izričito: rok od pet godina je zaključak po osnovu da su to isprave na osnovu kojih se unose podaci u poslovne knjige, a isti rok bi dao i čl. 28 st. 5 kada bi se posmatrale kao pomoćne knjige. Proknjižen popis se ne menja — ispravka ide kroz novi popis (PoP čl. 14 st. 3; ZoRač čl. 8 st. 4). Popisne liste, odluku o popisu i plan rada program sastavlja i izvozi u datoteku za štampu — potpisan primerak sastavlja i čuva sam obveznik, a izvezena datoteka nije potpisana isprava. Izveštaj o popisu se ne čuva u aplikaciji: sastavlja se na zahtev i prikazuje na ekranu, a program ga ne štampa i ne izvozi — štampani i potpisani primerak sastavlja i čuva sam obveznik. Automatsko brisanje popisne dokumentacije ne postoji — program samo računa najraniji dan od kog čuvanje više ne bi bilo obavezno."
             }
         }
     }
@@ -1529,13 +1529,52 @@ mod tests {
         );
         assert!(
             note.contains("program ga ne štampa"),
-            "the other half of the same sentence, and the one nothing pinned: the \
-             popis module has no print and no export, so a note saying the izveštaj \
-             „se štampa na zahtev“ describes a button that does not exist: {note}"
+            "the other half of the same sentence, and the one nothing pinned: no \
+             command in this crate writes the izveštaj to a file, so a note saying \
+             it „se štampa na zahtev“ describes a button that does not exist: {note}"
         );
         assert!(
             !note.contains("štampa na zahtev"),
             "the withdrawn clause must not come back: {note}"
+        );
+
+        // The same sentence read the other way round, and the half that went
+        // stale. When this note was written the popis module had no print and no
+        // export at all; `popis_export_lista`, `popis_export_odluka` and
+        // `popis_export_plan_rada` gave it three. The izveštaj clause above is
+        // still true — nothing writes an izveštaj to a file — but a note that
+        // said only that would leave the shop reading „this program produces no
+        // popis document“, which is now the opposite of the truth. So the note
+        // has to carry the positive half too, and it has to carry it in the same
+        // breath as the exception, or the reader learns the wrong lesson from
+        // whichever sentence he stops at.
+        //
+        // The claim is read out of its OWN sentence, bounded by the nearest
+        // `". "` on either side: „popisne liste“ opens this note already, so a
+        // `contains` over the whole string would pass on a note that never made
+        // the claim at all.
+        let at = note.find("izvozi u datoteku").unwrap_or_else(|| {
+            panic!(
+                "the note must say which popis documents this program writes to a file — \
+                 three commands produce one and a note silent about them understates what \
+                 the shop is handed: {note}"
+            )
+        });
+        let start = note[..at].rfind(". ").map_or(0, |kraj| kraj + 2);
+        let end = note[at..].find(". ").map_or(note.len(), |kraj| at + kraj);
+        let izlazi = &note[start..end];
+        for dokument in ["Popisne liste", "odluku o popisu", "plan rada"] {
+            assert!(
+                izlazi.contains(dokument),
+                "the sentence naming the program's outputs omits „{dokument}“, which \
+                 `commands::popis` exports: {izlazi}"
+            );
+        }
+        assert!(
+            !izlazi.to_lowercase().contains("izveštaj"),
+            "…and it must not sweep the izveštaj in with them: no command writes one, \
+             and a list that included it would promise a file the shop will never \
+             find: {izlazi}"
         );
         assert!(
             note.contains("Automatsko brisanje") && note.contains("ne postoji"),

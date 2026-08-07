@@ -62,6 +62,7 @@ import type {
   PopisLineInput,
   PopisLista,
   PopisPodesavanja,
+  PopisPrintFaza,
   PopisSessionView,
   PopisSummary,
   ProveraListiView,
@@ -617,6 +618,28 @@ export interface PopisService {
     obuhvat: NivelacijaObuhvatId | null,
   ): Promise<NivelacijaObuhvatView>;
   izvestaj(id: number, request: IzvestajRequest): Promise<IzvestajView>;
+  /**
+   * Reqs. 31/32 — writes one of the two popisna-lista documents into `exports/`
+   * and returns the descriptor to hand `PrintService.openForPrint`.
+   *
+   * **`faza` null is the ordinary call.** The backend derives the phase from
+   * the session and refuses `"b"` before the čl. 8 st. 5 potpis by name; a
+   * caller that picked the phase would be the one deciding when book quantities
+   * reach paper, which is the breach the whole module is built around. `"a"`
+   * only ever narrows, so the čl. 2 st. 6 reprint of the signed counted state
+   * may ask for it in any state.
+   */
+  exportLista(id: number, faza: PopisPrintFaza | null): Promise<ExportedFile>;
+  /** Req. 35 — the odluka o popisu i obrazovanju komisije, as a document. */
+  exportOdluka(id: number): Promise<ExportedFile>;
+  /** Req. 35 / PoP čl. 8 st. 1 — the plan rada with the approval as stored. */
+  exportPlanRada(id: number): Promise<ExportedFile>;
+  /**
+   * PoP čl. 8 st. 2 — records that the lice iz čl. 4 st. 2 approved the plan
+   * rada. A blank name is refused by name rather than substituted, and a posted
+   * popis is refused outright (čl. 14 st. 3).
+   */
+  odobriPlan(id: number, odobrio: string): Promise<PopisSessionView>;
 }
 
 export interface PrintService {

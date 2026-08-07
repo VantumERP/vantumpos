@@ -1238,6 +1238,11 @@ describe("local service adapter", () => {
     await services.popis.nivelacijaPregled();
     await services.popis.nivelacijaObuhvat(4, "ceo_objekat");
     await services.popis.izvestaj(4, { prijavljeneListe: [], narativ });
+    await services.popis.exportLista(4, null);
+    await services.popis.exportLista(4, "a");
+    await services.popis.exportOdluka(4);
+    await services.popis.exportPlanRada(4);
+    await services.popis.odobriPlan(4, "Amina Hodžić");
 
     expect(invoke).toHaveBeenNthCalledWith(1, "popis_list");
     expect(invoke).toHaveBeenNthCalledWith(2, "popis_get", { id: 4 });
@@ -1269,6 +1274,29 @@ describe("local service adapter", () => {
       id: 4,
       request: { prijavljeneListe: [], narativ },
     });
+    // Reqs. 31/32. The phase travels as the caller gave it, `null` included:
+    // `faza_stampe` decides it against the session's own čl. 8 st. 5 potpis, so
+    // an adapter that resolved it here would be answering the one question this
+    // module keeps backend-side.
+    expect(invoke).toHaveBeenNthCalledWith(14, "popis_export_lista", {
+      id: 4,
+      faza: null,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(15, "popis_export_lista", {
+      id: 4,
+      faza: "a",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(16, "popis_export_odluka", { id: 4 });
+    expect(invoke).toHaveBeenNthCalledWith(17, "popis_export_plan_rada", {
+      id: 4,
+    });
+    // Req. 35 / PoP čl. 8 st. 2 — the name goes across as typed. The backend
+    // trims it and refuses a blank one by name; an adapter that substituted the
+    // shop's registered name would record an approval nobody gave.
+    expect(invoke).toHaveBeenNthCalledWith(18, "popis_odobri_plan", {
+      id: 4,
+      odobrio: "Amina Hodžić",
+    });
 
     // Req. 41 at the port, asserted over the SHAPE and not over the calls this
     // test happened to make. Once the result is knjižen (PoP čl. 14 st. 3) the
@@ -1276,14 +1304,24 @@ describe("local service adapter", () => {
     // so an `update`, a `delete` or a `reopen` here would be the write the
     // backend refuses, arriving through the port instead. The req. 42 retention
     // purge is not a verb on this surface either.
+    //
+    // The four documents (reqs. 31/32/35) joined this list when the export
+    // commands shipped; they widen the surface deliberately and none of them is
+    // a write to the popis. `odobriPlan` is the one that is, and it is the čl. 8
+    // st. 2 approval — which `posting_lock` refuses on a proknjižen popis, so it
+    // does not reopen one either.
     expect(Object.keys(services.popis).sort()).toEqual([
       "compute",
+      "exportLista",
+      "exportOdluka",
+      "exportPlanRada",
       "get",
       "getPodesavanja",
       "izvestaj",
       "list",
       "nivelacijaObuhvat",
       "nivelacijaPregled",
+      "odobriPlan",
       "open",
       "post",
       "proveraListi",

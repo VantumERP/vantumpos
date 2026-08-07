@@ -335,14 +335,20 @@ const TEMPLATES: &[Template] = &[
             "ZoRač čl. 28 st. 7 — isprave na osnovu kojih se unose podaci u poslovne knjige \
              čuvaju se pet godina, a rok se računa od poslednjeg dana poslovne godine na koju se \
              odnose (čl. 28 st. 9). Nijedan propis ne imenuje popisne liste izričito, pa je ovo \
-             zaključak a ne izričita odredba; rok se pomera samo unapred. Izveštaj o popisu se ne \
-             čuva u aplikaciji — sastavlja se na zahtev i prikazuje na ekranu, a program ga ne \
-             štampa i ne izvozi; štampani primerak sastavlja i čuva sam obveznik.",
+             zaključak a ne izričita odredba; rok se pomera samo unapred. Popisne liste, odluku o \
+             popisu i plan rada program sastavlja i izvozi u datoteku za štampu — potpisan \
+             primerak sastavlja i čuva sam obveznik, a izvezena datoteka nije potpisana isprava. \
+             Izveštaj o popisu se ne čuva u aplikaciji — sastavlja se na zahtev i prikazuje na \
+             ekranu, a program ga ne štampa i ne izvozi; štampani primerak sastavlja i čuva sam \
+             obveznik.",
         retention: Some(RecordClass::PopisDokumentacija),
         mere: "Podaci iz knjigovodstva o količinama ne izdaju se komisiji pre nego što je stvarno \
              stanje upisano u popisne liste i pre nego što su te liste potpisane (Pravilnik o \
              popisu, čl. 8 st. 5); to ograničenje je postavljeno u samoj bazi i u upitima, a ne u \
-             izgledu ekrana. Proknjižen popis se više ne menja — ispravka ide kroz novi popis.",
+             izgledu ekrana. Proknjižen popis se više ne menja — ispravka ide kroz novi popis. \
+             Odluka o popisu, plan rada i popisne liste sadrže imena, pa izvoz tih dokumenata \
+             iznosi imena iz baze u datoteku na disku, koja više nije zaštićena prijavom u \
+             program nego pristupom samom uređaju.",
     },
     Template {
         kljuc: "evidencija_radnji_obrade",
@@ -889,7 +895,11 @@ pub fn cl47_export(state: State<'_, AppState>) -> Result<ExportedFile, CommandEr
 
 #[cfg(test)]
 mod tests {
+    use tauri::State;
+
     use super::{export, generate, list, regenerate, render_html, ProcessingActivity};
+    use crate::app_error::CommandError;
+    use crate::commands::reports::ExportedFile;
     use crate::commands::settings::CompanySettings;
     use crate::db::{test_database_path, Db};
     use crate::retention::{
@@ -1548,17 +1558,109 @@ mod tests {
         });
     }
 
+    /// The half a sweep cannot supply. The sweep below fires on a **claim**, so
+    /// a register that said nothing at all would satisfy it while leaving the
+    /// Poverenik with an entry that understates what the program hands the shop.
+    ///
+    /// The popis entry is the live case. Since SW-16 its rok_osnov has said that
+    /// the izveštaj is composed on screen and neither printed nor exported —
+    /// true then of every popis document, and true now of the izveštaj alone,
+    /// because `popis_export_lista`, `popis_export_odluka` and
+    /// `popis_export_plan_rada` write the other three into `exports/`. An entry
+    /// carrying only the denial reads, to an inspector, as *„this program
+    /// produces no popis document“*, which is the same defect facing the other
+    /// way — and it is the direction nothing in this crate was watching. So both
+    /// halves are pinned here: the three documents that are written, and the one
+    /// that is not.
+    #[test]
+    fn the_popis_entry_names_the_documents_the_program_writes_and_the_one_it_does_not() {
+        with_state("cl47_popis_outputs", |state| {
+            sign_in_admin(state);
+            let register = generate(state, NOW).expect("the register should generate");
+            let popis = register
+                .iter()
+                .find(|activity| activity.kljuc == "popis_imovine")
+                .expect("the popis radnja must be in the register");
+            let rok = popis
+                .rok_cuvanja
+                .as_deref()
+                .expect("the popis radnja carries a rok (st. 1 t. 6)");
+
+            // Read out of the sentence that makes the claim, not out of the whole
+            // entry: „popisne liste“ opens the vrsta_podataka clause already, so a
+            // `contains` over the entry would pass on a register that never said
+            // what is produced.
+            let at = rok.find("izvozi u datoteku").unwrap_or_else(|| {
+                panic!(
+                    "the popis entry must name the documents this program writes to a file \
+                     — three commands produce one: {rok}"
+                )
+            });
+            let start = rok[..at].rfind(". ").map_or(0, |kraj| kraj + 2);
+            let end = rok[at..].find(". ").map_or(rok.len(), |kraj| at + kraj);
+            let izlazi = &rok[start..end];
+            for dokument in ["Popisne liste", "odluku o popisu", "plan rada"] {
+                assert!(
+                    izlazi.contains(dokument),
+                    "the register omits „{dokument}“ from the documents the program \
+                     produces: {izlazi}"
+                );
+            }
+            assert!(
+                !izlazi.to_lowercase().contains("izveštaj"),
+                "…and it must not sweep the izveštaj in with them — no command writes \
+                 one, and an inspector reading it into that list would be told the shop \
+                 has a file it will never find: {izlazi}"
+            );
+            assert!(
+                rok.contains("program ga ne štampa i ne izvozi"),
+                "the izveštaj keeps its own denial, in the same entry and unchanged: {rok}"
+            );
+
+            // Čl. 47 st. 1 t. 7. The export is the moment the komisija's names
+            // leave the database, and the register's mere clause is where a
+            // Poverenik looks for what protects them afterwards.
+            assert!(
+                popis
+                    .opis_mera_zastite
+                    .as_deref()
+                    .is_some_and(|mere| mere.contains("izvoz")),
+                "the mere clause must account for the export that carries the names out \
+                 of the database: {:?}",
+                popis.opis_mera_zastite
+            );
+        });
+    }
+
     /// The register is handed to the Poverenik, so a capability it claims is a
     /// claim the shop makes about itself. This project has shipped a document
     /// promising behaviour the code lacks **six separate times**, and the last
     /// one lived in this very file — the popis rok_osnov said the izveštaj
-    /// „sastavlja se i štampa na zahtev“ while the popis module has no print and
+    /// „sastavlja se i štampa na zahtev“ while the popis module had no print and
     /// no export at all.
     ///
     /// So this is a sweep, not a pinned sentence. The two fixes before it each
     /// pinned one string and left its neighbours unguarded, which is exactly how
-    /// instances two through six survived. Any claim that the program prints,
-    /// exports, sends or files something must be negated in the same breath.
+    /// instances two through six survived.
+    ///
+    /// **Amended deliberately for the popis export (Tasks 3–4).** The program
+    /// really did gain three outputs, so „negate it or delete it“ stopped being
+    /// a rule the register could obey honestly: the only sentences it left
+    /// available were false ones and silence, and silence about a capability an
+    /// inspector is entitled to know about is its own defect. The rule is now
+    /// *negate it, **or** name the documents you are claiming it for* — and the
+    /// list of nameable documents is **not a literal**. Each entry is bound
+    /// below to the command that produces it by a function pointer, so deleting
+    /// or renaming that command stops this test compiling instead of leaving a
+    /// stale sentence standing.
+    ///
+    /// **The amendment still fails an untrue claim, which is the whole point of
+    /// making it rather than dropping the guard.** An affirmative sentence has
+    /// to name at least one real output *and no document this crate cannot
+    /// produce*: „program štampa izveštaj“ names none of the three and fails,
+    /// and „program štampa popisne liste i izveštaj o popisu“ — the half-true
+    /// shape, which is what a widening edit actually looks like — fails on the
+    /// second limb. Only a sentence that is true of the code passes.
     #[test]
     fn the_generated_register_promises_no_output_the_program_cannot_produce() {
         with_state("cl47_no_false_output_promise", |state| {
@@ -1571,15 +1673,55 @@ mod tests {
                 render_html(&company, &register)
             );
 
+            // The documents this crate genuinely writes to a file, bound to the
+            // commands that write them. The binding is the point: rename or
+            // delete any of the three and this test stops compiling, so the
+            // allow-list cannot outlive the capability it describes. Nothing
+            // else in the crate may be added here without the same binding.
+            let _liste: fn(
+                State<'_, AppState>,
+                i64,
+                Option<crate::popis_print::PrintFaza>,
+            ) -> Result<ExportedFile, CommandError> = crate::commands::popis::popis_export_lista;
+            let _odluka: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
+                crate::commands::popis::popis_export_odluka;
+            let _plan: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
+                crate::commands::popis::popis_export_plan_rada;
+            const IZLAZI: [&str; 3] = ["popisne liste", "odluku o popisu", "plan rada"];
+            // …and the document in the same subject area that this crate still
+            // cannot produce. `compose_izvestaj` returns a view for the screen;
+            // no command writes an izveštaj anywhere.
+            const BEZ_IZLAZA: [&str; 1] = ["izveštaj"];
+
             // Scope: a sentence whose subject is the PROGRAM. That is the shape
             // every one of the six incidents took — „program … štampa na zahtev“.
             // A passive clause about something else („materijal koji se šalje
             // tehničkoj podršci“) is not a claim about what this app does, and a
             // participle („štampani primerak“) is the obveznik's own paper.
-            for sentence in haystack.split(['.', ';']) {
+            //
+            // **Case-folded, and that is a fix and not a tidy-up.** The scope
+            // check used to read the sentence as written, so „Program štampa …“
+            // — a sentence-initial subject, which is how a stored napomena and
+            // every operator string in this crate begins — carried no lowercase
+            // „program“ and was skipped whole. Measured rather than assumed:
+            // with the fold removed, a planted „Program štampa popisne liste i
+            // izveštaj o popisu“ leaves this test green. `popis_print`'s čl. 6
+            // sweep had the identical hole and was folded for the identical
+            // reason.
+            for raw in haystack.split(['.', ';']) {
+                let sentence = raw.to_lowercase();
+                let sentence = sentence.as_str();
                 if !sentence.contains("program") && !sentence.contains("aplikacij") {
                     continue;
                 }
+                // The amended half: a claim may stand affirmatively when it says
+                // WHICH document it is claiming, and every document it names is
+                // one of the three above. „…popisne liste i izveštaj o popisu“ —
+                // the half-true shape a widening edit actually takes — fails on
+                // the second limb, and a claim naming nothing fails on the first.
+                let istinita = IZLAZI.iter().any(|izlaz| sentence.contains(izlaz))
+                    && !BEZ_IZLAZA.iter().any(|bez| sentence.contains(bez));
+
                 for (verb, negation) in [
                     ("štampa", "ne štampa"),
                     ("izvozi", "ne izvozi"),
@@ -1595,12 +1737,15 @@ mod tests {
                     });
                     if claimed {
                         assert!(
-                            sentence.contains(negation),
-                            "the čl. 47 register says the program „{verb}“ without negating it: \
-                             „{}“ — the register is read by an inspector, so a capability it names \
-                             is one the shop is taken to have. Six times in this project a document \
-                             promised behaviour the code lacked. If the program genuinely gained \
-                             this output, say so here deliberately.",
+                            sentence.contains(negation) || istinita,
+                            "the čl. 47 register says the program „{verb}“ without negating it \
+                             and without naming a document this crate can produce: „{}“ — the \
+                             register is read by an inspector, so a capability it names is one \
+                             the shop is taken to have. Six times in this project a document \
+                             promised behaviour the code lacked. An affirmative claim is allowed \
+                             only for {IZLAZI:?}, each of which is bound above to the command \
+                             that produces it, and only when the same sentence names none of \
+                             {BEZ_IZLAZA:?}.",
                             sentence.trim()
                         );
                     }

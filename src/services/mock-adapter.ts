@@ -3082,9 +3082,82 @@ export function createMockServices(): PosServices {
           upozorenja: [
             "Izveštaj o popisu se ne čuva u aplikaciji, a program ga ne štampa " +
               "i ne izvozi — štampani primerak sastavite sami i čuvajte ga uz " +
-              "popisne liste.",
+              "popisne liste. Popisne liste, odluku o popisu i plan rada program " +
+              "izvozi u datoteku za štampu; izveštaj nije među njima.",
           ],
         };
+      },
+      /**
+       * `crate::commands::popis::faza_stampe`. The phase is **derived**, and a
+       * čl. 9 st. 3 sheet asked for before the čl. 8 st. 5 potpis is refused by
+       * name rather than quietly downgraded — a caller handed the counted sheet
+       * under the name it asked for would believe it had printed the obračun.
+       * An explicit `"a"` is honoured in every state: over-withholding breaches
+       * nothing, and čl. 2 st. 6 owes the owner of tuđa roba a primerak of the
+       * signed counted lista after the potpis.
+       */
+      async exportLista(id, faza) {
+        const session = popisById(id);
+        const dostupno = popisKnjigovodstvoDostupno(session);
+        if (!dostupno && faza === "b") {
+          throw new Error(
+            "Obračunate popisne liste ne mogu da se odštampaju pre nego što se " +
+              "stvarno stanje unese u popisne liste i pre nego što članovi " +
+              "komisije potpišu te liste (PoP čl. 8 st. 5).",
+          );
+        }
+
+        const primenjena = dostupno ? (faza ?? "b") : "a";
+        return {
+          fileName: `popisne-liste-${id}-faza-${primenjena}.html`,
+          path: `mock://exports/popisne-liste-${id}-faza-${primenjena}.html`,
+          mimeType: "text/html" as const,
+          rowCount: session.linije.length,
+        };
+      },
+      async exportOdluka(id) {
+        const session = popisById(id);
+        return {
+          fileName: `odluka-o-popisu-${id}.html`,
+          path: `mock://exports/odluka-o-popisu-${id}.html`,
+          mimeType: "text/html" as const,
+          rowCount: session.komisija.length,
+        };
+      },
+      async exportPlanRada(id) {
+        const session = popisById(id);
+        return {
+          fileName: `plan-rada-${id}.html`,
+          path: `mock://exports/plan-rada-${id}.html`,
+          mimeType: "text/html" as const,
+          rowCount: session.komisija.length,
+        };
+      },
+      /**
+       * `crate::commands::popis::odobri_plan_rada`, refusals and order both.
+       *
+       * The blank name is checked **before** the popis is looked up, because
+       * that is where the backend checks it, and it is refused rather than
+       * filled in from the shop's registered name: a server-side default would
+       * be an auto-approval wearing a default's clothes. The čl. 14 st. 3 lock
+       * is the second gate. Both columns are written together — v21 pairs them
+       * in a CHECK, and half an approval is not an approval.
+       */
+      async odobriPlan(id, odobrio) {
+        const ime = odobrio.trim();
+        if (ime === "") {
+          throw new Error(
+            "Plan rada odobrava lice iz člana 4. stav 2. Pravilnika o popisu, " +
+              "kod preduzetnika sam preduzetnik (PoP čl. 8 st. 2) — unesite ime " +
+              "i prezime tog lica. Odobrenje bez imena se ne evidentira.",
+          );
+        }
+
+        const session = popisById(id);
+        popisEnsureOtvoren(session);
+        session.planRadaOdobrio = ime;
+        session.planRadaOdobrenoAt = now;
+        return popisView(session);
       },
     },
     print: {

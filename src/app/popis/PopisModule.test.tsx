@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { PopisModule, sledeciKorak } from "./PopisModule";
 import { navigationItems } from "@/app/navigation";
+import { Toaster } from "@/components/ui/sonner";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices } from "@/services/ports";
+import type { PopisStatus } from "@/services/types";
 
 type User = ReturnType<typeof userEvent.setup>;
 
@@ -45,6 +47,41 @@ async function otvoriPopis(user: User, opcije: OtvoriOpcije = {}) {
   }
 
   await user.click(screen.getByRole("button", { name: /^otvori popis$/i }));
+}
+
+/**
+ * Walks an already-opened popis forward through the module's own buttons and
+ * stops in `cilj`. Only the arrows `sledeciKorak` offers are ever clicked, so a
+ * fixture can never reach a state the state machine refuses to produce — which
+ * matters most for `computed`, the first state in which book quantities exist
+ * at all.
+ */
+async function dovediDo(user: User, cilj: PopisStatus) {
+  const putanja: [PopisStatus, RegExp][] = [
+    ["counting", /započni brojanje/i],
+    ["counted_signed", /potpiši stvarno stanje/i],
+    ["computed", /obračunaj razlike/i],
+    ["computed_signed", /potpiši obračunate liste/i],
+    ["posted", /proknjiži popis/i],
+  ];
+  const ciljIndex = putanja.findIndex(([status]) => status === cilj);
+
+  // The module offers exactly one arrow, so the arrow on screen is where the
+  // popis already stands. A helper that always started at „Započni brojanje“
+  // could not walk a popis it had itself already moved.
+  let pocetak = 0;
+  await waitFor(() => {
+    pocetak = putanja.findIndex(
+      ([, dugme]) => screen.queryByRole("button", { name: dugme }) !== null,
+    );
+    expect(pocetak).toBeGreaterThanOrEqual(0);
+  });
+
+  for (let korak = pocetak; korak <= ciljIndex; korak += 1) {
+    await user.click(
+      await screen.findByRole("button", { name: putanja[korak][1] }),
+    );
+  }
 }
 
 function services(): PosServices {
@@ -662,5 +699,364 @@ describe("PopisModule — the čl. 8 st. 4 handover list on a nivelacija popis",
     expect(
       screen.queryByRole("group", { name: /artikli za popis po nivelaciji/i }),
     ).toBeNull();
+  });
+});
+
+describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
+  /**
+   * The copy beside the button has to say which of the two documents the click
+   * produces, because they are not variants of one sheet: the čl. 8 st. 5 one
+   * carries the counted state and nothing the books know, and the čl. 9 st. 3
+   * one carries the obračun. An operator who printed the wrong one and handed
+   * it to the komisija would breach čl. 8 st. 5 with a document this program
+   * generated for him.
+   */
+  it("offers the čl. 8 st. 5 sheet during the count and says it carries no book data", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "counting");
+
+    const blok = await screen.findByRole("group", {
+      name: /popisne liste za štampu/i,
+    });
+    expect(
+      within(blok).getByRole("button", { name: /štampaj popisne liste/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(blok).getByText(/bez knjigovodstvenih količina/i),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * The two descriptions must not be one interchangeable string. A single
+   * sentence covering both phases would either name čl. 8 st. 5 over a sheet
+   * carrying razlike or name čl. 9 st. 3 over one that carries none — and the
+   * article is the only thing on screen that tells the operator which document
+   * he is about to put in front of the komisija.
+   */
+  it("names čl. 9 st. 3 on the computed sheet and čl. 8 st. 5 on the counted one", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "counting");
+
+    const brojanje = await screen.findByText(/štampa se popisna lista/i);
+    expect(brojanje).toHaveTextContent(/PoP čl\. 8 st\. 5/);
+    expect(brojanje).not.toHaveTextContent(/čl\. 9 st\. 3/);
+
+    await dovediDo(user, "computed");
+
+    const obracun = await screen.findByText(/štampaju se obračunate/i);
+    expect(obracun).toHaveTextContent(/PoP čl\. 9 st\. 3/);
+    expect(obracun).not.toHaveTextContent(/čl\. 8 st\. 5/);
+    // And the counting sentence is gone, not merely joined by a second one.
+    expect(screen.queryByText(/štampa se popisna lista/i)).toBeNull();
+  });
+
+  /** SW-8 export-then-open: the written file is what goes to the OS handler. */
+  it("exports through the backend and hands the written file to the print service", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const izvoz = vi.spyOn(svc.popis, "exportLista");
+    const otvori = vi
+      .spyOn(svc.print, "openForPrint")
+      .mockResolvedValue(undefined);
+
+    render(
+      <>
+        <PopisModule services={svc} />
+        <Toaster />
+      </>,
+    );
+
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "counting");
+    await user.click(
+      screen.getByRole("button", { name: /štampaj popisne liste/i }),
+    );
+
+    await waitFor(() => expect(izvoz).toHaveBeenCalledTimes(1));
+    const exported = await izvoz.mock.results[0].value;
+    await waitFor(() => expect(otvori).toHaveBeenCalledWith(exported.path));
+  });
+
+  /**
+   * The load-bearing one. `popis_export_lista` derives the phase from
+   * `book_quantities_released(status, fazaAPotpisana)` and refuses „b“ before
+   * the čl. 8 st. 5 potpis by name — but the frontend must never be the surface
+   * that asks for it. Omitted means „print what this popis has“; „a“ can only
+   * ever narrow, and over-withholding breaches nothing. „b“ would be this
+   * screen instructing the backend to release book quantities onto paper, and
+   * no state of this module may send it.
+   */
+  it("never asks the backend for the čl. 9 st. 3 sheet", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const izvoz = vi.spyOn(svc.popis, "exportLista");
+    vi.spyOn(svc.print, "openForPrint").mockResolvedValue(undefined);
+
+    render(<PopisModule services={svc} />);
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+
+    for (const status of [
+      "counting",
+      "counted_signed",
+      "computed",
+      "computed_signed",
+      "posted",
+    ] as const) {
+      await dovediDo(user, status);
+      for (const dugme of await screen.findAllByRole("button", {
+        name: /^štampaj (popisne liste|potpisane liste)/i,
+      })) {
+        await user.click(dugme);
+      }
+    }
+
+    expect(izvoz).toHaveBeenCalled();
+    for (const [, faza] of izvoz.mock.calls) {
+      expect(faza).not.toBe("b");
+    }
+  });
+
+  /**
+   * PoP čl. 2 st. 6 gives the owner of tuđa roba ten days for a primerak of the
+   * **signed** posebna popisna lista, and the signed document is the counted
+   * state. `popis_export_lista` keeps an explicit Faza A printable in every
+   * state for exactly that reason, so the reprint has to be reachable once the
+   * obračun has opened — otherwise the module states a rok it gives the shop no
+   * way to meet.
+   */
+  it("keeps the signed čl. 8 st. 5 sheet printable once the obračun has opened", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const izvoz = vi.spyOn(svc.popis, "exportLista");
+    vi.spyOn(svc.print, "openForPrint").mockResolvedValue(undefined);
+
+    render(<PopisModule services={svc} />);
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "computed");
+
+    await user.click(
+      await screen.findByRole("button", { name: /štampaj potpisane liste/i }),
+    );
+
+    await waitFor(() => expect(izvoz).toHaveBeenCalledWith(1, "a"));
+  });
+
+  /**
+   * A failed export must be said out loud. The alternative is a button that
+   * looks as though it worked and a document that was never written — the shop
+   * finds out at the moment it needs the signed sheet.
+   */
+  it("surfaces a failed export instead of silently opening nothing", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    vi.spyOn(svc.popis, "exportLista").mockRejectedValue(
+      new Error("Disk je pun."),
+    );
+    const otvori = vi
+      .spyOn(svc.print, "openForPrint")
+      .mockResolvedValue(undefined);
+
+    render(
+      <>
+        <PopisModule services={svc} />
+        <Toaster />
+      </>,
+    );
+
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "counting");
+    await user.click(
+      screen.getByRole("button", { name: /štampaj popisne liste/i }),
+    );
+
+    expect(await screen.findByText(/Disk je pun\./)).toBeInTheDocument();
+    expect(otvori).not.toHaveBeenCalled();
+  });
+});
+
+describe("PopisModule — the odluka and the plan rada (req. 35)", () => {
+  /**
+   * The plan's own instruction, and the class of defect this project keeps
+   * catching: an approval nobody performed is a worse record than a missing
+   * one. Opening a popis approves nothing, rendering the plan approves nothing,
+   * and the screen says so in the statute's own terms rather than leaving the
+   * field blank and silent.
+   */
+  it("never auto-approves the plan rada", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const odobri = vi.spyOn(svc.popis, "odobriPlan");
+    render(<PopisModule services={svc} />);
+
+    await otvoriPopis(user);
+
+    const blok = await screen.findByRole("group", {
+      name: /odluka o popisu i plan rada/i,
+    });
+    expect(within(blok).getByText(/plan rada nije odobren/i)).toHaveTextContent(
+      /PoP čl\. 8 st\. 2/,
+    );
+    expect(odobri).not.toHaveBeenCalled();
+  });
+
+  /**
+   * For a preduzetnik the lice iz čl. 4 st. 2 is the owner personally (čl. 4
+   * st. 2 → ZoRač čl. 43 st. 3), so the registered obveznik is the useful
+   * suggestion — and only a suggestion. The backend deliberately refuses to
+   * substitute it (`popis_plan_rada_bez_odobravaoca`), because a server-side
+   * default is an auto-approval wearing a default's clothes; the default
+   * belongs here, where a person sees it and can correct it before submitting.
+   */
+  it("defaults the approver to the registered obveznik and leaves it editable", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const podesavanja = await svc.settings.getCompanySettings();
+    render(<PopisModule services={svc} />);
+
+    await otvoriPopis(user);
+
+    const polje = await screen.findByLabelText(/lica koje odobrava plan rada/i);
+    await waitFor(() => expect(polje).toHaveValue(podesavanja.shopName));
+
+    await user.clear(polje);
+    await user.type(polje, "Amina Hodžić");
+    expect(polje).toHaveValue("Amina Hodžić");
+  });
+
+  it("records the approval only when the operator submits it", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const odobri = vi.spyOn(svc.popis, "odobriPlan");
+    render(<PopisModule services={svc} />);
+
+    await otvoriPopis(user);
+
+    const polje = await screen.findByLabelText(/lica koje odobrava plan rada/i);
+    await user.clear(polje);
+    await user.type(polje, "Amina Hodžić");
+    expect(odobri).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: /evidentiraj odobrenje/i }),
+    );
+
+    await waitFor(() => expect(odobri).toHaveBeenCalledWith(1, "Amina Hodžić"));
+    expect(
+      await screen.findByText(/plan rada je odobren/i),
+    ).toHaveTextContent(/Amina Hodžić/);
+  });
+
+  /** The backend's own sentence, not a second wording invented here. */
+  it("surfaces the refusal of a blank approver", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    render(<PopisModule services={svc} />);
+
+    await otvoriPopis(user);
+
+    const polje = await screen.findByLabelText(/lica koje odobrava plan rada/i);
+    await user.clear(polje);
+    await user.click(
+      screen.getByRole("button", { name: /evidentiraj odobrenje/i }),
+    );
+
+    expect(
+      await screen.findByText(/Odobrenje bez imena se ne evidentira/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/plan rada nije odobren/i)).toBeInTheDocument();
+  });
+
+  it("prints the odluka and the plan rada through the export-then-open path", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const odluka = vi.spyOn(svc.popis, "exportOdluka");
+    const plan = vi.spyOn(svc.popis, "exportPlanRada");
+    const otvori = vi
+      .spyOn(svc.print, "openForPrint")
+      .mockResolvedValue(undefined);
+
+    render(
+      <>
+        <PopisModule services={svc} />
+        <Toaster />
+      </>,
+    );
+
+    await otvoriPopis(user);
+
+    await user.click(
+      await screen.findByRole("button", { name: /štampaj odluku o popisu/i }),
+    );
+    await waitFor(() => expect(odluka).toHaveBeenCalledWith(1));
+
+    await user.click(screen.getByRole("button", { name: /štampaj plan rada/i }));
+    await waitFor(() => expect(plan).toHaveBeenCalledWith(1));
+
+    await waitFor(() => expect(otvori).toHaveBeenCalledTimes(2));
+  });
+
+  /**
+   * Req. 41 / čl. 14 st. 3 — `odobri_plan_rada` runs `posting_lock` and refuses
+   * a posted popis. The module offers no action the state machine would refuse,
+   * so the control goes; the documents stay printable, because a reprint of a
+   * posted popis changes nothing about it.
+   */
+  it("offers no approval control on a proknjižen popis", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "posted");
+
+    expect(
+      screen.queryByRole("button", { name: /evidentiraj odobrenje/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByLabelText(/lica koje odobrava plan rada/i),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /štampaj plan rada/i }),
+    ).toBeEnabled();
+  });
+
+  /**
+   * `odluka_doneta_at` exists since v21 and **no verb in this build writes it**
+   * — exporting a draft odluka is not *donošenje odluke*. The generated
+   * document says so in its own header cell; the screen that offers the button
+   * has to say the same thing, or the operator reads a dated decision into an
+   * undated one.
+   */
+  it("says the datum donošenja of the odluka is not recorded here", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user);
+
+    const blok = await screen.findByRole("group", {
+      name: /odluka o popisu i plan rada/i,
+    });
+    expect(
+      within(blok).getByText(/datum donošenja odluke/i),
+    ).toHaveTextContent(/ne evidentira/i);
   });
 });

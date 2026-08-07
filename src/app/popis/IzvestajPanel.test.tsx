@@ -164,7 +164,7 @@ const izvestaj: IzvestajView = {
       "Aplikacija ne evidentira odluku o usvajanju izveštaja — donesite je i čuvajte uz izveštaj.",
   },
   upozorenja: [
-    "Izveštaj o popisu se ne čuva u aplikaciji, a program ga ne štampa i ne izvozi — štampani primerak sastavite sami i čuvajte ga uz popisne liste.",
+    "Izveštaj o popisu se ne čuva u aplikaciji, a program ga ne štampa i ne izvozi — štampani primerak sastavite sami i čuvajte ga uz popisne liste. Popisne liste, odluku o popisu i plan rada program izvozi u datoteku za štampu; izveštaj nije među njima.",
   ],
 };
 
