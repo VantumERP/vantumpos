@@ -318,12 +318,15 @@ const TEMPLATES: &[Template] = &[
              sa stvarnim stanjem (ZoRač čl. 20 i čl. 21) i dokazivanje da je popis vodila komisija \
              sastavljena onako kako propis traži (Pravilnik o popisu, čl. 5 st. 1 i čl. 6).",
         vrsta_lica: "Članovi komisije za popis, odnosno jedno lice koje kod preduzetnika vrši \
-             popis, i lica koja potpisuju popisne liste.",
+             popis, lica koja potpisuju popisne liste i lice iz člana 4. stav 2. Pravilnika o \
+             popisu koje odobrava plan rada — kod preduzetnika sam preduzetnik.",
         vrsta_podataka: "Ime i prezime, uloga u popisu (predsednik komisije, član ili jedno lice) \
              i podatak o tome da li lice rukuje imovinom koja se popisuje — taj podatak se vodi \
              zato što lica koja rukuju imovinom ne mogu biti određena u komisiju. Uz svaki potpis \
-             beleže se ime potpisnika i vreme potpisivanja. Ostalo u popisnim listama odnosi se na \
-             robu, gotovinu, potraživanja i obaveze, a ne na lica.",
+             beleže se ime potpisnika i vreme potpisivanja. Uz odobrenje plana rada beleže se ime \
+             lica koje ga je odobrilo i vreme kada je odobrenje evidentirano (Pravilnik o popisu, \
+             čl. 8 st. 2). Ostalo u popisnim listama odnosi se na robu, gotovinu, potraživanja i \
+             obaveze, a ne na lica.",
         vrsta_primalaca: "Poreska uprava u nadzoru nad evidentiranjem poslovnih promena (ZoRač \
              čl. 56 st. 1); knjigovođa koji knjiži utvrđene razlike; vlasnik tuđe robe, kome \
              obveznik dostavlja primerak potpisane posebne popisne liste (Pravilnik o popisu, \

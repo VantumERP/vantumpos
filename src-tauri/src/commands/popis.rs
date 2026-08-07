@@ -31,6 +31,7 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_error::{AppError, CommandError};
+use crate::audit::{AuditAction, AuditDraft, AuditObjectType};
 use crate::commands::reports::ExportedFile;
 use crate::popis::{
     advance, book_quantities_released, ensure_izvestaj_kompletan, izvestaj_due, konsignacija_rok,
@@ -204,7 +205,17 @@ pub struct PopisSessionView {
     pub period_to: Option<String>,
     pub status: PopisStatus,
     pub plan_rada_json: Option<String>,
+    /// Req. 35 / PoP čl. 8 st. 2 — who approved the plan rada, and when it was
+    /// recorded. Both `None` until somebody actually approves it: nothing in this
+    /// module fills either in, because an approval nobody performed is a worse
+    /// record than a missing one. v21 pairs them in a CHECK.
+    pub plan_rada_odobrio: Option<String>,
+    pub plan_rada_odobreno_at: Option<String>,
     pub odluka_ref: Option<String>,
+    /// When the odluka o popisu i obrazovanju komisije was issued. v21 carries the
+    /// column; **no command in this build writes it**, so it reads back `None` on
+    /// every popis and the generated odluka says so rather than dating itself.
+    pub odluka_doneta_at: Option<String>,
     pub perpetual_odluka_ref: Option<String>,
     pub uskladjivanje_potvrdjeno_at: Option<String>,
     pub posted_at: Option<String>,
@@ -257,7 +268,10 @@ struct SessionRow {
     period_to: Option<String>,
     status: PopisStatus,
     plan_rada_json: Option<String>,
+    plan_rada_odobrio: Option<String>,
+    plan_rada_odobreno_at: Option<String>,
     odluka_ref: Option<String>,
+    odluka_doneta_at: Option<String>,
     perpetual_odluka_ref: Option<String>,
     uskladjivanje_potvrdjeno_at: Option<String>,
     posted_at: Option<String>,
@@ -267,7 +281,8 @@ fn read_session(connection: &Connection, id: i64) -> Result<SessionRow, AppError
     let row = connection
         .query_row(
             "SELECT id, vrsta, prodajno_mesto, datum_popisa, period_from, period_to, status,
-                    plan_rada_json, odluka_ref, perpetual_odluka_ref,
+                    plan_rada_json, plan_rada_odobrio, plan_rada_odobreno_at,
+                    odluka_ref, odluka_doneta_at, perpetual_odluka_ref,
                     uskladjivanje_potvrdjeno_at, posted_at
              FROM popis_sessions
              WHERE id = ?1",
@@ -286,6 +301,9 @@ fn read_session(connection: &Connection, id: i64) -> Result<SessionRow, AppError
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
                 ))
             },
         )
@@ -301,10 +319,13 @@ fn read_session(connection: &Connection, id: i64) -> Result<SessionRow, AppError
         period_to: row.5,
         status: decode_status(&row.6)?,
         plan_rada_json: row.7,
-        odluka_ref: row.8,
-        perpetual_odluka_ref: row.9,
-        uskladjivanje_potvrdjeno_at: row.10,
-        posted_at: row.11,
+        plan_rada_odobrio: row.8,
+        plan_rada_odobreno_at: row.9,
+        odluka_ref: row.10,
+        odluka_doneta_at: row.11,
+        perpetual_odluka_ref: row.12,
+        uskladjivanje_potvrdjeno_at: row.13,
+        posted_at: row.14,
     })
 }
 
@@ -646,7 +667,10 @@ pub(crate) fn load_session(connection: &Connection, id: i64) -> Result<PopisSess
         period_to: session.period_to,
         status: session.status,
         plan_rada_json: session.plan_rada_json,
+        plan_rada_odobrio: session.plan_rada_odobrio,
+        plan_rada_odobreno_at: session.plan_rada_odobreno_at,
         odluka_ref: session.odluka_ref,
+        odluka_doneta_at: session.odluka_doneta_at,
         perpetual_odluka_ref: session.perpetual_odluka_ref,
         uskladjivanje_potvrdjeno_at: session.uskladjivanje_potvrdjeno_at,
         posted_at: session.posted_at,
@@ -2628,6 +2652,130 @@ pub fn popis_export_lista(
         .map_err(Into::into)
 }
 
+/// Req. 35 — the odluka o popisu i obrazovanju komisije, as a document.
+///
+/// Printable in every state and gated by nothing but the admin check: the odluka
+/// precedes the count, and a reprint of it after the knjiženje is still the same
+/// decision. It carries no book quantity, no razlika and no valuation — čl. 8 st. 5
+/// has nothing to withhold here — so there is no phase to derive.
+#[tauri::command]
+pub fn popis_export_odluka(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let session = load_session(&connection, id)?;
+    let company = super::settings::load_company_settings(state.inner())?;
+    let html = crate::popis_print::render_odluka(&company, &session);
+    let file_name = format!("odluka-o-popisu-{id}.html");
+    super::campaigns::write_export(state.inner(), &file_name, &html, session.komisija.len())
+        .map_err(Into::into)
+}
+
+/// Req. 35 / PoP čl. 8 st. 1 — the plan rada, with its čl. 8 st. 2 approval as the
+/// row actually holds it.
+#[tauri::command]
+pub fn popis_export_plan_rada(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<ExportedFile, CommandError> {
+    super::auth::require_admin(state.inner())?;
+    let connection = state.db().open().map_err(CommandError::from)?;
+    let session = load_session(&connection, id)?;
+    let company = super::settings::load_company_settings(state.inner())?;
+    let html = crate::popis_print::render_plan_rada(&company, &session);
+    let file_name = format!("plan-rada-{id}.html");
+    super::campaigns::write_export(state.inner(), &file_name, &html, session.komisija.len())
+        .map_err(Into::into)
+}
+
+/// Req. 35 / PoP čl. 8 st. 2 — records that the lice iz čl. 4 st. 2 approved the
+/// plan rada.
+///
+/// **The approver is a parameter and never a default.** For a preduzetnik that
+/// person is the owner personally (čl. 4 st. 2 → ZoRač čl. 43 st. 3), and the
+/// obveznik's registered name is on file — which is exactly why nothing here reads
+/// it. Substituting the shop's name for an approval nobody gave would be an
+/// auto-approval wearing a default's clothes, and an approval nobody performed is
+/// the false-record class this module exists to keep out. A blank name is refused
+/// by name, so the operator reads a sentence rather than v21's raw CHECK.
+///
+/// **Both columns in one statement.** v21 pairs them in a CHECK and would refuse a
+/// half record anyway; the write does not lean on that, because a refusal arriving
+/// as a constraint failure is a refusal nobody can read.
+///
+/// The ZZPL čl. 48 line and the approval share one transaction — the fact and its
+/// log line commit or roll back together, the way `retention::extend_policy` does
+/// it. `unos` the first time and `menjanje` afterwards: two `unos` lines would
+/// report two approvals where there was one and a correction.
+pub(crate) fn odobri_plan_rada(
+    state: &AppState,
+    id: i64,
+    odobrio: &str,
+    now: &str,
+) -> Result<PopisSessionView, AppError> {
+    let acting = super::auth::require_admin(state)?;
+
+    let odobrio = odobrio.trim();
+    if odobrio.is_empty() {
+        return Err(AppError::business(
+            "popis_plan_rada_bez_odobravaoca",
+            "Plan rada odobrava lice iz člana 4. stav 2. Pravilnika o popisu, kod preduzetnika sam \
+             preduzetnik (PoP čl. 8 st. 2) — unesite ime i prezime tog lica. Odobrenje bez imena \
+             se ne evidentira.",
+        ));
+    }
+
+    let mut connection = state.db().open()?;
+    let session = read_session(&connection, id)?;
+    crate::popis::posting_lock(session.status)?;
+
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "UPDATE popis_sessions
+            SET plan_rada_odobrio = ?2, plan_rada_odobreno_at = ?3, updated_at = ?3
+          WHERE id = ?1",
+        params![id, odobrio, now],
+    )?;
+
+    // Req. 4 — the popis id and nothing else. The approver's name is the personal
+    // datum this write records, and `audit_events` is the one table that may not
+    // hold one.
+    crate::commands::audit::append_audit_event(
+        &transaction,
+        &AuditDraft {
+            at: now.to_string(),
+            actor_user_id: Some(acting.id),
+            action: if session.plan_rada_odobrio.is_some() {
+                AuditAction::Menjanje
+            } else {
+                AuditAction::Unos
+            },
+            object_type: AuditObjectType::PopisSession,
+            object_id: id.to_string(),
+            reason_code: None,
+            recipient: None,
+            support_session_id: None,
+        },
+    )?;
+
+    let view = load_session(&transaction, id)?;
+    transaction.commit()?;
+
+    Ok(view)
+}
+
+#[tauri::command]
+pub fn popis_odobri_plan(
+    state: State<'_, AppState>,
+    id: i64,
+    odobrio: String,
+) -> Result<PopisSessionView, CommandError> {
+    let now = crate::clock::utc_now()?;
+    odobri_plan_rada(state.inner(), id, &odobrio, &now).map_err(Into::into)
+}
+
 /// Req. 37. Read-only: the izveštaj is composed from the popis and the narrative
 /// the caller supplies, and nothing about the popis changes when it is asked for.
 #[tauri::command]
@@ -3219,7 +3367,10 @@ mod tests {
             period_to: None,
             status: PopisStatus::Counting,
             plan_rada_json: None,
+            plan_rada_odobrio: None,
+            plan_rada_odobreno_at: None,
             odluka_ref: None,
+            odluka_doneta_at: None,
             perpetual_odluka_ref: None,
             uskladjivanje_potvrdjeno_at: None,
             posted_at: None,
@@ -6618,5 +6769,401 @@ mod tests {
             serde_json::from_str::<PrintFaza>("\"c\"").is_err(),
             "an unknown phase must not resolve to one"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Req. 35 — the odluka, the plan rada and the čl. 8 st. 2 approval
+    // -----------------------------------------------------------------
+
+    /// The two v21 columns as the row actually holds them, read together because
+    /// čl. 8 st. 2 is satisfied only by the pair.
+    fn odobrenje(state: &AppState, id: i64) -> (Option<String>, Option<String>) {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row(
+                "SELECT plan_rada_odobrio, plan_rada_odobreno_at FROM popis_sessions WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the session should exist")
+    }
+
+    /// Every `audit_events` row about a popis, with every textual column of it —
+    /// the whole row, so „no personal name reached the log“ is asserted over the
+    /// columns and not over the two somebody remembered to check.
+    fn popis_audit_lines(state: &AppState) -> Vec<(String, String, String, Option<i64>, String)> {
+        let connection = state.db().open().expect("database should open");
+        let mut statement = connection
+            .prepare(
+                "SELECT at, action, object_id, actor_user_id,
+                        COALESCE(reason_code, '') || '|' || COALESCE(recipient, '')
+                 FROM audit_events WHERE object_type = 'popis_session' ORDER BY id",
+            )
+            .expect("statement should prepare");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .expect("query should run")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows should read");
+        rows
+    }
+
+    fn admin_id(state: &AppState) -> i64 {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row("SELECT id FROM users WHERE username = 'admin'", [], |row| {
+                row.get(0)
+            })
+            .expect("bootstrap admin should exist")
+    }
+
+    /// The odluka is the čl. 4 st. 2 / čl. 5 act: it orders a particular popis and
+    /// appoints particular people. A document that named neither would be a
+    /// letterhead.
+    #[test]
+    fn the_exported_odluka_names_the_popis_it_orders_and_the_people_it_appoints() {
+        with_app("popis_export_odluka", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            let exported =
+                popis_export_odluka(app.state::<AppState>(), id).expect("the odluka should export");
+
+            assert_eq!(exported.file_name, format!("odluka-o-popisu-{id}.html"));
+            assert_eq!(exported.mime_type, "text/html");
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(
+                html.contains("Miloš Đurđević"),
+                "the odluka must name whoever takes the popis: {html}"
+            );
+            assert!(html.contains("Butik Centar"), "{html}");
+            assert!(html.contains("2026-12-31"), "{html}");
+            assert!(html.contains("Odluka 3/2026"), "{html}");
+            assert!(
+                html.contains("čl. 4 st. 2"),
+                "the odluka must cite who answers for the popis: {html}"
+            );
+        });
+    }
+
+    /// Čl. 8 st. 1 — the plan rada is the commission's own, so the exported
+    /// document carries what the shop wrote into `plan_rada_json`.
+    #[test]
+    fn the_exported_plan_rada_carries_the_schedule_the_shop_supplied() {
+        with_app("popis_export_plan_rada", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            let exported = popis_export_plan_rada(app.state::<AppState>(), id)
+                .expect("the plan rada should export");
+
+            assert_eq!(exported.file_name, format!("plan-rada-{id}.html"));
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(
+                html.contains("brojanje robe"),
+                "the schedule the shop supplied belongs on its own plan: {html}"
+            );
+            assert!(html.contains("čl. 8 st. 1"), "{html}");
+            assert!(
+                !html.contains("Plan rada nije unet"),
+                "a supplied plan must not report itself missing: {html}"
+            );
+        });
+    }
+
+    /// The other half. `plan_rada_json` is nullable and the field is optional in
+    /// front of the operator, so most popisi will arrive without one — and an
+    /// empty schedule on a document somebody signs reads as „there is no work to
+    /// do“.
+    #[test]
+    fn a_popis_opened_without_a_plan_rada_exports_a_document_that_says_so() {
+        with_app("popis_export_plan_rada_prazan", |app| {
+            let state = app.state::<AppState>();
+            seed_article(state.inner(), "KOS-1");
+            let mut request = open_request();
+            request.plan_rada_json = None;
+            let mut connection = state.db().open().expect("database should open");
+            let session = open_popis(&mut connection, &request, "2026-12-31T08:00:00Z")
+                .expect("the popis should open");
+            drop(connection);
+            sign_in_admin(state.inner());
+
+            let exported = popis_export_plan_rada(app.state::<AppState>(), session.id)
+                .expect("the plan rada should export even when there is no schedule");
+
+            let html =
+                std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+            assert!(
+                html.contains("Plan rada nije unet u aplikaciju"),
+                "the missing schedule has to be stated: {html}"
+            );
+            assert!(!html.contains("class=\"raspored\""), "{html}");
+        });
+    }
+
+    /// Čl. 8 st. 2 — one act, one write. The pairing CHECK would refuse a half
+    /// record anyway; the command must not depend on that, and the view has to
+    /// carry both back.
+    #[test]
+    fn approving_the_plan_records_the_approver_and_the_time_in_one_write() {
+        with_app("popis_odobri_plan", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+            assert_eq!(odobrenje(state.inner(), id), (None, None));
+
+            let view = odobri_plan_rada(
+                state.inner(),
+                id,
+                "  Miloš Đurđević  ",
+                "2026-12-31T08:30:00Z",
+            )
+            .expect("the lice iz čl. 4 st. 2 should be able to approve the plan");
+
+            assert_eq!(
+                odobrenje(state.inner(), id),
+                (
+                    Some("Miloš Đurđević".to_string()),
+                    Some("2026-12-31T08:30:00Z".to_string())
+                ),
+                "both columns, trimmed, in one write"
+            );
+            assert_eq!(view.plan_rada_odobrio.as_deref(), Some("Miloš Đurđević"));
+            assert_eq!(
+                view.plan_rada_odobreno_at.as_deref(),
+                Some("2026-12-31T08:30:00Z")
+            );
+        });
+    }
+
+    /// An approver nobody named is the false record this requirement exists to
+    /// prevent, and blanking is how it would arrive: a form submitted with the
+    /// field untouched. The refusal is the command's own, so the message is a
+    /// sentence and not a raw CHECK failure — and nothing is written.
+    #[test]
+    fn a_blank_approver_is_refused_and_records_nothing() {
+        with_app("popis_odobri_plan_bez_imena", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            for prazno in ["", "   ", "\t\n"] {
+                let error = odobri_plan_rada(state.inner(), id, prazno, "2026-12-31T08:30:00Z")
+                    .expect_err("an approval has to name who gave it");
+                assert_eq!(error.code(), "popis_plan_rada_bez_odobravaoca");
+                assert!(
+                    error.to_string().contains("čl. 8 st. 2"),
+                    "the refusal names the provision it enforces, said: {error}"
+                );
+                assert_eq!(
+                    odobrenje(state.inner(), id),
+                    (None, None),
+                    "a refused approval must leave the row untouched"
+                );
+            }
+            assert!(
+                popis_audit_lines(state.inner()).is_empty(),
+                "a refused approval must not be logged as one"
+            );
+        });
+    }
+
+    /// Req. 41 / čl. 14 st. 3 — a proknjižen popis is closed, and an approval
+    /// recorded afterwards would date a čl. 8 st. 2 act to after the popis it was
+    /// supposed to precede. The v20 trigger fires on the whole row and would
+    /// refuse it too; the command refuses first, in the module's own words.
+    #[test]
+    fn approving_the_plan_of_a_posted_popis_is_refused() {
+        with_app("popis_odobri_plan_proknjizen", |app| {
+            let state = app.state::<AppState>();
+            let id = walk_to_posted(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            let error =
+                odobri_plan_rada(state.inner(), id, "Miloš Đurđević", "2027-01-06T08:00:00Z")
+                    .expect_err("a posted popis takes no further approval");
+
+            assert_eq!(error.code(), "popis_proknjizen");
+            assert_eq!(odobrenje(state.inner(), id), (None, None));
+        });
+    }
+
+    /// Nothing auto-approves. The whole flow — open, count, both potpisi, the
+    /// obračun and the knjiženje — leaves the čl. 8 st. 2 columns empty, and the
+    /// generated documents report it as unapproved.
+    #[test]
+    fn nothing_in_the_popis_flow_approves_the_plan_by_itself() {
+        with_app("popis_nista_ne_odobrava_samo", |app| {
+            let state = app.state::<AppState>();
+            let id = walk_to_posted(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            assert_eq!(
+                odobrenje(state.inner(), id),
+                (None, None),
+                "no step of the popis may approve its own plan rada"
+            );
+            for exported in [
+                popis_export_odluka(app.state::<AppState>(), id).expect("the odluka should export"),
+                popis_export_plan_rada(app.state::<AppState>(), id)
+                    .expect("the plan rada should export"),
+            ] {
+                let html =
+                    std::fs::read_to_string(&exported.path).expect("the export should be on disk");
+                assert!(
+                    html.contains("Plan rada nije odobren"),
+                    "{} claims an approval nobody gave: {html}",
+                    exported.file_name
+                );
+            }
+        });
+    }
+
+    /// ZZPL čl. 48 — the approval writes a person's name into the popis, so the
+    /// act is logged. Req. 4 governs what the line may carry: the popis id and
+    /// nothing else, never the name it recorded.
+    #[test]
+    fn the_approval_writes_one_audit_line_and_no_personal_name_reaches_it() {
+        with_app("popis_odobri_plan_evidencija", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+            let admin = admin_id(state.inner());
+
+            odobri_plan_rada(state.inner(), id, "Miloš Đurđević", "2026-12-31T08:30:00Z")
+                .expect("the approval should record");
+
+            let lines = popis_audit_lines(state.inner());
+            assert_eq!(lines.len(), 1, "one act, one line: {lines:?}");
+            let (at, action, object_id, actor, ostalo) = &lines[0];
+            assert_eq!(
+                at, "2026-12-31T08:30:00Z",
+                "the line carries the same instant"
+            );
+            assert_eq!(action, "unos");
+            assert_eq!(object_id, &id.to_string());
+            assert_eq!(*actor, Some(admin));
+            for polje in [at, action, object_id, ostalo] {
+                assert!(
+                    !polje.contains("Miloš") && !polje.contains("Đurđević"),
+                    "req. 4 — a name reached the evidencija pristupa: {polje}"
+                );
+            }
+        });
+    }
+
+    /// Recording the approval a second time is a change to a record that already
+    /// existed, and the log has a verb for each. Calling both „unos“ would report
+    /// two approvals where there was one and a correction.
+    #[test]
+    fn re_recording_an_approval_is_logged_as_a_change_and_not_as_a_new_record() {
+        with_app("popis_odobri_plan_ispravka", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_admin(state.inner());
+
+            odobri_plan_rada(state.inner(), id, "Miloš Đurđević", "2026-12-31T08:30:00Z")
+                .expect("the approval should record");
+            odobri_plan_rada(state.inner(), id, "Mira Marković", "2026-12-31T09:00:00Z")
+                .expect("a correction should record");
+
+            let actions: Vec<String> = popis_audit_lines(state.inner())
+                .into_iter()
+                .map(|line| line.1)
+                .collect();
+            assert_eq!(actions, vec!["unos".to_string(), "menjanje".to_string()]);
+            assert_eq!(
+                odobrenje(state.inner(), id),
+                (
+                    Some("Mira Marković".to_string()),
+                    Some("2026-12-31T09:00:00Z".to_string())
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn a_cashier_can_neither_export_nor_approve_the_plan_rada() {
+        with_app("popis_plan_rada_admin_gate", |app| {
+            let state = app.state::<AppState>();
+            let id = seeded_count(state.inner(), "KOS-1");
+            sign_in_cashier(state.inner());
+
+            assert_eq!(
+                popis_export_odluka(app.state::<AppState>(), id)
+                    .expect_err("a cashier must not export the odluka")
+                    .code,
+                "forbidden"
+            );
+            assert_eq!(
+                popis_export_plan_rada(app.state::<AppState>(), id)
+                    .expect_err("a cashier must not export the plan rada")
+                    .code,
+                "forbidden"
+            );
+            assert_eq!(
+                popis_odobri_plan(app.state::<AppState>(), id, "Kasir".to_string())
+                    .expect_err("a cashier is not the lice iz čl. 4 st. 2")
+                    .code,
+                "forbidden"
+            );
+            assert_eq!(odobrenje(state.inner(), id), (None, None));
+        });
+    }
+
+    #[test]
+    fn approving_a_popis_that_does_not_exist_is_refused_as_not_found() {
+        with_app("popis_odobri_plan_nepostojeci", |app| {
+            let state = app.state::<AppState>();
+            sign_in_admin(state.inner());
+
+            let error =
+                odobri_plan_rada(state.inner(), 404, "Miloš Đurđević", "2026-12-31T08:30:00Z")
+                    .expect_err("a popis that does not exist has no plan rada");
+
+            assert_eq!(error.code(), "not_found");
+        });
+    }
+
+    /// Two popisi share one `exports/` directory, so a name that dropped the id
+    /// would have one shop's odluka overwrite another's.
+    #[test]
+    fn the_generated_document_file_names_carry_the_session() {
+        with_app("popis_export_odluka_ime_fajla", |app| {
+            let state = app.state::<AppState>();
+            let prvi = seeded_count(state.inner(), "KOS-1");
+            let drugi = seeded_count(state.inner(), "KOS-2");
+            assert_ne!(prvi, drugi, "two distinct popisi");
+            sign_in_admin(state.inner());
+
+            assert_eq!(
+                popis_export_odluka(app.state::<AppState>(), prvi)
+                    .expect("the odluka should export")
+                    .file_name,
+                format!("odluka-o-popisu-{prvi}.html")
+            );
+            assert_eq!(
+                popis_export_plan_rada(app.state::<AppState>(), drugi)
+                    .expect("the plan rada should export")
+                    .file_name,
+                format!("plan-rada-{drugi}.html")
+            );
+        });
     }
 }

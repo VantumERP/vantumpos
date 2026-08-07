@@ -223,10 +223,15 @@ pub enum AuditObjectType {
     /// export to the Poverenik both act ON the log.
     AuditLog,
     Backup,
+    /// One popis (SW-16). The popis holds names — the komisija, the potpisnici and
+    /// the lice iz čl. 4 st. 2 who approves the plan rada — so a write that records
+    /// one is a radnja obrade like any other, and the object it acts on is the
+    /// session id.
+    PopisSession,
 }
 
 impl AuditObjectType {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Sale,
         Self::Employee,
         Self::PersonnelRecord,
@@ -237,6 +242,7 @@ impl AuditObjectType {
         Self::RetentionPolicy,
         Self::AuditLog,
         Self::Backup,
+        Self::PopisSession,
     ];
 
     pub fn as_code(self) -> &'static str {
@@ -251,6 +257,7 @@ impl AuditObjectType {
             Self::RetentionPolicy => "retention_policy",
             Self::AuditLog => "audit_log",
             Self::Backup => "backup",
+            Self::PopisSession => "popis_session",
         }
     }
 
@@ -1206,7 +1213,8 @@ mod tests {
                 "processing_activity",
                 "retention_policy",
                 "audit_log",
-                "backup"
+                "backup",
+                "popis_session"
             ]
         );
         for object_type in AuditObjectType::ALL {

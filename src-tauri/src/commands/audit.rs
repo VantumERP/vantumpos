@@ -1077,6 +1077,7 @@ fn object_type_label(code: &str) -> String {
                 AuditObjectType::RetentionPolicy => "Rok čuvanja",
                 AuditObjectType::AuditLog => "Evidencija pristupa",
                 AuditObjectType::Backup => "Rezervna kopija",
+                AuditObjectType::PopisSession => "Popis imovine i obaveza",
             }
             .to_string()
         },
@@ -2301,6 +2302,6 @@ mod tests {
                 "„{label}“ should read as a sentence"
             );
         }
-        assert_eq!(labels.len(), 36, "every code in every vocabulary");
+        assert_eq!(labels.len(), 37, "every code in every vocabulary");
     }
 }

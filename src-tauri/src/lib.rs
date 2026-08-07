@@ -270,6 +270,13 @@ pub fn run() {
             // let the caller pick the phase by picking the command, and that is
             // the choice čl. 8 st. 5 does not leave open.
             commands::popis::popis_export_lista,
+            // Req. 35 / PoP čl. 8 st. 1–2 — the two pre-count documents and the
+            // approval that čl. 8 st. 2 requires of the plan rada. The approval is
+            // its own command because it is an act by a named person and never a
+            // by-product of printing the document that reports it.
+            commands::popis::popis_export_odluka,
+            commands::popis::popis_export_plan_rada,
+            commands::popis::popis_odobri_plan,
             commands::popis::popis_izvestaj,
             commands::popis::popis_podesavanja_get,
             commands::popis::popis_podesavanja_set,

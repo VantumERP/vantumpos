@@ -168,7 +168,10 @@ interface MockPopis {
   periodTo: string | null;
   status: PopisStatus;
   planRadaJson: string | null;
+  planRadaOdobrio: string | null;
+  planRadaOdobrenoAt: string | null;
   odlukaRef: string | null;
+  odlukaDonetaAt: string | null;
   perpetualOdlukaRef: string | null;
   uskladjivanjePotvrdjenoAt: string | null;
   postedAt: string | null;
@@ -2872,7 +2875,12 @@ export function createMockServices(): PosServices {
           periodTo: request.periodTo,
           status: "draft",
           planRadaJson: request.planRadaJson,
+          // Req. 35 / PoP čl. 8 st. 2 — opening a popis approves nothing, and
+          // this double has no approval verb to set them with either.
+          planRadaOdobrio: null,
+          planRadaOdobrenoAt: null,
           odlukaRef: request.odlukaRef,
+          odlukaDonetaAt: null,
           perpetualOdlukaRef: request.perpetualOdlukaRef,
           uskladjivanjePotvrdjenoAt: now,
           postedAt: null,
@@ -3255,7 +3263,10 @@ export function createMockServices(): PosServices {
       periodTo: session.periodTo,
       status: session.status,
       planRadaJson: session.planRadaJson,
+      planRadaOdobrio: session.planRadaOdobrio,
+      planRadaOdobrenoAt: session.planRadaOdobrenoAt,
       odlukaRef: session.odlukaRef,
+      odlukaDonetaAt: session.odlukaDonetaAt,
       perpetualOdlukaRef: session.perpetualOdlukaRef,
       uskladjivanjePotvrdjenoAt: session.uskladjivanjePotvrdjenoAt,
       postedAt: session.postedAt,

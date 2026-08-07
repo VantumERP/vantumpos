@@ -2131,7 +2131,23 @@ export interface PopisSessionView {
   periodTo: string | null;
   status: PopisStatus;
   planRadaJson: string | null;
+  /**
+   * Req. 35 / PoP čl. 8 st. 2 — who approved the plan rada, and when the
+   * approval was recorded. Both `null` until somebody approves it: no backend
+   * path fills either in, because an approval nobody performed is a worse
+   * record than a missing one. Half a record is not an approval — migration v21
+   * pairs the two columns in a CHECK — so a surface that reports the plan as
+   * approved has to see both.
+   */
+  planRadaOdobrio: string | null;
+  planRadaOdobrenoAt: string | null;
   odlukaRef: string | null;
+  /**
+   * When the odluka o popisu was issued. The column exists since v21, but **no
+   * command in this build writes it**, so it reads back `null` on every popis
+   * and the generated odluka states that rather than dating itself.
+   */
+  odlukaDonetaAt: string | null;
   perpetualOdlukaRef: string | null;
   uskladjivanjePotvrdjenoAt: string | null;
   postedAt: string | null;
