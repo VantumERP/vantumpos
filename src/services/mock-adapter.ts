@@ -881,11 +881,20 @@ export function createMockServices(): PosServices {
       legalHold: false,
       neverPurge: false,
       adjustable: true,
+      // Abridged from `RecordClass::PopisDokumentacija::napomena`, but never in
+      // the direction of claiming more than the crate does: the withdrawn
+      // „štampa se na zahtev“ clause about the izveštaj lived on here through
+      // the sixth-incident fix, because the guard beside it reads the Rust
+      // string and nothing read this one.
       napomena:
         "Popisne liste, sastav komisije i potpisi. Rok čuvanja je pet godina, računato od " +
         "poslednjeg dana poslovne godine na koju se popis odnosi (ZoRač čl. 28 st. 7 i st. 9); " +
-        "rok se pomera samo unapred. Izveštaj o popisu se ne čuva u aplikaciji — štampa se na " +
-        "zahtev. Automatsko brisanje popisne dokumentacije ne postoji.",
+        "rok se pomera samo unapred. Proknjižen popis se ne menja — ispravka ide kroz novi popis " +
+        "(PoP čl. 14 st. 3; ZoRač čl. 8 st. 4). Popisne liste, odluku o popisu i plan rada " +
+        "program sastavlja i izvozi u datoteku za štampu — potpisan primerak sastavlja i čuva " +
+        "sam obveznik, a izvezena datoteka nije potpisana isprava. Izveštaj o popisu se ne čuva " +
+        "u aplikaciji: sastavlja se na zahtev i prikazuje na ekranu, a program ga ne štampa i ne " +
+        "izvozi. Automatsko brisanje popisne dokumentacije ne postoji.",
       updatedAt: now,
     },
   ];

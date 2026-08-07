@@ -788,3 +788,55 @@ fn the_cl_47_record_invokes_both_limbs_that_destroy_the_250_exemption() {
         );
     }
 }
+
+/// The register's popis row disclosed a real gap — čl. 9 st. 3's *„uz
+/// štampanje“* had no code behind it — in the strongest terms the file has:
+/// *„there is no print or export for a popisna lista“*, twice, once in row 19
+/// and once in the §3 SW-16 row. The popis module now writes three documents
+/// into `exports/`, so both sentences became false in the same commit that made
+/// them false, and nothing here could see it: all eighteen guards above are
+/// about quotation marks, retention promises, penalty tiers and the čl. 47
+/// record, and none of them reads a claim about output.
+///
+/// A false *denial* is the mirror of the six false promises this module exists
+/// to catch, and it is the more dangerous half in a register: it withdraws the
+/// only pointer a reader has to a capability the shop is now taken to have, and
+/// it does so in the document handed to whoever advises the shop.
+///
+/// So the denial is pinned to the code that contradicts it, line-locally. A row
+/// is one line of a markdown table, so requiring the correction on the same line
+/// is requiring it in the same cell — a superseding note filed three sections
+/// away would leave the row itself reading as a closed item. Delete the denial
+/// entirely and this guard goes quiet, which is the right outcome once req.
+/// 31/32 is written up rather than corrected in place.
+#[test]
+fn the_register_corrects_every_denial_of_the_popis_export_it_now_has() {
+    // Bound to the command, not to the words: rename it and this stops
+    // compiling rather than leaving the register's correction unbacked.
+    let _liste: fn(
+        tauri::State<'_, crate::AppState>,
+        i64,
+        Option<crate::popis_print::PrintFaza>,
+    ) -> Result<
+        crate::commands::reports::ExportedFile,
+        crate::app_error::CommandError,
+    > = crate::commands::popis::popis_export_lista;
+
+    for poricanje in [
+        "there is no print or export for a popisna lista",
+        "there is no print and no export for a popisna lista",
+        "`PopisService` has fifteen methods and none exports",
+    ] {
+        for (line, text) in lines_with(REGISTER, poricanje) {
+            assert!(
+                text.contains("popis_export_lista"),
+                "docs/SERBIAN-LAW-COMPLIANCE.md:{line} still says \"{poricanje}\", which stopped \
+                 being true when `popis_export_lista`, `popis_export_odluka` and \
+                 `popis_export_plan_rada` shipped. Correct it in the same cell — a register row \
+                 is read on its own, and a denial with its correction three sections away is a \
+                 denial. Naming `popis_export_lista` in the row satisfies this guard; deleting \
+                 the denial satisfies it too."
+            );
+        }
+    }
+}

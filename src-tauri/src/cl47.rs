@@ -1644,23 +1644,33 @@ mod tests {
     /// instances two through six survived.
     ///
     /// **Amended deliberately for the popis export (Tasks 3–4).** The program
-    /// really did gain three outputs, so „negate it or delete it“ stopped being
-    /// a rule the register could obey honestly: the only sentences it left
+    /// really did gain an output, so „negate it or delete it“ stopped being a
+    /// rule the register could obey honestly: the only sentences it left
     /// available were false ones and silence, and silence about a capability an
     /// inspector is entitled to know about is its own defect. The rule is now
-    /// *negate it, **or** name the documents you are claiming it for* — and the
-    /// list of nameable documents is **not a literal**. Each entry is bound
-    /// below to the command that produces it by a function pointer, so deleting
-    /// or renaming that command stops this test compiling instead of leaving a
-    /// stale sentence standing.
+    /// *negate it, **or** say „izvozi“ and name the documents you are exporting*
+    /// — and the list of nameable documents is **not a literal**. Each entry is
+    /// bound in [`neosnovana_tvrdnja`] to the command that produces it by a
+    /// function pointer, so deleting or renaming that command stops this test
+    /// compiling; `every_export_the_sweep_allows_is_registered_as_a_command`
+    /// carries the binding the rest of the way, to the invoke handler, because
+    /// an export no `generate_handler!` names is one no operator can reach.
     ///
-    /// **The amendment still fails an untrue claim, which is the whole point of
-    /// making it rather than dropping the guard.** An affirmative sentence has
-    /// to name at least one real output *and no document this crate cannot
-    /// produce*: „program štampa izveštaj“ names none of the three and fails,
-    /// and „program štampa popisne liste i izveštaj o popisu“ — the half-true
-    /// shape, which is what a widening edit actually looks like — fails on the
-    /// second limb. Only a sentence that is true of the code passes.
+    /// **The amendment reaches exactly one verb, and that is the whole of what
+    /// the crate gained.** It writes three files; it prints nothing itself,
+    /// sends nothing to anybody and files nothing with anybody. The first cut of
+    /// the amendment granted the allowance per *sentence* rather than per verb,
+    /// so naming a real document bought any claim at all about it —
+    /// „Aplikacija podnosi popisne liste Poreskoj upravi“ passed a guard whose
+    /// entire purpose is to fail that sentence, and so did „Program štampa
+    /// popisne liste i šalje ih vlasniku tuđe robe“, which is the likeliest
+    /// false sentence in this subject area because čl. 2 st. 6 really does owe
+    /// that primerak — the obveznik owes it. The scope is now the verb.
+    ///
+    /// The predicate is factored out so the amendment can be *measured* rather
+    /// than described: `the_output_sweep_still_fails_a_claim_the_crate_cannot_back`
+    /// runs it over eight untrue shapes and four true ones, and that test is the
+    /// evidence for every claim in this comment.
     #[test]
     fn the_generated_register_promises_no_output_the_program_cannot_produce() {
         with_state("cl47_no_false_output_promise", |state| {
@@ -1673,85 +1683,211 @@ mod tests {
                 render_html(&company, &register)
             );
 
-            // The documents this crate genuinely writes to a file, bound to the
-            // commands that write them. The binding is the point: rename or
-            // delete any of the three and this test stops compiling, so the
-            // allow-list cannot outlive the capability it describes. Nothing
-            // else in the crate may be added here without the same binding.
-            let _liste: fn(
-                State<'_, AppState>,
-                i64,
-                Option<crate::popis_print::PrintFaza>,
-            ) -> Result<ExportedFile, CommandError> = crate::commands::popis::popis_export_lista;
-            let _odluka: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
-                crate::commands::popis::popis_export_odluka;
-            let _plan: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
-                crate::commands::popis::popis_export_plan_rada;
-            const IZLAZI: [&str; 3] = ["popisne liste", "odluku o popisu", "plan rada"];
-            // …and the document in the same subject area that this crate still
-            // cannot produce. `compose_izvestaj` returns a view for the screen;
-            // no command writes an izveštaj anywhere.
-            const BEZ_IZLAZA: [&str; 1] = ["izveštaj"];
-
-            // Scope: a sentence whose subject is the PROGRAM. That is the shape
-            // every one of the six incidents took — „program … štampa na zahtev“.
-            // A passive clause about something else („materijal koji se šalje
-            // tehničkoj podršci“) is not a claim about what this app does, and a
-            // participle („štampani primerak“) is the obveznik's own paper.
-            //
-            // **Case-folded, and that is a fix and not a tidy-up.** The scope
-            // check used to read the sentence as written, so „Program štampa …“
-            // — a sentence-initial subject, which is how a stored napomena and
-            // every operator string in this crate begins — carried no lowercase
-            // „program“ and was skipped whole. Measured rather than assumed:
-            // with the fold removed, a planted „Program štampa popisne liste i
-            // izveštaj o popisu“ leaves this test green. `popis_print`'s čl. 6
-            // sweep had the identical hole and was folded for the identical
-            // reason.
-            for raw in haystack.split(['.', ';']) {
-                let sentence = raw.to_lowercase();
-                let sentence = sentence.as_str();
-                if !sentence.contains("program") && !sentence.contains("aplikacij") {
-                    continue;
-                }
-                // The amended half: a claim may stand affirmatively when it says
-                // WHICH document it is claiming, and every document it names is
-                // one of the three above. „…popisne liste i izveštaj o popisu“ —
-                // the half-true shape a widening edit actually takes — fails on
-                // the second limb, and a claim naming nothing fails on the first.
-                let istinita = IZLAZI.iter().any(|izlaz| sentence.contains(izlaz))
-                    && !BEZ_IZLAZA.iter().any(|bez| sentence.contains(bez));
-
-                for (verb, negation) in [
-                    ("štampa", "ne štampa"),
-                    ("izvozi", "ne izvozi"),
-                    ("šalje", "ne šalje"),
-                    ("podnosi", "ne podnosi"),
-                ] {
-                    // The verb, not a longer word that merely starts with it.
-                    let claimed = sentence.match_indices(verb).any(|(at, _)| {
-                        sentence[at + verb.len()..]
-                            .chars()
-                            .next()
-                            .is_none_or(|next| !next.is_alphabetic())
-                    });
-                    if claimed {
-                        assert!(
-                            sentence.contains(negation) || istinita,
-                            "the čl. 47 register says the program „{verb}“ without negating it \
-                             and without naming a document this crate can produce: „{}“ — the \
-                             register is read by an inspector, so a capability it names is one \
-                             the shop is taken to have. Six times in this project a document \
-                             promised behaviour the code lacked. An affirmative claim is allowed \
-                             only for {IZLAZI:?}, each of which is bound above to the command \
-                             that produces it, and only when the same sentence names none of \
-                             {BEZ_IZLAZA:?}.",
-                            sentence.trim()
-                        );
-                    }
+            for recenica in haystack.split(['.', ';']) {
+                if let Some(verb) = neosnovana_tvrdnja(recenica) {
+                    panic!(
+                        "the čl. 47 register says the program „{verb}“ without negating it and \
+                         without that verb being one the crate performs over a document it can \
+                         produce: „{}“ — the register is read by an inspector, so a capability \
+                         it names is one the shop is taken to have. Six times in this project a \
+                         document promised behaviour the code lacked. An affirmative claim is \
+                         allowed only for „izvozi“ over {IZLAZI:?}, each of which is bound to \
+                         the command that produces it, and only when the same sentence names \
+                         none of {BEZ_IZLAZA:?}.",
+                        recenica.trim()
+                    );
                 }
             }
         });
+    }
+
+    /// The documents this crate genuinely writes to a file, bound in
+    /// [`neosnovana_tvrdnja`] to the commands that write them.
+    const IZLAZI: [&str; 3] = ["popisne liste", "odluku o popisu", "plan rada"];
+
+    /// …and the documents in the same subject area that this crate cannot
+    /// produce. `compose_izvestaj` returns a view for the screen and no command
+    /// writes an izveštaj anywhere; nothing anywhere writes the čl. 14 st. 2
+    /// odluka o usvajanju or a zapisnik o primopredaji, both of which the popis
+    /// module names in prose and neither of which it generates. They are listed
+    /// so that a real document cannot carry a false one through on the same
+    /// conjunction — „izvozi popisne liste i zapisnik“ is exactly the shape a
+    /// widening edit takes.
+    const BEZ_IZLAZA: [&str; 3] = ["izveštaj", "zapisnik", "odluku o usvajanju"];
+
+    /// The verb one sentence claims the program performs while the crate cannot
+    /// back the claim, if there is one.
+    ///
+    /// Scope: a sentence whose subject is the PROGRAM. That is the shape every
+    /// one of the six incidents took — „program … štampa na zahtev“. A passive
+    /// clause about something else („materijal koji se šalje tehničkoj
+    /// podršci“) is not a claim about what this app does, and a participle
+    /// („štampani primerak“) is the obveznik's own paper.
+    ///
+    /// **Case-folded, and that is a fix and not a tidy-up.** The scope check
+    /// used to read the sentence as written, so „Program štampa …“ — a
+    /// sentence-initial subject, which is how a stored napomena and every
+    /// operator string in this crate begins — carried no lowercase „program“
+    /// and was skipped whole. Measured rather than assumed: with the fold
+    /// removed, a planted „Program štampa popisne liste i izveštaj o popisu“
+    /// leaves the sweep green. `popis_print`'s čl. 6 sweep had the identical
+    /// hole and was folded for the identical reason.
+    ///
+    /// **The allowance is scoped to the verb, not to the sentence, and that is
+    /// the correction of the Tasks 3–4 amendment.** The amendment computed
+    /// „this sentence names a real document“ once and then let it excuse all
+    /// four verbs, so naming a real document bought a sentence any claim at all
+    /// — „Program štampa popisne liste i šalje ih vlasniku tuđe robe“ passed,
+    /// and so did „Aplikacija podnosi popisne liste Poreskoj upravi“. The crate
+    /// gained exactly one capability: `popis_export_lista`, `popis_export_odluka`
+    /// and `popis_export_plan_rada` **write a file**. Nothing in it sends
+    /// anything to anybody or files anything with anybody — this same entry has
+    /// to say so in as many words („tu listu dostavlja obveznik, program je ne
+    /// šalje nikome“) — and it does not print either: the file goes to the OS
+    /// print handler, which is why every shipped sentence is worded „izvozi u
+    /// datoteku za štampu“. So only „izvozi“ may stand affirmatively, and the
+    /// other three keep the original rule: negate it or do not say it.
+    fn neosnovana_tvrdnja(recenica: &str) -> Option<&'static str> {
+        // The binding is the point: rename or delete any of the three and this
+        // stops compiling, so the allow-list cannot outlive the capability it
+        // describes. Nothing else in the crate may be added to `IZLAZI` without
+        // the same binding.
+        let _liste: fn(
+            State<'_, AppState>,
+            i64,
+            Option<crate::popis_print::PrintFaza>,
+        ) -> Result<ExportedFile, CommandError> = crate::commands::popis::popis_export_lista;
+        let _odluka: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
+            crate::commands::popis::popis_export_odluka;
+        let _plan: fn(State<'_, AppState>, i64) -> Result<ExportedFile, CommandError> =
+            crate::commands::popis::popis_export_plan_rada;
+
+        let recenica = recenica.to_lowercase();
+        let recenica = recenica.as_str();
+        if !recenica.contains("program") && !recenica.contains("aplikacij") {
+            return None;
+        }
+        // A claim may stand affirmatively when it says WHICH document it is
+        // claiming, and every document it names is one of the three above.
+        // „…popisne liste i izveštaj o popisu“ — the half-true shape a widening
+        // edit actually takes — fails on the second limb, and a claim naming
+        // nothing fails on the first.
+        let imenuje_izlaz = IZLAZI.iter().any(|izlaz| recenica.contains(izlaz))
+            && !BEZ_IZLAZA.iter().any(|bez| recenica.contains(bez));
+
+        for (verb, negacija) in [
+            ("štampa", "ne štampa"),
+            ("izvozi", "ne izvozi"),
+            ("šalje", "ne šalje"),
+            ("podnosi", "ne podnosi"),
+        ] {
+            // The verb, not a longer word that merely starts with it.
+            let tvrdi = recenica.match_indices(verb).any(|(at, _)| {
+                recenica[at + verb.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !next.is_alphabetic())
+            });
+            let dozvoljeno = verb == "izvozi" && imenuje_izlaz;
+            if tvrdi && !recenica.contains(negacija) && !dozvoljeno {
+                return Some(verb);
+            }
+        }
+
+        None
+    }
+
+    /// The amendment made under house rule 9 has to be shown to still fail an
+    /// untrue claim, and shown by measurement rather than by the doc comment
+    /// above asserting it. These are the shapes a widening edit actually takes,
+    /// and each one below is a sentence somebody could plausibly write about
+    /// this module — čl. 2 st. 6 really does owe the owner of tuđa roba a
+    /// primerak, so „…i šalje ih vlasniku tuđe robe“ is the single likeliest
+    /// false sentence in the whole subject area, and it is false because the
+    /// obveznik delivers that primerak and this program delivers nothing.
+    #[test]
+    fn the_output_sweep_still_fails_a_claim_the_crate_cannot_back() {
+        for istinita in [
+            // The three shipped sentences, in the shape the register carries them.
+            "Popisne liste, odluku o popisu i plan rada program sastavlja i izvozi u datoteku za \
+             štampu",
+            "Izveštaj o popisu se ne čuva u aplikaciji — sastavlja se na zahtev i prikazuje na \
+             ekranu, a program ga ne štampa i ne izvozi",
+            " 6) — tu listu dostavlja obveznik, program je ne šalje nikome",
+            // No claim at all, and a participle that is the obveznik's own paper.
+            "Štampani i potpisani primerak sastavlja i čuva sam obveznik",
+        ] {
+            assert_eq!(
+                neosnovana_tvrdnja(istinita),
+                None,
+                "a sentence the code backs must pass the sweep: „{istinita}“"
+            );
+        }
+
+        for (neistinita, verb) in [
+            // Names no output at all, and names the one document no command writes.
+            ("Program štampa izveštaj o popisu na zahtev", "štampa"),
+            // The half-true shape: one real document, one the crate cannot write.
+            ("Program štampa popisne liste i izveštaj o popisu", "štampa"),
+            // A real document carrying a false one through on the conjunction.
+            (
+                "Program izvozi popisne liste i zapisnik o primopredaji",
+                "izvozi",
+            ),
+            // Sentence-initial subject: the case fold is what catches these.
+            ("Program štampa popisne liste", "štampa"),
+            // The four the verb scope catches. A real document is named in every
+            // one of them, which is precisely why the sentence-wide allowance
+            // let all four through.
+            (
+                "Program štampa popisne liste i šalje ih vlasniku tuđe robe u roku od deset dana \
+                 (PoP čl. 2 st. 6)",
+                "štampa",
+            ),
+            (
+                "Aplikacija podnosi popisne liste Poreskoj upravi",
+                "podnosi",
+            ),
+            (
+                "Program izvozi plan rada i šalje ga knjigovođi elektronskom poštom",
+                "šalje",
+            ),
+            (
+                "Popisne liste program šalje vlasniku robe elektronskom poštom",
+                "šalje",
+            ),
+        ] {
+            assert_eq!(
+                neosnovana_tvrdnja(neistinita),
+                Some(verb),
+                "the sweep must still fail „{neistinita}“ on „{verb}“ — the amendment allows an \
+                 affirmative „izvozi“ over {IZLAZI:?} and nothing else; this crate sends nothing \
+                 anywhere, files nothing with anybody and prints nothing itself"
+            );
+        }
+    }
+
+    /// The `IZLAZI` allow-list is bound to three Rust functions, and a Rust
+    /// function no `generate_handler!` names is a command no operator can
+    /// reach. Without this, deleting the three from the invoke handler would
+    /// leave the register claiming an export nobody can perform and every test
+    /// above still green, because they all bind the item and not its
+    /// registration.
+    #[test]
+    fn every_export_the_sweep_allows_is_registered_as_a_command() {
+        const LIB: &str = include_str!("lib.rs");
+
+        for command in [
+            "popis_export_lista",
+            "popis_export_odluka",
+            "popis_export_plan_rada",
+        ] {
+            assert!(
+                LIB.contains(&format!("commands::popis::{command},")),
+                "`{command}` backs an affirmative claim in the čl. 47 register but is not in \
+                 lib.rs's invoke handler, so no operator can reach it"
+            );
+        }
     }
 
     /// The export is what the čl. 47 st. 8 *uvid* and the Pravilnik 40/2019

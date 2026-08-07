@@ -112,3 +112,46 @@ describe("mock popis — the čl. 8 st. 2 approval", () => {
     await expect(services.popis.exportPlanRada(id)).resolves.toBeTruthy();
   });
 });
+
+/**
+ * The double's own prose is prose this project is answerable for.
+ *
+ * The sixth false-promise artefact was the withdrawn clause „Izveštaj o popisu
+ * se ne čuva u aplikaciji — štampa se na zahtev“: nothing prints or exports the
+ * izveštaj, and `d928b36` pulled it out of `retention.rs` and planted
+ * `assert!(!note.contains("štampa na zahtev"))` beside it. That guard reads the
+ * Rust string only, so the double's copy of the same napomena survived the
+ * withdrawal untouched and then drifted four sentences behind the string it
+ * exists to model. `createMockServices` has no production caller today, but a
+ * double whose prose is false is a double that teaches the next screen the
+ * wrong sentence — this is the third time in this module a claim survived
+ * because only one of its two copies was guarded.
+ */
+describe("mock retention — the popis napomena the double mirrors", () => {
+  it("does not carry the withdrawn „štampa se na zahtev“ clause", async () => {
+    const services = createMockServices();
+    const polise = await services.retention.listPolicies();
+    const popis = polise.find(
+      (polisa) => polisa.recordClass === "popis_dokumentacija",
+    );
+
+    expect(popis).toBeDefined();
+    expect(popis?.napomena).not.toMatch(/štampa\s+(se\s+)?na zahtev/i);
+  });
+
+  it("says what the program does write to a file and what it does not", async () => {
+    const services = createMockServices();
+    const polise = await services.retention.listPolicies();
+    const napomena =
+      polise.find((polisa) => polisa.recordClass === "popis_dokumentacija")
+        ?.napomena ?? "";
+
+    // The three documents that really are exported, named the way
+    // `RecordClass::PopisDokumentacija::napomena` names them…
+    expect(napomena).toMatch(
+      /popisne liste, odluku o popisu i plan rada program .*izvozi/i,
+    );
+    // …and the izveštaj, which keeps its denial and is not swept in with them.
+    expect(napomena).toMatch(/program ga ne štampa i ne izvozi/i);
+  });
+});

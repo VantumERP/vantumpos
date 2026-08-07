@@ -15,15 +15,28 @@ interface OtvoriOpcije {
   potvrdiUskladjivanje?: boolean;
   clan?: { ime: string; rukujeImovinom: boolean };
   vrsta?: "godisnji" | "nivelacioni";
+  /**
+   * The čl. 8 st. 1 schedule itself. Left out, the popis carries none — which is
+   * the ordinary case, since `popis_open` is the only thing that ever writes
+   * `plan_rada_json`, but a helper that could not supply one made the „nije
+   * uneta“ qualification untestable in the direction that matters.
+   */
+  planRada?: string;
 }
 
 /** Fills the „novi popis“ form and submits it. */
 async function otvoriPopis(user: User, opcije: OtvoriOpcije = {}) {
-  const { potvrdiUskladjivanje = true, clan, vrsta } = opcije;
+  const { potvrdiUskladjivanje = true, clan, vrsta, planRada } = opcije;
 
   await user.click(await screen.findByRole("button", { name: /novi popis/i }));
   if (vrsta) {
     await user.selectOptions(screen.getByLabelText(/vrsta popisa/i), vrsta);
+  }
+  if (planRada !== undefined) {
+    // Pasted rather than typed: „{}“ is a schedule the screen has to read as
+    // empty, and `user.type` would read the brace as a key descriptor.
+    await user.click(screen.getByLabelText(/plan rada komisije/i));
+    await user.paste(planRada);
   }
   await user.clear(screen.getByLabelText(/prodajno mesto/i));
   await user.type(screen.getByLabelText(/prodajno mesto/i), "Butik Centar");
@@ -737,6 +750,15 @@ describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
    * carrying razlike or name čl. 9 st. 3 over one that carries none — and the
    * article is the only thing on screen that tells the operator which document
    * he is about to put in front of the komisija.
+   *
+   * **`counted_signed` is walked, and it is the only state that proves
+   * anything.** The copy is derived from `knjigovodstvoDostupno`, the backend's
+   * own `book_quantities_released(status, fazaAPotpisana)`, and every state but
+   * this one agrees with a plain status check — so a screen that read
+   * `status === "computed" || …` would pass a test that stopped at `computed`
+   * while telling a `counted_signed` popis it is about to print a sheet with no
+   * book quantities on it, over the sheet that carries them. Measured: with the
+   * predicate swapped for that status list, the rest of this file stays green.
    */
   it("names čl. 9 st. 3 on the computed sheet and čl. 8 st. 5 on the counted one", async () => {
     const user = userEvent.setup();
@@ -751,6 +773,15 @@ describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
     expect(brojanje).toHaveTextContent(/PoP čl\. 8 st\. 5/);
     expect(brojanje).not.toHaveTextContent(/čl\. 9 st\. 3/);
 
+    // The potpis is what releases the book quantities, not the obračun: from
+    // `counted_signed` on, the derived sheet is the čl. 9 st. 3 one.
+    await dovediDo(user, "counted_signed");
+
+    const potpisano = await screen.findByText(/štampaju se obračunate/i);
+    expect(potpisano).toHaveTextContent(/PoP čl\. 9 st\. 3/);
+    expect(potpisano).not.toHaveTextContent(/čl\. 8 st\. 5/);
+    expect(screen.queryByText(/štampa se popisna lista/i)).toBeNull();
+
     await dovediDo(user, "computed");
 
     const obracun = await screen.findByText(/štampaju se obračunate/i);
@@ -758,6 +789,66 @@ describe("PopisModule — the printed popisne liste (reqs. 31/32)", () => {
     expect(obracun).not.toHaveTextContent(/čl\. 8 st\. 5/);
     // And the counting sentence is gone, not merely joined by a second one.
     expect(screen.queryByText(/štampa se popisna lista/i)).toBeNull();
+  });
+
+  /**
+   * The half of the čl. 8 st. 5 property the frontend owns.
+   *
+   * `popis_export_lista` honours an explicit „a“ in **every** state by design —
+   * over-withholding breaches nothing and čl. 2 st. 6 needs the reprint — so the
+   * backend cannot tell a screen that narrowed the primary button to „a“ from
+   * one that did not. What it would produce is a `computed` popis whose own copy
+   * says *„Štampaju se obračunate popisne liste (PoP čl. 9 st. 3) — sa
+   * knjigovodstvenim stanjem, naturalnim razlikama, cenama i vrednostima“* and a
+   * click that hands over the counted sheet instead. Nothing else in this file
+   * would notice: the sweep asserts only `faza !== "b"`, and the čl. 2 st. 6
+   * test reaches the *second* button by name.
+   *
+   * So the request and the document are asserted together. `null` means „print
+   * what this popis has“, and the double's `fileName` carries the phase it
+   * applied, which is what ties the sentence on screen to the paper.
+   */
+  it("asks for the derived phase and gets the document its own copy names", async () => {
+    const user = userEvent.setup();
+    const svc = services();
+    const izvoz = vi.spyOn(svc.popis, "exportLista");
+    vi.spyOn(svc.print, "openForPrint").mockResolvedValue(undefined);
+
+    render(<PopisModule services={svc} />);
+    await otvoriPopis(user, {
+      clan: { ime: "Amina Hodžić", rukujeImovinom: false },
+    });
+    await dovediDo(user, "counting");
+
+    const brojanje = await screen.findByRole("group", {
+      name: /popisne liste za štampu/i,
+    });
+    expect(
+      within(brojanje).getByText(/štampa se popisna lista/i),
+    ).toHaveTextContent(/PoP čl\. 8 st\. 5/);
+    await user.click(
+      within(brojanje).getByRole("button", { name: /štampaj popisne liste/i }),
+    );
+
+    await waitFor(() => expect(izvoz).toHaveBeenCalledTimes(1));
+    expect(izvoz).toHaveBeenLastCalledWith(1, null);
+    expect((await izvoz.mock.results[0].value).fileName).toContain("faza-a");
+
+    await dovediDo(user, "computed");
+
+    const obracun = await screen.findByRole("group", {
+      name: /popisne liste za štampu/i,
+    });
+    expect(
+      within(obracun).getByText(/štampaju se obračunate/i),
+    ).toHaveTextContent(/PoP čl\. 9 st\. 3/);
+    await user.click(
+      within(obracun).getByRole("button", { name: /štampaj popisne liste/i }),
+    );
+
+    await waitFor(() => expect(izvoz).toHaveBeenCalledTimes(2));
+    expect(izvoz).toHaveBeenLastCalledWith(1, null);
+    expect((await izvoz.mock.results[1].value).fileName).toContain("faza-b");
   });
 
   /** SW-8 export-then-open: the written file is what goes to the OS handler. */
@@ -1058,5 +1149,65 @@ describe("PopisModule — the odluka and the plan rada (req. 35)", () => {
     expect(
       within(blok).getByText(/datum donošenja odluke/i),
     ).toHaveTextContent(/ne evidentira/i);
+  });
+
+  /**
+   * The frontend half of the property the printed plan rada already pins.
+   *
+   * The approval and the schedule are two separate facts and the app can hold
+   * the first without the second — nothing writes `plan_rada_json` after
+   * `popis_open`. „Plan rada je odobren“ standing a few lines under nothing at
+   * all reads as though the schedule were on file, so the gap has to be named,
+   * and named only when it is real: a screen that always printed the
+   * qualification would tell a shop that typed its schedule in that the
+   * application does not have it.
+   */
+  it("names the čl. 8 st. 1 gap when the application holds no schedule", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user);
+
+    const blok = await screen.findByRole("group", {
+      name: /odluka o popisu i plan rada/i,
+    });
+    expect(
+      within(blok).getByText(/sadržina plana rada nije uneta/i),
+    ).toHaveTextContent(/PoP čl\. 8 st\. 1/);
+  });
+
+  it("drops the qualification once the schedule itself is in the application", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user, {
+      planRada: "1. Roba u objektu — Amina Hodžić, 31.12.2026.",
+    });
+
+    const blok = await screen.findByRole("group", {
+      name: /odluka o popisu i plan rada/i,
+    });
+    expect(within(blok).queryByText(/sadržina plana rada nije uneta/i)).toBeNull();
+  });
+
+  /**
+   * And the emptiness is read the way `popis_print.rs` reads it. The printed
+   * plan rada asks `raspored_html`, which resolves `""`, `"{}"`, `"[]"` and
+   * `"null"` to no schedule — a screen testing `=== null` would drop the
+   * qualification for a popis whose printed plan rada carries it, and the two
+   * are supposed to name the gap in the same terms.
+   */
+  it("reads an empty schedule the way the printed plan rada reads it", async () => {
+    const user = userEvent.setup();
+    render(<PopisModule services={services()} />);
+
+    await otvoriPopis(user, { planRada: "{}" });
+
+    const blok = await screen.findByRole("group", {
+      name: /odluka o popisu i plan rada/i,
+    });
+    expect(
+      within(blok).getByText(/sadržina plana rada nije uneta/i),
+    ).toHaveTextContent(/PoP čl\. 8 st\. 1/);
   });
 });

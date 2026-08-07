@@ -977,6 +977,54 @@ function PopisDetail({
 }
 
 /**
+ * Whether the application holds the čl. 8 st. 1 schedule itself, as opposed to
+ * holding only a record about it.
+ *
+ * The mirror of `popis_print.rs::plan_rada_u_aplikaciji`, which asks the same
+ * question of `raspored_html` — the function that lays the schedule out — so
+ * that the printed plan rada and this screen cannot disagree about whether
+ * there is one. A blank string, `{}`, `[]` and `null` all mean the same thing
+ * as an absent column and all read as no schedule; anything `JSON.parse`
+ * refuses is free text, which the document prints as a schedule and so is one.
+ *
+ * `planRadaJson === null` is the check this replaced, and it is the check the
+ * backend deliberately does not make: a popis opened with `„{}“` typed into the
+ * field would have carried the qualification on the paper and not on the
+ * screen, which is the one thing the comment beside the sentence promises it
+ * does not do.
+ */
+function planRadaSadrzina(plan: string | null): boolean {
+  if (plan === null) {
+    return false;
+  }
+  const tekst = plan.trim();
+  if (tekst === "") {
+    return false;
+  }
+
+  let vrednost: unknown;
+  try {
+    vrednost = JSON.parse(tekst);
+  } catch {
+    return true;
+  }
+
+  if (vrednost === null) {
+    return false;
+  }
+  if (Array.isArray(vrednost)) {
+    return vrednost.length > 0;
+  }
+  if (typeof vrednost === "object") {
+    return Object.keys(vrednost).length > 0;
+  }
+  if (typeof vrednost === "string") {
+    return vrednost.trim() !== "";
+  }
+  return true;
+}
+
+/**
  * Reqs. 31/32/35 — the four documents the module generates, and the čl. 8 st. 2
  * approval.
  *
@@ -1181,15 +1229,16 @@ function DokumentiPanel({
           `plan_rada_json` after the popis is opened. A page carrying „odobren“
           over a plan it does not hold would read as though the schedule were on
           file, so the gap is named — here and on the generated document, in the
-          same terms.
+          same terms, which is why the emptiness is asked of `planRadaSadrzina`
+          and not of `=== null`.
         */}
-        {session.planRadaJson === null ? (
+        {planRadaSadrzina(session.planRadaJson) ? null : (
           <p className="text-xs text-muted-foreground">
             Sadržina plana rada nije uneta u aplikaciju (PoP čl. 8 st. 1) —
             evidentira se odobrenje, a ne raspored i zaduženja na koja se
             odobrenje odnosi.
           </p>
-        ) : null}
+        )}
 
         {odobren ? (
           <p className="text-sm">
