@@ -2328,3 +2328,125 @@ fn no_document_says_this_application_prints_nothing() {
         }
     }
 }
+
+/// SW-14 req. 28's mask exists, so no document may say it does not — and none
+/// may name it without naming what performs it.
+///
+/// The same inversion as [`no_document_says_the_cl_87_weekly_leg_is_still_unbuilt`],
+/// against the same failure: on 08.08.2026 the backend mask, migration v23's
+/// per-nalog unmask stamp and `commands::audit::reveal_absence_reason` landed,
+/// and three shipped documents went on saying the masking *„is not built“* —
+/// a denial that withdraws the reader's only pointer to a ZZPL čl. 46 control
+/// the shop is running. Two of the three were in `PROGRESS.md`'s still-open
+/// lists, where the flattest reading of a checklist leaves them standing.
+///
+/// **Two halves, because one of the three said nothing false in words.** The
+/// bullet under „Previously disclosed, unchanged“ carried no denial marker at
+/// all — it read as open because of the list it sat in — so a marker sweep alone
+/// would have passed it. The second half therefore requires every block that
+/// names the column to name one of the shipped symbols as well, which is the
+/// same presence-before-wording rule every sibling guard in this file applies.
+///
+/// A denial **inside Serbian quotation marks** is exempt, per
+/// [`inside_a_serbian_quotation`]: all four re-statements quote the sentence
+/// they withdraw, and a dated correction that cannot show what it corrected is
+/// worth nothing. The quotation is located by the marker's own offset rather
+/// than the needle's, because the needle sits outside the quotes and the marker
+/// inside them.
+///
+/// What this guard must NOT be read as claiming: that req. 28 is closed. It is a
+/// partial, and the words for the open limbs — no unmask control, a grid cell
+/// that renders „—“ rather than „skriveno“, and the ZEOR čl. 24 tač. 1 buckets
+/// that carry the reason onto the payload and into the exported file — are
+/// deliberately not in `PORICANJE`, so a document can and must still state them.
+#[test]
+fn no_document_says_the_absence_reason_mask_is_unbuilt() {
+    /// The subject, as all four documents word it. Lower-case, per
+    /// [`match_indices_ci`]'s contract.
+    const KOLONA: [&str; 2] = ["absence-reason column", "absence reason column"];
+
+    /// A categorical denial of the whole control. Narrower than the čl. 87
+    /// guard's list on purpose: „gap“ and „not enforced“ would fire on the
+    /// three open limbs, which are true and must stay statable.
+    const PORICANJE: [&str; 6] = [
+        "not built",
+        "unbuilt",
+        "not implemented",
+        "nije implementiran",
+        "nije izgrađen",
+        "wholly open",
+    ];
+
+    /// What performs it. A block that names the column must name at least one,
+    /// or the reader is left with a subject and no pointer.
+    const IZVODJENJE: [&str; 3] = [
+        "razlog_odsustva_dostupan",
+        "odsustvo_otkriveno_at",
+        "reveal_absence_reason",
+    ];
+
+    // Renaming any of the three stops this file compiling rather than leaving
+    // the prose above pointing at symbols nothing declares.
+    let _unmask_verb = crate::commands::audit::reveal_absence_reason;
+    let _stamp =
+        |nalog: &crate::commands::audit::SupportSession| nalog.odsustvo_otkriveno_at.clone();
+    let _withheld =
+        |mesec: &crate::commands::worktime::WorkTimeMonth| mesec.razlog_odsustva_skriven;
+
+    for (doc, text) in [
+        ("docs/SERBIAN-LAW-COMPLIANCE.md", REGISTER),
+        ("docs/PROGRESS.md", PROGRESS),
+    ] {
+        let mut pomena = 0usize;
+        for needle in KOLONA {
+            for at in match_indices_ci(text, needle) {
+                pomena += 1;
+                let line = text[..at].lines().count();
+
+                let (start, end) = sentence_span(text, at);
+                for marker in PORICANJE {
+                    for relative in match_indices_ci(&text[start..end], marker) {
+                        if inside_a_serbian_quotation(text, start + relative) {
+                            continue;
+                        }
+                        panic!(
+                            "{doc}:{line} names the SW-14 req. 28 absence-reason column and says \
+                             „{marker}“ of it in the same sentence — „{}“. The mask shipped \
+                             08.08.2026: `commands/worktime.rs::razlog_odsustva_dostupan` decides \
+                             it off the live čl. 46 nalog, `load_entries_without_reason` is a \
+                             statement that never names the column, v23's \
+                             `support_sessions.odsustvo_otkriveno_at` is the shop's per-nalog \
+                             unmask stamp and `commands::audit::reveal_absence_reason` writes the \
+                             čl. 48 line. Re-state the sentence as the partial it is — no unmask \
+                             control, a grid cell that renders „—“ instead of „skriveno“, and the \
+                             ZEOR čl. 24 tač. 1 buckets that still carry the reason on the payload \
+                             and in the exported file — rather than denying the control outright. \
+                             A withdrawn sentence quoted inside „ “ is exempt.",
+                            text[start..end].trim()
+                        );
+                    }
+                }
+
+                let (block_line, block) = markdown_block_around(text, at);
+                assert!(
+                    IZVODJENJE
+                        .iter()
+                        .any(|symbol| !match_indices_ci(&block, symbol).is_empty()),
+                    "{doc}:{block_line} names the SW-14 req. 28 absence-reason column and none of \
+                     {IZVODJENJE:?} — „{block}“. A block that states the subject without naming \
+                     what performs it reads as an open gap whatever its words say, which is how \
+                     this denial survived in a list headed „Previously disclosed, unchanged“. \
+                     Name the symbol beside the claim."
+                );
+            }
+        }
+
+        assert!(
+            pomena > 0,
+            "{doc} must keep naming the SW-14 req. 28 absence-reason column. A register silent \
+             about a ZZPL čl. 46 control the shop is running is the same defect as one that \
+             denies it — and this document said the masking was not built for a day after it \
+             was. Re-state the row rather than deleting it."
+        );
+    }
+}

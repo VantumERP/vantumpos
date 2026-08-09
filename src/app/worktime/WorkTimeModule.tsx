@@ -1042,9 +1042,22 @@ function MinuteCell({ value }: { value: number }) {
  *
  * The absence **category** is special-category data under ZZPL čl. 17 — the two
  * sprečenost buckets alone say which of a poslodavac-funded and an RFZO-funded
- * sick leave a day was. Payroll sees the category; every other role, and every
- * unknown one, sees „odsutan“ plus the hour total and nothing that identifies
- * why.
+ * sick leave a day was. With no support nalog live, payroll sees the category;
+ * every other role, and every unknown one, sees „odsutan“ plus the hour total
+ * and nothing that identifies why.
+ *
+ * **Under a live nalog none of that holds, and the gap is recorded here rather
+ * than left to be discovered.** Since 08.08.2026 the backend withholds the
+ * category while a ZZPL čl. 46 nalog za daljinsku podršku is open (SW-14
+ * req. 28), so `entry.kategorijaOdsustva` is `null` on a day that *is* an
+ * absence — and the first branch below then renders „—“, which on this column
+ * means „nema odsustva“, beside an „Ukupno neizvršeni“ cell reading 480. The
+ * null check runs before the role check, so **every** role including payroll
+ * gets that cell, and the §4 req. 25 rule the paragraph above states is not met
+ * while a nalog is live either. The backend already ships what the fix needs —
+ * `WorkTimeMonth.razlog_odsustva_skriven`, camelCase on the wire — and Task 4 of
+ * the req. 28 plan owns it: render the masked cell as a stated „Odsutan (razlog
+ * skriven)“, with a vitest pinning it against blank.
  */
 export function AbsenceCell({
   entry,

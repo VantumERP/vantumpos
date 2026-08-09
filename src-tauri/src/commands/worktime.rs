@@ -490,14 +490,24 @@ pub fn notices(state: &AppState) -> Result<WorkTimeNotices, AppError> {
 ///    category on the surface that exists to discharge that right would defeat
 ///    it. Req. 28's own words are „mask the column and payroll screens“ — a
 ///    person reading their own row is neither.
-/// 2. **What it returns is bounded by whoever is signed in**, and that person is
-///    sitting in front of the screen the operator is already mirroring. Masking
-///    the payload would withhold from the subject (a certain čl. 26 harm) to
-///    prevent a disclosure the mask cannot actually prevent (the operator sees
-///    the pixels, not the JSON).
-/// 3. **A masked „Moji sati“ would misinform the subject about their own
-///    record**: the category would simply be gone, with no way for the employee
-///    to tell a withheld reason from an unrecorded one.
+/// 2. **Masking here would inflict a certain harm to prevent an uncertain one.**
+///    Withholding the category from the subject is a čl. 26 harm that lands every
+///    time; what it would prevent is a disclosure the mask cannot prevent anyway,
+///    because the operator is mirroring a screen and reads pixels rather than
+///    JSON — and because the ZEOR čl. 24 tač. 1 buckets on the same payload, the
+///    grid the operator is already looking at, and the SQLite file under it all
+///    carry the same fact. **What this leg is not:** a claim that the session
+///    bounds what the operator can reach. It does not. An operator holding the
+///    vlasnik's admin session can reset an employee's PIN through
+///    `commands::users::update_user` — which writes no audit line on that branch —
+///    sign in as that employee and read their month here. That route is real, it
+///    is admin-gated and nothing bars it, and it is recorded against §6 W-15
+///    rather than denied.
+///
+/// A masked „Moji sati“ would be perfectly **expressible** — [`WorkTimeMonth`]
+/// carries `razlog_odsustva_skriven` for exactly this, so the panel could say
+/// „razlog je skriven“ rather than showing a gap — which is why that is not
+/// offered here as a third reason. The decision rests on the two above.
 ///
 /// What is left over is procedural and not something this code can impose: while
 /// a nalog is live, an employee opening „Moji sati“ shows their own čl. 17-adjacent
@@ -1119,10 +1129,13 @@ fn load_entries_with_reason(
 /// one above**.
 ///
 /// The query does not name `kategorija_odsustva`, so while a čl. 46 nalog is
-/// masking it there is no value in the row for a later refactor, a log line or a
-/// debug print to spill, and putting the column back would have to be done here,
-/// in the open, against this comment. Selecting it and dropping it in Rust would
-/// look identical from outside and be a different thing.
+/// masking it there is no **category value** in the row for a later refactor, a
+/// log line or a debug print to spill — and the buckets below are the limit of
+/// what that achieves, because every category is exactly its own bucket minus
+/// `_minuta`, so a debug print of this row still says which reason it was.
+/// Putting the column itself back would have to be done here, in the open,
+/// against this comment; selecting it and dropping it in Rust would look
+/// identical from outside and be a different thing.
 /// `commands::popis::read_lines` withholds the čl. 8 st. 5 book data the same way
 /// and for the same reason.
 ///
@@ -1133,7 +1146,13 @@ fn load_entries_with_reason(
 /// hours would make the register on screen disagree with the register in the
 /// table, which is a bigger lie than the one it prevents — and, since every
 /// category is exactly its own bucket minus `_minuta`, those buckets are also the
-/// limit of what this withholding achieves. That residual is pinned by
+/// limit of what this withholding achieves. **Where the residual travels, named
+/// so no document can word itself past it:** onto the wire, because
+/// [`WorkTimeMinutes`] serialises every bucket and a masked entry therefore ships
+/// `sprecenostRfzoMinuta: 480` beside a null category; and into the exported file,
+/// which carries every letter and outlives the nalog. What the mask does reach is
+/// the column and the rendered grid, which draws v) and none of the nine buckets.
+/// The residual is pinned by
 /// `the_mask_covers_the_zzpl_column_and_not_the_zeor_letters` and stated out loud
 /// in [`RAZLOG_ODSUSTVA_SKRIVEN`]; it is not closed here, because zeroing a
 /// statutory bucket would be a false statement rather than a withheld one.
@@ -1628,7 +1647,7 @@ mod tests {
     use super::{
         close_period, correct_entry, export_month_csv, list_month, my_hours, notices,
         parse_iso_date, save_entry, worktime_save_entry, CorrectEntryRequest, SaveEntryRequest,
-        KATEGORIJE_ODSUSTVA, RAZLOG_ODSUSTVA_SKRIVEN,
+        WorkTimeMinutes, KATEGORIJE_ODSUSTVA, RAZLOG_ODSUSTVA_SKRIVEN,
     };
     use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
@@ -3363,6 +3382,48 @@ mod tests {
             .join("\n")
     }
 
+    /// The exported data row for `dan`, split into its fields.
+    ///
+    /// A data row is `Datum`, `Kategorija odsustva`, then the minute columns, and
+    /// none of its fields is ever quoted — the day is an ISO date, the category is
+    /// a bare id and the rest are integers — so splitting on `,` is exact for this
+    /// line and for no other line of the file.
+    fn polja_dana<'a>(csv: &'a str, dan: &str) -> Vec<&'a str> {
+        let prefiks = format!("{dan},");
+        let red = csv
+            .lines()
+            .find(|line| line.starts_with(prefiks.as_str()))
+            .unwrap_or_else(|| panic!("the export must carry a row for {dan}: {csv}"));
+        red.split(',').collect()
+    }
+
+    /// What the exported register puts under `kolona` on `dan`, read **by column
+    /// name and by position**.
+    ///
+    /// `csv.contains("480")` is not this assertion and cannot stand in for it:
+    /// [`radni_dan`] gives every fixture day `moguci_minuta: 480`, so that
+    /// substring is in the file from column a) whatever became of the absence, and
+    /// an export that zeroed every ZEOR čl. 24 tač. 1 bucket while masking — the
+    /// „mask the hours too“ mistake req. 28 forbids — would still satisfy it. The
+    /// index is derived from [`WorkTimeMinutes::COLUMNS`] plus the two leading
+    /// Datum and Kategorija fields, so a reordered register moves the assertion
+    /// with it instead of quietly pointing at a neighbour.
+    fn celija_minuta(csv: &str, dan: &str, kolona: &str) -> i64 {
+        let index = WorkTimeMinutes::COLUMNS
+            .iter()
+            .position(|candidate| *candidate == kolona)
+            .unwrap_or_else(|| panic!("„{kolona}“ is not one of the register's minute columns"))
+            + 2;
+        let polja = polja_dana(csv, dan);
+        polja
+            .get(index)
+            .unwrap_or_else(|| panic!("the row for {dan} has no field {index}: {polja:?}"))
+            .parse()
+            .unwrap_or_else(|_| {
+                panic!("field {index} of the row for {dan} is not minutes: {polja:?}")
+            })
+    }
+
     /// Asserted on the **file bytes**, never on the returned struct: the struct is
     /// what the command hands back to the caller, the file is what stays on the
     /// disk the support operator is already inside.
@@ -3392,9 +3453,25 @@ mod tests {
                     "„{kategorija}“ reached the exported file under a live nalog: {csv}"
                 );
             }
-            assert!(
-                csv.contains("480"),
-                "the masked export still states the absence hours: {csv}"
+            // House rule 10 in the artefact rather than in the struct: the file an
+            // inspector is handed must still state that the day WAS an absence and
+            // how long it was. Read positionally, because „480“ as a substring is
+            // already in the file from column a) — see [`celija_minuta`].
+            assert_eq!(
+                celija_minuta(&csv, "2026-07-06", "ukupno_neizvrseni_minuta"),
+                480,
+                "the masked export must still state the absence hours in v): {csv}"
+            );
+            assert_eq!(
+                celija_minuta(&csv, "2026-07-06", "sprecenost_rfzo_minuta"),
+                480,
+                "and in the ZEOR čl. 24 tač. 1 bucket the day was booked into: {csv}"
+            );
+            assert_eq!(
+                polja_dana(&csv, "2026-07-06")[1],
+                "",
+                "the „Kategorija odsustva“ cell itself is what must be empty, and the sweep \
+                 above cannot tell an empty cell from a value in another column: {csv}"
             );
             assert!(
                 csv.contains(RAZLOG_ODSUSTVA_SKRIVEN),
@@ -3412,9 +3489,10 @@ mod tests {
             .expect("the export is UTF-8");
             std::fs::remove_file(&otkriven.path).expect("the export should be removable");
 
-            assert!(
-                bez_zaglavlja(&csv).contains("sprecenost_rfzo"),
-                "after the unmask the export is the ordinary one again: {csv}"
+            assert_eq!(
+                polja_dana(&csv, "2026-07-06")[1],
+                "sprecenost_rfzo",
+                "after the unmask the category is back in its own cell: {csv}"
             );
             assert!(
                 !csv.contains(RAZLOG_ODSUSTVA_SKRIVEN),
@@ -3430,6 +3508,13 @@ mod tests {
     /// from remote support; a person reading the record kept about themselves is
     /// neither, and withholding it there would defeat the right the surface
     /// exists to discharge.
+    ///
+    /// **The divergence is asserted inside this test, not assumed.** `my_hours`
+    /// takes no `now` and consults no nalog, so a test that only called it would
+    /// pass with the `izdaj_nalog` line deleted — it would pin „the employee sees
+    /// their category“, which was already true before req. 28, and not the one
+    /// thing this decision has to be held to: that under **one** live nalog the
+    /// register read withholds and this one does not.
     #[test]
     fn my_hours_still_shows_the_employee_their_own_absence_reason() {
         with_state("worktime_my_hours_keeps_own_reason", |state| {
@@ -3443,6 +3528,19 @@ mod tests {
             .expect("the absence day should record");
 
             izdaj_nalog(state, "2026-08-01T09:00:00Z");
+
+            // One nalog, live from 09:00 to 10:00. The register read inside it
+            // withholds — this is what makes the assertion below a divergence and
+            // not a restatement of the unmasked default.
+            let register =
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:20:00Z").expect("month lists");
+            assert_eq!(
+                register.entries[0].kategorija_odsustva, None,
+                "the payroll register must be masked under this nalog, or the test below \
+                 compares „Moji sati“ against nothing"
+            );
+            assert!(register.razlog_odsustva_skriven);
+
             sign_in(state, radnik);
 
             let moji = my_hours(state, 2026, 7).expect("the employee reads their own month");
@@ -3450,6 +3548,10 @@ mod tests {
                 moji.entries[0].kategorija_odsustva.as_deref(),
                 Some("sprecenost_rfzo"),
                 "a live nalog must not stand between an employee and their own čl. 26 record"
+            );
+            assert!(
+                !moji.razlog_odsustva_skriven,
+                "and the read must say of itself that it withheld nothing"
             );
         });
     }
@@ -3461,13 +3563,21 @@ mod tests {
     /// screen. `commands::popis::read_lines` withholds the same way and for the
     /// same reason, in two statements rather than one and a filter.
     ///
-    /// The needles are the two ways the column can be *read* — `e.kategorija_odsustva`
-    /// in the SELECT and `row.get("kategorija_odsustva")` out of the row. The bare
-    /// field name would false-fire on `kategorija_odsustva: None`, which is the
-    /// withholding itself.
+    /// **The needle is the bare column name, and nothing narrower will do.** An
+    /// earlier version forbade `e.kategorija_odsustva` and
+    /// `row.get("kategorija_odsustva")` only, on the stated ground that the bare
+    /// name would false-fire on the withholding itself. That ground is false for
+    /// the region this test scans: `kategorija_odsustva: None` is written in
+    /// [`entry_from_row`], which the split below excludes, and the scanned body
+    /// contains the string zero times. What the two narrow needles left open was
+    /// the exact refactor this guard exists to stop — `kategorija_odsustva` with
+    /// no `e.` prefix is unambiguous SQL here, since the only joined table is
+    /// `users` and it has no such column, and `row.get::<_, Option<String>>(…)`
+    /// or a positional `row.get(5)` reads it back past both.
     #[test]
     fn the_masked_register_read_never_names_the_absence_reason_column() {
         const SOURCE: &str = include_str!("worktime.rs");
+        const KOLONA: &str = "kategorija_odsustva";
 
         let bez_razloga = SOURCE
             .split("fn load_entries_without_reason(")
@@ -3477,13 +3587,14 @@ mod tests {
             .next()
             .expect("the masked read must end somewhere");
 
-        for needle in ["e.kategorija_odsustva", "row.get(\"kategorija_odsustva\")"] {
-            assert!(
-                !bez_razloga.contains(needle),
-                "the masked read names `{needle}`, so the reason is one filter away from \
-                 the support operator's screen"
-            );
-        }
+        assert!(
+            !bez_razloga.contains(KOLONA),
+            "the masked read names `{KOLONA}` somewhere in its body, so the reason is one \
+             filter away from the support operator's screen. The withholding is that nothing \
+             reads the column at all — the row build that passes `None` lives in \
+             `entry_from_row`, outside this function, so there is no legitimate mention to \
+             make room for here:\n{bez_razloga}"
+        );
 
         // The other half: a guard that passes because neither reader touches the
         // column would pin nothing at all.
@@ -3510,10 +3621,16 @@ mod tests {
     /// defective without them, and because zeroing one would be a false statement
     /// rather than a withholding: „0 časova“ is not „nije prikazano“.
     ///
-    /// So req. 28 is discharged for the column and for the screens — the grid
-    /// renders v) and not the nine buckets — and **not** for the exported file,
-    /// which carries every letter. This test exists so that the čl. 23 notice and
-    /// the čl. 47 register can only ever be worded to what is actually true.
+    /// So req. 28 is discharged **for the column and for the rendered grid**,
+    /// which draws v) and none of the nine buckets — and **not** for the two
+    /// places the buckets travel in full. Both are asserted below, in the order
+    /// they leak: the **wire** first (the `WorkTimeMonth` a masked `list_month`
+    /// serialises still carries `sprecenostRfzoMinuta: 480` beside a null
+    /// category, so any client that reads JSON rather than pixels recovers the
+    /// reason by looking for the one non-zero bucket) and then the **exported
+    /// file**, which carries every letter and outlives the nalog. This test exists
+    /// so that the čl. 23 notice and the čl. 47 register can only ever be worded
+    /// to what is actually true, and it must be read as naming both.
     #[test]
     fn the_mask_covers_the_zzpl_column_and_not_the_zeor_letters() {
         with_state("worktime_mask_leaves_the_zeor_letters", |state| {
@@ -3532,7 +3649,9 @@ mod tests {
             assert_eq!(maskiran.entries[0].kategorija_odsustva, None);
             assert_eq!(
                 maskiran.entries[0].minuti.sprecenost_rfzo_minuta, 480,
-                "the đ) bucket is still there — this is the residual, not an oversight"
+                "the đ) bucket is still on the wire — this is the residual on the payload, \
+                 not an oversight: the masked read withholds the label and serialises the \
+                 bucket the label was derived from"
             );
 
             let exported = export_month_csv(state, radnik, 2026, 7, "2026-08-01T09:20:00Z")
@@ -3542,9 +3661,19 @@ mod tests {
             )
             .expect("the export is UTF-8");
             std::fs::remove_file(&exported.path).expect("the export should be removable");
+            // The residual is a **number under a letter on a dated row**, so that is
+            // what is read. Asserting the heading instead would pin nothing: the
+            // label row is printed on every export, masked or not, so it is true of
+            // an empty register and true of a future export that blanked every
+            // bucket while masking — the partial fix someone reaches for next.
+            assert_eq!(
+                celija_minuta(&csv, "2026-07-06", "sprecenost_rfzo_minuta"),
+                480,
+                "the exported file still says which reason it was, in the đ) column: {csv}"
+            );
             assert!(
                 csv.contains("đ) Časovi privremene sprečenosti — sredstva RFZO (min)"),
-                "the exported register keeps its ZEOR letters: {csv}"
+                "and the column it says it in is labelled with its ZEOR letter: {csv}"
             );
         });
     }

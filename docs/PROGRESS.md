@@ -332,8 +332,15 @@ a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export
 - **Req 27 — the čl. 47 evidencija as a generated artefact** is still a hand-maintained document
   (`docs/compliance/evidencija-obrade-cl47.md`); it is not driven off the configured purposes, recipients
   and `retention_policies` rows.
-- **Req 28 — remote-support masking** of the absence-reason column, with the unmask logged, is not built
-  (depends on SW-10).
+- **Req 28 — remote-support masking** of the absence-reason column, with the unmask logged.
+  **Re-stated 09.08.2026:** this bullet ended *„is not built (depends on SW-10)“*, which was true when it
+  was written and false from 08.08.2026. The backend half shipped —
+  `commands/worktime.rs::razlog_odsustva_dostupan` withholds the category from every register read and
+  every export while a čl. 46 nalog is live, `support_sessions.odsustvo_otkriveno_at` (v23) is the shop's
+  per-nalog unmask stamp, and `commands::audit::reveal_absence_reason` writes the čl. 48 line for it.
+  Still owed: a surface that reaches the verb, a grid cell that says „skriveno“ rather than „—“, and the
+  ZEOR čl. 24 tač. 1 buckets, which still carry the reason on the payload and in the exported file.
+  Register row 12 states the whole of it.
 - **Req 21, print half — CSV ships, the per-employee monthly print sheet does not.** Mirrors the polog
   report's open item.
 - **W-1 remains open** (`docs/SW14-VERIFIED-RULES.md` §6): whether ZEOR čl. 51 reaches a preduzetnik at
@@ -509,8 +516,18 @@ under ZoP čl. 3, §6 R-2); and no headcount gate or plan-tier upsell on any of 
 - **Req. 49, redaction half — expiry deletes nothing yet for the breach log.** The requirement is to
   **redact or pseudonymise** the personal-data-bearing fields on expiry rather than drop the row, keeping
   the čl. 52 st. 7 skeleton. No breach-log retention class and no redaction path exists; the row is kept.
-- **SW-14 req. 28 — remote-support masking** of the absence-reason column, with the unmask logged, is
-  still not built. SW-10 was its stated dependency and has now landed, so nothing blocks it.
+- **SW-14 req. 28 — remote-support masking** of the absence-reason column, with the unmask logged.
+  **Re-stated 09.08.2026 — the backend half shipped 08.08.2026 (`7db90f7`).** This bullet said
+  *„is still not built“* while `commands::worktime::list_month` and `export_month_csv` were already
+  withholding `kategorija_odsustva` under a live čl. 46 nalog (the decision is
+  `razlog_odsustva_dostupan`, read off the nalog and never out of `audit_events`), while the unmask was
+  already a stamp on `support_sessions.odsustvo_otkriveno_at` (v23) with no re-mask verb behind it, and
+  while `commands::audit::reveal_absence_reason` was already writing one čl. 48 line carrying no
+  category, no employee name and no month. What is genuinely owed is narrower, and register row 12 lists
+  it: no surface reaches the unmask verb, the payroll grid renders „—“ for a withheld reason instead of
+  saying it is withheld, and the mask does not reach the ZEOR čl. 24 tač. 1 buckets — every category is
+  its bucket minus `_minuta`, so the JSON payload and the exported CSV still say which reason it was.
+  „Moji sati“ is left unmasked deliberately, on the ZZPL čl. 26 ground.
 - **One of the two SW-14 defects found by the previous batch's closing audit is still open.**
   `docs/compliance/obavestenje-zaposlenima.md` still prints the pravno-lice fine band in its header;
   `the_cl_47_record_prints_only_the_preduzetnik_fine_tier` guards that shape for the sibling document and
@@ -635,8 +652,12 @@ Previously disclosed, unchanged:
 - **Req. 49 (SW-17)** — neither half is built: there is no breach-log retention class in
   `RecordClass` and no redaction path, so the row is simply kept. The heading above called this „the
   redaction half“; both halves are open.
-- **SW-14 req. 28** — remote-support masking of the absence-reason column. Its stated dependency
-  (SW-10) has landed, so nothing blocks it.
+- **SW-14 req. 28** — remote-support masking of the absence-reason column. **Re-stated 09.08.2026:**
+  carried here as an open item, it is a partial as of 08.08.2026 — the backend withholds the category
+  under a live čl. 46 nalog (`commands/worktime.rs::razlog_odsustva_dostupan`), the unmask is a per-nalog
+  stamp (`support_sessions.odsustvo_otkriveno_at`, v23) and `commands::audit::reveal_absence_reason`
+  logs it. The limbs that remain are the unmask control, the masked grid cell and the ZEOR čl. 24 tač. 1
+  buckets; register row 12 states them.
 - **SW-2** — backup encryption is opt-in, so the čl. 50 st. 2 tač. 1 measure is available rather than in
   force. Register row 8 and `cl47::mere_zastite` both say so.
 - **§6 R-9** — which article of the ZZPL nadzor chapter carries the opomena and the nalog. Only the
@@ -1383,7 +1404,8 @@ is the defect above pointed the other way.**
   `processing_activities` at launch and on demand, driving the st. 1 t. 6 rok **per vrsta podataka**
   out of the shared `retention_policies` rows. Nothing in this cycle touched it; it is listed here
   because it was carried into the cycle's brief as an open item and is not one.
-- **Reqs. 10, 14, 15, 16 and 28 — wholly open.** Req. **10**: the 9-month reference period behind an
+- **Reqs. 10, 14, 15 and 16 — wholly open; req. 28 re-stated 09.08.2026.** Req. **10**: the 9-month
+  reference period behind an
   explicit `kolektivni_ugovor_postoji` flag, and the čl. 61 mid-period choice — the identifier has zero
   occurrences in the crate. Req. **14**: the čl. 62 st. 2 night threshold (≥ 3 h/day or ⅓ of the week)
   as an advisory flag; `nocni_minuta` is stored and correctly tagged
@@ -1392,8 +1414,11 @@ is the defect above pointed the other way.**
   is cited in `worktime.rs`. Req. **16**: the praznik calendar and the čl. 108 st. 1 tač. 1 exclusion
   set; `rad_na_praznik_minuta` is an operator-entered advisory bucket and `non_working_days` is the
   `cash_deposit` working-day table, which is a different question. Req. **28**: remote-support masking
-  of the absence-reason column with the unmask logged — stated as open here since 02.08.2026 and still
-  open.
+  of the absence-reason column with the unmask logged — **no longer open in full.** This list ended
+  *„stated as open here since 02.08.2026 and still open“*; the backend half landed 08.08.2026 as
+  `commands/worktime.rs::razlog_odsustva_dostupan`, the v23 `support_sessions.odsustvo_otkriveno_at`
+  stamp and `commands::audit::reveal_absence_reason`. The unmask control, the masked grid cell and the
+  ZEOR čl. 24 tač. 1 buckets are what remain; register row 12 states them.
 - **Reqs. 21 and 26 — partials, and recorded as partials.** Req. **21**'s CSV half ships:
   `worktime_export_csv` writes a per-employee month into `exports/` with the columns mapped 1:1 onto the
   ZEOR čl. 24 tač. 1 buckets, offline from the till and never labelled a propisani obrazac. What does
