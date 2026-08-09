@@ -53,6 +53,23 @@ pub const EVIDENCIJA_ZAGLAVLJE: &str =
 /// never appear under a statutory heading.
 const ADVISORY_TAG: &str = "izračunato radi provere usklađenosti";
 
+/// What the exported register says about its own empty „Kategorija odsustva“
+/// column while a čl. 46 nalog is masking it (req. 28).
+///
+/// Without it the artefact would state something false by omission: an empty
+/// category cell beside 480 minutes of absence reads as „razlog nije evidentiran“,
+/// which is a different and untrue statement about the shop's record-keeping.
+///
+/// The second sentence is there because the first one alone would overclaim. The
+/// mask covers the ZZPL column; it does not — and cannot, without gutting the
+/// register — remove the ZEOR čl. 24 tač. 1 buckets, and every category is
+/// exactly its own bucket minus the `_minuta` suffix. See
+/// `the_mask_covers_the_zzpl_column_and_not_the_zeor_letters`.
+const RAZLOG_ODSUSTVA_SKRIVEN: &str =
+    "Kategorija odsustva nije prikazana jer je u toku nalog za pristup tehničke podrške, \
+     a razlog odsustva nije otkriven za taj nalog (ZZPL čl. 46). \
+     Časovi odsustva ostaju iskazani u kolonama iz ZEOR čl. 24 tač. 1.";
+
 /// The ten `kategorija_odsustva` values migration v17's `CHECK` accepts.
 ///
 /// This is a closed enum, not a category → bucket map: the bucket column is
@@ -209,6 +226,14 @@ pub struct WorkTimeMonth {
     pub mesec: i64,
     pub zatvoren: bool,
     pub closed_at: Option<String>,
+    /// Req. 28: this read withheld `kategorija_odsustva` on every entry, because
+    /// a čl. 46 nalog is live and the shop has not unmasked it for that nalog.
+    ///
+    /// It is a property of **the read**, stated by the read that performed it, so
+    /// a surface can tell „nema odsustva“ from „razlog je skriven“ without asking
+    /// a second question of a second command and hoping the two answers were
+    /// about the same instant.
+    pub razlog_odsustva_skriven: bool,
     pub entries: Vec<WorkTimeEntryView>,
     /// Live rows only — `MAX(verzija)` per day.
     pub ukupno: WorkTimeMinutes,
@@ -328,7 +353,7 @@ pub fn worktime_list_month(
     godina: i64,
     mesec: i64,
 ) -> Result<WorkTimeMonth, CommandError> {
-    list_month(state.inner(), user_id, godina, mesec).map_err(Into::into)
+    list_month(state.inner(), user_id, godina, mesec, &utc_now()?).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -364,7 +389,7 @@ pub fn worktime_export_csv(
     godina: i64,
     mesec: i64,
 ) -> Result<ExportedFile, CommandError> {
-    export_month_csv(state.inner(), user_id, godina, mesec).map_err(Into::into)
+    export_month_csv(state.inner(), user_id, godina, mesec, &utc_now()?).map_err(Into::into)
 }
 
 /// The ZoR notices the register surfaces, resolved against the stored legal
@@ -387,14 +412,51 @@ pub fn worktime_my_hours(
     my_hours(state.inner(), godina, mesec).map_err(Into::into)
 }
 
+/// The payroll read of one employee's month — every version of every day.
+///
+/// `now` is a parameter for one reason, and it is req. 28's: whether the absence
+/// reason may be read at all is a question about the čl. 46 nalog that is live
+/// **at this instant**, and an expiry decided by `datetime('now')` inside SQL
+/// would be a decision no test could pin.
+///
+/// The admin gate runs first and the mask second, because they answer different
+/// questions and neither substitutes for the other: `require_admin` says who may
+/// open this register at all (§4 req. 25, čl. 50/čl. 42), and the mask says what
+/// the register shows while a third party is inside the machine under a čl. 46
+/// nalog. The support operator is looking at the vlasnik's own signed-in screen,
+/// which is exactly why a role check cannot reach this and the nalog can.
 pub fn list_month(
     state: &AppState,
     user_id: i64,
     godina: i64,
     mesec: i64,
+    now: &str,
 ) -> Result<WorkTimeMonth, AppError> {
     crate::commands::auth::require_admin(state)?;
-    load_month(state, user_id, godina, mesec)
+    let razlog_dostupan = razlog_odsustva_dostupan(state, now)?;
+    load_month(state, user_id, godina, mesec, razlog_dostupan)
+}
+
+/// Req. 28 in one question: may this read carry `kategorija_odsustva`?
+///
+/// **No live nalog, no mask.** The register's ordinary day — the vlasnik or the
+/// payroll role alone at the till — is left exactly as it was; req. 28 is about
+/// what „daljinska podrška“ sees, and inventing a second gate for everybody else
+/// would be inventing a rule. **A live nalog masks by default**, from the moment
+/// it is granted rather than from the moment the operator enters: the nalog is
+/// what authorises (čl. 46), the vlasnik may well open the register while waiting
+/// for the call to connect, and a mask that switched on halfway through the call
+/// would be one the shop cannot reason about.
+///
+/// The unmask is read off the nalog itself — v23's `odsustvo_otkriveno_at` — and
+/// never by reading `audit_events` back. SW-10 keeps that log a record and not an
+/// access control, and a stamp on the nalog dies with the nalog, which čl. 46's
+/// one-session shape and v18's 24 h bound already take care of.
+fn razlog_odsustva_dostupan(state: &AppState, now: &str) -> Result<bool, AppError> {
+    match crate::commands::audit::active_session(state, now)? {
+        Some(nalog) => Ok(nalog.odsustvo_otkriveno_at.is_some()),
+        None => Ok(true),
+    }
 }
 
 /// Resolves every ZoR notice against the shop's stored legal form.
@@ -415,9 +477,34 @@ pub fn notices(state: &AppState) -> Result<WorkTimeNotices, AppError> {
 /// ZoR čl. 83 st. 1 and ZZPL čl. 26 in one read-only surface. The employee is
 /// resolved from the server-side session, never from a client-supplied id, so
 /// there is no parameter here that could be pointed at a colleague.
+///
+/// **This is the one read path req. 28 deliberately does not mask, and the
+/// decision is not that a support operator cannot reach it.** They can: the
+/// command is session-gated only, so an operator remote-controlling the till
+/// under a čl. 46 nalog can invoke it for whoever happens to be signed in, and
+/// saying otherwise would be false. Three things decide it anyway.
+///
+/// 1. **§4 req. 25's carve-out names this function.** The čl. 50/čl. 42 gate
+///    governs disclosure to anyone *other than the data subject*; ZZPL čl. 26 is
+///    the right to be told what is recorded about oneself, and withholding the
+///    category on the surface that exists to discharge that right would defeat
+///    it. Req. 28's own words are „mask the column and payroll screens“ — a
+///    person reading their own row is neither.
+/// 2. **What it returns is bounded by whoever is signed in**, and that person is
+///    sitting in front of the screen the operator is already mirroring. Masking
+///    the payload would withhold from the subject (a certain čl. 26 harm) to
+///    prevent a disclosure the mask cannot actually prevent (the operator sees
+///    the pixels, not the JSON).
+/// 3. **A masked „Moji sati“ would misinform the subject about their own
+///    record**: the category would simply be gone, with no way for the employee
+///    to tell a withheld reason from an unrecorded one.
+///
+/// What is left over is procedural and not something this code can impose: while
+/// a nalog is live, an employee opening „Moji sati“ shows their own čl. 17-adjacent
+/// category to the obrađivač. That belongs in §6 W-15's lap, not in a mask here.
 pub fn my_hours(state: &AppState, godina: i64, mesec: i64) -> Result<WorkTimeMonth, AppError> {
     let user_id = crate::commands::auth::require_session(state)?;
-    load_month(state, user_id, godina, mesec)
+    load_month(state, user_id, godina, mesec, true)
 }
 
 /// Records one day as `verzija 1`.
@@ -486,10 +573,17 @@ pub fn close_period(
     }
 
     let (first, last) = month_bounds(godina, mesec);
+    // The frozen Class A classification is minutes and a day count — it has never
+    // carried `kategorija_odsustva` — so this read does not select the column at
+    // all, whatever the čl. 46 nalog says. Putting the reason into the frozen
+    // record would have to be done here, in the open, against this comment; doing
+    // it by flipping this argument alone would silently freeze a `None` under a
+    // live nalog and make a permanent record depend on a transient one.
     let entries = load_entries(
         &tx,
         "WHERE e.user_id = ?1 AND e.dan >= ?2 AND e.dan <= ?3",
         params![user_id, first, last],
+        false,
     )?;
     let live: Vec<&WorkTimeEntryView> = entries.iter().filter(|entry| !entry.zamenjen).collect();
     let mut minuti = WorkTimeMinutes::default();
@@ -538,13 +632,21 @@ pub fn close_period(
 /// which §4 req. 21 makes the real constraint (ZIN čl. 20 st. 7 / čl. 21 tač. 4).
 /// Live rows only: an inspector reads what the register currently says, and the
 /// superseded versions stay in the app where they can be shown struck through.
+///
+/// It masks because it goes through [`list_month`], which is the point: an export
+/// that carried what the screen withholds would put the čl. 17-adjacent column in
+/// a file on the disk the support operator is already inside, where it outlives
+/// the nalog that let them see it. The file says so itself —
+/// [`RAZLOG_ODSUSTVA_SKRIVEN`] — rather than handing an inspector a blank column
+/// with no explanation.
 pub fn export_month_csv(
     state: &AppState,
     user_id: i64,
     godina: i64,
     mesec: i64,
+    now: &str,
 ) -> Result<ExportedFile, AppError> {
-    let month = list_month(state, user_id, godina, mesec)?;
+    let month = list_month(state, user_id, godina, mesec, now)?;
     let live: Vec<&WorkTimeEntryView> = month.entries.iter().filter(|e| !e.zamenjen).collect();
     let csv = month_to_csv(&month, &live);
 
@@ -675,7 +777,12 @@ fn write_entry(
     )?;
     tx.commit()?;
 
-    let entry = load_entries(&connection, "WHERE e.id = ?1", params![id])?
+    // Read back unmasked on purpose: this row is the one the caller just wrote,
+    // so `kategorija_odsustva` is the value they supplied a line ago and echoing
+    // it discloses nothing req. 28 is about. Masking the write's own answer would
+    // also leave the operator unable to see whether the day they entered stored
+    // what they typed.
+    let entry = load_entries(&connection, "WHERE e.id = ?1", params![id], true)?
         .pop()
         .ok_or_else(|| AppError::not_found("Unos nije pronađen."))?;
 
@@ -898,11 +1005,17 @@ fn optional_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |text| Value::Text(text.to_string()))
 }
 
+/// The month both read paths are built from.
+///
+/// `razlog_odsustva_dostupan` is decided by the caller and not here, because the
+/// two callers answer it from different articles: [`list_month`] from the čl. 46
+/// nalog, [`my_hours`] from ZZPL čl. 26 and always yes.
 fn load_month(
     state: &AppState,
     user_id: i64,
     godina: i64,
     mesec: i64,
+    razlog_odsustva_dostupan: bool,
 ) -> Result<WorkTimeMonth, AppError> {
     validate_month(godina, mesec)?;
     let connection = state.db().open()?;
@@ -912,6 +1025,7 @@ fn load_month(
         &connection,
         "WHERE e.user_id = ?1 AND e.dan >= ?2 AND e.dan <= ?3",
         params![user_id, first, last],
+        razlog_odsustva_dostupan,
     )?;
 
     let mut ukupno = WorkTimeMinutes::default();
@@ -939,6 +1053,7 @@ fn load_month(
         mesec,
         zatvoren,
         closed_at,
+        razlog_odsustva_skriven: !razlog_odsustva_dostupan,
         entries,
         ukupno,
         napomena: EVIDENCIJA_ZAGLAVLJE.to_string(),
@@ -950,16 +1065,31 @@ fn load_month(
 /// supersedes. `zamenjen` is computed from `MAX(verzija)` per `(user_id, dan)`,
 /// never from `supersedes_id IS NULL` — v17's index is total precisely so that a
 /// forked chain cannot leave two rows live for one day.
+///
+/// `razlog_odsustva_dostupan` picks between **two whole statements**, not between
+/// two ways of finishing one — see [`load_entries_without_reason`] for why the
+/// difference is the entire point of req. 28.
 fn load_entries(
     connection: &Connection,
     predicate: &str,
     params: impl rusqlite::Params,
+    razlog_odsustva_dostupan: bool,
 ) -> Result<Vec<WorkTimeEntryView>, AppError> {
-    let minute_columns = WorkTimeMinutes::COLUMNS
-        .iter()
-        .map(|column| format!("e.{column} AS {column}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    if razlog_odsustva_dostupan {
+        load_entries_with_reason(connection, predicate, params)
+    } else {
+        load_entries_without_reason(connection, predicate, params)
+    }
+}
+
+/// The ordinary read: every column of the register, the čl. 17-adjacent one
+/// included.
+fn load_entries_with_reason(
+    connection: &Connection,
+    predicate: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<WorkTimeEntryView>, AppError> {
+    let minute_columns = minute_columns_sql();
     let sql = format!(
         "SELECT e.id AS id, e.user_id AS user_id, e.dan AS dan, e.verzija AS verzija,
                 e.supersedes_id AS supersedes_id, e.kategorija_odsustva AS kategorija_odsustva,
@@ -978,31 +1108,105 @@ fn load_entries(
 
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map(params, |row| {
-        let verzija: i64 = row.get("verzija")?;
-        let max_verzija: i64 = row.get("max_verzija")?;
-        Ok(WorkTimeEntryView {
-            id: row.get("id")?,
-            user_id: row.get("user_id")?,
-            dan: row.get("dan")?,
-            verzija,
-            zamenjen: verzija < max_verzija,
-            supersedes_id: row.get("supersedes_id")?,
-            kategorija_odsustva: row.get("kategorija_odsustva")?,
-            cap_override_razlog: row.get("cap_override_razlog")?,
-            korekcija_razlog: row.get("korekcija_razlog")?,
-            unio_user_id: row.get("unio_user_id")?,
-            unio_ime: row.get("unio_ime")?,
-            created_at: row.get("created_at")?,
-            updated_at: row.get("updated_at")?,
-            minuti: WorkTimeMinutes::from_row(row)?,
-        })
+        entry_from_row(row, row.get("kategorija_odsustva")?)
     })?;
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
 }
 
+/// The req. 28 read, in **a statement of its own rather than a filter over the
+/// one above**.
+///
+/// The query does not name `kategorija_odsustva`, so while a čl. 46 nalog is
+/// masking it there is no value in the row for a later refactor, a log line or a
+/// debug print to spill, and putting the column back would have to be done here,
+/// in the open, against this comment. Selecting it and dropping it in Rust would
+/// look identical from outside and be a different thing.
+/// `commands::popis::read_lines` withholds the čl. 8 st. 5 book data the same way
+/// and for the same reason.
+///
+/// **What it still carries is the absence itself.** ZEOR čl. 24 tač. 1's minute
+/// buckets are read exactly as they are, so an entry with an absence still
+/// reports that there IS one and how many minutes it was, and the month's totals
+/// are the same figures they would have been unmasked. A mask that suppressed the
+/// hours would make the register on screen disagree with the register in the
+/// table, which is a bigger lie than the one it prevents — and, since every
+/// category is exactly its own bucket minus `_minuta`, those buckets are also the
+/// limit of what this withholding achieves. That residual is pinned by
+/// `the_mask_covers_the_zzpl_column_and_not_the_zeor_letters` and stated out loud
+/// in [`RAZLOG_ODSUSTVA_SKRIVEN`]; it is not closed here, because zeroing a
+/// statutory bucket would be a false statement rather than a withheld one.
+fn load_entries_without_reason(
+    connection: &Connection,
+    predicate: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<WorkTimeEntryView>, AppError> {
+    let minute_columns = minute_columns_sql();
+    let sql = format!(
+        "SELECT e.id AS id, e.user_id AS user_id, e.dan AS dan, e.verzija AS verzija,
+                e.supersedes_id AS supersedes_id,
+                e.cap_override_razlog AS cap_override_razlog,
+                e.korekcija_razlog AS korekcija_razlog, e.unio_user_id AS unio_user_id,
+                u.display_name AS unio_ime, e.created_at AS created_at,
+                e.updated_at AS updated_at,
+                (SELECT MAX(x.verzija) FROM work_time_entries x
+                  WHERE x.user_id = e.user_id AND x.dan = e.dan) AS max_verzija,
+                {minute_columns}
+           FROM work_time_entries e
+           LEFT JOIN users u ON u.id = e.unio_user_id
+           {predicate}
+          ORDER BY e.dan, e.verzija"
+    );
+
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params, |row| entry_from_row(row, None))?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn minute_columns_sql() -> String {
+    WorkTimeMinutes::COLUMNS
+        .iter()
+        .map(|column| format!("e.{column} AS {column}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Builds the view from a row of either statement. The absence reason is a
+/// **parameter** rather than a column read, so the withholding reader has nothing
+/// to read and nothing to drop.
+fn entry_from_row(
+    row: &Row<'_>,
+    razlog_odsustva: Option<String>,
+) -> rusqlite::Result<WorkTimeEntryView> {
+    let verzija: i64 = row.get("verzija")?;
+    let max_verzija: i64 = row.get("max_verzija")?;
+    Ok(WorkTimeEntryView {
+        id: row.get("id")?,
+        user_id: row.get("user_id")?,
+        dan: row.get("dan")?,
+        verzija,
+        zamenjen: verzija < max_verzija,
+        supersedes_id: row.get("supersedes_id")?,
+        kategorija_odsustva: razlog_odsustva,
+        cap_override_razlog: row.get("cap_override_razlog")?,
+        korekcija_razlog: row.get("korekcija_razlog")?,
+        unio_user_id: row.get("unio_user_id")?,
+        unio_ime: row.get("unio_ime")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        minuti: WorkTimeMinutes::from_row(row)?,
+    })
+}
+
 /// The live row for one day, or `None`.
+///
+/// Unmasked, because this is not a read path: [`write_entry`] uses it for the
+/// predecessor's `id` and `verzija` and nothing else, and it is never returned to
+/// a caller. Threading the čl. 46 question into the append-only chain would put a
+/// clock-dependent branch inside a write and buy nothing.
 fn live_entry(
     connection: &Connection,
     user_id: i64,
@@ -1014,6 +1218,7 @@ fn live_entry(
              (SELECT MAX(x.verzija) FROM work_time_entries x
                WHERE x.user_id = e.user_id AND x.dan = e.dan)",
         params![user_id, dan],
+        true,
     )?;
     Ok(entries.pop())
 }
@@ -1366,8 +1571,15 @@ fn month_to_csv(month: &WorkTimeMonth, live: &[&WorkTimeEntryView]) -> String {
             },
         ]),
         csv_line(&["Jedinica", "Minuti"]),
-        String::new(),
     ];
+
+    // Above the table rather than under it: the sentence explains a column the
+    // reader is about to meet empty, and a reader who stops at the table would
+    // otherwise take „“ for „razlog nije evidentiran“.
+    if month.razlog_odsustva_skriven {
+        lines.push(csv_line(&["Napomena", RAZLOG_ODSUSTVA_SKRIVEN]));
+    }
+    lines.push(String::new());
 
     let mut header = vec!["Datum".to_string(), "Kategorija odsustva".to_string()];
     header.extend(
@@ -1416,9 +1628,15 @@ mod tests {
     use super::{
         close_period, correct_entry, export_month_csv, list_month, my_hours, notices,
         parse_iso_date, save_entry, worktime_save_entry, CorrectEntryRequest, SaveEntryRequest,
+        KATEGORIJE_ODSUSTVA, RAZLOG_ODSUSTVA_SKRIVEN,
     };
     use crate::db::{remove_test_database, test_database_path, Db};
     use crate::state::AppState;
+
+    /// An instant with no čl. 46 nalog anywhere near it — none of the tests that
+    /// pass it issue one. The register's ordinary day, which req. 28's mask must
+    /// leave exactly as it was.
+    const BEZ_NALOGA: &str = "2026-09-01T08:00:00Z";
 
     fn with_state(test_name: &str, test: impl FnOnce(&AppState)) {
         let path = test_database_path(test_name);
@@ -1581,7 +1799,8 @@ mod tests {
             assert_eq!(ispravka.entry.unio_user_id, Some(admin_id));
             assert_eq!(ispravka.entry.created_at, "2026-08-04T09:00:00Z");
 
-            let month = list_month(state, radnik, 2026, 8).expect("the month should list");
+            let month =
+                list_month(state, radnik, 2026, 8, BEZ_NALOGA).expect("the month should list");
             assert_eq!(month.entries.len(), 2, "append-only keeps both versions");
 
             let survivor = month
@@ -1711,7 +1930,8 @@ mod tests {
                 .expect_err("a closed period must not be closed twice");
             assert_eq!(error.code(), "period_closed");
 
-            let month = list_month(state, radnik, 2026, 8).expect("the month should list");
+            let month =
+                list_month(state, radnik, 2026, 8, BEZ_NALOGA).expect("the month should list");
             assert!(month.zatvoren);
             assert_eq!(month.closed_at.as_deref(), Some("2026-09-01T08:00:00Z"));
         });
@@ -1775,7 +1995,7 @@ mod tests {
             let state = managed.inner();
 
             assert_eq!(
-                list_month(state, radnik, 2026, 8)
+                list_month(state, radnik, 2026, 8, BEZ_NALOGA)
                     .expect_err("a cashier may not read the register")
                     .code(),
                 "forbidden"
@@ -1810,7 +2030,7 @@ mod tests {
                 "forbidden"
             );
             assert_eq!(
-                export_month_csv(state, radnik, 2026, 8)
+                export_month_csv(state, radnik, 2026, 8, BEZ_NALOGA)
                     .expect_err("a cashier may not export the register")
                     .code(),
                 "forbidden"
@@ -2118,7 +2338,8 @@ mod tests {
 
             // And nothing was left behind. Five days went in, five stand, and the
             // register holds exactly the 35 h the cap allows.
-            let mesec = list_month(state, maloletnik, 2026, 8).expect("the month should list");
+            let mesec =
+                list_month(state, maloletnik, 2026, 8, BEZ_NALOGA).expect("the month should list");
             assert_eq!(
                 mesec.entries.len(),
                 5,
@@ -2218,7 +2439,8 @@ mod tests {
             // And no superseding version was appended. The register is append-only:
             // a version this leg let through could never be withdrawn, and the day
             // it supersedes could never be brought back.
-            let mesec = list_month(state, maloletnik, 2026, 8).expect("the month should list");
+            let mesec =
+                list_month(state, maloletnik, 2026, 8, BEZ_NALOGA).expect("the month should list");
             assert_eq!(
                 mesec.entries.len(),
                 5,
@@ -2322,7 +2544,8 @@ mod tests {
 
             // Six live rows, one superseded beside them, and the register holds
             // exactly the 35 h the cap allows.
-            let mesec = list_month(state, maloletnik, 2026, 8).expect("the month should list");
+            let mesec =
+                list_month(state, maloletnik, 2026, 8, BEZ_NALOGA).expect("the month should list");
             let live: Vec<_> = mesec.entries.iter().filter(|e| !e.zamenjen).collect();
             assert_eq!(
                 live.len(),
@@ -2441,7 +2664,8 @@ mod tests {
             save_entry(state, odmor, "2026-08-08T21:00:00Z")
                 .expect("a day of zero worked hours breaches no weekly cap");
 
-            let mesec = list_month(state, radnik, 2026, 8).expect("the month should list");
+            let mesec =
+                list_month(state, radnik, 2026, 8, BEZ_NALOGA).expect("the month should list");
             let subota = mesec
                 .entries
                 .iter()
@@ -2505,7 +2729,8 @@ mod tests {
                 assert_eq!(saved.entry.minuti.ukupno_ostvareni_minuta, 540);
             }
 
-            let mesec = list_month(state, maloletnik, 2026, 8).expect("the month should list");
+            let mesec =
+                list_month(state, maloletnik, 2026, 8, BEZ_NALOGA).expect("the month should list");
             assert_eq!(
                 mesec.ukupno.ukupno_ostvareni_minuta, 2700,
                 "the register holds 45 h of ostvareni časovi for this minor's week"
@@ -2950,8 +3175,8 @@ mod tests {
             )
             .expect("the correction should record");
 
-            let exported =
-                export_month_csv(state, radnik, 2026, 8).expect("the month should export");
+            let exported = export_month_csv(state, radnik, 2026, 8, BEZ_NALOGA)
+                .expect("the month should export");
             let csv =
                 std::fs::read_to_string(&exported.path).expect("the export should be on disk");
             std::fs::remove_file(&exported.path).expect("the export should be removable");
@@ -2970,6 +3195,357 @@ mod tests {
             // Advisory columns are labelled, never presented as statutory fields.
             assert!(csv.contains("izračunato radi provere usklađenosti"));
             assert!(csv.contains("420"), "the live version is the exported one");
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Req. 28 — the absence reason under a čl. 46 nalog
+    // -----------------------------------------------------------------------
+
+    /// One day of absence, booked into the bucket its category derives.
+    fn dan_odsustva(user_id: i64, dan: &str, kategorija: &str, minuta: i64) -> SaveEntryRequest {
+        SaveEntryRequest {
+            kategorija_odsustva: Some(kategorija.to_string()),
+            odsustvo_minuta: minuta,
+            ..radni_dan(user_id, dan, 0, 0)
+        }
+    }
+
+    /// The vlasnik issues a čl. 46 nalog at `now`, valid for the hour a support
+    /// call is actually measured in. The operator need not have entered yet: the
+    /// nalog is what authorises, and the mask follows the authorisation.
+    fn izdaj_nalog(state: &AppState, now: &str) {
+        crate::commands::audit::grant_access(
+            state,
+            crate::commands::audit::GrantAccessRequest {
+                scope: "Pregled greške u evidenciji radnog vremena".to_string(),
+                duration_minutes: 60,
+            },
+            now,
+        )
+        .expect("the vlasnik should be able to issue the nalog");
+    }
+
+    /// Req. 28's first limb, and its truthfulness bound in the same test.
+    ///
+    /// The absence itself and its minutes survive the mask — v) is what the
+    /// month's totals are read off, and a mask that suppressed the hours would
+    /// make the register on screen disagree with the register in the table. Only
+    /// the ZZPL čl. 17-adjacent *reason* is withheld.
+    #[test]
+    fn a_live_nalog_withholds_the_absence_reason_and_leaves_the_absence() {
+        with_state("worktime_nalog_withholds_absence_reason", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik_maska1", "Radnik Maska Jedan");
+            save_entry(
+                state,
+                dan_odsustva(radnik, "2026-07-06", "sprecenost_rfzo", 480),
+                "2026-07-06T18:00:00Z",
+            )
+            .expect("the absence day should record");
+
+            // No nalog: the payroll role's ordinary day is untouched.
+            let otvoren =
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:00:00Z").expect("month lists");
+            assert_eq!(
+                otvoren.entries[0].kategorija_odsustva.as_deref(),
+                Some("sprecenost_rfzo"),
+                "without a nalog nothing is masked"
+            );
+
+            izdaj_nalog(state, "2026-08-01T09:00:00Z");
+
+            let maskiran =
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:20:00Z").expect("month lists");
+            let unos = &maskiran.entries[0];
+            assert_eq!(
+                unos.kategorija_odsustva, None,
+                "a live nalog with no unmask must not carry the reason"
+            );
+            assert_eq!(
+                unos.minuti.ukupno_neizvrseni_minuta, 480,
+                "the masked read still says there IS an absence, and how long"
+            );
+            assert_eq!(
+                maskiran.ukupno, otvoren.ukupno,
+                "masking the reason may not move a single figure in the month's totals"
+            );
+            assert_eq!(maskiran.entries.len(), otvoren.entries.len());
+        });
+    }
+
+    /// The nalog is what masks, so a spent one masks nothing: `expires_at` is
+    /// exclusive, and at that instant there is no čl. 46 authorisation left for
+    /// the mask to be „for that session“ of.
+    #[test]
+    fn an_expired_nalog_withholds_nothing() {
+        with_state("worktime_expired_nalog_withholds_nothing", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik_maska2", "Radnik Maska Dva");
+            save_entry(
+                state,
+                dan_odsustva(radnik, "2026-07-06", "porodiljsko", 480),
+                "2026-07-06T18:00:00Z",
+            )
+            .expect("the absence day should record");
+
+            izdaj_nalog(state, "2026-08-01T09:00:00Z");
+            assert_eq!(
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:59:59Z")
+                    .expect("month lists")
+                    .entries[0]
+                    .kategorija_odsustva,
+                None,
+                "one second before expiry the nalog still masks"
+            );
+            assert_eq!(
+                list_month(state, radnik, 2026, 7, "2026-08-01T10:00:00Z")
+                    .expect("month lists")
+                    .entries[0]
+                    .kategorija_odsustva
+                    .as_deref(),
+                Some("porodiljsko"),
+                "at expires_at the nalog is spent and masks nothing"
+            );
+        });
+    }
+
+    /// The shop's explicit unmask is what req. 28 makes the exception, and it
+    /// holds for that nalog only.
+    #[test]
+    fn the_unmasked_nalog_carries_the_absence_reason_again() {
+        with_state("worktime_unmasked_nalog_carries_reason", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik_maska3", "Radnik Maska Tri");
+            save_entry(
+                state,
+                dan_odsustva(radnik, "2026-07-06", "sprecenost_rfzo", 480),
+                "2026-07-06T18:00:00Z",
+            )
+            .expect("the absence day should record");
+
+            izdaj_nalog(state, "2026-08-01T09:00:00Z");
+            assert_eq!(
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:05:00Z")
+                    .expect("month lists")
+                    .entries[0]
+                    .kategorija_odsustva,
+                None
+            );
+
+            crate::commands::audit::reveal_absence_reason(state, "2026-08-01T09:10:00Z")
+                .expect("the vlasnik should be able to unmask for this nalog");
+
+            assert_eq!(
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:20:00Z")
+                    .expect("month lists")
+                    .entries[0]
+                    .kategorija_odsustva
+                    .as_deref(),
+                Some("sprecenost_rfzo"),
+                "after the čl. 48-logged unmask the register carries the reason again"
+            );
+        });
+    }
+
+    /// The exported register minus its column headings.
+    ///
+    /// The ZEOR čl. 24 tač. 1 headings are fixed prose printed on every export,
+    /// masked or not, and „đ) Časovi **porodiljsko**g i skraćenog radnog vremena
+    /// roditelja (min)“ contains a category id as a substring — the sweep below
+    /// fired on it the first time it ran. What must not appear is a category
+    /// **value in a cell**, so the heading line is taken out of the haystack and
+    /// nothing else is.
+    fn bez_zaglavlja(csv: &str) -> String {
+        csv.lines()
+            .filter(|line| !line.starts_with("Datum,Kategorija odsustva"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Asserted on the **file bytes**, never on the returned struct: the struct is
+    /// what the command hands back to the caller, the file is what stays on the
+    /// disk the support operator is already inside.
+    #[test]
+    fn the_exported_file_carries_no_absence_reason_while_the_nalog_is_live() {
+        with_state("worktime_export_withholds_absence_reason", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik_maska4", "Radnik Maska Četiri");
+            save_entry(
+                state,
+                dan_odsustva(radnik, "2026-07-06", "sprecenost_rfzo", 480),
+                "2026-07-06T18:00:00Z",
+            )
+            .expect("the absence day should record");
+
+            izdaj_nalog(state, "2026-08-01T09:00:00Z");
+            let maskiran = export_month_csv(state, radnik, 2026, 7, "2026-08-01T09:20:00Z")
+                .expect("the month should export under a nalog too");
+            let csv = String::from_utf8(
+                std::fs::read(&maskiran.path).expect("the export should be on disk"),
+            )
+            .expect("the export is UTF-8");
+
+            for kategorija in KATEGORIJE_ODSUSTVA {
+                assert!(
+                    !bez_zaglavlja(&csv).contains(kategorija),
+                    "„{kategorija}“ reached the exported file under a live nalog: {csv}"
+                );
+            }
+            assert!(
+                csv.contains("480"),
+                "the masked export still states the absence hours: {csv}"
+            );
+            assert!(
+                csv.contains(RAZLOG_ODSUSTVA_SKRIVEN),
+                "an empty category cell reads as „no absence“, so the file must say why \
+                 it is empty: {csv}"
+            );
+
+            crate::commands::audit::reveal_absence_reason(state, "2026-08-01T09:30:00Z")
+                .expect("the vlasnik should be able to unmask");
+            let otkriven = export_month_csv(state, radnik, 2026, 7, "2026-08-01T09:40:00Z")
+                .expect("the month should export after the unmask");
+            let csv = String::from_utf8(
+                std::fs::read(&otkriven.path).expect("the export should be on disk"),
+            )
+            .expect("the export is UTF-8");
+            std::fs::remove_file(&otkriven.path).expect("the export should be removable");
+
+            assert!(
+                bez_zaglavlja(&csv).contains("sprecenost_rfzo"),
+                "after the unmask the export is the ordinary one again: {csv}"
+            );
+            assert!(
+                !csv.contains(RAZLOG_ODSUSTVA_SKRIVEN),
+                "an unmasked export must not claim a mask that is not there: {csv}"
+            );
+        });
+    }
+
+    /// **The exception, decided rather than copied.** „Moji sati“ is the ZZPL
+    /// čl. 26 surface: it takes no employee parameter, resolves the employee from
+    /// the server-side session and returns own rows only (§4 req. 25's carve-out
+    /// names this very function). Req. 28 masks „the column and payroll screens“
+    /// from remote support; a person reading the record kept about themselves is
+    /// neither, and withholding it there would defeat the right the surface
+    /// exists to discharge.
+    #[test]
+    fn my_hours_still_shows_the_employee_their_own_absence_reason() {
+        with_state("worktime_my_hours_keeps_own_reason", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik_maska5", "Radnik Maska Pet");
+            save_entry(
+                state,
+                dan_odsustva(radnik, "2026-07-06", "sprecenost_rfzo", 480),
+                "2026-07-06T18:00:00Z",
+            )
+            .expect("the absence day should record");
+
+            izdaj_nalog(state, "2026-08-01T09:00:00Z");
+            sign_in(state, radnik);
+
+            let moji = my_hours(state, 2026, 7).expect("the employee reads their own month");
+            assert_eq!(
+                moji.entries[0].kategorija_odsustva.as_deref(),
+                Some("sprecenost_rfzo"),
+                "a live nalog must not stand between an employee and their own čl. 26 record"
+            );
+        });
+    }
+
+    /// The structural half, asserted structurally because no input can
+    /// demonstrate it: a reader that selected the column and dropped it in Rust
+    /// would satisfy every assertion above and still be the wrong thing — the
+    /// value would exist, one refactor or one debug print away from the operator's
+    /// screen. `commands::popis::read_lines` withholds the same way and for the
+    /// same reason, in two statements rather than one and a filter.
+    ///
+    /// The needles are the two ways the column can be *read* — `e.kategorija_odsustva`
+    /// in the SELECT and `row.get("kategorija_odsustva")` out of the row. The bare
+    /// field name would false-fire on `kategorija_odsustva: None`, which is the
+    /// withholding itself.
+    #[test]
+    fn the_masked_register_read_never_names_the_absence_reason_column() {
+        const SOURCE: &str = include_str!("worktime.rs");
+
+        let bez_razloga = SOURCE
+            .split("fn load_entries_without_reason(")
+            .nth(1)
+            .expect("the masked read must exist as its own function")
+            .split("\nfn ")
+            .next()
+            .expect("the masked read must end somewhere");
+
+        for needle in ["e.kategorija_odsustva", "row.get(\"kategorija_odsustva\")"] {
+            assert!(
+                !bez_razloga.contains(needle),
+                "the masked read names `{needle}`, so the reason is one filter away from \
+                 the support operator's screen"
+            );
+        }
+
+        // The other half: a guard that passes because neither reader touches the
+        // column would pin nothing at all.
+        let sa_razlogom = SOURCE
+            .split("fn load_entries_with_reason(")
+            .nth(1)
+            .expect("the ordinary read must exist as its own function")
+            .split("\nfn ")
+            .next()
+            .expect("the ordinary read must end somewhere");
+        assert!(
+            sa_razlogom.contains("e.kategorija_odsustva"),
+            "the ordinary read must still select the column, or the guard above is vacuous"
+        );
+    }
+
+    /// **What the mask does not cover, pinned so no document can claim otherwise.**
+    ///
+    /// Every `kategorija_odsustva` value is exactly its ZEOR čl. 24 tač. 1 minute
+    /// column minus the `_minuta` suffix — that derivation is `book_absence`'s
+    /// whole design — so a masked row whose `sprecenost_rfzo_minuta` is 480 still
+    /// says which reason it was, to anyone reading the buckets rather than the
+    /// column. The buckets stay because ZEOR mandates them and the register is
+    /// defective without them, and because zeroing one would be a false statement
+    /// rather than a withholding: „0 časova“ is not „nije prikazano“.
+    ///
+    /// So req. 28 is discharged for the column and for the screens — the grid
+    /// renders v) and not the nine buckets — and **not** for the exported file,
+    /// which carries every letter. This test exists so that the čl. 23 notice and
+    /// the čl. 47 register can only ever be worded to what is actually true.
+    #[test]
+    fn the_mask_covers_the_zzpl_column_and_not_the_zeor_letters() {
+        with_state("worktime_mask_leaves_the_zeor_letters", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik_maska6", "Radnik Maska Šest");
+            save_entry(
+                state,
+                dan_odsustva(radnik, "2026-07-06", "sprecenost_rfzo", 480),
+                "2026-07-06T18:00:00Z",
+            )
+            .expect("the absence day should record");
+            izdaj_nalog(state, "2026-08-01T09:00:00Z");
+
+            let maskiran =
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:20:00Z").expect("month lists");
+            assert_eq!(maskiran.entries[0].kategorija_odsustva, None);
+            assert_eq!(
+                maskiran.entries[0].minuti.sprecenost_rfzo_minuta, 480,
+                "the đ) bucket is still there — this is the residual, not an oversight"
+            );
+
+            let exported = export_month_csv(state, radnik, 2026, 7, "2026-08-01T09:20:00Z")
+                .expect("the month should export");
+            let csv = String::from_utf8(
+                std::fs::read(&exported.path).expect("the export should be on disk"),
+            )
+            .expect("the export is UTF-8");
+            std::fs::remove_file(&exported.path).expect("the export should be removable");
+            assert!(
+                csv.contains("đ) Časovi privremene sprečenosti — sredstva RFZO (min)"),
+                "the exported register keeps its ZEOR letters: {csv}"
+            );
         });
     }
 
