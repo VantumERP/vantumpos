@@ -223,9 +223,65 @@ The masked read must remain **truthful**: an entry with an absence still reports
 
 ### Task 5: Docs and the full gate run
 
-- [ ] Move req. 28 out of the „Still open“ lists in `docs/PROGRESS.md` and restate the SW-14 register row and row 15 in `docs/SERBIAN-LAW-COMPLIANCE.md`. **Name `docs/SERBIAN-LAW-COMPLIANCE.md` row 12 (privacy by design) explicitly**: it is neither the SW-14 row nor row 15, it carried the flattest denial of the three — *„remote-support masking of the absence-reason column is not built“* — and a checklist read literally would have left it standing. **The four PROGRESS.md bullets (`:335`, `:512`, `:638`, `:1395`) and register row 12 were already re-stated by Task 3's findings pass**, together with `docs_guard::no_document_says_the_absence_reason_mask_is_unbuilt`, which now fails the crate on a categorical denial and on a block that names the column without naming what performs it. What Task 5 owes is the SW-14 row, row 15 and a section of its own — and none of them may say „built“: no surface reaches the unmask verb, so the honest statement is partial.
-- [ ] Record what did **not** ship: whether `my_hours` is masked and why, and that this feature sharpens §6 **W-15** — the vendor now demonstrably reaches čl. 17-adjacent data, which is a question for the F-1 lawyer review rather than something code closes. **The W-15 residual must name the credential-reset chain**, which is a real and almost unlogged route to the column: an operator holding the vlasnik's admin session calls `users_update` (`commands/users.rs:89`) → `update_user` re-hashes any employee's PIN (`:215`) and writes **no** audit event on that branch (only the deactivation branch calls `clear_credentials`, `:277`) → `auth_login` as that employee → `worktime_my_hours` returns that employee's month with `kategorija_odsustva` unmasked. The only trace is a login. It is why `my_hours`'s doc comment no longer claims the session bounds what the operator can reach.
-- [ ] Run all six gates; report exact counts and exit codes. Commit.
+- [x] Move req. 28 out of the „Still open“ lists in `docs/PROGRESS.md` and restate the SW-14 register row and row 15 in `docs/SERBIAN-LAW-COMPLIANCE.md`. **Name `docs/SERBIAN-LAW-COMPLIANCE.md` row 12 (privacy by design) explicitly**: it is neither the SW-14 row nor row 15, it carried the flattest denial of the three — *„remote-support masking of the absence-reason column is not built“* — and a checklist read literally would have left it standing. **The four PROGRESS.md bullets (`:335`, `:512`, `:638`, `:1395`) and register row 12 were already re-stated by Task 3's findings pass**, together with `docs_guard::no_document_says_the_absence_reason_mask_is_unbuilt`, which now fails the crate on a categorical denial and on a block that names the column without naming what performs it. What Task 5 owes is the SW-14 row, row 15 and a section of its own — and none of them may say „built“: no surface reaches the unmask verb, so the honest statement is partial.
+- [x] Record what did **not** ship: whether `my_hours` is masked and why, and that this feature sharpens §6 **W-15** — the vendor now demonstrably reaches čl. 17-adjacent data, which is a question for the F-1 lawyer review rather than something code closes. **The W-15 residual must name the credential-reset chain**, which is a real and almost unlogged route to the column: an operator holding the vlasnik's admin session calls `users_update` (`commands/users.rs:89`) → `update_user` re-hashes any employee's PIN (`:215`) and writes **no** audit event on that branch (only the deactivation branch calls `clear_credentials`, `:277`) → `auth_login` as that employee → `worktime_my_hours` returns that employee's month with `kategorija_odsustva` unmasked. The only trace is a login. It is why `my_hours`'s doc comment no longer claims the session bounds what the operator can reach.
+- [x] Run all six gates; report exact counts and exit codes. Commit.
+
+**Shipped.** One new `docs/PROGRESS.md` section (`:1577`, dated 2026-08-09) in the voice of the sections
+above it — a per-task table carrying the real commit hashes (`520fe6b`; `fe4c3b4`, `ecf2d48`;
+`7bc450b`, `7db90f7`, `ed15afd`; `2801dff`, `6dc4085`), the six-gate table with the counts measured for
+it, a residual paragraph, the two deliberate non-decisions, the W-15 paragraph and the migration head
+(**v23**). In `docs/SERBIAN-LAW-COMPLIANCE.md`: §2 row 12 re-stated, §2 row **15** re-stated, the §3
+**SW-14** row given a req. 28 block of its own, and the §2 revision note now records the sweep. Four
+`PROGRESS.md` bullets (`:335`, `:519`, `:655`, `:1407`) re-stated a second time. Gates, run once each
+from the repo root and never concurrently, every command exit `0`: `bun run test` **568 passed / 0
+failed, 36 files** (was 547 / 35); `bun run build` ok; `cargo test` **1040 passed / 0 failed, 0
+ignored, 0 measured, 0 filtered out** (was 1016); clippy clean; `cargo fmt --check` clean, nothing to
+reformat; `git diff --check` clean. `cargo test docs_guard` **28 passed** both before and after the
+gate table was written into the file the guard embeds.
+
+**Deviation 1 — this task's own stated ground was stale, and is withdrawn.** The checklist above says
+*„none of them may say built: no surface reaches the unmask verb, so the honest statement is partial“*.
+Task 4 shipped that surface hours before this task started. The conclusion survives and the reason does
+not: req. 28 is a partial because of the **ZEOR čl. 24 tač. 1 buckets**, which carry the reason onto the
+JSON payload and into the exported file whatever the mask does, and which give up `obustava_rada_strajk`
+on the rendered grid by subtraction. Every row re-stated here says „partial“ on that ground and on no
+other.
+
+**Deviation 2 — the four bullets and register row 12 needed a SECOND re-statement, which this checklist
+said they did not.** It records them as *„already re-stated by Task 3's findings pass“*, and they were —
+but each of those re-statements listed **three** owed limbs, two of which (*„no surface reaches the
+unmask verb“* and *„the payroll grid renders the em dash“*) Task 4 closed the same afternoon. Left
+alone they would have been the same defect the guard beside them exists to bar, pointed one requirement
+further in. Each is re-stated in the house pattern, quoting the sentence withdrawn.
+
+**Deviation 3 — four `docs_guard.rs` doc comments and panic strings were edited in a docs task.** The
+guard's own prose listed the two closed limbs as open, in the doc comment, in the `PORICANJE` note and
+in the failure message it prints to the next author — a guard against stale denials, itself carrying
+one. **No assertion, needle, list or bound changed**; the diff is comment and message text, and the 28
+`docs_guard` tests pass unchanged in count. `src/app/worktime/WorkTimeModule.tsx`'s `AbsenceCell`
+comment was touched for the same reason, one word of date.
+
+**Deviation 4 — a nine-site date correction the plan did not ask for.** Every commit in this cycle is
+dated **09.08.2026** per `git log`; four `PROGRESS.md` blocks and five doc comments stamped the backend
+half 08.08.2026, apparently from this plan's own filename, and register row 12 said the false denial
+stood *„for a day“* when the gap was under an hour. All ten corrected; the čl. 87 cycle's genuine
+08.08.2026 stamps were checked and left alone.
+
+**Deviation 5 — req. 28 was moved out of the „Still open“ lists by re-statement, not by deletion.** It
+is still named in both documents, and must be: it is still a partial, and
+`docs_guard::no_document_says_the_absence_reason_mask_is_unbuilt` asserts `pomena > 0` per document —
+a register silent about a čl. 46 control the shop is running is the same defect as one that denies it.
+
+**Unclosed, and recorded rather than fixed here.** The ZEOR-bucket residual (needs `Option<i64>` bucket
+columns, which reach the frozen Class A `klasifikacija_json`); the zero-minute absence booking, which
+moves no bucket and so renders „—“ while masked; the credential-reset chain — `users_update` →
+`update_user` re-hashes a PIN and writes no audit line → `auth_login` → `worktime_my_hours` — which is
+recorded against §6 W-15 and is a question about what a credential reset must log, not about req. 28.
+**One item Task 2 left unclosed did close inside this cycle and is recorded so it is not carried
+forward:** constant-vs-schema drift on `KATEGORIJE_ODSUSTVA` — `7bc450b` holds the constant and v17's
+own `CHECK` to the same ten values, in both directions, which is what keeps the ten-category leak
+sweep on the čl. 48 unmask line honest as the vocabulary grows.
 
 ---
 

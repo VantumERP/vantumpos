@@ -333,14 +333,19 @@ a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export
   (`docs/compliance/evidencija-obrade-cl47.md`); it is not driven off the configured purposes, recipients
   and `retention_policies` rows.
 - **Req 28 — remote-support masking** of the absence-reason column, with the unmask logged.
-  **Re-stated 09.08.2026:** this bullet ended *„is not built (depends on SW-10)“*, which was true when it
-  was written and false from 08.08.2026. The backend half shipped —
-  `commands/worktime.rs::razlog_odsustva_dostupan` withholds the category from every register read and
-  every export while a čl. 46 nalog is live, `support_sessions.odsustvo_otkriveno_at` (v23) is the shop's
-  per-nalog unmask stamp, and `commands::audit::reveal_absence_reason` writes the čl. 48 line for it.
-  Still owed: a surface that reaches the verb, a grid cell that says „skriveno“ rather than „—“, and the
-  ZEOR čl. 24 tač. 1 buckets, which still carry the reason on the payload and in the exported file.
-  Register row 12 states the whole of it.
+  **Re-stated twice on 09.08.2026, and the second re-statement is the one that matters.** The bullet
+  first ended *„is not built (depends on SW-10)“*; it was then re-stated to owe three things, of which
+  **two shipped the same afternoon** and the sentence naming them is withdrawn — *„Still owed: a surface
+  that reaches the verb, a grid cell that says skriveno rather than the em dash, and the ZEOR čl. 24
+  tač. 1 buckets“*. What the code does: `commands/worktime.rs::razlog_odsustva_dostupan` withholds the
+  category from every register read and every export while a čl. 46 nalog is live,
+  `support_sessions.odsustvo_otkriveno_at` (v23) is the shop's per-nalog unmask stamp,
+  `commands::audit::reveal_absence_reason` writes the čl. 48 line for it carrying no category, no
+  employee name and no month, `SupportApprovalPanel` is the vlasnik's admin-gated control beside
+  Daljinska podrška, and `AbsenceCell` renders „Odsutan (razlog skriven)“ instead of an em dash.
+  **It is still a partial, for one reason rather than three:** the ZEOR čl. 24 tač. 1 buckets ride on
+  the JSON payload and on the exported file, so a client reading either recovers the reason, and the
+  rendered grid discloses the tenth category by subtraction. Register row 12 states the whole of it.
 - **Req 21, print half — CSV ships, the per-employee monthly print sheet does not.** Mirrors the polog
   report's open item.
 - **W-1 remains open** (`docs/SW14-VERIFIED-RULES.md` §6): whether ZEOR čl. 51 reaches a preduzetnik at
@@ -517,17 +522,19 @@ under ZoP čl. 3, §6 R-2); and no headcount gate or plan-tier upsell on any of 
   **redact or pseudonymise** the personal-data-bearing fields on expiry rather than drop the row, keeping
   the čl. 52 st. 7 skeleton. No breach-log retention class and no redaction path exists; the row is kept.
 - **SW-14 req. 28 — remote-support masking** of the absence-reason column, with the unmask logged.
-  **Re-stated 09.08.2026 — the backend half shipped 08.08.2026 (`7db90f7`).** This bullet said
-  *„is still not built“* while `commands::worktime::list_month` and `export_month_csv` were already
-  withholding `kategorija_odsustva` under a live čl. 46 nalog (the decision is
+  **Re-stated 09.08.2026, and again the same day when the surfaces landed (`7db90f7`, `2801dff`).** This
+  bullet said *„is still not built“* while `commands::worktime::list_month` and `export_month_csv` were
+  already withholding `kategorija_odsustva` under a live čl. 46 nalog (the decision is
   `razlog_odsustva_dostupan`, read off the nalog and never out of `audit_events`), while the unmask was
   already a stamp on `support_sessions.odsustvo_otkriveno_at` (v23) with no re-mask verb behind it, and
   while `commands::audit::reveal_absence_reason` was already writing one čl. 48 line carrying no
-  category, no employee name and no month. What is genuinely owed is narrower, and register row 12 lists
-  it: no surface reaches the unmask verb, the payroll grid renders „—“ for a withheld reason instead of
-  saying it is withheld, and the mask does not reach the ZEOR čl. 24 tač. 1 buckets — every category is
-  its bucket minus `_minuta`, so the JSON payload and the exported CSV still say which reason it was.
-  „Moji sati“ is left unmasked deliberately, on the ZZPL čl. 26 ground.
+  category, no employee name and no month. Its replacement then listed three owed limbs, of which two —
+  *„no surface reaches the unmask verb“* and *„the payroll grid renders the em dash for a withheld
+  reason“* — are withdrawn: the vlasnik's admin-gated unmask sits on `SupportApprovalPanel` beside
+  Daljinska podrška and the masked cell says „Odsutan (razlog skriven)“. What is genuinely owed is the
+  third, and register row 12 states it: the mask does not reach the ZEOR čl. 24 tač. 1 buckets — every
+  category is its bucket minus `_minuta`, so the JSON payload and the exported CSV still say which
+  reason it was. „Moji sati“ is left unmasked deliberately, on the ZZPL čl. 26 ground.
 - **One of the two SW-14 defects found by the previous batch's closing audit is still open.**
   `docs/compliance/obavestenje-zaposlenima.md` still prints the pravno-lice fine band in its header;
   `the_cl_47_record_prints_only_the_preduzetnik_fine_tier` guards that shape for the sibling document and
@@ -653,11 +660,12 @@ Previously disclosed, unchanged:
   `RecordClass` and no redaction path, so the row is simply kept. The heading above called this „the
   redaction half“; both halves are open.
 - **SW-14 req. 28** — remote-support masking of the absence-reason column. **Re-stated 09.08.2026:**
-  carried here as an open item, it is a partial as of 08.08.2026 — the backend withholds the category
+  carried here as an open item, it is a partial as of that day — the backend withholds the category
   under a live čl. 46 nalog (`commands/worktime.rs::razlog_odsustva_dostupan`), the unmask is a per-nalog
-  stamp (`support_sessions.odsustvo_otkriveno_at`, v23) and `commands::audit::reveal_absence_reason`
-  logs it. The limbs that remain are the unmask control, the masked grid cell and the ZEOR čl. 24 tač. 1
-  buckets; register row 12 states them.
+  stamp (`support_sessions.odsustvo_otkriveno_at`, v23), `commands::audit::reveal_absence_reason`
+  logs it, and the shop reaches the verb from Privatnost → Daljinska podrška. The sentence
+  *„the limbs that remain are the unmask control, the masked grid cell and the ZEOR čl. 24 tač. 1
+  buckets“* is withdrawn to its last clause: only the buckets remain, and register row 12 states them.
 - **SW-2** — backup encryption is opt-in, so the čl. 50 st. 2 tač. 1 measure is available rather than in
   force. Register row 8 and `cl47::mere_zastite` both say so.
 - **§6 R-9** — which article of the ZZPL nadzor chapter carries the opomena and the nalog. Only the
@@ -1415,10 +1423,13 @@ is the defect above pointed the other way.**
   set; `rad_na_praznik_minuta` is an operator-entered advisory bucket and `non_working_days` is the
   `cash_deposit` working-day table, which is a different question. Req. **28**: remote-support masking
   of the absence-reason column with the unmask logged — **no longer open in full.** This list ended
-  *„stated as open here since 02.08.2026 and still open“*; the backend half landed 08.08.2026 as
+  *„stated as open here since 02.08.2026 and still open“*; the whole feature landed 09.08.2026 as
   `commands/worktime.rs::razlog_odsustva_dostupan`, the v23 `support_sessions.odsustvo_otkriveno_at`
-  stamp and `commands::audit::reveal_absence_reason`. The unmask control, the masked grid cell and the
-  ZEOR čl. 24 tač. 1 buckets are what remain; register row 12 states them.
+  stamp, `commands::audit::reveal_absence_reason` and the two surfaces — the vlasnik's unmask control on
+  `SupportApprovalPanel` and the masked cell's „Odsutan (razlog skriven)“. The sentence
+  *„the unmask control, the masked grid cell and the ZEOR čl. 24 tač. 1 buckets are what remain“* is
+  withdrawn to its last item: the buckets are what remain, and register row 12 states them. The section
+  below carries the cycle.
 - **Reqs. 21 and 26 — partials, and recorded as partials.** Req. **21**'s CSV half ships:
   `worktime_export_csv` writes a per-employee month into `exports/` with the columns mapped 1:1 onto the
   ZEOR čl. 24 tač. 1 buckets, offline from the till and never labelled a propisani obrazac. What does
@@ -1560,6 +1571,120 @@ was proven non-vacuous by mutation and reverted.
    quoted in this file and not in `docs/SERBIAN-LAW-COMPLIANCE.md`, on that document's own convention —
    *„the denial is restated and not annotated“* — and because the new guard would (correctly) fail the
    register for carrying the sentence verbatim.
+
+---
+
+### SW-14 req. 28 — the razlog odsustva is withheld from daljinska podrška (2026-08-09)
+
+A five-task TDD plan (`docs/superpowers/plans/2026-08-08-sw14-req28-maskiranje-razloga-odsustva.md`)
+against `docs/SW14-VERIFIED-RULES.md` §4 req. 28 — *„Remote support must not see the absence reason by
+default: mask the column and payroll screens unless the shop explicitly unmasks for that session, and
+log the unmask“* — with §4 req. 24 for the čl. 12 st. 1 tač. 3 / čl. 17 st. 2 tač. 2 bases and §6 W-15
+for the question it sharpens and does not close. Baseline `e7c79a3` — cargo **1016**, bun **547** / 35
+files, migration **v22**. **Migration head is now v23, and v23 is the only migration this cycle adds.**
+
+**What changed, in one sentence, because the architecture is the point.** Before this cycle
+`kategorija_odsustva` left the backend on every read and the **screen** decided —
+`WorkTimeModule.tsx::canSeeAbsenceReason` is a role boolean drawn over data the wire had already
+carried, which is masking by CSS. After it the **backend** decides: while a ZZPL čl. 46 nalog za
+daljinsku podršku is live, the register read and the export run a statement that never names the
+column, so the value is absent because nothing read it rather than because something read it and
+dropped it — the shape `commands::popis::read_lines` uses for the čl. 8 st. 5 withholding, and its
+reasoning is quoted into the new function's doc comment. The role gate stays, as a second layer over a
+backend that has already decided.
+
+| Task | Shipped | Commits |
+|---|---|---|
+| 1 — the unmask is a stamp on the nalog, not a flag | Migration **v23** `support_session_odsustvo_unmask_stamp`: one nullable `odsustvo_otkriveno_at TEXT` on `support_sessions`, non-empty CHECK, never backfilled. **There is no re-mask verb and no boolean**, and the migration's own comment carries the reason — an operator who has read the column does not unread it, so a flag that could go back to `false` would let the surface above it claim a disclosure was undone. No expiry of its own: v18's `expires_at` already bounds the nalog at 24 h. The v22-seeded survival test applies `MIGRATIONS[..22]` to a raw `Connection`, seeds a nalog **and** an absence row, drops the connection and only then calls `Db::new` — a test that seeds after `Db::new` proves nothing about an upgrade | `520fe6b` |
+| 2 — the unmask verb, and a čl. 48 line that carries no secret | `commands::audit::reveal_absence_reason(state, now)`, `require_admin` on its first line **inside** the domain function, one transaction carrying both the stamp and `append_audit_event` so neither can exist without the other. Refuses with no live nalog (`support_bez_naloga_za_otkrivanje`), idempotent on a second call so the log holds one disclosure per nalog. The line names the **field class** and not the value: a new closed-vocabulary `AuditObjectType::SupportAbsenceReason`, object id the session id, and a test asserts every one of the ten v17 `KATEGORIJE_ODSUSTVA` strings is absent from the written row. Review found three further defects and closed them: the line was indistinguishable from the čl. 46 entry line, `reject_forbidden_content` never looked at `AuditDraft::at` at all (so a category appended to the timestamp reached the hash chain), and an unmask taken *before* the operator enters logged an `otkrivanje` to a primalac that received nothing — it is now an `unos` on that branch, following `grant_access`'s own rule | `fe4c3b4`, `ecf2d48` |
+| 3 — the read paths, and the decision behind them | `razlog_odsustva_dostupan` is the whole question in one function: no live nalog → nothing is masked, a live nalog → masked unless v23's stamp is set on **that** nalog, read off the nalog and never by reading `audit_events` back. `load_entries` became a two-line dispatcher over two whole statements, `load_entries_with_reason` and `load_entries_without_reason`, the second of which does not name the column anywhere — pinned by a source-level guard, because a `SELECT` that fetches and drops is invisible from outside. `now: &str` was threaded through `list_month` and `export_month_csv`, the mask being a clock decision. `close_period` reads through the withholding statement (the frozen Class A classification has never carried the category); `my_hours` deliberately does not mask. `7bc450b` pins `KATEGORIJE_ODSUSTVA` and v17's own CHECK to the same ten values, which is what lets the audit test's ten-category sweep stay honest | `7bc450b`, `7db90f7`, `ed15afd` |
+| 4 — the surfaces, the čl. 23 notice and the čl. 47 measure | `AbsenceCell` reads `razlogOdsustvaSkriven` **before** the null category, so an em dash can no longer stand on a row that books absence minutes; the why is a banner above the register naming the nalog and pointing at Privatnost → Daljinska podrška. `SupportApprovalPanel` carries the vlasnik's unmask inside the live-nalog branch, admin-gated on a `currentUser` threaded `AppShell` → `PrivacyModule` → panel, stating the two facts req. 28's third limb turns on — the disclosure is for that nalog only and **ne može da se povuče**, and it is written into the evidencija pristupa. Once the stamp is set the button is replaced by the instant; **there is no re-mask control anywhere**, held by a button sweep and by a port-surface assertion in two adapters. The čl. 23 notice gained one paragraph and the čl. 47 register one `mere` sentence, both scoped to what the code does. Review closed three false statements in the same family: the masked cell rendered an em dash on a full shift of štrajk (which books outside v)), and the panel copy plus the čl. 47 measure denied the „Moji sati“ carve-out the backend keeps open | `2801dff`, `6dc4085` |
+| 5 — this section, and the four rows | This section; `docs/SERBIAN-LAW-COMPLIANCE.md` row 12, row 15 and the §3 SW-14 row re-stated, with the §2 revision note recording the sweep; the four `docs/PROGRESS.md` bullets re-stated **a second time**, because the versions Task 3 wrote listed three owed limbs and Task 4 shipped two of them hours later | this commit |
+
+**Where the mask reaches, and where it stops — the residual this cycle could not close.** Every
+`kategorija_odsustva` value is exactly its ZEOR čl. 24 tač. 1 bucket minus `_minuta`; that derivation is
+`book_absence`'s whole design. So req. 28 is discharged for the ZZPL column itself and for the rendered
+grid's nine v) buckets, and it is **not** discharged for the two places the buckets travel in full: the
+**wire**, where `WorkTimeMinutes` serialises every bucket beside a `kategorijaOdsustva` of `null`, and
+the **exported file**. A client reading JSON rather than pixels recovers the category with one
+`find(|b| b != 0)`. The rendered grid leaks one further category by subtraction — it draws b),
+efektivno izvršeni and čekanja i zastoji, and b) minus the other two **is**
+`obustava_rada_strajk_minuta`. Both halves are asserted rather than described, by
+`commands::worktime::tests::the_mask_covers_the_zzpl_column_and_not_the_zeor_letters` (the struct half
+for the wire, a positional cell read for the file). **The buckets stay:** ZEOR mandates them, the
+month's totals are read off them, and zeroing one would be a *false* statement where the withheld
+column is a silent one. Closing it properly needs the bucket columns to become `Option<i64>`, which
+reaches the frozen Class A `klasifikacija_json`. Refusing the export outright while a nalog is live was
+considered and rejected — the čl. 21 offline export is a duty — so the file carries a stated note above
+the table instead, and every operator string in the feature says „skriva se sama kolona“ and never
+„razlog nije dostupan“.
+
+**Two smaller things this cycle deliberately did not do.**
+
+- **`my_hours` is not masked, and the reason is not that a support operator cannot reach it.** They
+  can: the command is session-gated only, so an operator remote-controlling the till can invoke it for
+  whoever is signed in. It is left open because §4 req. 25's carve-out names this very function as the
+  ZZPL čl. 26 discharge, because req. 28's own words are *„mask the column and payroll screens“* and a
+  person reading their own row is neither, and because masking the payload would withhold from the data
+  subject to prevent a disclosure the mask cannot prevent anyway — the operator is mirroring a screen
+  and reads pixels. A masked „Moji sati“ would be perfectly expressible (`WorkTimeMonth` carries
+  `razlog_odsustva_skriven` for exactly this), which is why that is not offered as a third reason. The
+  decision is written on the function, the čl. 23 notice states it to the employee, and
+  `my_hours_still_shows_the_employee_their_own_absence_reason` pins the divergence under one live nalog.
+- **No other column is masked.** The absence reason is singled out because it is the one field in this
+  register that is health-adjacent; masking more would be inventing a rule.
+
+**§6 W-15 is sharpened by this cycle and is not closed by it.** The question is for the lawyer
+reviewing F-1 — whether `docs/compliance/ugovor-o-obradi-nacrt.md` names posebne vrste podataka in its
+ZZPL čl. 45 st. 3 clause, and whether the čl. 45 st. 4 tač. 7 delete-or-return duty covers support
+artefacts — and this feature is what first put čl. 17-adjacent data on the machine the vendor reaches.
+Two facts now make it demonstrable rather than theoretical, and both belong to the lawyer rather than
+to code:
+
+1. **The vendor reaches the register.** `list_month` and `export_month_csv` are exactly what an operator
+   under a čl. 46 nalog invokes, which is why `radno_vreme.vrsta_primalaca` in the čl. 47 register now
+   names the obrađivač — a single entry cannot tell the Poverenik in field 5 that remote support does
+   not receive the record and in field 8 that a column of it is masked from them.
+2. **The credential-reset chain reaches the column with the mask still on, and is almost unlogged.** An
+   operator holding the vlasnik's admin session calls `users_update` (`commands/users.rs:89`) →
+   `update_user` (`:184`) re-hashes any employee's PIN and writes **no** audit event on that branch —
+   only the deactivation branch calls `clear_credentials` (`:278`) → `auth_login` as that employee →
+   `worktime_my_hours` returns that employee's month with `kategorija_odsustva` unmasked. The only trace
+   is a login. It is admin-gated and nothing bars it; it is why `my_hours`'s doc comment no longer
+   claims the session bounds what the operator can reach, and it is recorded here rather than denied.
+   Closing it is a decision about what a credential reset must log and whether a support operator may
+   hold the vlasnik's session at all — neither of which req. 28 asks for.
+
+**Verification gates — all six run from the repo root, one at a time, every command exited `0`:**
+
+| Gate | Result | Exit |
+|---|---|---|
+| `bun run test` | **568 passed** / 0 failed, 36 files (was 547 / 35) | `0` |
+| `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | **1040 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 1016) | `0` |
+| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
+| `git diff --check` | clean, no output | `0` |
+
+Net **+24 cargo / +21 bun** over `e7c79a3`, and the two figures reconcile against the diff rather than
+against memory: `#[test]` attributes added per file are `commands/audit.rs` **+9**,
+`commands/worktime.rs` **+7**, `db/migrations.rs` **+3**, `audit.rs` **+2**, `docs_guard.rs` **+2**,
+`cl47.rs` **+1**; `it(` blocks added are `SupportApprovalPanel.test.tsx` **+7**,
+`mock-adapter.odsustvo.test.ts` **+6** (a new file, which is the 36th), `WorkTimeModule.test.tsx`
+**+5**, and one each in `App.test.tsx`, `PrivacyModule.test.tsx` and `AuditLogPanel.test.tsx`.
+`local-adapter.test.ts` gained assertions inside an existing test rather than a test of its own.
+**Nothing was deleted, weakened or skipped**, and three pins had to be *restated* rather than left
+alone because the feature moved what they assert: the migration-count pin in `db/mod.rs` follows the
+head from 22 to 23, the registered-command list in
+`commands::audit::tests::no_audit_command_can_edit_or_delete_a_logged_row` names the new verb and was
+**tightened** with a second assertion that exactly one registered command may mention `absence_reason`,
+and `every_stored_code_renders_as_serbian_prose` moved 37 → 38 codes. Latest migration: **v23**.
+
+**Bookkeeping note on dates.** Every commit in this cycle is dated 09.08.2026. Four blocks in this file
+and five doc comments (four in `docs_guard.rs`, one on `AbsenceCell`) stamped the backend half
+08.08.2026, taken from the plan's own filename rather than from `git log`; all nine are corrected here,
+and register row 12's *„for a day after it was“* — the gap was under an hour — with them. The čl. 87
+cycle's own 08.08.2026 stamps are correct and are untouched.
 
 ---
 

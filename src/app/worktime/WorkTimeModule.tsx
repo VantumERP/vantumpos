@@ -1083,7 +1083,7 @@ function MinuteCell({ value }: { value: number }) {
  * and nothing that identifies why.
  *
  * **`razlogSkriven` comes from the read and is not re-derived here, which is the
- * whole point.** Since 08.08.2026 the backend withholds the category while a
+ * whole point.** Since 09.08.2026 the backend withholds the category while a
  * ZZPL čl. 46 nalog za daljinsku podršku is open (SW-14 req. 28), so
  * `entry.kategorijaOdsustva` is `null` on a day that *is* an absence. A `null`
  * has two causes — nothing was recorded, or nothing was read — and this column's

@@ -2333,7 +2333,7 @@ fn no_document_says_this_application_prints_nothing() {
 /// may name it without naming what performs it.
 ///
 /// The same inversion as [`no_document_says_the_cl_87_weekly_leg_is_still_unbuilt`],
-/// against the same failure: on 08.08.2026 the backend mask, migration v23's
+/// against the same failure: on 09.08.2026 the backend mask, migration v23's
 /// per-nalog unmask stamp and `commands::audit::reveal_absence_reason` landed,
 /// and three shipped documents went on saying the masking *„is not built“* —
 /// a denial that withdraws the reader's only pointer to a ZZPL čl. 46 control
@@ -2355,10 +2355,13 @@ fn no_document_says_this_application_prints_nothing() {
 /// inside them.
 ///
 /// What this guard must NOT be read as claiming: that req. 28 is closed. It is a
-/// partial, and the words for the open limbs — no unmask control, a grid cell
-/// that renders „—“ rather than „skriveno“, and the ZEOR čl. 24 tač. 1 buckets
-/// that carry the reason onto the payload and into the exported file — are
-/// deliberately not in `PORICANJE`, so a document can and must still state them.
+/// partial, and the words for what is open are deliberately not in `PORICANJE`,
+/// so a document can and must still state them. **Two of the three limbs this
+/// comment first listed closed later the same day (09.08.2026)** — the unmask
+/// control now sits on `SupportApprovalPanel` and the masked grid cell states
+/// itself instead of rendering „—“ — so the sentence naming them is withdrawn.
+/// What remains open is the ZEOR čl. 24 tač. 1 buckets, which carry the reason
+/// onto the JSON payload and into the exported file whatever the mask does.
 #[test]
 fn no_document_says_the_absence_reason_mask_is_unbuilt() {
     /// The subject, as all four documents word it. Lower-case, per
@@ -2367,7 +2370,8 @@ fn no_document_says_the_absence_reason_mask_is_unbuilt() {
 
     /// A categorical denial of the whole control. Narrower than the čl. 87
     /// guard's list on purpose: „gap“ and „not enforced“ would fire on the
-    /// three open limbs, which are true and must stay statable.
+    /// ZEOR-bucket limb that is still open, which is true and must stay
+    /// statable.
     const PORICANJE: [&str; 6] = [
         "not built",
         "unbuilt",
@@ -2412,16 +2416,17 @@ fn no_document_says_the_absence_reason_mask_is_unbuilt() {
                         panic!(
                             "{doc}:{line} names the SW-14 req. 28 absence-reason column and says \
                              „{marker}“ of it in the same sentence — „{}“. The mask shipped \
-                             08.08.2026: `commands/worktime.rs::razlog_odsustva_dostupan` decides \
+                             09.08.2026: `commands/worktime.rs::razlog_odsustva_dostupan` decides \
                              it off the live čl. 46 nalog, `load_entries_without_reason` is a \
                              statement that never names the column, v23's \
                              `support_sessions.odsustvo_otkriveno_at` is the shop's per-nalog \
-                             unmask stamp and `commands::audit::reveal_absence_reason` writes the \
-                             čl. 48 line. Re-state the sentence as the partial it is — no unmask \
-                             control, a grid cell that renders „—“ instead of „skriveno“, and the \
-                             ZEOR čl. 24 tač. 1 buckets that still carry the reason on the payload \
-                             and in the exported file — rather than denying the control outright. \
-                             A withdrawn sentence quoted inside „ “ is exempt.",
+                             unmask stamp, `commands::audit::reveal_absence_reason` writes the \
+                             čl. 48 line, `SupportApprovalPanel` is the vlasnik's control over \
+                             that verb and the masked grid cell states itself. Re-state the \
+                             sentence as the partial it is — the ZEOR čl. 24 tač. 1 buckets still \
+                             carry the reason on the payload and in the exported file — rather \
+                             than denying the control outright. A withdrawn sentence quoted \
+                             inside „ “ is exempt.",
                             text[start..end].trim()
                         );
                     }
@@ -2455,7 +2460,7 @@ fn no_document_says_the_absence_reason_mask_is_unbuilt() {
 /// withheld from remote support — and must claim **only** that.
 ///
 /// Čl. 23 st. 1 tač. 5 makes the recipients part of what the employee is owed,
-/// and since 08.08.2026 the answer changed: the obrađivač reaching this till
+/// and since 09.08.2026 the answer changed: the obrađivač reaching this till
 /// under a čl. 46 nalog no longer receives `kategorija_odsustva` unless the shop
 /// discloses it for that one nalog. A notice that still describes the old
 /// recipient set understates a control the employee benefits from, which is the
@@ -2540,7 +2545,7 @@ fn the_cl_23_notice_states_the_absence_reason_mask_and_overclaims_nothing() {
          block: the absence category is not shown while a čl. 46 nalog za daljinsku podršku is \
          live, and lifting that is written into the evidencija pristupa. Čl. 23 st. 1 tač. 5 \
          makes the recipients part of what the employee is owed, and \
-         `commands/worktime.rs::razlog_odsustva_dostupan` changed the answer on 08.08.2026 — a \
+         `commands/worktime.rs::razlog_odsustva_dostupan` changed the answer on 09.08.2026 — a \
          notice describing the old recipient set understates a control the employee benefits \
          from. Blocks that name the subject and stop short: {kandidati:?}"
     );
