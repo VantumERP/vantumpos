@@ -1445,6 +1445,38 @@ ALTER TABLE reklamacije ADD COLUMN no_fee_attested INTEGER NOT NULL DEFAULT 0
 ALTER TABLE reklamacije ADD COLUMN no_fee_attested_at TEXT;
 "#,
     },
+    Migration {
+        version: 23,
+        name: "support_session_odsustvo_unmask_stamp",
+        sql: r#"
+-- SW-14 req. 28: remote support must not see the absence REASON by default, and
+-- the shop's decision to reveal it holds „for that session“. So the decision is a
+-- property of the ZZPL čl. 46 nalog — this table — and not a state derived by
+-- reading `audit_events` back: v18 keeps that log a record and not an access
+-- control, and reading it is deliberately not logged.
+--
+-- WHY A STAMP AND NOT A BOOLEAN. `kategorija_odsustva` is a čl. 17 posebna vrsta
+-- podataka in all but name, and revealing it to the obrađivač is irreversible:
+-- once the operator has read the column, flipping a flag back does not unsee it.
+-- A boolean would let the surface above this table claim otherwise — „maskirano“
+-- again, over data already disclosed — which is the false statement čl. 46 is
+-- least able to afford. An instant can only ever record that the disclosure
+-- happened and when, so there is no re-mask verb and no column for one.
+--
+-- Nullable and never backfilled, because masked is the default and most naloge
+-- never unmask: NULL is „nobody revealed anything under this nalog“, and writing
+-- an instant in on an existing session would put a disclosure on file that did
+-- not happen. The stamp needs no expiry of its own — the nalog is already
+-- hard-bounded at 24 h by `expires_at`, so the unmask dies with the session it
+-- belongs to.
+--
+-- Non-empty because '' is not an instant; the same reasoning v21 applied to
+-- plan_rada_odobreno_at. A stamp that cannot say WHEN is not a record of a
+-- disclosure, it is only a rumour of one.
+ALTER TABLE support_sessions ADD COLUMN odsustvo_otkriveno_at TEXT
+    CHECK (odsustvo_otkriveno_at IS NULL OR odsustvo_otkriveno_at <> '');
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
@@ -3044,6 +3076,257 @@ VALUES (7,  1, '2025-03-01T09:00:00Z', 1290000, 'create', NULL, '2025-03-01T09:0
                 .expect("the seeded row should read back");
             assert_eq!(attested, 0, "the default must be UNattested");
             assert!(attested_at.is_none());
+        }
+        remove_test_database(&path);
+    }
+
+    /// SW-14 req. 28. The nalog gains the instant at which the shop revealed the
+    /// absence reason for that session, and a freshly issued nalog carries none:
+    /// masked is the default, so an upgraded or newly granted čl. 46 nalog reads
+    /// back NULL rather than as a disclosure nobody made.
+    ///
+    /// The empty string is refused for the same reason `plan_rada_odobreno_at`
+    /// refuses it in v21 — `''` is not an instant, and a stamp that cannot say
+    /// WHEN the disclosure happened is not a record of one.
+    #[test]
+    fn migration_v23_adds_the_absence_reason_unmask_stamp() {
+        let path = test_database_path("migration_v23_schema");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            assert!(
+                column_exists(&conn, "support_sessions", "odsustvo_otkriveno_at"),
+                "support_sessions.odsustvo_otkriveno_at should exist after v23"
+            );
+
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (930, 'vlasnik', 'Vlasnik Vlasnikovič', 'admin', 1,
+                             '2026-08-09T09:00:00Z', '2026-08-09T09:00:00Z');
+                 INSERT INTO support_sessions (id, granted_by, granted_at, scope, expires_at,
+                                               created_at, updated_at)
+                     VALUES (930, 930, '2026-08-09T09:00:00Z',
+                             'Pregled greške na štampi fiskalnog isečka',
+                             '2026-08-09T10:00:00Z', '2026-08-09T09:00:00Z',
+                             '2026-08-09T09:00:00Z');",
+            )
+            .expect("a čl. 46 nalog should insert under v23");
+
+            let stamp: Option<String> = conn
+                .query_row(
+                    "SELECT odsustvo_otkriveno_at FROM support_sessions WHERE id = 930",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the new column should read back");
+            assert_eq!(
+                stamp, None,
+                "the default is masked — a nalog nobody unmasked carries no stamp"
+            );
+
+            assert!(
+                conn.execute(
+                    "UPDATE support_sessions SET odsustvo_otkriveno_at = '' WHERE id = 930",
+                    [],
+                )
+                .is_err(),
+                "the empty string is not an instant — the CHECK must refuse it"
+            );
+
+            conn.execute(
+                "UPDATE support_sessions SET odsustvo_otkriveno_at = '2026-08-09T09:30:00Z'
+                   WHERE id = 930",
+                [],
+            )
+            .expect("an RFC3339 instant should stamp");
+
+            let stamped: Option<String> = conn
+                .query_row(
+                    "SELECT odsustvo_otkriveno_at FROM support_sessions WHERE id = 930",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the stamp should read back");
+            assert_eq!(stamped.as_deref(), Some("2026-08-09T09:30:00Z"));
+        }
+        remove_test_database(&path);
+    }
+
+    /// The installed-base path: a till already running v22 gains the req. 28 stamp
+    /// without losing a nalog it issued or an absence it recorded. Seeding through
+    /// a raw connection at `MIGRATIONS[..22]` and only then opening with `Db::new`
+    /// is what makes this provable; seeding after `Db::new` would prove a
+    /// new-schema round trip and nothing at all about the upgrade (commit 270796c).
+    #[test]
+    fn migration_v23_preserves_pre_existing_rows() {
+        let path = test_database_path("migration_v23_survival");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw connection");
+            conn.execute_batch(
+                "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);",
+            )
+            .expect("migrations table");
+
+            for migration in &MIGRATIONS[..22] {
+                assert!(
+                    migration.version <= 22,
+                    "the pre-v23 prefix must stop at v22, saw v{}",
+                    migration.version
+                );
+                conn.execute_batch(migration.sql)
+                    .unwrap_or_else(|error| panic!("v{} should apply: {error}", migration.version));
+                conn.execute(
+                    "INSERT INTO _migrations (version, name, applied_at) VALUES (?1, ?2, '2026-08-08T00:00:00Z')",
+                    rusqlite::params![migration.version, migration.name],
+                )
+                .expect("record the migration");
+            }
+
+            // A nalog that was issued AND entered — the state in which a support
+            // operator is actually on the machine — plus the one absence row whose
+            // reason req. 28 exists to keep from them.
+            conn.execute_batch(
+                "INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (930, 'vlasnik', 'Vlasnik Vlasnikovič', 'admin', 1,
+                             '2026-08-01T07:00:00Z', '2026-08-01T07:00:00Z');
+                 INSERT INTO users (id, username, display_name, role, active, created_at, updated_at)
+                     VALUES (931, 'prodavac', 'Prodavac Prodavčević', 'cashier', 1,
+                             '2026-08-01T07:00:00Z', '2026-08-01T07:00:00Z');
+                 INSERT INTO support_sessions (id, granted_by, granted_at, scope, expires_at,
+                                               started_at, created_at, updated_at)
+                     VALUES (930, 930, '2026-08-08T09:00:00Z',
+                             'Pregled greške na štampi fiskalnog isečka',
+                             '2026-08-08T10:00:00Z', '2026-08-08T09:05:00Z',
+                             '2026-08-08T09:00:00Z', '2026-08-08T09:05:00Z');
+                 INSERT INTO work_time_entries (id, user_id, dan, moguci_minuta,
+                                                ukupno_neizvrseni_minuta, sprecenost_rfzo_minuta,
+                                                kategorija_odsustva, created_at, updated_at)
+                     VALUES (930, 931, '2026-08-07', 480, 480, 480, 'sprecenost_rfzo',
+                             '2026-08-07T18:00:00Z', '2026-08-07T18:00:00Z');",
+            )
+            .expect("seed v22-era rows");
+            drop(conn);
+
+            let db = Db::new(&path).expect("database should migrate forward");
+            let conn = db.open().expect("database should open");
+
+            let (granted_by, granted_at, scope, expires_at, started_at, created_at, updated_at): (
+                i64,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+            ) = conn
+                .query_row(
+                    "SELECT granted_by, granted_at, scope, expires_at, started_at, created_at,
+                            updated_at
+                       FROM support_sessions WHERE id = 930",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .expect("the pre-v23 nalog must survive verbatim");
+            assert_eq!(
+                (
+                    granted_by,
+                    granted_at.as_str(),
+                    scope.as_str(),
+                    expires_at.as_str(),
+                    started_at.as_str(),
+                    created_at.as_str(),
+                    updated_at.as_str(),
+                ),
+                (
+                    930,
+                    "2026-08-08T09:00:00Z",
+                    "Pregled greške na štampi fiskalnog isečka",
+                    "2026-08-08T10:00:00Z",
+                    "2026-08-08T09:05:00Z",
+                    "2026-08-08T09:00:00Z",
+                    "2026-08-08T09:05:00Z",
+                ),
+                "the nalog is the čl. 46 evidence — the upgrade rewrites no word of it"
+            );
+
+            let (ended_at, revoked_at): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT ended_at, revoked_at FROM support_sessions WHERE id = 930",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the lifecycle stamps should read back");
+            assert_eq!(
+                (ended_at, revoked_at),
+                (None, None),
+                "the upgrade neither ends nor revokes a live nalog"
+            );
+
+            // The upgrade discloses nothing. A stamp records an irreversible
+            // disclosure, so backfilling one would put on file a čl. 46 session in
+            // which the shop revealed the absence reason — an event that never
+            // happened, and the one thing worse here than a missing column.
+            let stamp: Option<String> = conn
+                .query_row(
+                    "SELECT odsustvo_otkriveno_at FROM support_sessions WHERE id = 930",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the new column should read back");
+            assert_eq!(
+                stamp, None,
+                "an upgraded nalog has unmasked nothing, and must not claim it did"
+            );
+
+            // v23 masks a READ. It deletes no column and rewrites no absence: the
+            // ZoR čl. 55 register still holds the reason it always held.
+            let (kategorija, neizvrseni, rfzo): (Option<String>, i64, i64) = conn
+                .query_row(
+                    "SELECT kategorija_odsustva, ukupno_neizvrseni_minuta, sprecenost_rfzo_minuta
+                       FROM work_time_entries WHERE id = 930",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("the pre-v23 absence must survive verbatim");
+            assert_eq!(
+                (kategorija.as_deref(), neizvrseni, rfzo),
+                (Some("sprecenost_rfzo"), 480, 480),
+                "minutes are whole minutes and the category is untouched by v23"
+            );
+
+            // The CHECK arrives with the column rather than only on a fresh
+            // database, and the v18 constraints that make the row a nalog are still
+            // standing — the upgrade added a column, it did not rebuild the table.
+            assert!(
+                conn.execute(
+                    "UPDATE support_sessions SET odsustvo_otkriveno_at = '' WHERE id = 930",
+                    [],
+                )
+                .is_err(),
+                "the empty-stamp CHECK must bind an upgraded database too"
+            );
+            assert!(
+                conn.execute(
+                    "INSERT INTO support_sessions (granted_by, granted_at, scope, expires_at,
+                                                   created_at, updated_at)
+                     VALUES (930, '2026-08-08T09:00:00Z', 'Bez roka', '2026-08-08T08:00:00Z',
+                             '2026-08-08T09:00:00Z', '2026-08-08T09:00:00Z')",
+                    [],
+                )
+                .is_err(),
+                "the v18 expiry CHECK must survive the v23 upgrade"
+            );
         }
         remove_test_database(&path);
     }

@@ -78,6 +78,20 @@ pub struct SupportSession {
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub revoked_at: Option<String>,
+    /// Req. 28 (v23): when the shop revealed the absence reason **for this
+    /// nalog**, and `None` while it never did — masked is the default.
+    ///
+    /// A stamp rather than a boolean, because the disclosure is irreversible: an
+    /// operator who has read `kategorija_odsustva` does not unread it, and a flag
+    /// that could go back to `false` would let this surface say otherwise. There
+    /// is therefore no re-mask verb, and the unmask dies with the nalog, which
+    /// [`MAX_TRAJANJE_MINUTA`] already bounds at 24 h.
+    ///
+    /// It lives on the nalog and not in the log: čl. 46 makes the nalog the thing
+    /// that authorises, and `audit_events` is a record rather than an access
+    /// control — reading it back to decide anything is precisely the use v18
+    /// declines to put it to.
+    pub odsustvo_otkriveno_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -387,7 +401,7 @@ pub(crate) fn append_audit_event(conn: &Connection, draft: &AuditDraft) -> Resul
 }
 
 const SESSION_COLUMNS: &str = "s.id, s.granted_by, u.display_name, s.granted_at, s.scope,
-     s.expires_at, s.started_at, s.ended_at, s.revoked_at";
+     s.expires_at, s.started_at, s.ended_at, s.revoked_at, s.odsustvo_otkriveno_at";
 
 fn read_session(row: &Row<'_>) -> rusqlite::Result<SupportSession> {
     Ok(SupportSession {
@@ -400,6 +414,7 @@ fn read_session(row: &Row<'_>) -> rusqlite::Result<SupportSession> {
         started_at: row.get(6)?,
         ended_at: row.get(7)?,
         revoked_at: row.get(8)?,
+        odsustvo_otkriveno_at: row.get(9)?,
     })
 }
 
@@ -1272,6 +1287,54 @@ mod tests {
                 Some(session)
             );
         });
+    }
+
+    /// Req. 28. Whether the shop revealed the absence reason holds „for that
+    /// session“, so it is a property of the čl. 46 nalog and the nalog's own read
+    /// path must carry it. Deriving it instead by reading `audit_events` back
+    /// would turn that log into an access control, which v18 deliberately refuses
+    /// to make it.
+    ///
+    /// A freshly issued nalog has revealed nothing: masked is the default, and
+    /// the operator surface may not be handed a disclosure that did not happen.
+    ///
+    /// The stamp is written here in SQL because the verb that writes it is Task
+    /// 2's; what this pins is that the nalog reads the v23 column at all.
+    #[test]
+    fn a_nalog_reports_whether_the_absence_reason_was_unmasked_under_it() {
+        with_state(
+            "a_nalog_reports_whether_the_absence_reason_was_unmasked_under_it",
+            |state| {
+                sign_in_admin(state);
+
+                let session = grant_access(state, grant_request(), "2026-08-01T09:00:00Z")
+                    .expect("the vlasnik should be able to issue a nalog");
+                assert_eq!(
+                    session.odsustvo_otkriveno_at, None,
+                    "a nalog nobody unmasked must not read back as one that was"
+                );
+
+                state
+                    .db()
+                    .open()
+                    .expect("database should open")
+                    .execute(
+                        "UPDATE support_sessions SET odsustvo_otkriveno_at = ?1 WHERE id = ?2",
+                        params!["2026-08-01T09:20:00Z", session.id],
+                    )
+                    .expect("the stamp should write");
+
+                assert_eq!(
+                    active_session(state, "2026-08-01T09:30:00Z")
+                        .expect("the nalog should read back")
+                        .expect("the nalog is live")
+                        .odsustvo_otkriveno_at
+                        .as_deref(),
+                    Some("2026-08-01T09:20:00Z"),
+                    "the read path must carry the stamp, not re-derive it from the log"
+                );
+            },
+        );
     }
 
     /// Čl. 46 puts the nalog in the rukovalac's hands. A kasir authorising a
