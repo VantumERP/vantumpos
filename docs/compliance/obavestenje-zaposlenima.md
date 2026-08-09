@@ -56,6 +56,14 @@ datumom (ZoR čl. 90), bez medicinske dokumentacije.
 uloge u aplikaciji vide isključivo oznaku „odsutan“ i zbir časova. **Vi sami uvek vidite svoje podatke** —
 u aplikaciji, kroz pregled „Moji sati“ (ZoR čl. 83 st. 1, ZZPL čl. 26).
 
+**Kategorija odsustva i daljinska podrška.** Dok je izdat nalog za pristup tehničke podrške (odeljak 2.2),
+aplikacija **ne prikazuje kategoriju odsustva** u evidenciji radnog vremena — podatak se za to vreme ne
+čita iz baze, a ne samo da se ne ispisuje na ekranu. Poslodavac može da je otkrije, i to samo za taj jedan
+nalog; otkrivanje se **upisuje u evidenciju pristupa** (odeljak 2.2) i za taj nalog ne može da se povuče,
+a prestaje kad nalog istekne. **Skriva se sama kolona:** broj časova po zakonskim vrstama odsustva ostaje
+prikazan, pa se iz njega i dalje može zaključiti o kojoj je vrsti odsustva reč. Vaš pregled „Moji sati“ se
+ne skriva ni tada — pravo iz čl. 26 je Vaše i ne ograničava se zbog sesije podrške.
+
 Obrada se **ne zasniva na pristanku (saglasnosti)** — pristanak se u radnom odnosu tumači restriktivno i ne koristi se kao osnov za obradu podataka zaposlenih (v. [ZZPL čl. 12 st. 1 tač. 2–3](https://mduls.gov.rs/wp-content/uploads/Zakon-o-za%C5%A1titi-podataka-o-li%C4%8Dnosti.pdf)). Ni evidencija radnog vremena ne traži i ne prikuplja Vaš pristanak. Kada zakon traži pisanu saglasnost zaposlenog za prekovremeni rad (ZoR čl. 91) ili za preraspodelu radnog vremena (ZoR čl. 57 st. 4), aplikacija **beleži samo da takva saglasnost postoji i od kog datuma** — sama saglasnost se daje i čuva van aplikacije.
 
 ### 2.2 Evidencija pristupa podacima o ličnosti i daljinska podrška

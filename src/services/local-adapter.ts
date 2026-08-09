@@ -396,6 +396,8 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
       endSupportSession: () => invoke<SupportSession>("support_end_session"),
       activeSupportSession: () =>
         invoke<SupportSession | null>("support_active_session"),
+      revealAbsenceReason: () =>
+        invoke<SupportSession>("support_reveal_absence_reason"),
       searchAudit: (query) =>
         invoke<AuditSearchResult>("audit_search", { query }),
       exportAuditCsv: (query) =>

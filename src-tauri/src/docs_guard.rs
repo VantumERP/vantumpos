@@ -2450,3 +2450,132 @@ fn no_document_says_the_absence_reason_mask_is_unbuilt() {
         );
     }
 }
+
+/// The ZZPL čl. 23 notice must tell the employee that the absence reason is
+/// withheld from remote support — and must claim **only** that.
+///
+/// Čl. 23 st. 1 tač. 5 makes the recipients part of what the employee is owed,
+/// and since 08.08.2026 the answer changed: the obrađivač reaching this till
+/// under a čl. 46 nalog no longer receives `kategorija_odsustva` unless the shop
+/// discloses it for that one nalog. A notice that still describes the old
+/// recipient set understates a control the employee benefits from, which is the
+/// same defect as overstating one — both leave the reader with a false picture
+/// of who sees the čl. 17-adjacent column.
+///
+/// **Bound to the code, not to a copy of the prose.** The three items below are
+/// referenced as crate items, so renaming the verb, the stamp or the read's own
+/// flag stops this file compiling rather than leaving the notice asserting a
+/// control nothing performs. What the guard then checks of the document is the
+/// two facts, in whatever words the notice chooses: that the category is not
+/// shown while a nalog is live, and that an unmask is written into the
+/// evidencija pristupa.
+///
+/// **And the overclaim half, which is the one that matters.** Every
+/// `kategorija_odsustva` value is exactly its ZEOR čl. 24 tač. 1 bucket minus
+/// `_minuta`, and `load_entries_without_reason` still selects all nine buckets —
+/// so a masked `list_month` response and a masked export both carry
+/// `sprecenostRfzoMinuta: 480` on the very row whose category is `null`. The
+/// mask covers the **column**, not the reason. A notice that told the employee
+/// the support engineer cannot see the reason would therefore be false in the
+/// employee's favour, which is the worst direction for a čl. 23 statement to be
+/// wrong in, so the categorical wordings are swept out by name.
+#[test]
+fn the_cl_23_notice_states_the_absence_reason_mask_and_overclaims_nothing() {
+    /// Rename any of the three and the crate stops compiling — the notice may
+    /// not outlive what performs what it describes.
+    fn bound_to_the_code() {
+        let _unmask_verb = crate::commands::audit::reveal_absence_reason;
+        let _stamp =
+            |nalog: &crate::commands::audit::SupportSession| nalog.odsustvo_otkriveno_at.clone();
+        let _withheld =
+            |mesec: &crate::commands::worktime::WorkTimeMonth| mesec.razlog_odsustva_skriven;
+    }
+    bound_to_the_code();
+
+    /// The subject, lower-case per [`match_indices_ci`]'s contract.
+    const KATEGORIJA: &str = "kategorij";
+    /// The other half of the subject — this is about the obrađivač, not about
+    /// the ordinary role gate, which §2.1 already states.
+    const PODRSKA: &str = "podršk";
+    /// The withholding, in the terms the notice may use for it. „Ne prikazuje“
+    /// and not „skriva“: the employee is being told what the screen does.
+    const NE_PRIKAZUJE: [&str; 2] = ["ne prikazuje", "ne prikazuju"];
+    /// The čl. 48 half req. 28 sends to SW-10.
+    const UPISUJE_SE: [&str; 3] = ["upisuje", "beleži", "evidentira"];
+
+    // One BLOCK has to carry the whole statement, not the document as a whole:
+    // „ne prikazuje“ five paragraphs away from „kategorija odsustva“ is a
+    // sentence about something else, and two substrings anywhere in a 188-line
+    // notice is not a statement. The existence form is deliberate — the čl. 23
+    // st. 3 re-delivery header at the top of the file legitimately names both
+    // the category and the nalog za daljinsku podršku without describing the
+    // mask, so „every block that mentions both must state it“ would fail on a
+    // paragraph whose job is to say the notice is being handed out again.
+    let mut kandidati: Vec<(usize, String)> = Vec::new();
+    let mut stated = false;
+    for at in match_indices_ci(NOTICE, KATEGORIJA) {
+        let (line, block) = markdown_block_around(NOTICE, at);
+        if match_indices_ci(&block, PODRSKA).is_empty() {
+            continue;
+        }
+        let withheld = NE_PRIKAZUJE
+            .iter()
+            .any(|needle| !match_indices_ci(&block, needle).is_empty());
+        let recorded = UPISUJE_SE
+            .iter()
+            .any(|needle| !match_indices_ci(&block, needle).is_empty())
+            && !match_indices_ci(&block, "evidencij").is_empty();
+        if withheld && recorded {
+            stated = true;
+            break;
+        }
+        if !kandidati.iter().any(|(seen, _)| *seen == line) {
+            kandidati.push((line, block));
+        }
+    }
+
+    assert!(
+        stated,
+        "docs/compliance/obavestenje-zaposlenima.md must state the SW-14 req. 28 mask in one \
+         block: the absence category is not shown while a čl. 46 nalog za daljinsku podršku is \
+         live, and lifting that is written into the evidencija pristupa. Čl. 23 st. 1 tač. 5 \
+         makes the recipients part of what the employee is owed, and \
+         `commands/worktime.rs::razlog_odsustva_dostupan` changed the answer on 08.08.2026 — a \
+         notice describing the old recipient set understates a control the employee benefits \
+         from. Blocks that name the subject and stop short: {kandidati:?}"
+    );
+
+    /// The wordings that would turn the shipped control into a promise the code
+    /// cannot keep. Lower-case, per [`match_indices_ci`]'s contract.
+    const PREKO_MERE: [&str; 5] = [
+        "ne vidi",
+        "ne može da vidi",
+        "nije dostupan",
+        "nije dostupna",
+        "ne saznaje",
+    ];
+
+    for at in match_indices_ci(NOTICE, PODRSKA) {
+        let (start, end) = sentence_span(NOTICE, at);
+        let recenica = &NOTICE[start..end];
+        if match_indices_ci(recenica, KATEGORIJA).is_empty()
+            && match_indices_ci(recenica, "razlog odsustva").is_empty()
+        {
+            continue;
+        }
+        for marker in PREKO_MERE {
+            assert!(
+                match_indices_ci(recenica, marker).is_empty(),
+                "docs/compliance/obavestenje-zaposlenima.md:{} says „{marker}“ of the absence \
+                 category and remote support — „{}“. The mask covers the COLUMN and not the \
+                 reason: `load_entries_without_reason` still selects all nine ZEOR čl. 24 \
+                 tač. 1 buckets, so a masked read carries `sprecenostRfzoMinuta: 480` on the \
+                 row whose category is `null`, on the wire and in the exported file alike. \
+                 State what is withheld („kategorija se ne prikazuje“), never that the reason \
+                 is beyond reach.",
+                NOTICE[..at].lines().count(),
+                recenica.trim()
+            );
+        }
+    }
+}

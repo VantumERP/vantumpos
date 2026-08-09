@@ -6,6 +6,7 @@ import { BreachLogPanel } from "./BreachLogPanel";
 import { Cl47RegisterPanel } from "./Cl47RegisterPanel";
 import { SupportApprovalPanel } from "./SupportApprovalPanel";
 import type { PosServices } from "@/services/ports";
+import type { UserAccount } from "@/services/types";
 
 /**
  * Privatnost — the four ZZPL surfaces, in the order their legal weight runs.
@@ -31,11 +32,24 @@ const TABS: { id: PrivacyTab; label: string }[] = [
   { id: "radnje", label: "Radnje obrade" },
 ];
 
-export function PrivacyModule({ services }: { services: PosServices }) {
+export function PrivacyModule({
+  services,
+  currentUser,
+}: {
+  services: PosServices;
+  /**
+   * Passed through to the čl. 46 panel for the one control that needs a role:
+   * SW-14 req. 28's unmask. Optional and absent-means-closed, like every other
+   * privacy gate in this app.
+   */
+  currentUser?: UserAccount;
+}) {
   const [activeTab, setActiveTab] = useState<PrivacyTab>("podrska");
 
   const panels: Record<PrivacyTab, ReactNode> = {
-    podrska: <SupportApprovalPanel services={services} />,
+    podrska: (
+      <SupportApprovalPanel services={services} currentUser={currentUser} />
+    ),
     pristup: <AuditLogPanel services={services} />,
     povrede: <BreachLogPanel services={services} />,
     radnje: <Cl47RegisterPanel services={services} />,

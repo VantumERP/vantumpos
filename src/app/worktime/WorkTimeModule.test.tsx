@@ -99,6 +99,8 @@ function month(entries: WorkTimeEntryView[], overrides: Partial<WorkTimeMonth> =
     mesec: 6,
     zatvoren: false,
     closedAt: null,
+    // The default is the ordinary day: no čl. 46 nalog, nothing withheld.
+    razlogOdsustvaSkriven: false,
     entries,
     ukupno,
     napomena:
@@ -979,6 +981,147 @@ describe("WorkTimeModule absence reason gate", () => {
     const row = await screen.findByRole("row", { name: /02\.06\.2026/ });
     expect(within(row).getByText(/odsutan/i)).toBeInTheDocument();
     expect(within(row).queryByText(/godišnji odmor/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Req. 28's frontend half: the cell must SAY it is masked.
+ *
+ * An „—“ on this column has always meant „nema odsustva“, so rendering it on a
+ * row whose „Ukupno neizvršeni“ cell reads 480 is a different statement from the
+ * true one and a false one. The backend states the fact — `razlogOdsustvaSkriven`
+ * is a property of the read that performed it — and the cell must not re-derive
+ * it from the missing category, which is exactly the „—“ defect.
+ */
+describe("WorkTimeModule absence reason under a support nalog", () => {
+  /**
+   * The „Odsustvo“ cell by position, not by text.
+   *
+   * Every zero minute column renders „—“ too, so a row-wide search for that
+   * string says nothing about the column under test — which is the same trap the
+   * Rust export sweep hit and fixed with a positional cell read.
+   */
+  function celijaOdsustva(row: HTMLElement): HTMLElement {
+    return within(row).getAllByRole("cell")[2];
+  }
+
+  const godisnjiOdmor = entry({
+    id: 7,
+    dan: "2026-06-02",
+    kategorijaOdsustva: "godisnji_odmor",
+    minuti: {
+      ...nulaMinuta,
+      godisnjiOdmorMinuta: 480,
+      ukupnoNeizvrseniMinuta: 480,
+    },
+  });
+
+  const maskirano = entry({
+    id: 8,
+    dan: "2026-06-04",
+    // What the backend sends while a čl. 46 nalog is live and unrevealed: the
+    // absence and its minutes stand, the category was never read.
+    kategorijaOdsustva: null,
+    minuti: {
+      ...nulaMinuta,
+      sprecenostRfzoMinuta: 480,
+      ukupnoNeizvrseniMinuta: 480,
+    },
+  });
+
+  it("says the reason is hidden rather than rendering an empty cell", async () => {
+    render(
+      <WorkTimeModule
+        services={servicesWithMonth(
+          month([maskirano], { razlogOdsustvaSkriven: true }),
+        )}
+        currentUser={admin}
+      />,
+    );
+
+    const row = await screen.findByRole("row", { name: /04\.06\.2026/ });
+    const celija = celijaOdsustva(row);
+    // The two halves of the truthful statement: there IS an absence, and the
+    // reason is withheld rather than unrecorded.
+    expect(celija).toHaveTextContent(/odsutan/i);
+    expect(celija).toHaveTextContent(/skriven/i);
+    // 480 minutes of absence beside a „—“ is the false-by-omission reading this
+    // whole cell exists to stop.
+    expect(celija).not.toHaveTextContent("—");
+    // …and no row of the register carries the withheld category by another
+    // route. Scoped to the table on purpose: the entry form's category picker is
+    // the closed VOCABULARY, on screen for the shop's own admin whether or not a
+    // nalog is live, and it names nobody's month.
+    expect(
+      within(screen.getByRole("table")).queryByText(/sprečenost/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names the čl. 46 nalog as the reason the column is masked", async () => {
+    render(
+      <WorkTimeModule
+        services={servicesWithMonth(
+          month([maskirano], { razlogOdsustvaSkriven: true }),
+        )}
+        currentUser={admin}
+      />,
+    );
+
+    // „Skriveno“ with no stated cause reads as a defect. The banner says which
+    // control is doing it and where the shop reverses the decision.
+    const objasnjenje = await screen.findByText(
+      /nalog za pristup tehničke podrške/i,
+    );
+    expect(objasnjenje).toBeInTheDocument();
+    expect(screen.getByText(/čl\. 46/)).toBeInTheDocument();
+  });
+
+  it("keeps the payroll role's ordinary day untouched when nothing is masked", async () => {
+    render(
+      <WorkTimeModule
+        services={servicesWithMonth(
+          month([godisnjiOdmor], { razlogOdsustvaSkriven: false }),
+        )}
+        currentUser={admin}
+      />,
+    );
+
+    const row = await screen.findByRole("row", { name: /02\.06\.2026/ });
+    expect(celijaOdsustva(row)).toHaveTextContent(/godišnji odmor/i);
+    expect(celijaOdsustva(row)).not.toHaveTextContent(/skriven/i);
+    expect(screen.queryByText(/čl\. 46/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The masked cell must not claim an absence the row does not carry. `v)` is
+   * the sum of the nine ZEOR čl. 24 tač. 1 absence buckets, so a zero there is
+   * the row saying it booked no absence minutes — and „Odsutan“ on such a day
+   * would invent one.
+   */
+  it("does not invent an absence on a worked day while the column is masked", async () => {
+    const radni = entry({
+      id: 9,
+      dan: "2026-06-05",
+      minuti: {
+        ...nulaMinuta,
+        moguciMinuta: 480,
+        efektivnoIzvrseniMinuta: 480,
+        ukupnoOstvareniMinuta: 480,
+      },
+    });
+
+    render(
+      <WorkTimeModule
+        services={servicesWithMonth(
+          month([radni], { razlogOdsustvaSkriven: true }),
+        )}
+        currentUser={admin}
+      />,
+    );
+
+    const row = await screen.findByRole("row", { name: /05\.06\.2026/ });
+    expect(celijaOdsustva(row)).not.toHaveTextContent(/odsutan/i);
+    expect(celijaOdsustva(row)).not.toHaveTextContent(/skriven/i);
   });
 });
 

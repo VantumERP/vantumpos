@@ -174,8 +174,20 @@ export function MyHoursPanel({ hours }: MyHoursPanelProps) {
                       employee from the session and returns own rows only. This
                       is the carve-out recorded in docs/SW14-VERIFIED-RULES.md
                       §4 req. 25, not a hole in it.
+
+                      `razlogSkriven` is passed from the read rather than written
+                      as `false`, even though `my_hours` masks nothing today and
+                      deliberately so (SW-14 req. 28 is about the vendor, not
+                      about the person whose month it is). A literal here would
+                      be this panel asserting a backend property instead of
+                      reporting one, and it would go silently stale the day that
+                      decision is revisited.
                     */}
-                    <AbsenceCell entry={entry} canSeeAbsenceReason />
+                    <AbsenceCell
+                      entry={entry}
+                      canSeeAbsenceReason
+                      razlogSkriven={hours.razlogOdsustvaSkriven}
+                    />
                   </TableCell>
                   <MinuteCell value={entry.minuti.moguciMinuta} />
                   <MinuteCell value={entry.minuti.ukupnoOstvareniMinuta} />

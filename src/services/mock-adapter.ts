@@ -2445,7 +2445,7 @@ export function createMockServices(): PosServices {
     // and a correction that appends a new verzija instead of overwriting.
     worktime: {
       async listMonth(userId, godina, mesec) {
-        return buildMonth(userId, godina, mesec);
+        return buildMonth(userId, godina, mesec, razlogOdsustvaDostupan());
       },
       async saveEntry(request) {
         return writeWorkTimeEntry(request, null);
@@ -2470,7 +2470,10 @@ export function createMockServices(): PosServices {
         }
 
         workTimePeriods.push({ userId, godina, mesec, closedAt: now });
-        const month = buildMonth(userId, godina, mesec);
+        // `false` whatever the nalog says, like `close_period`: the frozen Class A
+        // classification is minutes and a day count and has never carried the
+        // category, so the read that feeds it has no business selecting one.
+        const month = buildMonth(userId, godina, mesec, false);
 
         return {
           userId,
@@ -2489,7 +2492,9 @@ export function createMockServices(): PosServices {
         };
       },
       async exportCsv(userId, godina, mesec) {
-        const month = buildMonth(userId, godina, mesec);
+        // The export masks because it goes through the register read: a file that
+        // carried what the screen withholds would outlive the nalog.
+        const month = buildMonth(userId, godina, mesec, razlogOdsustvaDostupan());
         const fileName = `evidencija-radnog-vremena-${userId}-${godina}-${String(mesec).padStart(2, "0")}.csv`;
 
         return {
@@ -2500,7 +2505,12 @@ export function createMockServices(): PosServices {
         };
       },
       async myHours(godina, mesec) {
-        return buildMonth(session?.user.id ?? 1, godina, mesec);
+        // `true` whatever the nalog says, like `my_hours`: the viewer is the data
+        // subject, and req. 28 is about the vendor rather than about the person
+        // whose month it is. Withholding here would take a certain ZZPL čl. 26
+        // harm to prevent a disclosure the mask cannot stop anyway — the operator
+        // watching the screen sees the pixels, not the JSON.
+        return buildMonth(session?.user.id ?? 1, godina, mesec, true);
       },
       async notices() {
         return {
@@ -2538,6 +2548,8 @@ export function createMockServices(): PosServices {
           startedAt: null,
           endedAt: null,
           revokedAt: null,
+          // Masked is the default and no nalog is ever born disclosed.
+          odsustvoOtkrivenoAt: null,
         };
         supportSessions = [...supportSessions, granted];
         return granted;
@@ -2574,6 +2586,22 @@ export function createMockServices(): PosServices {
       async activeSupportSession() {
         const live = liveSupportSession();
         return live ? { ...live } : null;
+      },
+      async revealAbsenceReason() {
+        const live = liveSupportSession();
+        if (!live) {
+          throw {
+            code: "support_bez_naloga_za_otkrivanje",
+            message:
+              "Razlog odsustva može da se otkrije samo dok važi nalog za pristup " +
+              "tehničke podrške. Bez naloga nema kome da se otkrije (ZZPL čl. 46).",
+          };
+        }
+        // Idempotent, like the backend: one disclosure per nalog, and the first
+        // instant survives — a second stamp would put a second čl. 48 line in the
+        // log for a category that was already open.
+        live.odsustvoOtkrivenoAt = live.odsustvoOtkrivenoAt ?? now;
+        return { ...live };
       },
       async searchAudit(query) {
         const events = filterAudit(query);
@@ -3529,10 +3557,36 @@ export function createMockServices(): PosServices {
     };
   }
 
+  /**
+   * SW-14 req. 28, as the backend decides it: no live nalog masks nothing, a
+   * live nalog masks unless the shop disclosed the category for that nalog.
+   *
+   * Read off the nalog and never by reading the audit log back — SW-10 keeps
+   * that log a record and not an access control.
+   */
+  function razlogOdsustvaDostupan(): boolean {
+    const live = liveSupportSession();
+    return !live || live.odsustvoOtkrivenoAt !== null;
+  }
+
+  /**
+   * `razlogDostupan` is the caller's answer, never this function's, because the
+   * three read paths give three different ones — which is the whole shape of
+   * `commands::worktime::load_entries` and the reason it is a dispatcher over two
+   * statements rather than one statement with a flag.
+   *
+   * **The mock cannot copy the structural half and does not pretend to.** The
+   * backend withholds by running a SELECT that never names `kategorija_odsustva`,
+   * so while masked there is no value in the row to drop, to log or to print; an
+   * in-memory array has no query to leave the column out of, so the double
+   * reproduces the observable contract instead — absent category, the flag set,
+   * and the absence and its minutes untouched.
+   */
   function buildMonth(
     userId: number,
     godina: number,
     mesec: number,
+    razlogDostupan: boolean,
   ): WorkTimeMonth {
     const prefix = `${godina}-${String(mesec).padStart(2, "0")}`;
     const entries = withSupersedes(
@@ -3543,6 +3597,9 @@ export function createMockServices(): PosServices {
         left.dan === right.dan
           ? left.verzija - right.verzija
           : left.dan.localeCompare(right.dan),
+      )
+      .map((entry) =>
+        razlogDostupan ? entry : { ...entry, kategorijaOdsustva: null },
       );
 
     const ukupno = emptyMinutes();
@@ -3567,6 +3624,7 @@ export function createMockServices(): PosServices {
       mesec,
       zatvoren: Boolean(closed),
       closedAt: closed?.closedAt ?? null,
+      razlogOdsustvaSkriven: !razlogDostupan,
       entries,
       ukupno,
       napomena: EVIDENCIJA_ZAGLAVLJE,

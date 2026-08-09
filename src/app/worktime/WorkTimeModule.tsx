@@ -1,4 +1,10 @@
-import { AlertCircleIcon, ClockIcon, DownloadIcon, LockIcon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  ClockIcon,
+  DownloadIcon,
+  EyeOffIcon,
+  LockIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { toast } from "sonner";
@@ -865,6 +871,14 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
         </Alert>
       ) : null}
 
+      {monthStatus === "ready" && month?.razlogOdsustvaSkriven ? (
+        <Alert>
+          <EyeOffIcon aria-hidden="true" />
+          <AlertTitle>Razlog odsustva je skriven</AlertTitle>
+          <AlertDescription>{RAZLOG_SKRIVEN_OBJASNJENJE}</AlertDescription>
+        </Alert>
+      ) : null}
+
       {monthStatus === "ready" && month && month.entries.length === 0 ? (
         <Empty>
           <EmptyHeader>
@@ -911,6 +925,7 @@ export function WorkTimeModule({ services, currentUser }: WorkTimeModuleProps) {
                     <AbsenceCell
                       entry={entry}
                       canSeeAbsenceReason={canSeeAbsenceReason}
+                      razlogSkriven={month.razlogOdsustvaSkriven}
                     />
                   </TableCell>
                   <MinuteCell value={entry.minuti.moguciMinuta} />
@@ -1029,6 +1044,21 @@ const ADVISORY_HINT =
  */
 const ADVISORY_TAG = "izračunato radi provere usklađenosti";
 
+/**
+ * Why the „Odsustvo“ column is withholding, and where the shop decides otherwise.
+ *
+ * A „skriveno“ state with no stated cause reads as a defect in the register — an
+ * operator who cannot see why assumes the data is missing. So the sentence names
+ * the control doing it (the čl. 46 nalog), says it lasts only as long as that
+ * nalog, and points at the one surface that can lift it. It does **not** offer to
+ * lift it here: the decision is the shop's and belongs beside the nalog, and a
+ * second entry point would let it be made by someone reading a payroll screen.
+ */
+const RAZLOG_SKRIVEN_OBJASNJENJE =
+  "Kategorija odsustva se ne prikazuje dok važi nalog za pristup tehničke podrške " +
+  "(ZZPL čl. 46). Broj časova odsustva ostaje prikazan. Otkrivanje za taj nalog " +
+  "vlasnik odobrava na kartici „Privatnost“, uz „Daljinska podrška“.";
+
 function MinuteCell({ value }: { value: number }) {
   return (
     <TableCell className="text-right tabular-nums">
@@ -1038,7 +1068,7 @@ function MinuteCell({ value }: { value: number }) {
 }
 
 /**
- * The §4 req. 25 gate, rendered.
+ * The §4 req. 25 gate and the req. 28 mask, rendered.
  *
  * The absence **category** is special-category data under ZZPL čl. 17 — the two
  * sprečenost buckets alone say which of a poslodavac-funded and an RFZO-funded
@@ -1046,26 +1076,51 @@ function MinuteCell({ value }: { value: number }) {
  * every other role, and every unknown one, sees „odsutan“ plus the hour total
  * and nothing that identifies why.
  *
- * **Under a live nalog none of that holds, and the gap is recorded here rather
- * than left to be discovered.** Since 08.08.2026 the backend withholds the
- * category while a ZZPL čl. 46 nalog za daljinsku podršku is open (SW-14
- * req. 28), so `entry.kategorijaOdsustva` is `null` on a day that *is* an
- * absence — and the first branch below then renders „—“, which on this column
- * means „nema odsustva“, beside an „Ukupno neizvršeni“ cell reading 480. The
- * null check runs before the role check, so **every** role including payroll
- * gets that cell, and the §4 req. 25 rule the paragraph above states is not met
- * while a nalog is live either. The backend already ships what the fix needs —
- * `WorkTimeMonth.razlog_odsustva_skriven`, camelCase on the wire — and Task 4 of
- * the req. 28 plan owns it: render the masked cell as a stated „Odsutan (razlog
- * skriven)“, with a vitest pinning it against blank.
+ * **`razlogSkriven` comes from the read and is not re-derived here, which is the
+ * whole point.** Since 08.08.2026 the backend withholds the category while a
+ * ZZPL čl. 46 nalog za daljinsku podršku is open (SW-14 req. 28), so
+ * `entry.kategorijaOdsustva` is `null` on a day that *is* an absence. A `null`
+ * has two causes — nothing was recorded, or nothing was read — and this column's
+ * „—“ asserts the first. Rendering it under a mask says „nema odsustva“ beside an
+ * „Ukupno neizvršeni“ cell reading 480, which is false by omission and was the
+ * defect this branch order fixes. `WorkTimeMonth.razlogOdsustvaSkriven` is the
+ * read's own statement of which cause applies, so the cell states it instead of
+ * guessing, and the mask branch runs first: while it is set, no category is
+ * printed even if one somehow arrived on the row.
+ *
+ * **The absence itself is read off v).** `ukupnoNeizvrseniMinuta` is the sum of
+ * the nine ZEOR čl. 24 tač. 1 non-worked buckets, so a non-zero says this day
+ * books absence minutes without saying which bucket — exactly the statement the
+ * masked cell is allowed to make. On a worked day it is zero and the cell stays
+ * „—“, because „Odsutan“ there would invent an absence the row does not carry.
+ *
+ * **The residual, stated rather than implied.** A category booked with **zero**
+ * minutes leaves v) at zero, so while masked such a day is indistinguishable
+ * from a day with no absence at all and renders „—“. Closing it would need the
+ * read to carry a per-entry „there is an absence“ bit, and the only place to
+ * derive one is `kategorija_odsustva IS NOT NULL` — a predicate over the very
+ * column the masked statement must not name, which
+ * `the_masked_register_read_never_names_the_absence_reason_column` refuses. The
+ * narrow corner is left open rather than bought with a read that names the
+ * column.
  */
 export function AbsenceCell({
   entry,
   canSeeAbsenceReason,
+  razlogSkriven,
 }: {
   entry: WorkTimeEntryView;
   canSeeAbsenceReason: boolean;
+  razlogSkriven: boolean;
 }) {
+  if (razlogSkriven) {
+    return entry.minuti.ukupnoNeizvrseniMinuta > 0 ? (
+      <span title={RAZLOG_SKRIVEN_OBJASNJENJE}>Odsutan (razlog skriven)</span>
+    ) : (
+      <span className="text-muted-foreground">—</span>
+    );
+  }
+
   if (!entry.kategorijaOdsustva) {
     return <span className="text-muted-foreground">—</span>;
   }

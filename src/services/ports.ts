@@ -469,6 +469,24 @@ export interface PrivacyService {
   /** The vlasnik closing the nalog — ended if it was entered, revoked if not. */
   endSupportSession(): Promise<SupportSession>;
   activeSupportSession(): Promise<SupportSession | null>;
+  /**
+   * Req. 28 — the shop disclosing the absence category for the **live** nalog.
+   *
+   * It takes no argument on purpose: the nalog is resolved backend-side, so a
+   * caller cannot name a session other than the one the support engineer is
+   * actually inside. With no live nalog the backend refuses with
+   * `support_bez_naloga_za_otkrivanje` — unmasking nothing is not a thing the
+   * shop can consent to — and a second call on an already-disclosed nalog
+   * returns it unchanged rather than re-stamping, so the čl. 48 log carries one
+   * disclosure per nalog and the earliest instant survives.
+   *
+   * **There is no companion that puts the category back, and there may never
+   * be.** `SupportSession.odsustvoOtkrivenoAt` records an irreversible act; a
+   * `remaskAbsenceReason` here would be an affordance the backend cannot honour,
+   * and `local-adapter.test.ts` asserts this surface holds exactly one
+   * absence-reason method.
+   */
+  revealAbsenceReason(): Promise<SupportSession>;
   /** Req. 8's two axes; the chain verdict covers the whole log, not the slice. */
   searchAudit(query: AuditQuery): Promise<AuditSearchResult>;
   /** The čl. 48 st. 4 izvod, rendered offline from the till. */

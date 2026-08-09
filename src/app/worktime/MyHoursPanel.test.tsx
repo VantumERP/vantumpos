@@ -70,6 +70,9 @@ function month(
     mesec: 6,
     zatvoren: false,
     closedAt: null,
+    // `my_hours` masks nothing — the viewer is the data subject (§4 req. 25's
+    // carve-out) — so the read's own flag is false here whatever nalog is live.
+    razlogOdsustvaSkriven: false,
     entries,
     ukupno,
     napomena:

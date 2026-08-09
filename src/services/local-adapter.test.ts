@@ -1092,6 +1092,7 @@ describe("local service adapter", () => {
     await services.privacy.listProcessingActivities();
     await services.privacy.generateProcessingActivities();
     await services.privacy.exportProcessingActivities();
+    await services.privacy.revealAbsenceReason();
 
     // The nalog travels as one request object, so its obim and its trajanje
     // cannot be sent apart from each other.
@@ -1115,6 +1116,19 @@ describe("local service adapter", () => {
     expect(invoke).toHaveBeenCalledWith("cl47_list");
     expect(invoke).toHaveBeenCalledWith("cl47_generate");
     expect(invoke).toHaveBeenCalledWith("cl47_export");
+    // Req. 28's unmask. It takes no argument on purpose: the nalog it stamps is
+    // the live one, resolved backend-side, so a caller cannot name a different
+    // session than the one the support engineer is actually inside.
+    expect(invoke).toHaveBeenCalledWith("support_reveal_absence_reason");
+
+    // There is one absence-reason verb and there may never be a second: the
+    // stamp records an irreversible disclosure, so a `remaskAbsenceReason` here
+    // would be an affordance the backend cannot honour. Asserted over the PORT
+    // SURFACE, like the audit sweep above, not over the calls this test made.
+    const maskMethods = Object.keys(services.privacy)
+      .filter((name) => /absence|mask/i.test(name))
+      .sort();
+    expect(maskMethods).toEqual(["revealAbsenceReason"]);
 
     // Req. 7: there is no write verb on the evidencija pristupa to map. The
     // assertion is over the PORT SURFACE, not over the calls this test happened

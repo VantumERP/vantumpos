@@ -168,7 +168,11 @@ const TEMPLATES: &[Template] = &[
              ne podešava.",
         retention: Some(RecordClass::WorktimeClassification),
         mere: "Zaključen mesec se ne prepisuje: ispravka je nova verzija zapisa koja nosi ko je, \
-             kada i zašto ispravio, pa raniji sadržaj ostaje vidljiv.",
+             kada i zašto ispravio, pa raniji sadržaj ostaje vidljiv. Dok traje odobrena sesija \
+             daljinske podrške, kategorija odsustva se ne čita iz baze i ne prikazuje; rukovalac \
+             može da je otkrije za taj nalog, a otkrivanje se upisuje u evidenciju pristupa. \
+             Skriva se kolona sa kategorijom — broj časova po zakonskim vrstama odsustva ostaje \
+             vidljiv.",
     },
     Template {
         kljuc: "prekovremeni_rad",
@@ -897,7 +901,7 @@ pub fn cl47_export(state: State<'_, AppState>) -> Result<ExportedFile, CommandEr
 mod tests {
     use tauri::State;
 
-    use super::{export, generate, list, regenerate, render_html, ProcessingActivity};
+    use super::{export, generate, list, regenerate, render_html, ProcessingActivity, TEMPLATES};
     use crate::app_error::CommandError;
     use crate::commands::reports::ExportedFile;
     use crate::commands::settings::CompanySettings;
@@ -1555,6 +1559,93 @@ mod tests {
                      („{figure}“) — legal.rs is the only module allowed to hold one"
                 );
             }
+        });
+    }
+
+    /// SW-14 req. 28 reaches the čl. 47 st. 1 t. 8 measures **once**, in the
+    /// entry whose data it protects.
+    ///
+    /// The mask is a measure over the working-time record — it withholds
+    /// `kategorija_odsustva` from the obrađivač — so it belongs in
+    /// `radno_vreme.mere` and nowhere else. Repeating it under
+    /// `tehnicka_podrska` would read to an inspector as two controls, and the
+    /// second copy is the one that goes stale: this register is generated, and a
+    /// measure stated twice is a measure half-corrected the next time it moves.
+    ///
+    /// The needle is the subject rather than a sentence, so the entry may be
+    /// reworded freely; what it may not do is migrate, multiply or drop the two
+    /// facts. Bound to the crate items that perform them, so a rename fails the
+    /// build instead of leaving the register describing nothing.
+    #[test]
+    fn one_register_entry_states_the_absence_reason_mask_and_no_other_does() {
+        let _unmask_verb = crate::commands::audit::reveal_absence_reason;
+        let _withheld =
+            |mesec: &crate::commands::worktime::WorkTimeMonth| mesec.razlog_odsustva_skriven;
+
+        const SUBJEKT: &str = "kategorija odsustva";
+
+        let imenuju: Vec<&str> = TEMPLATES
+            .iter()
+            .filter(|template| template.mere.to_lowercase().contains(SUBJEKT))
+            .map(|template| template.kljuc)
+            .collect();
+        assert_eq!(
+            imenuju,
+            vec!["radno_vreme"],
+            "exactly one čl. 47 entry may state the req. 28 mask, and it is the working-time \
+             record whose column is masked — found {imenuju:?}"
+        );
+
+        let radno_vreme = TEMPLATES
+            .iter()
+            .find(|template| template.kljuc == "radno_vreme")
+            .expect("the working-time entry must exist");
+        let mere = radno_vreme.mere.to_lowercase();
+        for (needle, why) in [
+            (
+                "ne prikazuje",
+                "the measure must say the category is not shown — `razlog_odsustva_dostupan` \
+                 withholds it while a čl. 46 nalog is live",
+            ),
+            (
+                "podršk",
+                "the measure must say WHEN it applies: only while a nalog za daljinsku podršku \
+                 is live, never as a blanket claim about the column",
+            ),
+            (
+                "evidencij",
+                "the measure must say the disclosure is recorded — `reveal_absence_reason` \
+                 writes one čl. 48 line per nalog",
+            ),
+        ] {
+            assert!(
+                mere.contains(needle),
+                "radno_vreme.mere lacks „{needle}“: {why}"
+            );
+        }
+
+        // …and it reaches the generated artefact, not just the constant. The
+        // register the Poverenik reads is the row, not the source.
+        with_state("cl47_absence_reason_mask", |state| {
+            sign_in_admin(state);
+            let register = generate(state, NOW).expect("the register should generate");
+
+            let entries: Vec<&ProcessingActivity> = register
+                .iter()
+                .filter(|activity| {
+                    activity
+                        .opis_mera_zastite
+                        .as_deref()
+                        .is_some_and(|mere| mere.to_lowercase().contains(SUBJEKT))
+                })
+                .collect();
+            assert_eq!(
+                entries.len(),
+                1,
+                "one generated entry, not {}",
+                entries.len()
+            );
+            assert_eq!(entries[0].kljuc, "radno_vreme");
         });
     }
 

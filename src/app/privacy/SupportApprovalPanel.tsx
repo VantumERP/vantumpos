@@ -1,4 +1,9 @@
-import { AlertCircleIcon, KeyRoundIcon, ShieldCheckIcon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  EyeIcon,
+  KeyRoundIcon,
+  ShieldCheckIcon,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
@@ -24,7 +29,7 @@ import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import type { PosServices } from "@/services/ports";
-import type { SupportSession } from "@/services/types";
+import type { SupportSession, UserAccount } from "@/services/types";
 
 /**
  * The ZZPL čl. 46 nalog za pristup tehničke podrške.
@@ -44,13 +49,47 @@ import type { SupportSession } from "@/services/types";
  */
 const PODRAZUMEVANO_TRAJANJE_MINUTA = 60;
 
-export function SupportApprovalPanel({ services }: { services: PosServices }) {
+/**
+ * SW-14 req. 28's unmask, and it lives here rather than on the working-time
+ * screen for one reason: it is a property of **the nalog**.
+ *
+ * `support_sessions.odsustvo_otkriveno_at` is a per-nalog stamp, the backend
+ * refuses an unmask with no live nalog, and the disclosure expires when the
+ * nalog does. On the register it would look like a view setting — something the
+ * person reading a payroll screen turns on to see a column — when what it
+ * actually is, is the rukovalac widening what an obrađivač may process under
+ * čl. 46. So the decision sits beside the four facts that are the nalog.
+ *
+ * **No re-mask control, because there is no re-mask verb.** The support engineer
+ * who has read `kategorija_odsustva` does not unread it; a button that claimed
+ * to put it back would assert something neither this app nor the world can do.
+ * `PrivacyService` therefore carries exactly one absence-reason method, and
+ * `local-adapter.test.ts` pins that count.
+ */
+export function SupportApprovalPanel({
+  services,
+  currentUser,
+}: {
+  services: PosServices;
+  /**
+   * The signed-in operator, used for one thing: the admin gate over the unmask.
+   *
+   * Optional, and **absent means closed** — the house rule this repository
+   * applies to every privacy gate. The whole Privatnost surface is already
+   * admin-only in `navigation.ts` and `support_reveal_absence_reason` is
+   * `require_admin`-gated inside the domain function, so this is the third of
+   * three layers rather than the only one; it exists so a cashier is never
+   * offered a control whose only possible answer is a refusal.
+   */
+  currentUser?: UserAccount;
+}) {
   const [session, setSession] = useState<SupportSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [scope, setScope] = useState("");
   const [duration, setDuration] = useState(String(PODRAZUMEVANO_TRAJANJE_MINUTA));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const canUnmask = currentUser?.role === "admin";
 
   useEffect(() => {
     let ignore = false;
@@ -135,6 +174,22 @@ export function SupportApprovalPanel({ services }: { services: PosServices }) {
     }
   }
 
+  async function reveal() {
+    setError(null);
+    setSubmitting(true);
+    try {
+      setSession(await services.privacy.revealAbsenceReason());
+    } catch (revealError) {
+      // The refusal is shown as it came back. A surface that swallowed it would
+      // leave the vlasnik believing a disclosure happened — and the nalog may
+      // have expired between the render and the click, which is precisely the
+      // case `support_bez_naloga_za_otkrivanje` exists to name.
+      setError(errorMessage(revealError, "Razlog odsustva nije otkriven."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <section className="flex flex-col gap-4">
       <Card>
@@ -209,6 +264,57 @@ export function SupportApprovalPanel({ services }: { services: PosServices }) {
                   </Button>
                 )}
               </div>
+
+              <Separator />
+
+              <div className="flex flex-col gap-3">
+                <h4 className="text-sm font-medium">
+                  Razlog odsustva u evidenciji radnog vremena
+                </h4>
+                <p className="text-sm text-muted-foreground">
+                  Dok ovaj nalog važi, kategorija odsustva se ne prikazuje u
+                  evidenciji radnog vremena — podatak se za to vreme ne čita iz
+                  baze. Skriva se sama kolona: broj časova odsustva po zakonskim
+                  vrstama ostaje prikazan, pa se iz njega i dalje može zaključiti o
+                  kojoj je vrsti odsustva reč.
+                </p>
+
+                {session.odsustvoOtkrivenoAt ? (
+                  <Alert>
+                    <EyeIcon aria-hidden="true" />
+                    <AlertTitle>Razlog odsustva je otkriven</AlertTitle>
+                    <AlertDescription>
+                      Otkriveno {formatInstant(session.odsustvoOtkrivenoAt)}, za
+                      ovaj nalog. Važi do isteka ovog naloga i upisano je u
+                      evidenciju pristupa.
+                    </AlertDescription>
+                  </Alert>
+                ) : canUnmask ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      Otkrivanje važi samo za ovaj nalog i ne može da se povuče:
+                      tehnička podrška koja je kategoriju videla više ne može da je
+                      ne vidi, pa u programu nema radnje koja je vraća pod masku.
+                      Otkrivanje se upisuje u evidenciju pristupa (ZZPL čl. 48), uz
+                      oznaku ovog naloga.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-fit"
+                      disabled={submitting}
+                      onClick={() => void reveal()}
+                    >
+                      {submitting ? (
+                        <Spinner data-icon="inline-start" aria-hidden="true" />
+                      ) : (
+                        <EyeIcon data-icon="inline-start" />
+                      )}
+                      Otkrij razlog odsustva za ovaj nalog
+                    </Button>
+                  </>
+                ) : null}
+              </div>
             </div>
           ) : (
             <Alert>
@@ -216,6 +322,8 @@ export function SupportApprovalPanel({ services }: { services: PosServices }) {
               <AlertDescription>
                 Nema izdatog naloga za pristup tehničke podrške. Dok nalog ne
                 postoji, tehnička podrška ne sme da obrađuje podatke iz ove kase.
+                Kategorija odsustva se skriva samo dok nalog važi, pa sada nema
+                šta da se otkrije.
               </AlertDescription>
             </Alert>
           )}

@@ -5,7 +5,26 @@ import { describe, expect, it, vi } from "vitest";
 import { SupportApprovalPanel } from "./SupportApprovalPanel";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices } from "@/services/ports";
-import type { SupportSession } from "@/services/types";
+import type { SupportSession, UserAccount } from "@/services/types";
+
+const vlasnik: UserAccount = {
+  id: 1,
+  username: "admin",
+  displayName: "Administrator",
+  role: "admin",
+  active: true,
+  createdAt: "2026-08-01T08:00:00Z",
+  updatedAt: "2026-08-01T08:00:00Z",
+  lastLoginAt: "2026-08-01T08:00:00Z",
+};
+
+const kasirka: UserAccount = {
+  ...vlasnik,
+  id: 7,
+  username: "jelena",
+  displayName: "Jelena Đurić",
+  role: "cashier",
+};
 
 function session(overrides: Partial<SupportSession> = {}): SupportSession {
   return {
@@ -18,6 +37,7 @@ function session(overrides: Partial<SupportSession> = {}): SupportSession {
     startedAt: null,
     endedAt: null,
     revokedAt: null,
+    odsustvoOtkrivenoAt: null,
     ...overrides,
   };
 }
@@ -142,5 +162,127 @@ describe("SupportApprovalPanel", () => {
     expect(
       await screen.findByText(/samo administrator može da izda nalog/i),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * Req. 28's third limb — *„unless the shop explicitly unmasks for that session“*.
+ *
+ * The control belongs beside the nalog because it is a property OF the nalog:
+ * `support_sessions.odsustvo_otkriveno_at` is a per-nalog stamp, the backend
+ * refuses an unmask with no live nalog, and the disclosure dies with the nalog.
+ * Putting it on the working-time screen would make it look like a view setting.
+ */
+describe("SupportApprovalPanel absence-reason unmask", () => {
+  /** Any affordance that would claim the disclosure can be taken back. */
+  const PONOVO_SAKRIJ = /sakrij|maskiraj|vrati pod|opozovi otkrivanje/i;
+
+  it("offers the unmask to the vlasnik only", async () => {
+    const posServices = services(session());
+    const reveal = vi.spyOn(posServices.privacy, "revealAbsenceReason");
+
+    const { unmount } = render(
+      <SupportApprovalPanel services={posServices} currentUser={kasirka} />,
+    );
+    await screen.findByText("Administrator");
+
+    expect(
+      screen.queryByRole("button", { name: /otkrij razlog odsustva/i }),
+    ).not.toBeInTheDocument();
+    expect(reveal).not.toHaveBeenCalled();
+    unmount();
+
+    // Absent means closed: a gate that opens when the caller forgets to wire the
+    // role is not a gate.
+    const { unmount: unmountBezUloge } = render(
+      <SupportApprovalPanel services={services(session())} />,
+    );
+    await screen.findByText("Administrator");
+    expect(
+      screen.queryByRole("button", { name: /otkrij razlog odsustva/i }),
+    ).not.toBeInTheDocument();
+    unmountBezUloge();
+
+    render(<SupportApprovalPanel services={services(session())} currentUser={vlasnik} />);
+    expect(
+      await screen.findByRole("button", { name: /otkrij razlog odsustva/i }),
+    ).toBeEnabled();
+  });
+
+  it("states that the disclosure cannot be taken back and that it is recorded", async () => {
+    render(<SupportApprovalPanel services={services(session())} currentUser={vlasnik} />);
+    await screen.findByRole("button", { name: /otkrij razlog odsustva/i });
+
+    // Irreversible for this nalog — the operator who has read the category does
+    // not unread it, so the control must not be presented as a toggle.
+    expect(screen.getByText(/ne može da se povuče/i)).toBeInTheDocument();
+    // …and logged, which is the čl. 48 half req. 28 sends to SW-10.
+    expect(screen.getByText(/evidenciju pristupa/i)).toBeInTheDocument();
+  });
+
+  it("offers no re-mask affordance, because there is no re-mask verb", async () => {
+    render(<SupportApprovalPanel services={services(session())} currentUser={vlasnik} />);
+    await screen.findByRole("button", { name: /otkrij razlog odsustva/i });
+
+    expect(screen.queryAllByRole("button", { name: PONOVO_SAKRIJ })).toHaveLength(0);
+  });
+
+  it("reveals through the port and then stops offering the control", async () => {
+    const posServices = services(session());
+    const reveal = vi
+      .spyOn(posServices.privacy, "revealAbsenceReason")
+      .mockResolvedValue(
+        session({ odsustvoOtkrivenoAt: "2026-08-01T09:20:00Z" }),
+      );
+    const user = userEvent.setup();
+
+    render(<SupportApprovalPanel services={posServices} currentUser={vlasnik} />);
+    await user.click(
+      await screen.findByRole("button", { name: /otkrij razlog odsustva/i }),
+    );
+
+    await waitFor(() => {
+      expect(reveal).toHaveBeenCalled();
+    });
+    // One disclosure per nalog: the button is gone rather than repeatable, and
+    // the stamp is on screen so the vlasnik can see what was done and when.
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: /otkrij razlog odsustva/i }),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByText(/razlog odsustva je otkriven/i)).toBeInTheDocument();
+    expect(screen.queryAllByRole("button", { name: PONOVO_SAKRIJ })).toHaveLength(0);
+  });
+
+  it("shows the refusal rather than claiming a disclosure that did not happen", async () => {
+    const posServices = services(session());
+    vi.spyOn(posServices.privacy, "revealAbsenceReason").mockRejectedValue({
+      code: "support_bez_naloga_za_otkrivanje",
+      message:
+        "Nema važećeg naloga za pristup tehničke podrške, pa nema šta da se otkrije.",
+    });
+    const user = userEvent.setup();
+
+    render(<SupportApprovalPanel services={posServices} currentUser={vlasnik} />);
+    await user.click(
+      await screen.findByRole("button", { name: /otkrij razlog odsustva/i }),
+    );
+
+    expect(
+      await screen.findByText(/nema važećeg naloga za pristup tehničke podrške/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/razlog odsustva je otkriven/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says nothing about a live mask when there is no nalog to unmask", async () => {
+    render(<SupportApprovalPanel services={services()} currentUser={vlasnik} />);
+    await screen.findByText(/nema izdatog naloga za pristup tehničke podrške/i);
+
+    expect(
+      screen.queryByRole("button", { name: /otkrij razlog odsustva/i }),
+    ).not.toBeInTheDocument();
   });
 });

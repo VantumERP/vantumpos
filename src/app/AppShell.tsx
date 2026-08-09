@@ -510,7 +510,7 @@ function renderModule({
   }
 
   if (activeId === "privatnost") {
-    return <PrivacyModule services={services} />;
+    return <PrivacyModule services={services} currentUser={session.user} />;
   }
 
   if (activeId === "campaigns") {

@@ -1619,6 +1619,25 @@ export interface WorkTimeMonth {
   mesec: number;
   zatvoren: boolean;
   closedAt: string | null;
+  /**
+   * Req. 28: this read withheld `kategorijaOdsustva` on every entry, because a
+   * ZZPL čl. 46 nalog za daljinsku podršku is live and the shop has not
+   * disclosed the category for that nalog.
+   *
+   * A property of **the read**, stated by the read that performed it — so a
+   * surface can tell „nema odsustva“ from „razlog je skriven“ without asking a
+   * second command and hoping the two answers were about the same instant. That
+   * is exactly what the cell may not re-derive from a `null` category: a `null`
+   * has two causes and the flag has one.
+   *
+   * **It says the CATEGORY was withheld, and no more.** Every category value is
+   * its ZEOR čl. 24 tač. 1 bucket minus `_minuta`, and the buckets are on this
+   * payload whatever the flag says, so a masked read still carries
+   * `sprecenostRfzoMinuta` on the row whose `kategorijaOdsustva` is `null`. The
+   * grid draws v) and none of the nine, which is why the rendered register is
+   * covered and the wire is not.
+   */
+  razlogOdsustvaSkriven: boolean;
   entries: WorkTimeEntryView[];
   /** Live rows only. */
   ukupno: WorkTimeMinutes;
@@ -1760,6 +1779,17 @@ export interface SupportSession {
   startedAt: string | null;
   endedAt: string | null;
   revokedAt: string | null;
+  /**
+   * Req. 28: when the shop disclosed the absence category **for this nalog**,
+   * and `null` while it never did — masked is the default.
+   *
+   * A stamp and not a boolean, because the disclosure is irreversible: the
+   * support engineer who has read `kategorijaOdsustva` does not unread it, and a
+   * flag that could go back to `false` would let a surface say otherwise. So
+   * there is no re-mask verb on `PrivacyService` and no control that offers one;
+   * the disclosure ends when the nalog does.
+   */
+  odsustvoOtkrivenoAt: string | null;
 }
 
 /**
