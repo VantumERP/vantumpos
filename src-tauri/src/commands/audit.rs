@@ -129,6 +129,13 @@ pub fn support_active_session(
 }
 
 #[tauri::command]
+pub fn support_reveal_absence_reason(
+    state: State<'_, AppState>,
+) -> Result<SupportSession, CommandError> {
+    reveal_absence_reason(state.inner(), &utc_now()?).map_err(Into::into)
+}
+
+#[tauri::command]
 pub fn audit_search(
     state: State<'_, AppState>,
     query: AuditQuery,
@@ -337,6 +344,86 @@ pub fn active_session(state: &AppState, now: &str) -> Result<Option<SupportSessi
         Some(session) if is_active(&session, now)? => Ok(Some(session)),
         _ => Ok(None),
     }
+}
+
+/// The shop reveals the absence reason to the obrađivač — for **this** nalog,
+/// once, and irreversibly (req. 28).
+///
+/// Admin-gated inside the domain function rather than in the `#[tauri::command]`
+/// wrapper, like [`grant_access`] and for the same reason: čl. 46 puts the nalog
+/// in the rukovalac's hands, what may be seen under it is the same decision, and
+/// no in-process caller may route around the gate.
+///
+/// **Refused without a live nalog.** Req. 28 puts the unmask „for that session“,
+/// so with no session there is nothing for it to hold for. A stamp with no nalog
+/// behind it would be a record of a disclosure that did not happen — and the next
+/// nalog, issued for something else entirely, would inherit it.
+///
+/// **Idempotent.** A second call returns the session unchanged instead of
+/// re-stamping: the operator has been able to read the column since the first
+/// one, so the log carries one disclosure per nalog and the instant it carries is
+/// the EARLIEST — the moment the column first became visible, which is what a
+/// later reader needs. There is no re-mask verb to pair with it, because an
+/// operator who has read `kategorija_odsustva` does not unread it.
+///
+/// **The line records THAT the reason was revealed and under which nalog, and
+/// nothing else.** [`AuditDraft`] has no field a value payload could sit in, so
+/// the only free-form field is `object_id` and it holds the session id: no
+/// category, no employee, no month. The čl. 5 st. 1 t. 3 half of
+/// [`reject_forbidden_content`] therefore has nothing to refuse here, and its
+/// čl. 48 st. 2 half is satisfied truthfully rather than fed — this really is an
+/// `otkrivanje`, its razlog really is tehnička podrška and its primalac really is
+/// the obrađivač class, the same three facts [`request_access`] records when the
+/// support side enters. A log that recorded the secret it exists to protect
+/// would be worse than no log at all.
+///
+/// The stamp and its line commit together: [`append_audit_event`] on this
+/// transaction, not [`record_audit`], which owns its own.
+pub fn reveal_absence_reason(state: &AppState, now: &str) -> Result<SupportSession, AppError> {
+    let acting = crate::commands::auth::require_admin(state)?;
+
+    let mut connection = state.db().open()?;
+    let tx = connection.transaction()?;
+
+    let live = match newest_open_session(&tx)? {
+        Some(session) if is_active(&session, now)? => session,
+        _ => {
+            return Err(AppError::business(
+                "support_bez_naloga_za_otkrivanje",
+                "Razlog odsustva može da se otkrije samo dok važi nalog za pristup \
+                 tehničke podrške. Bez naloga nema kome da se otkrije (ZZPL čl. 46).",
+            ))
+        }
+    };
+
+    if live.odsustvo_otkriveno_at.is_some() {
+        return Ok(live);
+    }
+
+    tx.execute(
+        "UPDATE support_sessions SET odsustvo_otkriveno_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![now, live.id],
+    )?;
+
+    append_audit_event(
+        &tx,
+        &AuditDraft {
+            at: now.to_string(),
+            // The vlasnik decided this, unlike the entry line, whose actor is the
+            // support engineer and who holds no account on this till.
+            actor_user_id: Some(acting.id),
+            action: AuditAction::Otkrivanje,
+            object_type: AuditObjectType::SupportSession,
+            object_id: live.id.to_string(),
+            reason_code: Some(AuditReason::TehnickaPodrska),
+            recipient: Some(AuditRecipient::ObradjivacTehnickePodrske),
+            support_session_id: Some(live.id),
+        },
+    )?;
+
+    let session = load_session(&tx, live.id)?;
+    tx.commit()?;
+    Ok(session)
 }
 
 /// Appends one row to `audit_events`, chained onto the last.
@@ -1258,6 +1345,80 @@ mod tests {
         rows
     }
 
+    /// The v23 stamp read straight off the table, without going through
+    /// [`active_session`] — an expired or revoked nalog no longer reads back
+    /// there, and „the refusal left no stamp behind“ is exactly the question
+    /// those cases raise.
+    fn unmask_stamp(state: &AppState, session_id: i64) -> Option<String> {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row(
+                "SELECT odsustvo_otkriveno_at FROM support_sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .expect("the nalog should read back")
+    }
+
+    /// Every TEXTUAL column of the newest `audit_events` row, joined — the
+    /// payload the čl. 5 st. 1 t. 3 exclusion list governs.
+    ///
+    /// `prev_hash` and `hash` are deliberately left out. They are a SHA-256
+    /// digest OF these very fields, so a scan of them for a plaintext category
+    /// would pass for the wrong reason: it would prove that SHA-256 is not the
+    /// identity function, not that the line carries no secret.
+    fn newest_audit_row_payload(state: &AppState) -> String {
+        state
+            .db()
+            .open()
+            .expect("database should open")
+            .query_row(
+                "SELECT at || '|' || action || '|' || object_type || '|' || object_id
+                        || '|' || COALESCE(reason_code, '')
+                        || '|' || COALESCE(recipient, '')
+                   FROM audit_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the newest logged row should read back")
+    }
+
+    /// An employee with an absence on file — the čl. 17-adjacent data req. 28
+    /// masks — so the unmask tests run against a database that actually holds
+    /// the secret. Against an empty one „the line carries no category“ would be
+    /// true for want of any category to carry.
+    ///
+    /// The absence sits in **July** while the unmask happens in **August**, on
+    /// purpose: čl. 48 st. 2 obliges the line to carry the instant of the
+    /// disclosure, so the one date it legitimately holds is an August one, and
+    /// „the line names no month of the register“ can be asserted against a month
+    /// the timestamp is unable to supply by accident.
+    fn seed_employee_with_an_absence(state: &AppState) -> i64 {
+        let connection = state.db().open().expect("database should open");
+        connection
+            .execute(
+                "INSERT INTO users (username, display_name, role, active, created_at, updated_at)
+                 VALUES ('milica', 'Milica Milić', 'cashier', 1,
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("the employee should insert");
+        let employee_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO work_time_entries
+                     (user_id, dan, kategorija_odsustva, sprecenost_rfzo_minuta,
+                      ukupno_neizvrseni_minuta, created_at, updated_at)
+                 VALUES (?1, '2026-07-14', 'sprecenost_rfzo', 480, 480,
+                         '2026-07-14T18:00:00Z', '2026-07-14T18:00:00Z')",
+                params![employee_id],
+            )
+            .expect("the absence should insert");
+        employee_id
+    }
+
     /// Req. 2: „the owner grants access with an explicit scope and duration“.
     /// All four facts — who, when, what, until when — are the nalog.
     #[test]
@@ -1335,6 +1496,287 @@ mod tests {
                 );
             },
         );
+    }
+
+    /// Req. 28 puts the unmask „for that session“. With no session there is
+    /// nothing for it to hold for: čl. 46 makes the nalog the only thing that
+    /// authorises the obrađivač at all, so a stamp with no nalog behind it would
+    /// put a disclosure on file that did not happen — and the next nalog, issued
+    /// for something else entirely, would inherit it.
+    ///
+    /// A spent nalog is refused on the same footing. The window has closed; the
+    /// question of what may be shown inside it no longer arises.
+    #[test]
+    fn the_absence_reason_cannot_be_unmasked_without_a_live_nalog() {
+        with_state(
+            "the_absence_reason_cannot_be_unmasked_without_a_live_nalog",
+            |state| {
+                sign_in_admin(state);
+                seed_employee_with_an_absence(state);
+
+                let error = reveal_absence_reason(state, "2026-08-01T09:00:00Z")
+                    .expect_err("there is no nalog for the disclosure to hold for");
+                assert_eq!(error.code(), "support_bez_naloga_za_otkrivanje");
+                assert!(
+                    audit_rows(state).is_empty(),
+                    "a refused unmask must write no line — the log records what happened"
+                );
+
+                let session = grant_access(state, grant_request(), "2026-08-01T09:00:00Z")
+                    .expect("nalog issues");
+                let expired = reveal_absence_reason(state, "2026-08-01T11:00:00Z")
+                    .expect_err("a spent nalog authorises no disclosure");
+                assert_eq!(expired.code(), "support_bez_naloga_za_otkrivanje");
+
+                assert_eq!(
+                    audit_rows(state).len(),
+                    1,
+                    "only the grant should have been logged"
+                );
+                assert_eq!(
+                    unmask_stamp(state, session.id),
+                    None,
+                    "a refused unmask must leave the nalog masked"
+                );
+            },
+        );
+    }
+
+    /// Req. 28's „log the unmask“. One stamp, one line, both in one transaction:
+    /// a stamp without its line is an undocumented disclosure and a line without
+    /// its stamp is a record of one that never took effect.
+    ///
+    /// The line is an `otkrivanje` to the class „obrađivač tehničke podrške“ for
+    /// the razlog „tehnička podrška“, exactly as the entry under the same nalog
+    /// is, because that is what is happening: more of the shop's data is being
+    /// made available to that third party. It also means čl. 48 st. 2's razlog
+    /// and identitet primaoca are answered truthfully rather than filled in to
+    /// get past [`reject_forbidden_content`].
+    #[test]
+    fn unmasking_stamps_the_nalog_and_logs_exactly_one_line() {
+        with_state(
+            "unmasking_stamps_the_nalog_and_logs_exactly_one_line",
+            |state| {
+                let admin_id = sign_in_admin(state);
+                seed_employee_with_an_absence(state);
+
+                let session = grant_access(state, grant_request(), "2026-08-01T09:00:00Z")
+                    .expect("nalog issues");
+                request_access(state, "2026-08-01T09:10:00Z").expect("the support side enters");
+                assert_eq!(
+                    audit_rows(state).len(),
+                    2,
+                    "the grant and the entry, before anything is unmasked"
+                );
+
+                let revealed = reveal_absence_reason(state, "2026-08-01T09:20:00Z")
+                    .expect("the vlasnik may reveal the reason under a live nalog");
+
+                assert_eq!(
+                    revealed.odsustvo_otkriveno_at.as_deref(),
+                    Some("2026-08-01T09:20:00Z"),
+                    "the returned nalog must carry the stamp the caller's `now` supplied"
+                );
+                assert_eq!(
+                    unmask_stamp(state, session.id).as_deref(),
+                    Some("2026-08-01T09:20:00Z"),
+                    "and the stamp must be on the table, not only in the reply"
+                );
+
+                let rows = audit_rows(state);
+                assert_eq!(rows.len(), 3, "exactly one line for the unmask");
+                let (
+                    action,
+                    object_type,
+                    object_id,
+                    reason,
+                    recipient,
+                    actor,
+                    logged_session,
+                    _,
+                    _,
+                ) = rows.last().expect("the unmask line").clone();
+                assert_eq!(action, "otkrivanje");
+                assert_eq!(object_type, "support_session");
+                assert_eq!(
+                    object_id,
+                    session.id.to_string(),
+                    "the object is the nalog the disclosure was made under"
+                );
+                assert_eq!(reason.as_deref(), Some("tehnicka_podrska"));
+                assert_eq!(
+                    recipient.as_deref(),
+                    Some("obradjivac_tehnicke_podrske"),
+                    "čl. 48 st. 2's identitet primaoca, as a class"
+                );
+                assert_eq!(
+                    actor,
+                    Some(admin_id),
+                    "the vlasnik decided this, and the log must say so"
+                );
+                assert_eq!(logged_session, Some(session.id));
+
+                let connection = state.db().open().expect("database should open");
+                assert_eq!(
+                    chain_status(&connection)
+                        .expect("the chain should walk")
+                        .verdict,
+                    ChainVerdict::Intact,
+                    "the unmask line must chain onto the log like any other"
+                );
+            },
+        );
+    }
+
+    /// **The line must not carry the secret it exists to protect.** A čl. 48
+    /// log that recorded „Milica Milić, jul 2026, sprečenost RFZO“ would put the
+    /// čl. 17-adjacent value into a second table — one whose whole design (req.
+    /// 4) is to hold no personal data — and would do it in the name of
+    /// protecting that value.
+    ///
+    /// [`AuditDraft`] has no field a value payload could sit in, so the only
+    /// free-form field on the line is `object_id`, and it holds the session id.
+    /// This test pins that: every one of the ten v17 `kategorija_odsustva`
+    /// values, the employee's name and the month of the register they belong to
+    /// are all absent from the row's payload, and every id column on the line is
+    /// checked by value rather than by substring — a digit scan would be
+    /// meaningless against a row that legitimately holds small integers.
+    #[test]
+    fn the_unmask_line_carries_no_category_no_name_and_no_month() {
+        with_state(
+            "the_unmask_line_carries_no_category_no_name_and_no_month",
+            |state| {
+                let admin_id = sign_in_admin(state);
+                let employee_id = seed_employee_with_an_absence(state);
+
+                let session = grant_access(state, grant_request(), "2026-08-01T09:00:00Z")
+                    .expect("nalog issues");
+                request_access(state, "2026-08-01T09:10:00Z").expect("the support side enters");
+                reveal_absence_reason(state, "2026-08-01T09:20:00Z")
+                    .expect("the reason is revealed");
+
+                let payload = newest_audit_row_payload(state);
+
+                for kategorija in crate::commands::worktime::KATEGORIJE_ODSUSTVA {
+                    assert!(
+                        !payload.contains(kategorija),
+                        "the unmask line must not name „{kategorija}“ — it records THAT the \
+                     reason was revealed, never which reason (ZZPL čl. 5 st. 1 t. 3); \
+                     line was: {payload}"
+                    );
+                }
+                assert!(
+                    !payload.contains("Milica"),
+                    "no employee name may reach audit_events; line was: {payload}"
+                );
+                assert!(
+                    !payload.contains("Milić"),
+                    "no employee name may reach audit_events; line was: {payload}"
+                );
+                assert!(
+                    !payload.contains("2026-07"),
+                    "the line must not name the month of the register whose reasons were \
+                 revealed — the only date it carries is the čl. 48 st. 2 instant of the \
+                 disclosure itself; line was: {payload}"
+                );
+                assert!(
+                    payload.contains("2026-08-01T09:20:00Z"),
+                    "and that instant must be there: a disclosure with no when is not a \
+                 čl. 48 st. 2 record; line was: {payload}"
+                );
+
+                let (_, _, object_id, _, _, actor, logged_session, _, _) =
+                    audit_rows(state).last().expect("the unmask line").clone();
+                assert_ne!(
+                    object_id,
+                    employee_id.to_string(),
+                    "the object is the nalog, never the person whose reason was revealed"
+                );
+                assert_eq!(object_id, session.id.to_string());
+                assert_eq!(
+                    actor,
+                    Some(admin_id),
+                    "the actor is the vlasnik who decided, not the employee"
+                );
+                assert_ne!(actor, Some(employee_id));
+                assert_eq!(logged_session, Some(session.id));
+            },
+        );
+    }
+
+    /// A second unmask under the same nalog is not a second disclosure. The
+    /// operator has been able to read the column since the first one, so
+    /// re-stamping would move the record of „from when“ forward over a window
+    /// that was already open, and a second line would report a disclosure that
+    /// changed nothing.
+    ///
+    /// The earliest instant is the one worth keeping: it is the moment the
+    /// column first became visible, which is what a later reader needs.
+    #[test]
+    fn a_second_unmask_neither_re_stamps_nor_writes_a_second_line() {
+        with_state(
+            "a_second_unmask_neither_re_stamps_nor_writes_a_second_line",
+            |state| {
+                sign_in_admin(state);
+                seed_employee_with_an_absence(state);
+
+                let session = grant_access(state, grant_request(), "2026-08-01T09:00:00Z")
+                    .expect("nalog issues");
+                reveal_absence_reason(state, "2026-08-01T09:20:00Z").expect("first unmask");
+                let after_first = audit_rows(state).len();
+
+                let again = reveal_absence_reason(state, "2026-08-01T09:40:00Z")
+                    .expect("a second unmask is the same disclosure, not an error");
+
+                assert_eq!(
+                    again.odsustvo_otkriveno_at.as_deref(),
+                    Some("2026-08-01T09:20:00Z"),
+                    "the earliest instant survives — the column was visible from then"
+                );
+                assert_eq!(
+                    unmask_stamp(state, session.id).as_deref(),
+                    Some("2026-08-01T09:20:00Z"),
+                    "and nothing on the table moved"
+                );
+                assert_eq!(
+                    audit_rows(state).len(),
+                    after_first,
+                    "one disclosure per nalog, one line per disclosure"
+                );
+            },
+        );
+    }
+
+    /// Čl. 46 puts the nalog, and therefore what may be shown under it, in the
+    /// rukovalac's hands. A kasir revealing a colleague's absence reason to a
+    /// third party is the failure req. 28 exists to prevent, and the gate sits
+    /// inside the domain function so no in-process caller can route around it.
+    #[test]
+    fn a_cashier_cannot_unmask_the_absence_reason() {
+        with_state("a_cashier_cannot_unmask_the_absence_reason", |state| {
+            sign_in_admin(state);
+            seed_employee_with_an_absence(state);
+            let session =
+                grant_access(state, grant_request(), "2026-08-01T09:00:00Z").expect("nalog issues");
+            request_access(state, "2026-08-01T09:10:00Z").expect("the support side enters");
+            let before = audit_rows(state).len();
+
+            sign_in_cashier(state);
+            let error = reveal_absence_reason(state, "2026-08-01T09:20:00Z")
+                .expect_err("a kasir must not be able to reveal the reason");
+
+            assert_eq!(error.code(), "forbidden");
+            assert_eq!(
+                unmask_stamp(state, session.id),
+                None,
+                "a refused unmask must leave the nalog masked"
+            );
+            assert_eq!(
+                audit_rows(state).len(),
+                before,
+                "and must write no line: nothing was disclosed"
+            );
+        });
     }
 
     /// Čl. 46 puts the nalog in the rukovalac's hands. A kasir authorising a
@@ -1914,6 +2356,12 @@ mod tests {
     ///
     /// The needles are composed at run time so that this assertion cannot match
     /// its own source text.
+    ///
+    /// `support_reveal_absence_reason` joins the list without loosening the
+    /// claim: it APPENDS one čl. 48 line like every other write, and the row it
+    /// updates is the nalog on `support_sessions`, never a logged one. The list
+    /// is exact and ordered on purpose — a new command here has to be argued for
+    /// against this comment rather than slipped in.
     #[test]
     fn no_audit_command_can_edit_or_delete_a_logged_row() {
         const LIB_RS: &str = include_str!("../lib.rs");
@@ -1931,10 +2379,21 @@ mod tests {
                 "support_request_access",
                 "support_end_session",
                 "support_active_session",
+                "support_reveal_absence_reason",
                 "audit_search",
                 "audit_export_csv",
             ],
             "the log exposes a read path and nothing else"
+        );
+        assert_eq!(
+            registered
+                .iter()
+                .filter(|name| name.contains("absence_reason"))
+                .count(),
+            1,
+            "req. 28 gets ONE verb over the absence reason and deliberately no second: \
+             a disclosure already made cannot be undone, so a re-mask command would let \
+             the surface above it claim an operator unsaw the column"
         );
 
         // The shipped half of the module only. The tests below deliberately

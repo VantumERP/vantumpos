@@ -306,6 +306,11 @@ pub fn run() {
             commands::audit::support_request_access,
             commands::audit::support_end_session,
             commands::audit::support_active_session,
+            // Req. 28. There is no paired re-mask command, and there is not
+            // meant to be: the stamp records a disclosure that cannot be
+            // undone, and a button that claimed otherwise would be the false
+            // statement čl. 46 is least able to afford.
+            commands::audit::support_reveal_absence_reason,
             // Req. 7: a read path and nothing else. There is deliberately no
             // command here that edits or removes a logged row — an
             // owner-editable audit log proves nothing, and proving something is

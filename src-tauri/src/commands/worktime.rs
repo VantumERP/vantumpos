@@ -61,7 +61,12 @@ const ADVISORY_TAG: &str = "izračunato radi provere usklađenosti";
 /// vocabularies together. The list exists only so an unknown category fails as a
 /// clean validation error here instead of as a raw `CHECK` violation from SQLite,
 /// and so no operator string is ever interpolated into SQL unvalidated.
-const KATEGORIJE_ODSUSTVA: [&str; 10] = [
+///
+/// Visible crate-wide because req. 28 makes this list the thing that must never
+/// reach `audit_events`: `commands::audit`'s unmask test asserts every value here
+/// is absent from the line it writes, and a second hand-copied list in that test
+/// would silently stop covering an eleventh category the day one is added.
+pub(crate) const KATEGORIJE_ODSUSTVA: [&str; 10] = [
     "godisnji_odmor",
     "praznik_odmor",
     "odsustvo_uz_naknadu",
