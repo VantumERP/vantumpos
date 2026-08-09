@@ -4212,6 +4212,80 @@ VALUES (57, 900, 'bank_deposit', 250000, 'Polog pazara', 'izvod-77', 900,
         remove_test_database(&path);
     }
 
+    /// **The `CHECK` and [`crate::commands::worktime::KATEGORIJE_ODSUSTVA`] are one
+    /// vocabulary, and until this test nothing said so.** v17 is the storage gate —
+    /// SQLite refuses an eleventh category outright; the constant is the validation
+    /// gate, so `book_absence` turns that refusal into a clean error instead of a raw
+    /// `CHECK` violation, and no operator string ever reaches SQL unvalidated. Two
+    /// declarations of the ZEOR čl. 24 tač. 1 buckets, in two languages, with no
+    /// compiler able to see that they must agree.
+    ///
+    /// Neither existing test closes the gap, because each reads exactly one side.
+    /// `migration_v17_derives_every_absence_bucket_from_its_category` parses the
+    /// schema and never looks at the constant. `commands::audit`'s
+    /// `the_unmask_line_carries_no_category_no_name_and_no_month` iterates the
+    /// constant and never looks at the schema. So an eleventh category added to the
+    /// schema alone leaves both green while the req. 28 leak test silently stops
+    /// covering it — and that test is the one holding the čl. 48 unmask line to
+    /// carrying no čl. 17 posebna vrsta value. Drift there is not a stale list; it
+    /// is a category that may be written into `audit_events` with every test
+    /// passing. Drift the other way is milder but still wrong: a category the
+    /// constant admits and the schema rejects turns a validation error into a
+    /// `CHECK` violation surfacing from the driver.
+    ///
+    /// Count **and** set, and deliberately not order. Order inside a `CHECK … IN`
+    /// list carries no meaning, so pinning it would fail on a harmless reshuffle;
+    /// but set equality alone would swallow a literal duplicated on one side, which
+    /// is exactly how a hand-edited ten-line list drifts. Both assertions together
+    /// fail in either direction.
+    #[test]
+    fn migration_v17_check_and_kategorije_odsustva_are_the_same_ten_values() {
+        use std::collections::BTreeSet;
+
+        let path = test_database_path("migration_v17_kategorije_pin");
+        {
+            let db = Db::new(&path).expect("database should initialize");
+            let conn = db.open().expect("database should open");
+
+            let schema: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'work_time_entries'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the work_time_entries schema should be readable");
+
+            let in_schema = closed_enum_values(&schema, "kategorija_odsustva");
+            let in_code = crate::commands::worktime::KATEGORIJE_ODSUSTVA;
+
+            // Counted over the raw lists, before the sets collapse any duplicate.
+            assert_eq!(
+                in_schema.len(),
+                in_code.len(),
+                "v17 admits {} kategorija_odsustva values and KATEGORIJE_ODSUSTVA lists {}; \
+                 schema was {in_schema:?}, constant was {in_code:?}",
+                in_schema.len(),
+                in_code.len()
+            );
+
+            let schema_set: BTreeSet<&str> = in_schema.iter().map(String::as_str).collect();
+            let code_set: BTreeSet<&str> = in_code.iter().copied().collect();
+            let only_in_schema: Vec<&str> = schema_set.difference(&code_set).copied().collect();
+            let only_in_code: Vec<&str> = code_set.difference(&schema_set).copied().collect();
+            assert_eq!(
+                schema_set, code_set,
+                "the v17 CHECK and KATEGORIJE_ODSUSTVA must name the same absence \
+                 categories. Only in the schema: {only_in_schema:?} — book_absence would \
+                 reject these before SQLite ever saw them. Only in the constant: \
+                 {only_in_code:?} — these reach SQLite and come back as a raw CHECK \
+                 violation. Either way the req. 28 unmask-leak test in commands::audit \
+                 iterates the constant, so a category missing from it is a category that \
+                 test no longer proves absent from the čl. 48 line."
+            );
+        }
+        remove_test_database(&path);
+    }
+
     #[test]
     fn migration_v17_preserves_pre_existing_users() {
         let path = test_database_path("migration_v17_survival");
