@@ -746,19 +746,20 @@ mod tests {
             let id = {
                 let mut connection = state.db().open().expect("database should open");
                 let tx = connection.transaction().expect("tx");
-                let id = crate::kep_kalkulacija::create_kalkulacija(
+                let created = crate::kep_kalkulacija::create_kalkulacija(
                     &tx,
                     1,
                     50_000,
                     10_000,
                     Some("kalkulacija"),
                     Some(7),
+                    None, // no supplier isprava in this export fixture
                     1,
                     "2026-07-04T09:00:00Z",
                 )
                 .expect("create kalkulacija");
                 tx.commit().expect("commit");
-                id
+                created.id
             };
 
             let exported = kep_export_kalkulacija(app.state::<AppState>(), id)

@@ -11,6 +11,10 @@ mod cl47;
 mod clock;
 mod commands;
 mod db;
+/// Dobavljači i primljene isprave (ZoT čl. 29 st. 1). Records the supplier
+/// document's identifying data and the operator's assertion that it is held —
+/// it holds no document.
+mod dobavljaci;
 /// Guards over the compliance prose in `docs/`. Test-only — the documents are
 /// embedded in the test binary and never in the shipped app.
 #[cfg(test)]
@@ -166,6 +170,11 @@ pub fn run() {
             commands::inventory::inventory_correct,
             commands::inventory::inventory_write_off,
             commands::inventory::inventory_mark_declaration_checked,
+            commands::dobavljaci::dobavljaci_list,
+            commands::dobavljaci::dobavljac_save,
+            commands::dobavljaci::isprave_list,
+            commands::dobavljaci::isprava_create,
+            commands::dobavljaci::isprava_confirm_possession,
             commands::receipts::receipts_search,
             commands::receipts::receipts_get,
             commands::receipts::receipts_void,

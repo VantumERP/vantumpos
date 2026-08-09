@@ -114,6 +114,39 @@ pub fn declaration_missing(profile: &ShopProfile) -> LegalNotice {
     }
 }
 
+/// ZoT čl. 68 st. 1 tač. 6 — not possessing the isprave that accompany the goods.
+///
+/// Distinct from the two deklaracija notices: those concern the čl. 34 marking on
+/// the goods, this concerns the **supplier's isprava o nabavci** the trgovac must
+/// hold under čl. 29. Raised on a goods receipt booked with no isprava attached —
+/// advisory only, never a block, because refusing the receipt would leave the
+/// goods unbooked, which is the heavier čl. 68 st. 1 tač. 7 tier.
+///
+/// The summary states what the application does *and does not* do: it records the
+/// document's identifying data and the operator's assertion that it is held, and
+/// it holds no document. A notice that implied otherwise would be a false clear on
+/// a duty that is precisely about having the paper.
+pub fn isprava_missing(profile: &ShopProfile) -> LegalNotice {
+    LegalNotice {
+        summary: "Prijem robe je evidentiran bez isprave dobavljača. Trgovac je dužan da \
+                  poseduje ispravu o nabavci robe (otpremnicu, fakturu i sl.). Aplikacija \
+                  evidentira podatke o ispravi i vašu izjavu da je posedujete — samu \
+                  ispravu ne čuva."
+            .to_string(),
+        penalty: tiered(
+            profile,
+            "Prekršaj: novčana kazna od 50.000 do 500.000 dinara (čl. 68 st. 3), \
+             uz moguću zaštitnu meru zabrane vršenja delatnosti od šest meseci do dve godine \
+             (čl. 68 st. 6).",
+            "Prekršaj: novčana kazna od 500.000 do 2.000.000 dinara (čl. 68 st. 1), \
+             uz kaznu za odgovorno lice od 50.000 do 150.000 dinara (čl. 68 st. 2) i moguću \
+             zaštitnu meru zabrane vršenja delatnosti (čl. 68 st. 6).",
+        ),
+        citation: "Zakon o trgovini, čl. 29 st. 1, čl. 68 st. 1 tač. 6.".to_string(),
+        is_legal_duty: true,
+    }
+}
+
 /// ZoT čl. 67 st. 1 tač. 6 — selling with a defective declaration. Fixed, lower.
 pub fn declaration_defective(profile: &ShopProfile) -> LegalNotice {
     LegalNotice {
@@ -505,6 +538,7 @@ mod tests {
             cash_deposit_duty(p),
             declaration_missing(p),
             declaration_defective(p),
+            isprava_missing(p),
             reklamacija_breach(p, ReklamacijaRegime::Old),
             reklamacija_breach(p, ReklamacijaRegime::New),
             lpfr_required(p),
@@ -533,7 +567,7 @@ mod tests {
 
         assert_eq!(
             enumerated.len(),
-            13,
+            14,
             "adding a notice function means adding it to all_notices, to the \
              list below, AND bumping this count — an omission from both lists \
              is otherwise invisible. Regime-versioned copy counts once per \
@@ -545,6 +579,7 @@ mod tests {
             cash_deposit_duty(&p),
             declaration_missing(&p),
             declaration_defective(&p),
+            isprava_missing(&p),
             reklamacija_breach(&p, ReklamacijaRegime::Old),
             reklamacija_breach(&p, ReklamacijaRegime::New),
             lpfr_required(&p),

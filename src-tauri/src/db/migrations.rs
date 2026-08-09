@@ -1477,6 +1477,87 @@ ALTER TABLE support_sessions ADD COLUMN odsustvo_otkriveno_at TEXT
     CHECK (odsustvo_otkriveno_at IS NULL OR odsustvo_otkriveno_at <> '');
 "#,
     },
+    Migration {
+        version: 24,
+        name: "dobavljaci_and_primljene_isprave",
+        sql: r#"
+-- ZoT čl. 29 st. 1 is a duty to POSSESS the supplier's isprava o nabavci. Before
+-- v24 no dobavljač entity existed anywhere in the crate: `kalkulacije` (v13) is
+-- the shop's OWN price document and snapshots `settings.company`, i.e. the
+-- trgovac's identity, so the register's row 16 named five limbs with no schema
+-- behind them at all.
+--
+-- What these two tables do NOT do is hold the document. They record its
+-- identifying data and the operator's own assertion that the paper is filed —
+-- the v16 `documented_per_pravilnik` posture. `poseduje_ispravu` therefore
+-- DEFAULTS TO 0: an isprava nobody has asserted stays visibly unasserted, because
+-- a presumption here would hand the owner a false clear on the one duty that is
+-- about physically having the thing.
+CREATE TABLE dobavljaci (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    poslovno_ime TEXT NOT NULL,
+    adresa TEXT NOT NULL DEFAULT '',
+    pib TEXT NOT NULL DEFAULT '',
+    -- One column spanning matični broj and BPG. KEP-VERIFIED-RULES §8 t. 5 records
+    -- that the čl. 29 st. 1 label list was read from neobilten and is NOT pinned
+    -- against an official consolidated text, so the datum is stored under a name
+    -- that survives either reading and nothing in this crate asserts the label is
+    -- verified. If a prečišćen text later contradicts it, only presentation moves.
+    maticni_broj_bpg TEXT NOT NULL DEFAULT '',
+    -- PEP čl. 15 st. 4 puts the dobavljač's poslovno ime in kolona 3, and for a
+    -- natural-person supplier ime i prebivalište instead. That branch is verbatim
+    -- in the Pravilnik, so it is encodable; `adresa` serves as prebivalište.
+    fizicko_lice INTEGER NOT NULL DEFAULT 0 CHECK (fizicko_lice IN (0, 1)),
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_dobavljaci_ime ON dobavljaci(poslovno_ime);
+
+CREATE TABLE primljene_isprave (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dobavljac_id INTEGER NOT NULL REFERENCES dobavljaci(id),
+    -- Identity SNAPSHOTTED at creation, exactly as create_kalkulacija copies
+    -- settings.company rather than joining it. A kalkulacija reprinted next year
+    -- must render what it rendered when issued; a live join would let an edit to
+    -- the dobavljaci row silently rewrite documents already issued, which is the
+    -- retroactive mutation PEP čl. 14 st. 1 exists to prevent.
+    dobavljac_poslovno_ime TEXT NOT NULL,
+    dobavljac_adresa TEXT NOT NULL DEFAULT '',
+    dobavljac_pib TEXT NOT NULL DEFAULT '',
+    dobavljac_maticni_broj_bpg TEXT NOT NULL DEFAULT '',
+    dobavljac_fizicko_lice INTEGER NOT NULL DEFAULT 0
+        CHECK (dobavljac_fizicko_lice IN (0, 1)),
+    -- Deliberately NO CHECK constraint. KEP-VERIFIED-RULES §3 lists the valid
+    -- source documents verbatim and closes with „ili druga odgovarajuća isprava
+    -- za robu“. A closed SQL enum would convert that open clause into a refusal of
+    -- a document the Pravilnik allows. The six named kinds are offered by the UI
+    -- and validated in Rust against an enum with an open `Druga` variant; the
+    -- schema itself never refuses a lawful isprava.
+    vrsta TEXT NOT NULL,
+    broj TEXT NOT NULL,
+    -- The document's OWN date (PEP čl. 15 st. 3 kolona 3), never the booking date
+    -- of kolona 2. „These are two different dates — never conflate them.“
+    datum TEXT NOT NULL,
+    poseduje_ispravu INTEGER NOT NULL DEFAULT 0 CHECK (poseduje_ispravu IN (0, 1)),
+    poseduje_potvrdio INTEGER REFERENCES users(id),
+    poseduje_potvrdjeno_at TEXT,
+    napomena TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_primljene_isprave_dobavljac ON primljene_isprave(dobavljac_id, datum);
+CREATE UNIQUE INDEX idx_primljene_isprave_broj
+    ON primljene_isprave(dobavljac_id, vrsta, broj, datum);
+
+-- A typed link, rather than reusing the untyped reference_type/reference_id pair,
+-- which is already aimed at the operator's own free reference on the movement.
+-- Nullable: the receive path warns on a missing isprava and never blocks, so a
+-- kalkulacija with no isprava behind it stays representable and stays visible.
+ALTER TABLE kalkulacije ADD COLUMN isprava_id INTEGER REFERENCES primljene_isprave(id);
+CREATE INDEX idx_kalkulacije_isprava ON kalkulacije(isprava_id);
+"#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {

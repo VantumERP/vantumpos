@@ -993,9 +993,99 @@ export interface InventoryAdjustmentRequest {
   productId: number;
   quantityMilli: number;
   reason?: string | null;
+  /**
+   * This delivery's nabavna cena po jedinici mere. **Sending it also rewrites
+   * `products.purchase_price_minor`** — the catalog's standing figure, a last-in
+   * cost that margin displays read. The form says so; it is never sent silently.
+   */
   purchasePriceMinor?: number | null;
   referenceType?: string | null;
   referenceId?: number | null;
+  /**
+   * The supplier's isprava o nabavci this delivery arrived with (ZoT čl. 29
+   * st. 1). Optional — a receipt without one is warned about, never refused.
+   */
+  ispravaId?: number | null;
+}
+
+/**
+ * A supplier — `crate::dobavljaci::Dobavljac`. Reused across deliveries so PIB
+ * and matični broj are typed once rather than per delivery, those being exactly
+ * the fields where a typo is the čl. 29 st. 1 defect.
+ */
+export interface Dobavljac {
+  id: number;
+  poslovnoIme: string;
+  adresa: string;
+  pib: string;
+  /** Spans matični broj and BPG. The čl. 29 st. 1 label list is **not** pinned
+   *  against an official consolidated text (KEP-VERIFIED-RULES §8 t. 5), so no
+   *  label here is presented as verified. */
+  maticniBrojBpg: string;
+  /** PEP čl. 15 st. 4: a natural person goes into KEP kolona 3 as ime i
+   *  prebivalište rather than poslovno ime. */
+  fizickoLice: boolean;
+  active: boolean;
+}
+
+/**
+ * A received supplier document — `crate::dobavljaci::PrimljenaIsprava`. The
+ * identity fields are a snapshot taken when the isprava was created, not a live
+ * join, so a document already issued never changes under a later edit.
+ */
+export interface PrimljenaIsprava {
+  id: number;
+  dobavljacId: number;
+  dobavljacPoslovnoIme: string;
+  dobavljacAdresa: string;
+  dobavljacPib: string;
+  dobavljacMaticniBrojBpg: string;
+  dobavljacFizickoLice: boolean;
+  vrsta: string;
+  broj: string;
+  /** The document's own date, `YYYY-MM-DD` — never the booking date. */
+  datum: string;
+  /**
+   * The operator's assertion that the paper isprava is held. **Not proof of
+   * possession:** the application stores no document. Never render this as
+   * „isprava je sačuvana u aplikaciji“.
+   */
+  posedujeIspravu: boolean;
+  posedujePotvrdio: number | null;
+  posedujePotvrdjenoAt: string | null;
+  napomena: string | null;
+  createdAt: string;
+}
+
+export interface SaveDobavljacRequest {
+  id?: number | null;
+  poslovnoIme: string;
+  adresa?: string;
+  pib?: string;
+  maticniBrojBpg?: string;
+  fizickoLice?: boolean;
+}
+
+export interface CreateIspravaRequest {
+  dobavljacId: number;
+  vrsta: string;
+  broj: string;
+  datum: string;
+  posedujeIspravu?: boolean;
+  napomena?: string | null;
+}
+
+/**
+ * `commands::inventory::IspravaWarning`. Raised when a receipt is booked with no
+ * supplier isprava attached. Separate from `DeclarationWarning` on purpose: that
+ * one is about the manufacturer's čl. 34 marking on the goods, this one about
+ * the document the trgovac must hold under čl. 29.
+ */
+export interface IspravaWarning {
+  /** The record-vs-reality qualifier. Render it **with** `notice`, never the
+   *  notice alone. */
+  advisory: string;
+  notice: LegalNotice;
 }
 
 /**
@@ -1026,6 +1116,9 @@ export interface InventoryAdjustmentResult {
   createdAt: string;
   /** Advisory only, and always empty for corrections and write-offs. */
   declarationWarnings: DeclarationWarning[];
+  /** Present only on a receipt booked with no supplier isprava. Advisory: the
+   *  movement, the kalkulacija and the zaduženje are already committed. */
+  ispravaWarning: IspravaWarning | null;
 }
 
 /** `commands::catalog::DeclarationGapReason`. The UI branches on the reason

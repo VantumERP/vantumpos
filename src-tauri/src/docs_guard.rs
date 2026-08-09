@@ -2630,3 +2630,91 @@ fn the_cl_23_notice_states_the_absence_reason_mask_and_overclaims_nothing() {
         }
     }
 }
+
+/// No register row may claim the application **holds** the supplier's isprava,
+/// and row 16 must name the tables that now capture it.
+///
+/// ZoT čl. 29 st. 1 is a duty to *possess* the supplier's isprava o nabavci.
+/// Migration v24 records the document's identifying data and the operator's own
+/// assertion that the paper is filed; it stores **no document**. Those are
+/// different things, and the gap between them is the whole exposure: a reader
+/// told the app holds the isprava stops looking for the paper, which is exactly
+/// the čl. 68 st. 1 tač. 6 failure.
+///
+/// The guard runs in **both directions**, like the popis-export pair it is
+/// modelled on:
+///
+/// - **No false promise.** No line may pair the isprava with a verb of keeping.
+/// - **No false denial.** Row 16 must name `primljene_isprave`, so the day the
+///   capture shipped the register cannot go on saying the shop has nothing.
+///
+/// Bound to the crate rather than to prose: `HOLDING_VERBS` fires only while
+/// **no** file-storage column exists on `primljene_isprave`. Add one — a path, a
+/// blob, an attachment — and this guard stops applying by its own terms, and the
+/// author decides then what the register may say.
+#[test]
+fn no_register_row_claims_the_application_holds_the_supplier_isprava() {
+    /// The migration that creates the capture, read as the source of truth for
+    /// whether a document is stored anywhere.
+    const MIGRATIONS: &str = include_str!("db/migrations.rs");
+    /// Column-name fragments that would mean the file itself is kept.
+    const STORAGE_COLUMNS: [&str; 4] = ["putanja", "file_path", "blob", "prilog"];
+
+    // Scoped to the `primljene_isprave` DDL itself rather than to the whole
+    // migrations file: a `putanja` column on some unrelated table says nothing
+    // about whether a supplier document is stored.
+    let (_, after) = MIGRATIONS
+        .split_once("CREATE TABLE primljene_isprave")
+        .expect("migration v24 must create `primljene_isprave`");
+    let isprave_ddl = after.split_once(");").map(|(ddl, _)| ddl).unwrap_or(after);
+    let stores_a_document = STORAGE_COLUMNS
+        .iter()
+        .any(|fragment| isprave_ddl.contains(fragment));
+
+    // Direction 1 — the row must not deny work that shipped.
+    //
+    // `| 16 |` matches TWO rows: this one and the §6 open question about the
+    // mašinski čitljiva oznaka. The row is therefore identified by its
+    // obligation text, not by its number — a bare `.find` on the number would
+    // silently read the other table the day the sections are reordered.
+    let row_16 = REGISTER
+        .lines()
+        .find(|line| line.starts_with("| 16 |") && line.contains("Possess isprave o robi"))
+        .expect("row 16 (Possess isprave o robi) must exist in the requirements register");
+    assert!(
+        row_16.contains("primljene_isprave"),
+        "row 16 does not name `primljene_isprave`. Migration v24 captures the dobavljač and \
+         the isprava's broj i datum, and `receipt_opis` composes the PEP čl. 15 st. 4 kolona-3 \
+         line from them. A row that still reads as though none of it exists withdraws the \
+         reader's only pointer to the control — the same defect as a false promise, facing \
+         the other way."
+    );
+
+    // Direction 2 — and it must not promise what the code does not do.
+    if stores_a_document {
+        return;
+    }
+    for (label, text) in prose_sources() {
+        for (index, line) in text.lines().enumerate() {
+            if !line.contains("isprav") {
+                continue;
+            }
+            for verb in [
+                "čuva ispravu",
+                "čuva isprave",
+                "stores the isprava",
+                "holds the isprava",
+            ] {
+                assert!(
+                    !line.contains(verb),
+                    "{label}:{} says the application „{verb}“, but no column on \
+                     `primljene_isprave` stores a document — v23 records the isprava's \
+                     identifying data and the operator's assertion that it is held. \
+                     ZoT čl. 29 st. 1 is a possession duty, so a reader told the paper is in \
+                     the application stops looking for the paper.",
+                    index + 1
+                );
+            }
+        }
+    }
+}

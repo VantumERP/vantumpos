@@ -95,6 +95,7 @@ describe("InventoryScreen", () => {
             notice: missingNotice,
           },
         ],
+        ispravaWarning: null,
       };
     }
 
@@ -188,6 +189,7 @@ describe("InventoryScreen", () => {
       vi.spyOn(services.inventory, "receiveStock").mockResolvedValue({
         ...receiptWithWarning(),
         declarationWarnings: [],
+        ispravaWarning: null,
       });
 
       render(<InventoryScreen services={services} />);
@@ -199,6 +201,150 @@ describe("InventoryScreen", () => {
       expect(
         screen.queryByText("Prijem je upisan — nedostaju podaci deklaracije"),
       ).not.toBeInTheDocument();
+    });
+  });
+
+  // ZoT čl. 29 st. 1 is a duty to POSSESS the supplier's isprava. The app records
+  // the document's data and the operator's assertion that it is held — it holds
+  // no document, and nothing on this screen may imply otherwise.
+  describe("isprava dobavljača na prijemu (ZoT čl. 29 st. 1)", () => {
+    const ispravaAdvisory =
+      "Roba je primljena i evidentirana, ali uz prijem nije vezana isprava " +
+      "dobavljača. Ako ispravu posedujete u papirnoj dokumentaciji, " +
+      "evidentirajte je i povežite sa prijemom.";
+
+    // `legal::isprava_missing` verbatim, `penalty: null` — every figure comes
+    // from src-tauri/src/legal.rs and none is repeated here.
+    const ispravaNotice = {
+      summary:
+        "Prijem robe je evidentiran bez isprave dobavljača. Trgovac je dužan " +
+        "da poseduje ispravu o nabavci robe (otpremnicu, fakturu i sl.). " +
+        "Aplikacija evidentira podatke o ispravi i vašu izjavu da je " +
+        "posedujete — samu ispravu ne čuva.",
+      penalty: null,
+      citation: "Zakon o trgovini, čl. 29 st. 1, čl. 68 st. 1 tač. 6.",
+      isLegalDuty: true,
+    };
+
+    function receiptWithoutIsprava() {
+      return {
+        productId: 1,
+        movementId: 11,
+        movementType: "receive" as const,
+        quantityMilli: 2000,
+        previousQuantityMilli: 3000,
+        newQuantityMilli: 5000,
+        createdAt: "2026-06-18T12:00:00Z",
+        declarationWarnings: [],
+        ispravaWarning: { advisory: ispravaAdvisory, notice: ispravaNotice },
+      };
+    }
+
+    async function receiveMleko(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(
+        await screen.findByRole("button", { name: "Prijem robe za Mleko 1 l" }),
+      );
+      const quantity = await screen.findByLabelText("Količina");
+      await user.clear(quantity);
+      await user.type(quantity, "2");
+      await user.click(screen.getByRole("button", { name: "Sačuvaj prijem" }));
+    }
+
+    it("says the receipt is written before it says the isprava is missing", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      vi.spyOn(services.inventory, "receiveStock").mockResolvedValue(
+        receiptWithoutIsprava(),
+      );
+
+      render(<InventoryScreen services={services} />);
+      await receiveMleko(user);
+
+      expect(
+        await screen.findByText("Prijem je upisan — nema isprave dobavljača"),
+      ).toBeInTheDocument();
+    });
+
+    // The qualifier travels with the exposure, as on the čl. 34 panel: the
+    // notice alone reads as a proven offence, when the paper may well be in the
+    // folder and simply unrecorded.
+    it("renders the advisory together with the notice and its citation", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      vi.spyOn(services.inventory, "receiveStock").mockResolvedValue(
+        receiptWithoutIsprava(),
+      );
+
+      render(<InventoryScreen services={services} />);
+      await receiveMleko(user);
+
+      expect(await screen.findByText(ispravaAdvisory)).toBeInTheDocument();
+      expect(screen.getByText(ispravaNotice.summary)).toBeInTheDocument();
+      expect(screen.getByText(ispravaNotice.citation)).toBeInTheDocument();
+    });
+
+    // The form must not offer the isprava fields where there is no dobavljač:
+    // a correction and a write-off are not a nabavka.
+    it("offers the isprava and nabavna-cena fields only on a receipt", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      render(<InventoryScreen services={services} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Prijem robe za Mleko 1 l" }),
+      );
+      expect(
+        await screen.findByLabelText("Isprava dobavljača"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByLabelText("Nabavna cena po jedinici mere"),
+      ).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Odustani" }));
+
+      await user.click(
+        await screen.findByRole("button", { name: "Otpis za Mleko 1 l" }),
+      );
+      await screen.findByLabelText("Količina");
+      expect(
+        screen.queryByLabelText("Isprava dobavljača"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByLabelText("Nabavna cena po jedinici mere"),
+      ).not.toBeInTheDocument();
+    });
+
+    // The catalog write is real and must not be silent — the operator is told
+    // that saving a delivery price also moves the article's standing figure.
+    it("says that the nabavna cena also updates the catalog", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      render(<InventoryScreen services={services} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Prijem robe za Mleko 1 l" }),
+      );
+
+      expect(
+        await screen.findByText(
+          /ažurira se i nabavna cena artikla u šifarniku/,
+        ),
+      ).toBeInTheDocument();
+    });
+
+    // The one claim this screen may never make.
+    it("never claims the application stores the document itself", async () => {
+      const user = userEvent.setup();
+      const services = createMockServices();
+      render(<InventoryScreen services={services} />);
+
+      await user.click(
+        await screen.findByRole("button", { name: "Prijem robe za Mleko 1 l" }),
+      );
+      await screen.findByLabelText("Isprava dobavljača");
+
+      expect(
+        screen.getByText(/samu ispravu \(papir ili PDF\) ne čuva/),
+      ).toBeInTheDocument();
     });
   });
 });

@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -69,7 +70,10 @@ import type { PosServices } from "@/services/ports";
 import type {
   CommandErrorShape,
   DeclarationWarning,
+  Dobavljac,
   InventoryAdjustmentRequest,
+  IspravaWarning,
+  PrimljenaIsprava,
   ProductLedger,
   StockListItem,
   StockListQuery,
@@ -440,6 +444,51 @@ function StockBadge({ item }: { item: StockListItem }) {
   return <Badge variant="outline">U redu</Badge>;
 }
 
+/** The picker value that means „create a new isprava from the fields below“. */
+const NEW_ISPRAVA = "nova";
+
+/**
+ * The six kinds `crate::dobavljaci::VrstaIsprave` names, in the order
+ * KEP-VERIFIED-RULES §3 gives them. **Offered, never enforced** — §3's list ends
+ * in „ili druga odgovarajuća isprava za robu“, and neither the column nor the
+ * parser refuses a kind outside this list.
+ */
+const VRSTE_ISPRAVE = [
+  "faktura",
+  "otpremnica",
+  "faktura-otpremnica",
+  "dostavnica",
+  "interna prenosnica",
+  "prijemnica",
+] as const;
+
+const EMPTY_NOVA_ISPRAVA = {
+  dobavljacId: "",
+  vrsta: "otpremnica",
+  broj: "",
+  datum: "",
+  posedujeIspravu: false,
+};
+
+/**
+ * A dinar amount typed by the operator → integer minor units (para). Never
+ * floating point: the digits are read as written and scaled by string, so
+ * `1234,5` is 123.450 para exactly rather than whatever a binary double makes
+ * of it. Returns `null` for a blank input, meaning „do not send it“.
+ */
+function parsePriceInput(value: string): number | null {
+  const trimmed = value.trim().replace(/\s/g, "");
+  if (!trimmed) {
+    return null;
+  }
+  const normalized = trimmed.replace(",", ".");
+  if (!/^\d+(\.\d{0,2})?$/.test(normalized)) {
+    throw new Error("Nabavna cena nije ispravna.");
+  }
+  const [whole, fraction = ""] = normalized.split(".");
+  return Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
+}
+
 function InventoryAdjustmentDialog({
   adjustment,
   services,
@@ -462,6 +511,18 @@ function InventoryAdjustmentDialog({
   >([]);
   const [markingChecked, setMarkingChecked] = useState(false);
 
+  // ZoT čl. 29 st. 1 — the supplier's isprava o nabavci. Receive mode only: a
+  // correction or a write-off is not a nabavka and has no dobavljač.
+  const isReceive = adjustment?.mode === "receive";
+  const [dobavljaci, setDobavljaci] = useState<Dobavljac[]>([]);
+  const [isprave, setIsprave] = useState<PrimljenaIsprava[]>([]);
+  const [ispravaChoice, setIspravaChoice] = useState<string>("");
+  const [novaIsprava, setNovaIsprava] = useState(EMPTY_NOVA_ISPRAVA);
+  const [nabavnaCena, setNabavnaCena] = useState("");
+  const [ispravaWarning, setIspravaWarning] = useState<IspravaWarning | null>(
+    null,
+  );
+
   useEffect(() => {
     if (adjustment) {
       setQuantity("1");
@@ -469,8 +530,42 @@ function InventoryAdjustmentDialog({
       setError(null);
       setDeclarationWarnings([]);
       setMarkingChecked(false);
+      setIspravaChoice("");
+      setNovaIsprava(EMPTY_NOVA_ISPRAVA);
+      setNabavnaCena("");
+      setIspravaWarning(null);
     }
   }, [adjustment]);
+
+  // Loaded when the receive dialog opens. A failure here must not stop the
+  // operator taking in stock: the pickers stay empty, the receipt still books,
+  // and the čl. 29 advisory afterwards is what says the document is missing.
+  useEffect(() => {
+    if (!isReceive) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [loadedDobavljaci, loadedIsprave] = await Promise.all([
+          services.inventory.listDobavljaci(),
+          services.inventory.listIsprave(50),
+        ]);
+        if (!cancelled) {
+          setDobavljaci(loadedDobavljaci);
+          setIsprave(loadedIsprave);
+        }
+      } catch {
+        if (!cancelled) {
+          setDobavljaci([]);
+          setIsprave([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isReceive, services]);
 
   // Clearing on close, not on the next open: the effect above runs *after*
   // paint, so a dialog reopened for another article would render one frame
@@ -480,6 +575,7 @@ function InventoryAdjustmentDialog({
     if (!open) {
       setDeclarationWarnings([]);
       setMarkingChecked(false);
+      setIspravaWarning(null);
     }
 
     onOpenChange(open);
@@ -505,6 +601,28 @@ function InventoryAdjustmentDialog({
         reason,
       };
 
+      if (adjustment.mode === "receive") {
+        // A brand-new isprava is created first, so the receipt links to a row
+        // that already exists. If this throws, nothing has been received yet —
+        // the operator fixes the document and submits again.
+        if (ispravaChoice === NEW_ISPRAVA) {
+          request.ispravaId = await services.inventory.createIsprava({
+            dobavljacId: Number(novaIsprava.dobavljacId),
+            vrsta: novaIsprava.vrsta,
+            broj: novaIsprava.broj,
+            datum: novaIsprava.datum,
+            posedujeIspravu: novaIsprava.posedujeIspravu,
+          });
+        } else if (ispravaChoice) {
+          request.ispravaId = Number(ispravaChoice);
+        }
+
+        const parsedNabavna = parsePriceInput(nabavnaCena);
+        if (parsedNabavna !== null) {
+          request.purchasePriceMinor = parsedNabavna;
+        }
+      }
+
       const result =
         adjustment.mode === "receive"
           ? await services.inventory.receiveStock(request)
@@ -519,6 +637,8 @@ function InventoryAdjustmentDialog({
       // the dialog open only so the operator can read it and stamp the check.
       if (warnings.length > 0) {
         setDeclarationWarnings(warnings);
+      } else if (result.ispravaWarning) {
+        setIspravaWarning(result.ispravaWarning);
       } else {
         handleOpenChange(false);
       }
@@ -559,6 +679,11 @@ function InventoryAdjustmentDialog({
             warnings={declarationWarnings}
             marking={markingChecked}
             onMarkChecked={handleMarkChecked}
+            onClose={() => handleOpenChange(false)}
+          />
+        ) : ispravaWarning ? (
+          <IspravaWarningPanel
+            warning={ispravaWarning}
             onClose={() => handleOpenChange(false)}
           />
         ) : copy && adjustment ? (
@@ -602,6 +727,170 @@ function InventoryAdjustmentDialog({
                   aria-invalid={error ? true : undefined}
                 />
               </Field>
+
+              {adjustment.mode === "receive" ? (
+                <>
+                  <Field>
+                    <FieldLabel htmlFor="inventory-adjustment-nabavna">
+                      Nabavna cena po jedinici mere
+                    </FieldLabel>
+                    <Input
+                      id="inventory-adjustment-nabavna"
+                      inputMode="decimal"
+                      value={nabavnaCena}
+                      onChange={(event) => setNabavnaCena(event.target.value)}
+                      placeholder="npr. 100,00"
+                    />
+                    <FieldDescription>
+                      Cena sa ove isporuke. Ako je unesete, ažurira se i nabavna
+                      cena artikla u šifarniku.
+                    </FieldDescription>
+                  </Field>
+
+                  <Field>
+                    <FieldLabel htmlFor="inventory-adjustment-isprava">
+                      Isprava dobavljača
+                    </FieldLabel>
+                    <NativeSelect
+                      id="inventory-adjustment-isprava"
+                      value={ispravaChoice}
+                      onChange={(event) =>
+                        setIspravaChoice(event.target.value)
+                      }
+                    >
+                      <NativeSelectOption value="">
+                        Bez isprave
+                      </NativeSelectOption>
+                      {isprave.map((isprava) => (
+                        <NativeSelectOption
+                          key={isprava.id}
+                          value={String(isprava.id)}
+                        >
+                          {`${isprava.vrsta} br. ${isprava.broj} od ${isprava.datum} — ${isprava.dobavljacPoslovnoIme}`}
+                        </NativeSelectOption>
+                      ))}
+                      <NativeSelectOption value={NEW_ISPRAVA}>
+                        Nova isprava…
+                      </NativeSelectOption>
+                    </NativeSelect>
+                    <FieldDescription>
+                      Aplikacija evidentira podatke o ispravi — samu ispravu
+                      (papir ili PDF) ne čuva i ne zamenjuje je.
+                    </FieldDescription>
+                  </Field>
+
+                  {ispravaChoice === NEW_ISPRAVA ? (
+                    <>
+                      <Field>
+                        <FieldLabel htmlFor="inventory-isprava-dobavljac">
+                          Dobavljač
+                        </FieldLabel>
+                        <NativeSelect
+                          id="inventory-isprava-dobavljac"
+                          value={novaIsprava.dobavljacId}
+                          onChange={(event) =>
+                            setNovaIsprava((previous) => ({
+                              ...previous,
+                              dobavljacId: event.target.value,
+                            }))
+                          }
+                        >
+                          <NativeSelectOption value="">
+                            Izaberite dobavljača
+                          </NativeSelectOption>
+                          {dobavljaci.map((dobavljac) => (
+                            <NativeSelectOption
+                              key={dobavljac.id}
+                              value={String(dobavljac.id)}
+                            >
+                              {dobavljac.poslovnoIme}
+                            </NativeSelectOption>
+                          ))}
+                        </NativeSelect>
+                      </Field>
+
+                      <Field>
+                        <FieldLabel htmlFor="inventory-isprava-vrsta">
+                          Vrsta isprave
+                        </FieldLabel>
+                        <Input
+                          id="inventory-isprava-vrsta"
+                          list="inventory-isprava-vrste"
+                          value={novaIsprava.vrsta}
+                          onChange={(event) =>
+                            setNovaIsprava((previous) => ({
+                              ...previous,
+                              vrsta: event.target.value,
+                            }))
+                          }
+                        />
+                        <datalist id="inventory-isprava-vrste">
+                          {VRSTE_ISPRAVE.map((vrsta) => (
+                            <option key={vrsta} value={vrsta} />
+                          ))}
+                        </datalist>
+                        <FieldDescription>
+                          Ponuđene vrste su predlog — možete upisati i drugu
+                          odgovarajuću ispravu za robu.
+                        </FieldDescription>
+                      </Field>
+
+                      <Field>
+                        <FieldLabel htmlFor="inventory-isprava-broj">
+                          Broj isprave
+                        </FieldLabel>
+                        <Input
+                          id="inventory-isprava-broj"
+                          value={novaIsprava.broj}
+                          onChange={(event) =>
+                            setNovaIsprava((previous) => ({
+                              ...previous,
+                              broj: event.target.value,
+                            }))
+                          }
+                        />
+                      </Field>
+
+                      <Field>
+                        <FieldLabel htmlFor="inventory-isprava-datum">
+                          Datum isprave
+                        </FieldLabel>
+                        <Input
+                          id="inventory-isprava-datum"
+                          type="date"
+                          value={novaIsprava.datum}
+                          onChange={(event) =>
+                            setNovaIsprava((previous) => ({
+                              ...previous,
+                              datum: event.target.value,
+                            }))
+                          }
+                        />
+                        <FieldDescription>
+                          Datum sa same isprave, a ne datum knjiženja.
+                        </FieldDescription>
+                      </Field>
+
+                      <Field orientation="horizontal">
+                        <Checkbox
+                          id="inventory-isprava-poseduje"
+                          checked={novaIsprava.posedujeIspravu}
+                          onCheckedChange={(checked) =>
+                            setNovaIsprava((previous) => ({
+                              ...previous,
+                              posedujeIspravu: checked === true,
+                            }))
+                          }
+                        />
+                        <FieldLabel htmlFor="inventory-isprava-poseduje">
+                          Ispravu posedujem u dokumentaciji
+                        </FieldLabel>
+                      </Field>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
+
               {error ? <FieldError>{error}</FieldError> : null}
             </FieldGroup>
 
@@ -686,6 +975,65 @@ function DeclarationWarningPanel({
         <Button type="button" disabled={marking} onClick={onMarkChecked}>
           {marking ? <Spinner data-icon="inline-start" /> : null}
           Evidentiraj proveru deklaracije
+        </Button>
+      </DialogFooter>
+    </div>
+  );
+}
+
+/**
+ * ZoT čl. 29 st. 1. Like the čl. 34 panel, the title says the receipt is already
+ * written first — a warning that reads like a rejection sends the operator
+ * looking for a movement that is in fact in the ledger.
+ *
+ * The advisory sentence is printed **with** the notice and never without it: the
+ * notice alone reads as a proven offence, when all the shop actually knows is
+ * that this receipt has no document linked to it. The paper may well be in the
+ * folder — which is why the advisory says to record it, not that it is missing.
+ *
+ * There is no „mark as held“ button here on purpose. Asserting possession is an
+ * act about a specific document, and there is no specific document on this
+ * screen to assert it about; the operator records the isprava and links it.
+ */
+function IspravaWarningPanel({
+  warning,
+  onClose,
+}: {
+  warning: IspravaWarning;
+  onClose: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4">
+      <DialogHeader>
+        <DialogTitle>Prijem je upisan — nema isprave dobavljača</DialogTitle>
+        <DialogDescription>
+          Prijem robe je evidentiran u lageru i u KEP-u. Isprava dobavljača nije
+          vezana za ovaj prijem.
+        </DialogDescription>
+      </DialogHeader>
+
+      <Alert>
+        <AlertTitle>Isprava o nabavci</AlertTitle>
+        <AlertDescription>
+          <div className="flex flex-col gap-2">
+            <p>{warning.advisory}</p>
+            <p>{warning.notice.summary}</p>
+            {warning.notice.penalty ? (
+              <p>{warning.notice.penalty}</p>
+            ) : (
+              <p>
+                Unesite pravnu formu u Podešavanja → Profil da bi kazna bila
+                prikazana.
+              </p>
+            )}
+            <p className="text-xs">{warning.notice.citation}</p>
+          </div>
+        </AlertDescription>
+      </Alert>
+
+      <DialogFooter>
+        <Button type="button" onClick={onClose}>
+          Zatvori
         </Button>
       </DialogFooter>
     </div>

@@ -7,6 +7,7 @@ pub mod campaigns;
 pub mod cash_deposit;
 pub mod catalog;
 pub mod cenovnik;
+pub mod dobavljaci;
 pub mod health;
 pub mod imports;
 pub mod inventory;

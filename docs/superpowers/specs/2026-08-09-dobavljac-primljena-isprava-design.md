@@ -63,10 +63,12 @@ asserted stays visibly unasserted.
 
 ---
 
-## 3. Schema — migration v23, `dobavljaci_and_primljene_isprave`
+## 3. Schema — migration v24, `dobavljaci_and_primljene_isprave`
 
-The runner is append-only and v22 is the newest, so a new version is the only
-path.
+The runner is append-only, so a new version is the only path. **Renumbered v23 → v24
+on rebase:** master shipped its own v23 (`support_session_odsustvo_unmask_stamp`)
+while this branch was in flight, and two migrations sharing a version means the
+second never applies on an existing database.
 
 ```sql
 CREATE TABLE dobavljaci (
@@ -266,7 +268,7 @@ a side effect.
 
 ## 9. Tests
 
-- migration v23 applies on a fresh and on an upgraded database;
+- migration v24 applies on a fresh and on an upgraded database;
 - a later edit to a `dobavljaci` row does not change an isprava already created
   (the §3.1 snapshot property, asserted rather than commented);
 - `isprava_id` persists onto the kalkulacija through the receive transaction;

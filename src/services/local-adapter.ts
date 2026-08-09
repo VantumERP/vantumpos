@@ -34,7 +34,9 @@ import type {
   ImportJob,
   ImportJobDetail,
   ImportValidationResult,
+  Dobavljac,
   InventoryAdjustmentResult,
+  PrimljenaIsprava,
   IzvestajView,
   NivelacijaObuhvatView,
   NivelacijaPregledView,
@@ -218,6 +220,13 @@ export function createLocalServices(invoke: InvokeFn = tauriInvoke): PosServices
         invoke<ProductLedger>("inventory_get_product_ledger", { productId }),
       markDeclarationChecked: (productId) =>
         invoke<void>("inventory_mark_declaration_checked", { productId }),
+      listDobavljaci: () => invoke<Dobavljac[]>("dobavljaci_list", {}),
+      saveDobavljac: (request) => invoke<number>("dobavljac_save", { request }),
+      listIsprave: (limit) =>
+        invoke<PrimljenaIsprava[]>("isprave_list", { limit: limit ?? null }),
+      createIsprava: (request) => invoke<number>("isprava_create", { request }),
+      confirmIspravaPossession: (ispravaId) =>
+        invoke<void>("isprava_confirm_possession", { ispravaId }),
     },
     receipts: {
       searchReceipts: (query) => invoke<ReceiptSearchResult>("receipts_search", { query }),

@@ -64,6 +64,12 @@ pub struct InventoryAdjustmentRequest {
     pub purchase_price_minor: Option<i64>,
     pub reference_type: Option<String>,
     pub reference_id: Option<i64>,
+    /// The supplier's isprava o nabavci this delivery came with (ZoT čl. 29
+    /// st. 1). Optional: the receive path warns on a missing one and never
+    /// blocks. Read only on a `Receive`; a correction or a write-off is not a
+    /// nabavka and has no dobavljač.
+    #[serde(default)]
+    pub isprava_id: Option<i64>,
 }
 
 /// ZoT čl. 34 st. 1–2 puts the marking duty on the proizvođač/uvoznik, but čl. 68
@@ -108,6 +114,31 @@ pub struct InventoryAdjustmentResult {
     /// Advisory only. Always empty for corrections and write-offs — nothing new
     /// arrives through those doors.
     pub declaration_warnings: Vec<DeclarationWarning>,
+    /// The ZoT čl. 29 st. 1 advisory, when the receipt was booked with no supplier
+    /// isprava attached. **A separate field from `declaration_warnings` on
+    /// purpose:** that one is about the manufacturer's čl. 34 marking on the
+    /// goods, this one is about the document the trgovac must hold. Merging them
+    /// would blur which of two different duties is unmet.
+    pub isprava_warning: Option<IspravaWarning>,
+}
+
+/// Raised after a goods receipt is committed with no supplier isprava attached.
+///
+/// Advisory by construction, like `DeclarationWarning`: it is produced *after*
+/// the movement, the kalkulacija and the zaduženje are written, so it cannot gate
+/// them. PEP čl. 12 st. 1 has entries made „na osnovu verodostojnih isprava“,
+/// which is worth saying out loud — but refusing the receipt would strand a
+/// pallet the shop physically holds and would leave the goods unbooked, and
+/// unbooked goods are the heavier offence tier.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IspravaWarning {
+    /// What the shop is actually looking at — a receipt recorded with no supplier
+    /// document behind it — as distinct from `notice`, which is the exposure that
+    /// leaves unverified. The UI renders this line with the notice, never the
+    /// notice alone.
+    pub advisory: String,
+    pub notice: crate::legal::LegalNotice,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -528,6 +559,7 @@ pub fn apply_inventory_adjustment(
     let reason = normalized_optional_text(request.reason.as_deref());
     let reference_type = normalized_optional_text(request.reference_type.as_deref());
     let mut declaration_warnings = Vec::new();
+    let mut isprava_warning = None;
     let tx = connection.transaction()?;
 
     if let Some(purchase_price_minor) = request.purchase_price_minor {
@@ -572,13 +604,24 @@ pub fn apply_inventory_adjustment(
         // value is unchanged — 9b adds the isprava, not a re-post. All inside this
         // same transaction: a rollback removes the kalkulacija, the movement and
         // the ledger entry together.
-        let kalkulacija_id = crate::kep_kalkulacija::create_kalkulacija(
+        // ZoT čl. 29 st. 1: the supplier's isprava o nabavci, when the operator
+        // attached one. Loaded inside the transaction so the opis and the
+        // kalkulacija's link describe the very row that is being written, and so
+        // an unknown id rolls the whole receipt back rather than booking goods
+        // against a document that does not exist.
+        let isprava = match request.isprava_id {
+            Some(id) => Some(crate::dobavljaci::load_isprava_tx(&tx, id)?),
+            None => None,
+        };
+
+        let kalkulacija = crate::kep_kalkulacija::create_kalkulacija(
             &tx,
             request.product_id,
             request.quantity_milli,
             nabavna_po_jm_minor,
             reference_type.as_deref(),
             request.reference_id,
+            request.isprava_id,
             acting_user_id,
             created_at,
         )?;
@@ -586,6 +629,8 @@ pub fn apply_inventory_adjustment(
             reference_type.as_deref(),
             request.reference_id,
             reason.as_deref(),
+            isprava.as_ref(),
+            kalkulacija.redni_broj,
         );
         crate::kep::post_receipt_zaduzenje(
             &tx,
@@ -593,12 +638,22 @@ pub fn apply_inventory_adjustment(
             request.quantity_milli,
             sale_price_minor,
             &opis,
-            None,
+            // PEP čl. 15 st. 3: kolona 2 carries the booking date, kolona 3 the
+            // *document* date — „these are two different dates — never conflate
+            // them.“ This argument has been None on every receipt until now
+            // because no supplier document was captured to date it from.
+            isprava.as_ref().map(|isprava| isprava.datum.as_str()),
             "kalkulacija",
-            Some(kalkulacija_id),
+            Some(kalkulacija.id),
             acting_user_id,
             created_at,
         )?;
+
+        // The čl. 29 st. 1 advisory. Collected after the postings and returned,
+        // never raised as an error: a receipt with no isprava is worth saying out
+        // loud, but refusing it would strand a pallet the shop already holds and
+        // would leave the goods unbooked, which is the worse tier.
+        isprava_warning = missing_isprava_warning(&tx, isprava.as_ref());
 
         // SW-11c: the last moment the shop can still refuse the pallet. Collected
         // inside the transaction so the warning describes exactly the row that was
@@ -620,6 +675,7 @@ pub fn apply_inventory_adjustment(
         new_quantity_milli: outcome.new_quantity_milli,
         created_at: created_at.to_string(),
         declaration_warnings,
+        isprava_warning,
     })
 }
 
@@ -683,6 +739,36 @@ fn collect_declaration_warnings(
         advisory: DECLARATION_ADVISORY.to_string(),
         notice: crate::legal::declaration_missing(&profile),
     }]
+}
+
+/// What the shop is looking at when a receipt carries no isprava: a gap in its own
+/// records. Kept next to the constructor so the qualifier cannot drift away from
+/// the notice it qualifies.
+const ISPRAVA_ADVISORY: &str = "Roba je primljena i evidentirana, ali uz prijem nije \
+     vezana isprava dobavljača. Ako ispravu posedujete u papirnoj dokumentaciji, \
+     evidentirajte je i povežite sa prijemom.";
+
+/// `None` when an isprava was attached — there is nothing to warn about — and the
+/// advisory otherwise.
+///
+/// **Infallible by construction**, for the same reason `collect_declaration_warnings`
+/// is: the caller runs this inside the receive transaction *after* the kalkulacija
+/// and the zaduženje, so a `Result` here would be a hard block wearing an advisory
+/// label. An unreadable `shop_profile` falls back to `ShopProfile::default()`,
+/// whose pravna forma is `None`, so the notice renders **no figure** rather than a
+/// plausible one.
+fn missing_isprava_warning(
+    connection: &Connection,
+    isprava: Option<&crate::dobavljaci::PrimljenaIsprava>,
+) -> Option<IspravaWarning> {
+    if isprava.is_some() {
+        return None;
+    }
+    let profile = super::catalog::load_shop_profile_for_connection(connection).unwrap_or_default();
+    Some(IspravaWarning {
+        advisory: ISPRAVA_ADVISORY.to_string(),
+        notice: crate::legal::isprava_missing(&profile),
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -812,13 +898,47 @@ fn normalize_stock_state(value: Option<&str>) -> Result<Option<&'static str>, Ap
     }
 }
 
-/// The `opis` (kolona 5) for a receipt zaduženje: „Prijem robe" plus a suffix
-/// naming the source document when one is linked, else the free-text reason.
+/// The `opis` for a receipt zaduženje — KEP **kolona 3** (the previous comment
+/// here said kolona 5; that is the razduženje column). Its prescribed content is
+/// the document naziv, broj and datum, and for a nabavka additionally the
+/// dobavljač: PEP čl. 15 st. 4, `docs/KEP-VERIFIED-RULES.md` §2.1.
+///
+/// With a supplier isprava attached, the composed line follows §2.7's worked
+/// ledger row rather than a shape of our own invention:
+///
+/// ```text
+/// Kalkulacija br. 12; otpremnica dobavljača „ABC d.o.o.“ br. 125 od 03.07.2026
+/// ```
+///
+/// A natural-person supplier is named with prebivalište instead of poslovno ime,
+/// and without the quotation marks — those belong to a poslovno ime. That branch
+/// lives in `PrimljenaIsprava::kolona3_dobavljac`.
+///
+/// Without an isprava the pre-existing „Prijem robe“ text is returned unchanged.
+/// That is deliberate: an unattached receipt should read as exactly what it is,
+/// and dressing it up as though a document stood behind it would be the same
+/// defect as a false tick in the compliance register.
 fn receipt_opis(
     reference_type: Option<&str>,
     reference_id: Option<i64>,
     reason: Option<&str>,
+    isprava: Option<&crate::dobavljaci::PrimljenaIsprava>,
+    kalkulacija_redni_broj: i64,
 ) -> String {
+    if let Some(isprava) = isprava {
+        let dobavljac = if isprava.dobavljac_fizicko_lice {
+            isprava.kolona3_dobavljac()
+        } else {
+            format!("„{}“", isprava.kolona3_dobavljac())
+        };
+        return format!(
+            "Kalkulacija br. {kalkulacija_redni_broj}; {} dobavljača {dobavljac} br. {} od {}",
+            isprava.vrsta,
+            isprava.broj,
+            format_datum_dmy(&isprava.datum),
+        );
+    }
+
     match (reference_type, reference_id) {
         (Some(ref_type), Some(ref_id)) => format!("Prijem robe ({ref_type} #{ref_id})"),
         (Some(ref_type), None) => format!("Prijem robe ({ref_type})"),
@@ -826,6 +946,19 @@ fn receipt_opis(
             Some(reason) => format!("Prijem robe — {reason}"),
             None => "Prijem robe".to_string(),
         },
+    }
+}
+
+/// `2026-07-03` → `03.07.2026`, the form a Serbian document date is read in. A
+/// value that is not the stored shape passes through rather than being mangled:
+/// `dobavljaci::create_isprava` is what refuses a malformed datum, and repeating
+/// the check here would put it in two places that could disagree.
+fn format_datum_dmy(datum: &str) -> String {
+    match (datum.get(0..4), datum.get(5..7), datum.get(8..10)) {
+        (Some(year), Some(month), Some(day)) if datum.len() == 10 => {
+            format!("{day}.{month}.{year}")
+        }
+        _ => datum.to_string(),
     }
 }
 
@@ -965,6 +1098,233 @@ mod tests {
 
     const SEEDED_ADMIN_ID: i64 = 1;
 
+    /// Seeds a dobavljač and one isprava against it, returning the isprava id.
+    fn seed_isprava(connection: &Connection, fizicko_lice: bool) -> i64 {
+        let dobavljac_id = crate::dobavljaci::save_dobavljac(
+            connection,
+            crate::dobavljaci::SaveDobavljacRequest {
+                id: None,
+                poslovno_ime: if fizicko_lice {
+                    "Petar Petrović".into()
+                } else {
+                    "ABC d.o.o.".into()
+                },
+                adresa: "Novi Pazar".into(),
+                pib: "123456789".into(),
+                maticni_broj_bpg: "20123456".into(),
+                fizicko_lice,
+            },
+            "2026-06-18T10:00:00Z",
+        )
+        .expect("dobavljač should save");
+
+        crate::dobavljaci::create_isprava(
+            connection,
+            crate::dobavljaci::CreateIspravaRequest {
+                dobavljac_id,
+                vrsta: "otpremnica".into(),
+                broj: "125".into(),
+                datum: "2026-07-03".into(),
+                poseduje_ispravu: true,
+                napomena: None,
+            },
+            SEEDED_ADMIN_ID,
+            "2026-06-18T10:00:00Z",
+        )
+        .expect("isprava should create")
+    }
+
+    /// PEP čl. 15 st. 4 — kolona 3 names the document naziv, broj and datum plus
+    /// the dobavljač. The composed line follows KEP-VERIFIED-RULES §2.7's worked
+    /// ledger row, and the isprava's datum lands in `document_date`, which every
+    /// receipt before this left NULL (PEP čl. 15 st. 3: the booking date and the
+    /// document date are two different dates).
+    #[test]
+    fn a_receipt_with_an_isprava_composes_kolona3_and_dates_the_document() {
+        with_connection("inventory_isprava_opis", |connection| {
+            let isprava_id = seed_isprava(connection, false);
+            let mut request = adjustment(5000, "Prijem robe");
+            request.isprava_id = Some(isprava_id);
+
+            apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                request,
+                SEEDED_ADMIN_ID,
+                "2026-07-04T09:00:00Z",
+            )
+            .expect("receive should succeed");
+
+            let (opis, document_date): (String, Option<String>) = connection
+                .query_row(
+                    "SELECT opis, document_date FROM kep_entries
+                     WHERE kolona = 'zaduzenje' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the zaduženje row");
+
+            assert_eq!(
+                opis, "Kalkulacija br. 1; otpremnica dobavljača „ABC d.o.o.“ br. 125 od 03.07.2026",
+                "kolona 3 carries document naziv, broj, datum and the dobavljač"
+            );
+            assert_eq!(
+                document_date.as_deref(),
+                Some("2026-07-03"),
+                "the DOCUMENT date, not the 04.07 booking date — never conflate them"
+            );
+
+            let isprava_on_kalkulacija: Option<i64> = connection
+                .query_row(
+                    "SELECT isprava_id FROM kalkulacije ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the kalkulacija");
+            assert_eq!(isprava_on_kalkulacija, Some(isprava_id));
+        });
+    }
+
+    /// A natural-person supplier goes into kolona 3 as ime i prebivalište, and
+    /// without the quotation marks that belong to a poslovno ime.
+    #[test]
+    fn a_natural_person_supplier_is_named_with_prebivaliste() {
+        with_connection("inventory_isprava_fizicko", |connection| {
+            let isprava_id = seed_isprava(connection, true);
+            let mut request = adjustment(5000, "Prijem robe");
+            request.isprava_id = Some(isprava_id);
+
+            apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                request,
+                SEEDED_ADMIN_ID,
+                "2026-07-04T09:00:00Z",
+            )
+            .expect("receive should succeed");
+
+            let opis: String = connection
+                .query_row(
+                    "SELECT opis FROM kep_entries WHERE kolona = 'zaduzenje' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the zaduženje row");
+            assert_eq!(
+                opis,
+                "Kalkulacija br. 1; otpremnica dobavljača Petar Petrović, Novi Pazar br. 125 od 03.07.2026"
+            );
+        });
+    }
+
+    /// §3 req 12 and the čl. 34 precedent: warn, never block. All three writes
+    /// must still be there, and the advisory must come back beside them.
+    #[test]
+    fn a_receipt_without_an_isprava_still_books_everything_and_warns() {
+        with_connection("inventory_isprava_missing", |connection| {
+            let result = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                adjustment(5000, "Prijem robe"),
+                SEEDED_ADMIN_ID,
+                "2026-07-04T09:00:00Z",
+            )
+            .expect("a receipt with no isprava must NOT be refused");
+
+            assert_eq!(result.new_quantity_milli, 5000, "the movement is written");
+
+            let kalkulacije: i64 = connection
+                .query_row("SELECT COUNT(*) FROM kalkulacije", [], |row| row.get(0))
+                .expect("count");
+            let zaduzenja: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM kep_entries WHERE kolona = 'zaduzenje'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count");
+            assert_eq!(kalkulacije, 1, "the kalkulacija is written");
+            assert_eq!(zaduzenja, 1, "the zaduženje is written");
+
+            let warning = result
+                .isprava_warning
+                .expect("an unattached receipt must warn");
+            assert!(
+                warning.notice.citation.contains("čl. 29 st. 1"),
+                "the advisory cites the duty it is about: {}",
+                warning.notice.citation
+            );
+            // The opis stays the plain text — an unattached receipt reads as
+            // exactly what it is rather than implying a document behind it.
+            let opis: String = connection
+                .query_row(
+                    "SELECT opis FROM kep_entries WHERE kolona = 'zaduzenje' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("the zaduženje row");
+            assert_eq!(opis, "Prijem robe — Prijem robe");
+        });
+    }
+
+    #[test]
+    fn a_receipt_with_an_isprava_does_not_warn() {
+        with_connection("inventory_isprava_no_warning", |connection| {
+            let isprava_id = seed_isprava(connection, false);
+            let mut request = adjustment(5000, "Prijem robe");
+            request.isprava_id = Some(isprava_id);
+
+            let result = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                request,
+                SEEDED_ADMIN_ID,
+                "2026-07-04T09:00:00Z",
+            )
+            .expect("receive should succeed");
+
+            assert!(
+                result.isprava_warning.is_none(),
+                "nothing to warn about once the document is recorded"
+            );
+        });
+    }
+
+    /// An unknown isprava id must take the whole receipt down with it rather than
+    /// booking goods against a document that does not exist.
+    #[test]
+    fn an_unknown_isprava_rolls_the_receipt_back() {
+        with_connection("inventory_isprava_unknown", |connection| {
+            let mut request = adjustment(5000, "Prijem robe");
+            request.isprava_id = Some(999);
+
+            let err = apply_inventory_adjustment(
+                connection,
+                InventoryMovementType::Receive,
+                request,
+                SEEDED_ADMIN_ID,
+                "2026-07-04T09:00:00Z",
+            )
+            .expect_err("an unknown isprava is not bookable");
+            assert_eq!(err.code(), "not_found");
+
+            for (table, predicate) in [
+                ("inventory_movements", ""),
+                ("kalkulacije", ""),
+                ("kep_entries", " WHERE kolona = 'zaduzenje'"),
+            ] {
+                let count: i64 = connection
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table}{predicate}"),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("count");
+                assert_eq!(count, 0, "{table} must roll back with the rest");
+            }
+        });
+    }
+
     fn adjustment(quantity_milli: i64, reason: &str) -> InventoryAdjustmentRequest {
         InventoryAdjustmentRequest {
             product_id: 1,
@@ -973,6 +1333,7 @@ mod tests {
             purchase_price_minor: None,
             reference_type: None,
             reference_id: None,
+            isprava_id: None,
         }
     }
 
@@ -1458,6 +1819,7 @@ mod tests {
                         purchase_price_minor: None,
                         reference_type: None,
                         reference_id: None,
+                        isprava_id: None,
                     },
                     SEEDED_ADMIN_ID,
                     "2026-06-18T12:00:00Z",
@@ -1611,6 +1973,7 @@ mod tests {
                     purchase_price_minor: None,
                     reference_type: None,
                     reference_id: None,
+                    isprava_id: None,
                 },
                 SEEDED_ADMIN_ID,
                 "2026-07-04T09:00:00Z",

@@ -864,9 +864,99 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
                     .expect("migration count should query");
 
-                assert_eq!(migration_count, 23);
+                assert_eq!(migration_count, 24);
             },
         );
+    }
+
+    /// v24 — the ZoT čl. 29 st. 1 capture. Asserts the columns, and two shape
+    /// properties that are load-bearing rather than cosmetic.
+    #[test]
+    fn migration_v24_adds_dobavljaci_and_primljene_isprave() {
+        with_test_database("migration_v24_dobavljaci", |db| {
+            let connection = db.open().expect("database should open");
+
+            for (table, column) in [
+                ("dobavljaci", "poslovno_ime"),
+                ("dobavljaci", "adresa"),
+                ("dobavljaci", "pib"),
+                ("dobavljaci", "maticni_broj_bpg"),
+                ("dobavljaci", "fizicko_lice"),
+                ("primljene_isprave", "dobavljac_poslovno_ime"),
+                ("primljene_isprave", "dobavljac_adresa"),
+                ("primljene_isprave", "dobavljac_pib"),
+                ("primljene_isprave", "dobavljac_maticni_broj_bpg"),
+                ("primljene_isprave", "vrsta"),
+                ("primljene_isprave", "broj"),
+                ("primljene_isprave", "datum"),
+                ("primljene_isprave", "poseduje_ispravu"),
+                ("primljene_isprave", "poseduje_potvrdio"),
+                ("primljene_isprave", "poseduje_potvrdjeno_at"),
+                ("kalkulacije", "isprava_id"),
+            ] {
+                let exists: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                        [table, column],
+                        |row| row.get(0),
+                    )
+                    .expect("pragma should query");
+                assert_eq!(exists, 1, "{table}.{column}");
+            }
+
+            // KEP-VERIFIED-RULES §3's source-document list ends in „ili druga
+            // odgovarajuća isprava za robu“, so the column must accept a kind
+            // outside the six named ones. A CHECK constraint here would turn an
+            // open clause in the Pravilnik into a refusal by this software.
+            connection
+                .execute(
+                    "INSERT INTO dobavljaci (poslovno_ime, created_at, updated_at)
+                     VALUES ('ABC d.o.o.', '2026-07-03T09:00:00Z', '2026-07-03T09:00:00Z')",
+                    [],
+                )
+                .expect("dobavljač should insert");
+            connection
+                .execute(
+                    "INSERT INTO primljene_isprave (
+                        dobavljac_id, dobavljac_poslovno_ime, vrsta, broj, datum, created_at
+                     ) VALUES (1, 'ABC d.o.o.', 'zapisnik o prijemu', '1', '2026-07-03',
+                               '2026-07-03T09:00:00Z')",
+                    [],
+                )
+                .expect("an unnamed document kind must be storable — §3's list is open-ended");
+
+            // Possession is never presumed: the default is „nobody has said so“.
+            let poseduje: i64 = connection
+                .query_row(
+                    "SELECT poseduje_ispravu FROM primljene_isprave WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("query");
+            assert_eq!(
+                poseduje, 0,
+                "čl. 29 st. 1 possession must default to unasserted — a presumption \
+                 here would hand the owner a false clear"
+            );
+
+            // And no column stores the document itself. The register says the
+            // application holds none, and `docs_guard` keys on that being true.
+            for fragment in ["putanja", "file_path", "blob", "prilog"] {
+                let stores: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('primljene_isprave')
+                         WHERE name LIKE '%' || ?1 || '%'",
+                        [fragment],
+                        |row| row.get(0),
+                    )
+                    .expect("pragma should query");
+                assert_eq!(
+                    stores, 0,
+                    "primljene_isprave must store no document (`{fragment}`); if that \
+                     changes, row 16 of the register and its docs_guard both move with it"
+                );
+            }
+        });
     }
 
     #[test]

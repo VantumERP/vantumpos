@@ -46,8 +46,12 @@ import type {
   KepEntryView,
   KepLedger,
   KepStatus,
+  CreateIspravaRequest,
+  Dobavljac,
   InventoryAdjustmentRequest,
   InventoryAdjustmentResult,
+  PrimljenaIsprava,
+  SaveDobavljacRequest,
   LegalNotice,
   LowStockReport,
   LoginRequest,
@@ -264,6 +268,17 @@ export interface InventoryService {
    * sentencing, not a defence, and it asserts nothing about the catalog fields.
    */
   markDeclarationChecked(productId: number): Promise<void>;
+  /** Suppliers for the isprava picker (ZoT čl. 29 st. 1). */
+  listDobavljaci(): Promise<Dobavljac[]>;
+  saveDobavljac(request: SaveDobavljacRequest): Promise<number>;
+  listIsprave(limit?: number): Promise<PrimljenaIsprava[]>;
+  createIsprava(request: CreateIspravaRequest): Promise<number>;
+  /**
+   * Records that the operator asserts the paper isprava is held. Stores **no
+   * document** and proves no possession — it stores that somebody said so, and
+   * who, and when.
+   */
+  confirmIspravaPossession(ispravaId: number): Promise<void>;
 }
 
 export interface ReceiptsService {

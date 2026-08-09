@@ -24,6 +24,7 @@ import type {
   DeclarationGapReason,
   DeclarationGapRow,
   DeclarationWarning,
+  Dobavljac,
   DepositBucket,
   EmployeeProfile,
   EurRate,
@@ -49,6 +50,7 @@ import type {
   PrethodnaCenaDto,
   PriceDivergence,
   ProcessingActivity,
+  PrimljenaIsprava,
   ProductLedgerMovement,
   ProductListQuery,
   ProductLookupSuggestion,
@@ -376,6 +378,21 @@ const declarationMissingNotice: LegalNotice = {
   isLegalDuty: true,
 };
 
+/** Mirrors `legal::isprava_missing` (ZoT čl. 29 st. 1 / čl. 68 st. 1 tač. 6).
+ *  `penalty` null for the same reason as the others: the mock has no shop
+ *  profile to tier a figure against, and a plausible-looking one would be worse
+ *  than none. */
+const ispravaMissingNotice: LegalNotice = {
+  summary:
+    "Prijem robe je evidentiran bez isprave dobavljača. Trgovac je dužan da " +
+    "poseduje ispravu o nabavci robe (otpremnicu, fakturu i sl.). Aplikacija " +
+    "evidentira podatke o ispravi i vašu izjavu da je posedujete — samu " +
+    "ispravu ne čuva.",
+  penalty: null,
+  citation: "Zakon o trgovini, čl. 29 st. 1, čl. 68 st. 1 tač. 6.",
+  isLegalDuty: true,
+};
+
 /** Mirrors `legal::overtime_record_missing`. `penalty` null for the same reason. */
 const overtimeRecordMissingNotice: LegalNotice = {
   summary:
@@ -594,6 +611,12 @@ function declarationWarningsFor(product: ProductSummary): DeclarationWarning[] {
   ];
 }
 
+/** Verbatim `commands::inventory::ISPRAVA_ADVISORY`. */
+const ISPRAVA_ADVISORY =
+  "Roba je primljena i evidentirana, ali uz prijem nije vezana isprava " +
+  "dobavljača. Ako ispravu posedujete u papirnoj dokumentaciji, evidentirajte " +
+  "je i povežite sa prijemom.";
+
 /** `commands::catalog::declaration_gaps`. Active articles only; a row with no
  *  reason is not a gap and is not returned. */
 function declarationGapsFor(products: ProductSummary[]): DeclarationGapRow[] {
@@ -691,6 +714,21 @@ export function createMockServices(): PosServices {
     },
   ];
   const ledgerMovements = new Map<number, ProductLedgerMovement[]>();
+  // ZoT čl. 29 st. 1 fixtures. One supplier, no isprave: the default receive in
+  // the mock therefore raises the missing-isprava advisory, which is the state
+  // the screen has to render correctly.
+  const dobavljaci: Dobavljac[] = [
+    {
+      id: 1,
+      poslovnoIme: "ABC d.o.o.",
+      adresa: "Bulevar 1, Novi Pazar",
+      pib: "123456789",
+      maticniBrojBpg: "20123456",
+      fizickoLice: false,
+      active: true,
+    },
+  ];
+  const isprave: PrimljenaIsprava[] = [];
   const campaigns: CampaignView[] = [];
   const reklamacije: ReklamacijaView[] = [];
   // A single seeded receipt zaduženje (50 kom x 156,00 retail incl PDV).
@@ -1108,6 +1146,12 @@ export function createMockServices(): PosServices {
       // receipt can raise the čl. 34 warning.
       declarationWarnings:
         movementType === "receive" ? declarationWarningsFor(product) : [],
+      // Likewise the čl. 29 st. 1 advisory: only a nabavka has a dobavljač, and
+      // it fires only where no isprava was attached.
+      ispravaWarning:
+        movementType === "receive" && !request.ispravaId
+          ? { advisory: ISPRAVA_ADVISORY, notice: ispravaMissingNotice }
+          : null,
     };
   }
 
@@ -1827,6 +1871,76 @@ export function createMockServices(): PosServices {
       // pallet, and `inventory_receive` admits the cashier too.
       async markDeclarationChecked(productId) {
         findProduct(productId);
+      },
+      async listDobavljaci() {
+        return dobavljaci.filter((row) => row.active);
+      },
+      async saveDobavljac(request) {
+        const existing = request.id
+          ? dobavljaci.find((row) => row.id === request.id)
+          : undefined;
+        if (existing) {
+          Object.assign(existing, {
+            poslovnoIme: request.poslovnoIme,
+            adresa: request.adresa ?? "",
+            pib: request.pib ?? "",
+            maticniBrojBpg: request.maticniBrojBpg ?? "",
+            fizickoLice: request.fizickoLice ?? false,
+          });
+          return existing.id;
+        }
+        const id = dobavljaci.length + 1;
+        dobavljaci.push({
+          id,
+          poslovnoIme: request.poslovnoIme,
+          adresa: request.adresa ?? "",
+          pib: request.pib ?? "",
+          maticniBrojBpg: request.maticniBrojBpg ?? "",
+          fizickoLice: request.fizickoLice ?? false,
+          active: true,
+        });
+        return id;
+      },
+      async listIsprave(limit) {
+        return isprave.slice(0, limit ?? 100);
+      },
+      async createIsprava(request) {
+        const dobavljac = dobavljaci.find(
+          (row) => row.id === request.dobavljacId,
+        );
+        if (!dobavljac) {
+          throw new Error("Dobavljač ne postoji.");
+        }
+        const id = isprave.length + 1;
+        // Snapshot, exactly as the backend does: a later edit to the supplier
+        // must not rewrite an isprava already created.
+        isprave.unshift({
+          id,
+          dobavljacId: dobavljac.id,
+          dobavljacPoslovnoIme: dobavljac.poslovnoIme,
+          dobavljacAdresa: dobavljac.adresa,
+          dobavljacPib: dobavljac.pib,
+          dobavljacMaticniBrojBpg: dobavljac.maticniBrojBpg,
+          dobavljacFizickoLice: dobavljac.fizickoLice,
+          vrsta: request.vrsta,
+          broj: request.broj,
+          datum: request.datum,
+          posedujeIspravu: request.posedujeIspravu ?? false,
+          posedujePotvrdio: request.posedujeIspravu ? 1 : null,
+          posedujePotvrdjenoAt: request.posedujeIspravu ? now : null,
+          napomena: request.napomena ?? null,
+          createdAt: now,
+        });
+        return id;
+      },
+      async confirmIspravaPossession(ispravaId) {
+        const isprava = isprave.find((row) => row.id === ispravaId);
+        if (!isprava) {
+          throw new Error("Isprava ne postoji.");
+        }
+        isprava.posedujeIspravu = true;
+        isprava.posedujePotvrdio = 1;
+        isprava.posedujePotvrdjenoAt = now;
       },
     },
     receipts: {

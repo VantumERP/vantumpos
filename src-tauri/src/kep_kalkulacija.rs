@@ -49,15 +49,32 @@ pub fn derive_kalkulacija(
     }
 }
 
-/// Generates and persists a receipt's kalkulacija (the formal isprava), returning
-/// its new id. Runs inside the caller's receive transaction so it is atomic with
-/// the 9a zaduženje.
+/// A kalkulacija that has just been written: its id, and the redni broj allocated
+/// for it. The redni broj travels back with the id because kolona 3 names the
+/// kalkulacija by it (PEP čl. 15 st. 4, and §2.7's worked ledger row) — re-reading
+/// it from the caller would be a second query for a number this function has
+/// already computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreatedKalkulacija {
+    pub id: i64,
+    pub redni_broj: i64,
+}
+
+/// Generates and persists a receipt's kalkulacija (the formal isprava). Runs
+/// inside the caller's receive transaction so it is atomic with the 9a zaduženje.
 ///
 /// Snapshots elements 1-3 (company header) from settings, reads elements 5/6/14 +
 /// the PDV rate from the product line, derives 9-13 backward (`derive_kalkulacija`,
 /// marža may be negative), and allocates `redni_broj = MAX+1` per `book_year`.
 /// Element 13 (`prodajna_vrednost_sa_pdv_minor`) equals the zaduženje's amount
 /// (`qty × sale_price`), so linking it changes no ledger value.
+///
+/// `isprava` is the **supplier's** isprava o nabavci (ZoT čl. 29 st. 1) when the
+/// operator attached one — a different document from this one in every sense: the
+/// kalkulacija is the shop's *own* price document and its header identity is the
+/// trgovac's, snapshotted from settings. `None` is a receipt with no supplier
+/// document attached, representable on purpose because the receive path warns and
+/// never blocks.
 #[allow(clippy::too_many_arguments)]
 pub fn create_kalkulacija(
     tx: &Transaction<'_>,
@@ -66,9 +83,10 @@ pub fn create_kalkulacija(
     nabavna_po_jm_minor: i64,
     reference_type: Option<&str>,
     reference_id: Option<i64>,
+    isprava_id: Option<i64>,
     acting_user_id: i64,
     now: &str,
-) -> Result<i64, AppError> {
+) -> Result<CreatedKalkulacija, AppError> {
     // Elements 1-3: the company header, snapshotted from settings at creation.
     let company_json: Option<String> = tx
         .query_row(
@@ -121,14 +139,16 @@ pub fn create_kalkulacija(
             trgovacki_naziv, jedinica_mere, kolicina_milli,
             nabavna_cena_po_jm_minor, vrednost_po_fakturi_minor, razlika_u_ceni_minor,
             prodajna_vrednost_bez_pdv_minor, pdv_minor, prodajna_vrednost_sa_pdv_minor,
-            prodajna_cena_po_jm_minor, reference_type, reference_id, created_by, created_at
+            prodajna_cena_po_jm_minor, reference_type, reference_id, isprava_id,
+            created_by, created_at
         ) VALUES (
             ?1, ?2, ?3,
             ?4, ?5, ?6,
             ?7, ?8, ?9,
             ?10, ?11, ?12,
             ?13, ?14, ?15,
-            ?16, ?17, ?18, ?19, ?20
+            ?16, ?17, ?18, ?21,
+            ?19, ?20
         )",
         params![
             redni_broj,
@@ -151,10 +171,14 @@ pub fn create_kalkulacija(
             reference_id,
             acting_user_id,
             now,
+            isprava_id,
         ],
     )?;
 
-    Ok(tx.last_insert_rowid())
+    Ok(CreatedKalkulacija {
+        id: tx.last_insert_rowid(),
+        redni_broj,
+    })
 }
 
 /// A persisted kalkulacija, all columns, for the export/print surface (camelCase
@@ -181,6 +205,11 @@ pub struct KalkulacijaView {
     pub prodajna_cena_po_jm_minor: i64,
     pub reference_type: Option<String>,
     pub reference_id: Option<i64>,
+    /// The supplier's isprava o nabavci this receipt was booked against (ZoT
+    /// čl. 29 st. 1), or `None` where none was attached. Carried so the link is
+    /// visible to a reader of the document; this build does not yet render the
+    /// supplier's document *on* the printed kalkulacija.
+    pub isprava_id: Option<i64>,
     pub created_by: Option<i64>,
     pub created_at: String,
 }
@@ -239,7 +268,8 @@ pub fn load_kalkulacija(conn: &Connection, id: i64) -> Result<KalkulacijaView, A
                 trgovacki_naziv, jedinica_mere, kolicina_milli,
                 nabavna_cena_po_jm_minor, vrednost_po_fakturi_minor, razlika_u_ceni_minor,
                 prodajna_vrednost_bez_pdv_minor, pdv_minor, prodajna_vrednost_sa_pdv_minor,
-                prodajna_cena_po_jm_minor, reference_type, reference_id, created_by, created_at
+                prodajna_cena_po_jm_minor, reference_type, reference_id, created_by, created_at,
+                isprava_id
          FROM kalkulacije WHERE id = ?1",
         params![id],
         |row| {
@@ -265,6 +295,7 @@ pub fn load_kalkulacija(conn: &Connection, id: i64) -> Result<KalkulacijaView, A
                 reference_id: row.get(18)?,
                 created_by: row.get(19)?,
                 created_at: row.get(20)?,
+                isprava_id: row.get(21)?,
             })
         },
     )
@@ -479,6 +510,7 @@ mod tests {
             prodajna_cena_po_jm_minor: 15_600,
             reference_type: Some("kalkulacija".into()),
             reference_id: Some(7),
+            isprava_id: None,
             created_by: Some(1),
             created_at: "2026-07-04T09:00:00Z".into(),
         }
@@ -525,21 +557,27 @@ mod tests {
         with_kalkulacija_db("kalkulacija_load_render", |conn| {
             seed_product(conn);
             let tx = conn.transaction().expect("tx");
-            let id = create_kalkulacija(
+            let created = create_kalkulacija(
                 &tx,
                 1,
                 50_000, // 50 kom in milli
                 10_000, // nabavna 100,00 / jm
                 Some("kalkulacija"),
                 Some(7),
+                None, // no supplier isprava attached
                 1,
                 "2026-07-04T09:00:00Z",
             )
             .expect("create");
             tx.commit().expect("commit");
 
-            let view = load_kalkulacija(conn, id).expect("load");
+            let view = load_kalkulacija(conn, created.id).expect("load");
+            assert_eq!(created.redni_broj, 1, "returned redni broj matches the row");
             assert_eq!(view.redni_broj, 1, "first kalkulacija of the book year");
+            assert_eq!(
+                view.isprava_id, None,
+                "a receipt with no supplier isprava stays representable"
+            );
             assert_eq!(
                 view.prodajna_vrednost_sa_pdv_minor, 780_000,
                 "element 13 = qty × sale_price = 7.800,00"
