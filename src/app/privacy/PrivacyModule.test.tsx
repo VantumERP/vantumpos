@@ -7,7 +7,11 @@ import { UserDialog, UsersScreen } from "@/app/AppShell";
 import { navigationItems } from "@/app/navigation";
 import { createMockServices } from "@/services/mock-adapter";
 import type { PosServices, UsersService } from "@/services/ports";
-import type { EmployeeProfile, UserAccount } from "@/services/types";
+import type {
+  EmployeeProfile,
+  SupportSession,
+  UserAccount,
+} from "@/services/types";
 
 const admin: UserAccount = {
   id: 1,
@@ -45,6 +49,28 @@ const prazanProfil: EmployeeProfile = {
 /** Every affordance that would end an employee's record rather than an account. */
 const BRISANJE = /obriši|izbriši|brisanje|ukloni|uklanjanje|delete/i;
 
+/** A čl. 46 nalog that is live, so the req. 28 unmask block is on screen. */
+const zivNalog: SupportSession = {
+  id: 1,
+  grantedBy: 1,
+  grantedByName: "Administrator",
+  grantedAt: "2026-08-01T09:00:00Z",
+  scope: "Pregled greške na štampi fiskalnog isečka",
+  expiresAt: "2026-08-01T10:00:00Z",
+  startedAt: null,
+  endedAt: null,
+  revokedAt: null,
+  odsustvoOtkrivenoAt: null,
+};
+
+function servicesWithNalog(): PosServices {
+  const posServices = createMockServices();
+  vi.spyOn(posServices.privacy, "activeSupportSession").mockResolvedValue(
+    zivNalog,
+  );
+  return posServices;
+}
+
 describe("navigation", () => {
   it("carries Privatnost as an admin-only surface", () => {
     const item = navigationItems.find((candidate) => candidate.id === "privatnost");
@@ -78,6 +104,37 @@ describe("PrivacyModule", () => {
 
     await user.click(screen.getByRole("tab", { name: /radnje obrade/i }));
     expect(await screen.findByText(/čl\. 47 st\. 7/i)).toBeInTheDocument();
+  });
+
+  /**
+   * The one hop that fails silently: req. 28's unmask is `absent-means-closed`,
+   * so a dropped `currentUser` does not throw — the button simply never renders
+   * and the shop can never lift the mask, with the whole suite green. Every
+   * `SupportApprovalPanel` test renders the panel directly with its own
+   * `currentUser`, so none of them sees this prop being handed over at all.
+   *
+   * Both arms, because only the pair is a wiring test: the vlasnik arm fails if
+   * `PrivacyModule` stops passing the user down, and the no-user arm fails if
+   * the panel ever starts defaulting the gate open.
+   */
+  it("hands the vlasnik's role to the čl. 46 panel, and hands nothing when it has nothing", async () => {
+    const { unmount } = render(
+      <PrivacyModule services={servicesWithNalog()} currentUser={admin} />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /otkrij razlog odsustva/i }),
+    ).toBeEnabled();
+    unmount();
+
+    render(<PrivacyModule services={servicesWithNalog()} />);
+
+    // The same live nalog, so the block itself is on screen either way — what
+    // differs is the control.
+    await screen.findByText(/kategorija odsustva/i);
+    expect(
+      screen.queryByRole("button", { name: /otkrij razlog odsustva/i }),
+    ).not.toBeInTheDocument();
   });
 
   /**

@@ -273,10 +273,13 @@ export function SupportApprovalPanel({
                 </h4>
                 <p className="text-sm text-muted-foreground">
                   Dok ovaj nalog važi, kategorija odsustva se ne prikazuje u
-                  evidenciji radnog vremena — podatak se za to vreme ne čita iz
-                  baze. Skriva se sama kolona: broj časova odsustva po zakonskim
-                  vrstama ostaje prikazan, pa se iz njega i dalje može zaključiti o
-                  kojoj je vrsti odsustva reč.
+                  pregledu i izvozu evidencije radnog vremena — podatak se za to
+                  vreme ne čita iz baze. Skriva se sama kolona: broj časova
+                  odsustva po zakonskim vrstama ostaje prikazan, pa se iz njega i
+                  dalje može zaključiti o kojoj je vrsti odsustva reč. Pregled
+                  „Moji sati“, kojim zaposleni vidi sopstvene časove, ne skriva se
+                  ni tada — pravo iz ZZPL čl. 26 pripada zaposlenom i ne
+                  ograničava se zbog sesije podrške.
                 </p>
 
                 {session.odsustvoOtkrivenoAt ? (

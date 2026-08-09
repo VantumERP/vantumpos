@@ -163,16 +163,19 @@ const TEMPLATES: &[Template] = &[
              RFZO-a. Časovi privremene sprečenosti su posebna vrsta podataka (ZZPL čl. 17 st. 1) \
              i vode se kao časovi, bez dijagnoze.",
         vrsta_primalaca: "Nadležni državni organi kada zakon to nalaže; knjigovođa za obračun \
-             zarade.",
+             zarade; Actaer kao obrađivač samo tokom sesije daljinske podrške koju je rukovalac \
+             odobrio.",
         rok_osnov: "ZEOR čl. 25 st. 3 — zaključena mesečna klasifikacija čuva se trajno. Rok se \
              ne podešava.",
         retention: Some(RecordClass::WorktimeClassification),
         mere: "Zaključen mesec se ne prepisuje: ispravka je nova verzija zapisa koja nosi ko je, \
              kada i zašto ispravio, pa raniji sadržaj ostaje vidljiv. Dok traje odobrena sesija \
-             daljinske podrške, kategorija odsustva se ne čita iz baze i ne prikazuje; rukovalac \
-             može da je otkrije za taj nalog, a otkrivanje se upisuje u evidenciju pristupa. \
-             Skriva se kolona sa kategorijom — broj časova po zakonskim vrstama odsustva ostaje \
-             vidljiv.",
+             daljinske podrške, kategorija odsustva se ne čita iz baze i ne prikazuje u pregledu \
+             i izvozu evidencije radnog vremena; rukovalac može da je otkrije za taj nalog, a \
+             otkrivanje se upisuje u evidenciju pristupa. Pregled „Moji sati“, kojim zaposleni \
+             vidi sopstvene časove, ne skriva se ni tada — pravo iz ZZPL čl. 26 pripada \
+             zaposlenom i ne ograničava se zbog sesije podrške. Skriva se kolona sa kategorijom \
+             — broj časova po zakonskim vrstama odsustva ostaje vidljiv.",
     },
     Template {
         kljuc: "prekovremeni_rad",
@@ -1617,12 +1620,35 @@ mod tests {
                 "the measure must say the disclosure is recorded — `reveal_absence_reason` \
                  writes one čl. 48 line per nalog",
             ),
+            (
+                "moji sati",
+                "the measure must carry the carve-out, because `my_hours` does NOT mask: it \
+                 calls `load_month(.., true)` unconditionally, so while a nalog is live an \
+                 employee opening „Moji sati“ reads their own category straight out of the \
+                 database. Without this clause the register denies behaviour the code has, and \
+                 it is the document the Poverenik reads",
+            ),
         ] {
             assert!(
                 mere.contains(needle),
                 "radno_vreme.mere lacks „{needle}“: {why}"
             );
         }
+
+        // Čl. 47 st. 1 t. 5 and t. 8 have to describe the same world. The measure
+        // above is entirely about what the obrađivač sees during a support
+        // session, so an entry that masks a recipient it does not list is
+        // self-contradictory: field 5 would say remote support never receives the
+        // working-time record while field 8 says a column of it is masked from
+        // them. `list_month` and `export_month_csv` are exactly what the operator
+        // reaches under a nalog — that is req. 28's premise.
+        let primaoci = radno_vreme.vrsta_primalaca.to_lowercase();
+        assert!(
+            primaoci.contains("obrađivač") && primaoci.contains("podršk"),
+            "radno_vreme.vrsta_primalaca must name the obrađivač its own mere describe masking \
+             — found „{}“",
+            radno_vreme.vrsta_primalaca
+        );
 
         // …and it reaches the generated artefact, not just the constant. The
         // register the Poverenik reads is the row, not the source.

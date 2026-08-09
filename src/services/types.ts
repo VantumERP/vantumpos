@@ -1633,9 +1633,19 @@ export interface WorkTimeMonth {
    * **It says the CATEGORY was withheld, and no more.** Every category value is
    * its ZEOR čl. 24 tač. 1 bucket minus `_minuta`, and the buckets are on this
    * payload whatever the flag says, so a masked read still carries
-   * `sprecenostRfzoMinuta` on the row whose `kategorijaOdsustva` is `null`. The
-   * grid draws v) and none of the nine, which is why the rendered register is
-   * covered and the wire is not.
+   * `sprecenostRfzoMinuta` on the row whose `kategorijaOdsustva` is `null` — the
+   * wire is not covered, and any client reading JSON rather than pixels recovers
+   * the category from the one non-zero bucket.
+   *
+   * **The rendered register is not fully covered either, and the gap is one
+   * category wide.** The grid draws none of the nine v) buckets, so those nine
+   * are withheld on screen; but it draws b), efektivno izvršeni and čekanja i
+   * zastoji, and b) is exactly the sum of those two plus
+   * `obustavaRadaStrajkMinuta`. A reader subtracting two drawn columns from a
+   * third recovers the tenth category, `obustava_rada_strajk`, in full. Removing
+   * a drawn column would gut the ZEOR čl. 24 tač. 1 register, so the gap is
+   * stated rather than closed; `AbsenceCell` reads that bucket for the same
+   * reason, so the masked cell at least does not also deny the absence.
    */
   razlogOdsustvaSkriven: boolean;
   entries: WorkTimeEntryView[];

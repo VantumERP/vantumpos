@@ -1093,10 +1093,59 @@ describe("WorkTimeModule absence reason under a support nalog", () => {
   });
 
   /**
+   * The tenth category is not in v), and the cell has to read the bucket too.
+   *
+   * `derive_totals` sums the **nine** non-worked buckets into v); the tenth
+   * `kategorija_odsustva` value, `obustava_rada_strajk`, books into
+   * `obustavaRadaStrajkMinuta`, which is the third indent of b) „ukupno
+   * ostvareni“ (`commands/worktime.rs::derive_totals`, pinned by the save test
+   * that asserts a 300-minute strike leaves v) at zero). So a day that books a
+   * full shift of štrajk arrives here with v) = 0, and a cell that asks only v)
+   * renders „—“ on it — the „nema odsustva“ falsehood this whole branch exists
+   * to stop, for one category in ten and at any minute count.
+   *
+   * The bucket is reachable without naming the withheld column: it is on
+   * `WorkTimeMinutes` for every read, masked or not, so the guard
+   * `the_masked_register_read_never_names_the_absence_reason_column` is
+   * untouched by testing it.
+   */
+  it("says the reason is hidden on a štrajk day, which books outside v)", async () => {
+    const strajk = entry({
+      id: 12,
+      dan: "2026-06-08",
+      // What the backend sends for `obustava_rada_strajk` under a live nalog.
+      kategorijaOdsustva: null,
+      minuti: {
+        ...nulaMinuta,
+        moguciMinuta: 480,
+        ukupnoOstvareniMinuta: 480,
+        obustavaRadaStrajkMinuta: 480,
+        ukupnoNeizvrseniMinuta: 0,
+      },
+    });
+
+    render(
+      <WorkTimeModule
+        services={servicesWithMonth(
+          month([strajk], { razlogOdsustvaSkriven: true }),
+        )}
+        currentUser={admin}
+      />,
+    );
+
+    const row = await screen.findByRole("row", { name: /08\.06\.2026/ });
+    const celija = celijaOdsustva(row);
+    expect(celija).toHaveTextContent(/odsutan/i);
+    expect(celija).toHaveTextContent(/skriven/i);
+    expect(celija).not.toHaveTextContent("—");
+  });
+
+  /**
    * The masked cell must not claim an absence the row does not carry. `v)` is
-   * the sum of the nine ZEOR čl. 24 tač. 1 absence buckets, so a zero there is
-   * the row saying it booked no absence minutes — and „Odsutan“ on such a day
-   * would invent one.
+   * the sum of the nine ZEOR čl. 24 tač. 1 absence buckets and
+   * `obustavaRadaStrajkMinuta` is the tenth category's bucket, so a zero in
+   * both is the row saying it booked no absence minutes — and „Odsutan“ on such
+   * a day would invent one.
    */
   it("does not invent an absence on a worked day while the column is masked", async () => {
     const radni = entry({

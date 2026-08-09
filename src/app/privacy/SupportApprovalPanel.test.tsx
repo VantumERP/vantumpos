@@ -220,6 +220,25 @@ describe("SupportApprovalPanel absence-reason unmask", () => {
     expect(screen.getByText(/evidenciju pristupa/i)).toBeInTheDocument();
   });
 
+  /**
+   * The copy the vlasnik reads while deciding must not overstate the mask.
+   *
+   * `worktime::my_hours` calls `load_month(.., true)` unconditionally — Task 3's
+   * deliberate čl. 26 carve-out — so while a nalog is live an employee opening
+   * „Moji sati“ reads their own category out of the database and shows it to
+   * whoever is mirroring the screen. A panel that says the datum „se ne čita iz
+   * baze“ full stop is telling the vlasnik the obrađivač cannot reach it, which
+   * is the one direction it is worst to be wrong in: this is the surface where
+   * the čl. 46 decision to widen the processing is actually made. The čl. 23
+   * notice already carries the carve-out; the panel is the copy that dropped it.
+   */
+  it("does not deny the „Moji sati“ carve-out the backend keeps open", async () => {
+    render(<SupportApprovalPanel services={services(session())} currentUser={vlasnik} />);
+    await screen.findByRole("button", { name: /otkrij razlog odsustva/i });
+
+    expect(screen.getByText(/moji sati/i)).toBeInTheDocument();
+  });
+
   it("offers no re-mask affordance, because there is no re-mask verb", async () => {
     render(<SupportApprovalPanel services={services(session())} currentUser={vlasnik} />);
     await screen.findByRole("button", { name: /otkrij razlog odsustva/i });

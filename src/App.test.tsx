@@ -196,6 +196,45 @@ describe("AppShell", () => {
     ).not.toBeInTheDocument();
   });
 
+  /**
+   * The second, outer half of the req. 28 unmask wiring.
+   *
+   * `AppShell` is the only holder of a real session, and `PrivacyModule` is the
+   * only thing that can hand a role to the čl. 46 panel. Because the gate is
+   * `absent-means-closed`, deleting `currentUser={session.user}` at the
+   * Privatnost branch breaks nothing loudly: the button stops rendering, the
+   * shop can never lift the mask in the running app, and every panel and module
+   * test stays green because they all supply the prop themselves. So the hop is
+   * asserted where it actually happens — an admin signed into the shell,
+   * navigating to Privatnost, reaching the control.
+   */
+  it("threads the signed-in vlasnik into Privatnost, so the req. 28 unmask is reachable", async () => {
+    const services = Object.assign(createMockServices(), {
+      initialSession: adminSession,
+    });
+    vi.spyOn(services.privacy, "activeSupportSession").mockResolvedValue({
+      id: 1,
+      grantedBy: 1,
+      grantedByName: "Administrator",
+      grantedAt: "2026-06-18T09:00:00Z",
+      scope: "Pregled greške na štampi fiskalnog isečka",
+      expiresAt: "2026-06-18T10:00:00Z",
+      startedAt: null,
+      endedAt: null,
+      revokedAt: null,
+      odsustvoOtkrivenoAt: null,
+    });
+    const user = userEvent.setup();
+
+    render(<AppShell services={services} />);
+
+    await user.click(await screen.findByRole("button", { name: "Privatnost" }));
+
+    expect(
+      await screen.findByRole("button", { name: /otkrij razlog odsustva/i }),
+    ).toBeEnabled();
+  });
+
   it("shows real signed-in user and shift state in the shell", async () => {
     const services = buildAuthServices({
       auth: {

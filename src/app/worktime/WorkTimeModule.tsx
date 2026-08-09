@@ -1053,11 +1053,17 @@ const ADVISORY_TAG = "izračunato radi provere usklađenosti";
  * nalog, and points at the one surface that can lift it. It does **not** offer to
  * lift it here: the decision is the shop's and belongs beside the nalog, and a
  * second entry point would let it be made by someone reading a payroll screen.
+ *
+ * **Scoped to this register, because that is all the mask covers.** `my_hours`
+ * reads the category unmasked whatever the nalog says — the deliberate ZZPL
+ * čl. 26 carve-out — so a sentence saying the category „se ne prikazuje“ without
+ * naming where would deny behaviour „Moji sati“ has, which house rule 11 bars
+ * even when the reader happens to be standing in front of the register.
  */
 const RAZLOG_SKRIVEN_OBJASNJENJE =
-  "Kategorija odsustva se ne prikazuje dok važi nalog za pristup tehničke podrške " +
-  "(ZZPL čl. 46). Broj časova odsustva ostaje prikazan. Otkrivanje za taj nalog " +
-  "vlasnik odobrava na kartici „Privatnost“, uz „Daljinska podrška“.";
+  "Kategorija odsustva se u ovoj evidenciji ne prikazuje dok važi nalog za pristup " +
+  "tehničke podrške (ZZPL čl. 46). Broj časova odsustva ostaje prikazan. Otkrivanje " +
+  "za taj nalog vlasnik odobrava na kartici „Privatnost“, uz „Daljinska podrška“.";
 
 function MinuteCell({ value }: { value: number }) {
   return (
@@ -1088,21 +1094,26 @@ function MinuteCell({ value }: { value: number }) {
  * guessing, and the mask branch runs first: while it is set, no category is
  * printed even if one somehow arrived on the row.
  *
- * **The absence itself is read off v).** `ukupnoNeizvrseniMinuta` is the sum of
- * the nine ZEOR čl. 24 tač. 1 non-worked buckets, so a non-zero says this day
- * books absence minutes without saying which bucket — exactly the statement the
- * masked cell is allowed to make. On a worked day it is zero and the cell stays
- * „—“, because „Odsutan“ there would invent an absence the row does not carry.
+ * **The absence itself is read off the absence buckets, and v) is not all of
+ * them.** `ukupnoNeizvrseniMinuta` is the sum of **nine** of the ten categories'
+ * ZEOR čl. 24 tač. 1 buckets; the tenth, `obustava_rada_strajk`, books into
+ * `obustavaRadaStrajkMinuta`, which `derive_totals` puts inside b) „ukupno
+ * ostvareni“ as its third indent. Reading v) alone therefore rendered „—“ on a
+ * full shift of štrajk — the same „nema odsustva“ falsehood, for one category in
+ * ten, at any minute count. Both are tested, and neither names
+ * `kategorijaOdsustva`: the buckets ride on every read, masked or not, so this
+ * statement is derived from what the masked payload already carries and the
+ * guard `the_masked_register_read_never_names_the_absence_reason_column` has
+ * nothing to say about it. Zero in both is the row saying it booked no absence
+ * minutes, and the cell stays „—“, because „Odsutan“ there would invent an
+ * absence.
  *
  * **The residual, stated rather than implied.** A category booked with **zero**
- * minutes leaves v) at zero, so while masked such a day is indistinguishable
- * from a day with no absence at all and renders „—“. Closing it would need the
- * read to carry a per-entry „there is an absence“ bit, and the only place to
- * derive one is `kategorija_odsustva IS NOT NULL` — a predicate over the very
- * column the masked statement must not name, which
- * `the_masked_register_read_never_names_the_absence_reason_column` refuses. The
- * narrow corner is left open rather than bought with a read that names the
- * column.
+ * minutes moves no bucket at all, so while masked such a day is indistinguishable
+ * from a day with no absence and renders „—“. That is the whole of what is left
+ * open, and the reason is that nothing on the payload changes — not that the bit
+ * would require the withheld column. The narrow corner is left as it is rather
+ * than bought with a per-entry flag nobody has asked the read to carry.
  */
 export function AbsenceCell({
   entry,
@@ -1114,7 +1125,9 @@ export function AbsenceCell({
   razlogSkriven: boolean;
 }) {
   if (razlogSkriven) {
-    return entry.minuti.ukupnoNeizvrseniMinuta > 0 ? (
+    const odsustvoMinuta =
+      entry.minuti.ukupnoNeizvrseniMinuta + entry.minuti.obustavaRadaStrajkMinuta;
+    return odsustvoMinuta > 0 ? (
       <span title={RAZLOG_SKRIVEN_OBJASNJENJE}>Odsutan (razlog skriven)</span>
     ) : (
       <span className="text-muted-foreground">—</span>
