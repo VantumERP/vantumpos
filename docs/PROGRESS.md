@@ -1430,7 +1430,13 @@ Both documents state the night leg as unbuilt in a clause of its own, which is w
   `worktime::tests::raising_a_day_in_an_already_over_week_is_still_refused`, which bars the „once over,
   anything goes“ reading on purpose, and it needs a čl. 274 disclosure decided with it. Pinned as it
   stands by `commands::worktime::tests::an_over_cap_minors_week_admits_no_further_worked_day`, and
-  stated in register row SW-14.
+  stated in register row SW-14. **Escalated 08.08.2026 as `docs/SW14-VERIFIED-RULES.md` §6 W-16**, which
+  is where it belongs: the dead end is a symptom, and the question underneath it is whether čl. 87 is a
+  prohibition of the čl. 88 st. 1 kind — where refusing the entry is right — or a ceiling of the čl. 53
+  kind, where the same module already records the day and demands a ground. §4 req. 12 uses *„reject …
+  outright“* for čl. 88 st. 1 and *„cap“* for čl. 87 in one sentence; this module reads both as a
+  refusal. Neither article says what the **record** must do once the hours have been worked, and no
+  primary text read in any pass answers it. Choosing without an answer is what W-16 exists to prevent.
 - **Whether čl. 87's 35 časova counts časovi čekanja, zastoja i prekida u radu and časovi obustave rada
   zbog štrajka is UNRESOLVED, and the leg takes the narrower reading until it is answered.**
   `derive_totals` books all three into the ZEOR čl. 24 tač. 1 b) `ukupno_ostvareni_minuta` while both
