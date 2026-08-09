@@ -19,6 +19,7 @@
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::app_error::AppError;
 
@@ -215,6 +216,17 @@ pub enum AuditObjectType {
     /// SW-13 class C, the only class the purge job may touch (req. 19, 23).
     Credentials,
     SupportSession,
+    /// The `kategorija_odsustva` column of the work-time register, as a FIELD
+    /// CLASS, when it is unmasked for a support nalog (req. 28).
+    ///
+    /// Its own variant because the line would otherwise be indistinguishable
+    /// from the [`Self::SupportSession`] entry line that `request_access`
+    /// writes: same action, same razlog, same primalac, same object id, minutes
+    /// apart. „Log the unmask“ is not discharged by a row that cannot be read
+    /// as the unmask. Naming the field class costs nothing under čl. 5 st. 1
+    /// t. 3 — this is a code constant, and it carries no employee, no month and
+    /// no category VALUE. The object id stays the session id.
+    SupportAbsenceReason,
     DataBreach,
     /// A čl. 47 evidencija radnji obrade entry.
     ProcessingActivity,
@@ -231,12 +243,13 @@ pub enum AuditObjectType {
 }
 
 impl AuditObjectType {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Sale,
         Self::Employee,
         Self::PersonnelRecord,
         Self::Credentials,
         Self::SupportSession,
+        Self::SupportAbsenceReason,
         Self::DataBreach,
         Self::ProcessingActivity,
         Self::RetentionPolicy,
@@ -252,6 +265,7 @@ impl AuditObjectType {
             Self::PersonnelRecord => "personnel_record",
             Self::Credentials => "credentials",
             Self::SupportSession => "support_session",
+            Self::SupportAbsenceReason => "support_absence_reason",
             Self::DataBreach => "data_breach",
             Self::ProcessingActivity => "processing_activity",
             Self::RetentionPolicy => "retention_policy",
@@ -272,11 +286,17 @@ impl AuditObjectType {
 ///
 /// The struct IS the exclusion list's first line of defence: there is no
 /// `before_value`, no `after_value`, no `note` and no `query` field, so a value
-/// payload has nowhere to sit (req. 4). The two remaining textual fields are
-/// scanned by [`reject_forbidden_content`] before any write.
+/// payload has nowhere to sit (req. 4). Two fields are nonetheless free-form
+/// `String`s — `at` and `object_id` — and both are checked by
+/// [`reject_forbidden_content`] before any write: the first by being parsed as
+/// an instant, the second against the whitelisted shape of an internal id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditDraft {
     /// RFC3339, supplied by the caller. This module never reads a clock.
+    ///
+    /// Free-form as a type, but not as a value: [`reject_forbidden_content`]
+    /// parses it, so nothing that is not an instant reaches the column — v18
+    /// declares it `TEXT NOT NULL` and constrains it no further.
     pub at: String,
     /// Čl. 48 st. 2 „identiteta lica“ — an internal user id, NEVER a name.
     /// `None` for the time-driven purge line (req. 23), which has no human actor.
@@ -647,12 +667,35 @@ fn forbidden_shape(value: &str) -> Option<ForbiddenShape> {
 ///    record the article describes. Migration v18 carries the same two CHECKs;
 ///    they are repeated here so the refusal reaches the operator as a sentence
 ///    rather than as a raw SQLite constraint failure.
-/// 2. **The čl. 5 st. 1 t. 3 exclusion list** — a WHITELIST over `object_id`, the
-///    one remaining free-form field on the draft. There is no value payload, no
-///    note and no query field, because [`AuditDraft`] has none; `object_type` is
-///    a closed [`AuditObjectType`], so a name or a `pretraga` type cannot be
-///    built in the first place.
+/// 2. **The čl. 5 st. 1 t. 3 exclusion list**, over the draft's TWO free-form
+///    fields and only those two. There is no value payload, no note and no query
+///    field, because [`AuditDraft`] has none, and `object_type`, `action`,
+///    `reason_code` and `recipient` are closed enums, so a name or a `pretraga`
+///    type cannot be built in the first place. What is left is `object_id`,
+///    governed by a WHITELIST of the opaque-id shape, and `at`, governed by
+///    being parsed: an RFC3339 instant has no room for a payload, and v18
+///    declares the column `TEXT NOT NULL` with no CHECK of any kind, so this
+///    function is the only thing standing between the caller and that column.
 pub fn reject_forbidden_content(draft: &AuditDraft) -> Result<(), AppError> {
+    // Čl. 48 st. 2's *vreme* and the second half of the exclusion list are the
+    // same check here. „2026-08-01T09:20:00Z#sprecenost_rfzo“ would otherwise
+    // sit in the log looking like a timestamp to every eye that skims the
+    // column, while carrying into `audit_events` precisely the čl. 17-adjacent
+    // value the masking exists to keep out of it.
+    if OffsetDateTime::parse(&draft.at, &Rfc3339).is_err() {
+        return Err(AppError::business_with_details(
+            "audit_forbidden_content",
+            concat!(
+                "Vreme radnje mora da bude tačan trenutak u RFC3339 zapisu, na primer ",
+                "„2026-08-01T09:20:00Z“. Zapis bez trenutka ne odgovara na pitanje koje ",
+                "postavlja ZZPL čl. 48 st. 2, a slobodan tekst u ovom polju ne sme da ",
+                "uđe u evidenciju pristupa (ZZPL čl. 5 st. 1 t. 3)."
+            ),
+            // Field name and shape code only — never the value.
+            serde_json::json!({ "polje": "at", "oblik": "nije_trenutak" }),
+        ));
+    }
+
     if draft.action.requires_reason() && draft.reason_code.is_none() {
         return Err(AppError::business(
             "audit_missing_reason",
@@ -1113,6 +1156,84 @@ mod tests {
         }
     }
 
+    /// **`at` is a free-form field too, and the boundary has to say so.**
+    ///
+    /// On [`AuditDraft`] the instant is a plain `String`; migration v18 declares
+    /// `at TEXT NOT NULL` with no CHECK whatsoever, and the INSERT binds it
+    /// verbatim. Without a rule here it is the second place — beside `object_id`
+    /// — where a caller can park a value, and the shape that matters is the one
+    /// that opens with a real instant: „2026-08-01T09:20:00Z#sprecenost_rfzo“
+    /// reads as a timestamp to every eye that skims the column while carrying a
+    /// čl. 17-adjacent category into the one table whose whole design is to hold
+    /// none (req. 4).
+    ///
+    /// The guarantee is asserted HERE, where it is made, rather than once per
+    /// call site: the write door is `pub(crate)`, so a call site added tomorrow
+    /// inherits whatever this function refuses and nothing else.
+    #[test]
+    fn an_at_that_is_not_an_instant_is_refused() {
+        for value in [
+            "2026-08-01T09:20:00Z#sprecenost_rfzo",
+            "2026-08-01T09:20:00Z sprecenost_rfzo",
+            "2026-08-01",
+            "01.08.2026. 09:20",
+            "juče",
+            "",
+        ] {
+            let draft = AuditDraft {
+                at: value.to_string(),
+                ..draft_with(AuditAction::Unos, None)
+            };
+            let error = reject_forbidden_content(&draft)
+                .expect_err("only an instant may be written as the čl. 48 st. 2 vreme");
+            assert_eq!(error.code(), "audit_forbidden_content");
+            let AppError::Business {
+                message,
+                details: Some(details),
+                ..
+            } = &error
+            else {
+                panic!("expected a business error with details on {value:?}, got {error:?}");
+            };
+            assert_eq!(
+                details.get("polje").and_then(serde_json::Value::as_str),
+                Some("at"),
+                "the refusal must name the field it is about, for {value:?}"
+            );
+            // The refusal must not become the leak, exactly as for `object_id`.
+            assert!(
+                !message.contains("sprecenost_rfzo"),
+                "the message echoed the payload back: {message}"
+            );
+            let rendered = serde_json::to_string(details).expect("details serialize");
+            assert!(
+                !rendered.contains("sprecenost_rfzo"),
+                "the details echoed the payload back: {rendered}"
+            );
+        }
+    }
+
+    /// And the instants this app really writes must pass. A boundary that
+    /// refused `utc_now()` would take the whole log down with it, and a log that
+    /// cannot be written is not a stricter log.
+    #[test]
+    fn a_real_instant_passes_the_boundary() {
+        for value in [
+            "2026-08-01T09:20:00Z",
+            "2026-08-01T09:20:00.5Z",
+            "2026-08-01T11:20:00+02:00",
+        ] {
+            let draft = AuditDraft {
+                at: value.to_string(),
+                ..draft_with(AuditAction::Unos, None)
+            };
+            assert!(
+                reject_forbidden_content(&draft).is_ok(),
+                "{value} is an RFC3339 instant and must pass"
+            );
+        }
+    }
+
     /// The object TYPE was the last free-text hole on the table, and a shape scan
     /// is the wrong tool for it: „Marković“ passes every scan a code constant
     /// could be given. It is a closed vocabulary instead, so a name — or a
@@ -1209,6 +1330,7 @@ mod tests {
                 "personnel_record",
                 "credentials",
                 "support_session",
+                "support_absence_reason",
                 "data_breach",
                 "processing_activity",
                 "retention_policy",

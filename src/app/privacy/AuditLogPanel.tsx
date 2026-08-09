@@ -26,7 +26,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { PosServices } from "@/services/ports";
-import type { AuditSearchResult, UserAccount } from "@/services/types";
+import type { AuditEvent, AuditSearchResult, UserAccount } from "@/services/types";
 
 /**
  * The ZZPL čl. 48 evidencija pristupa podacima o ličnosti — read, filtered and
@@ -68,6 +68,32 @@ const OSNOV_VODJENJA =
   "Rukovalac ovu evidenciju vodi kao sopstvenu meru odgovornosti za postupanje " +
   "(ZZPL čl. 5 st. 2) i radi mogućnosti predočavanja primene načela obrade " +
   "(ZZPL čl. 41 st. 1).";
+
+/**
+ * Who performed the radnja, for the person reading the row.
+ *
+ * An absent actor means two different things and this column must not merge
+ * them. On a line linked to a čl. 46 nalog it is the support side entering: a
+ * person outside the shop, holding no account on this till, which is precisely
+ * why the backend records no id rather than borrowing the vlasnik's. Printing
+ * „automatska obrada“ there would deny the one fact the line exists to state.
+ *
+ * Kept in step with `crate::commands::audit::actor_label`, which draws the same
+ * distinction for the čl. 48 st. 4 izvod — the screen and the document must not
+ * disagree about the same row. The name-only rendering is this panel's own: §5
+ * item 3 keeps the id out of a column a reader might start tallying.
+ */
+function actorLabel(event: AuditEvent): string {
+  if (event.actorName !== null) {
+    return event.actorName;
+  }
+  if (event.actorUserId !== null) {
+    return `ID ${event.actorUserId}`;
+  }
+  return event.supportSessionId !== null
+    ? "Obrađivač tehničke podrške (bez korisničkog naloga)"
+    : "Automatska obrada (bez korisnika)";
+}
 
 export function AuditLogPanel({ services }: { services: PosServices }) {
   const [result, setResult] = useState<AuditSearchResult | null>(null);
@@ -273,7 +299,7 @@ export function AuditLogPanel({ services }: { services: PosServices }) {
                   <TableRow key={event.id}>
                     <TableCell>{formatInstant(event.at)}</TableCell>
                     <TableCell>
-                      {event.actorName ?? "Automatska obrada (bez korisnika)"}
+                      {actorLabel(event)}
                     </TableCell>
                     <TableCell>{event.actionLabel}</TableCell>
                     <TableCell>

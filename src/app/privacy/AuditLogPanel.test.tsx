@@ -116,6 +116,51 @@ describe("AuditLogPanel", () => {
     expect(screen.queryByText(/učinak|produktivnost|broj radnji po/i)).not.toBeInTheDocument();
   });
 
+  /**
+   * The support engineer holds no account on this till, so the backend records
+   * the entry line with `actorUserId: null` on purpose — a borrowed id would
+   * attribute the access to the vlasnik. The fallback printed in that column was
+   * written for the req. 23 time-driven purge, and using it here tells the shop
+   * that an unattended job read its data when in fact a person outside the shop
+   * was inside it under a čl. 46 nalog.
+   *
+   * `crate::commands::audit::actor_label` draws the same distinction for the
+   * čl. 48 st. 4 izvod. The screen and the document must not say different
+   * things about the same row.
+   */
+  it("does not call the remote-support engineer automatic processing", async () => {
+    const search = result([
+      event({
+        id: 1,
+        action: "otkrivanje",
+        actionLabel: "Otkrivanje (uključujući i prenos)",
+        objectType: "support_session",
+        objectTypeLabel: "Sesija tehničke podrške",
+        objectId: "1",
+        actorUserId: null,
+        actorName: null,
+        reasonCode: "tehnicka_podrska",
+        reasonLabel: "Tehnička podrška",
+        recipient: "obradjivac_tehnicke_podrske",
+        recipientLabel: "Obrađivač tehničke podrške",
+        supportSessionId: 1,
+      }),
+      // No actor and no nalog behind it: the one row the purge string was
+      // written for, so the fix cannot over-fire.
+      event({ id: 2, actorUserId: null, actorName: null, supportSessionId: null }),
+    ]);
+
+    render(<AuditLogPanel services={services(search)} />);
+
+    const table = await screen.findByRole("table");
+    expect(
+      within(table).getByText("Obrađivač tehničke podrške (bez korisničkog naloga)"),
+    ).toBeInTheDocument();
+    expect(
+      within(table).getByText("Automatska obrada (bez korisnika)"),
+    ).toBeInTheDocument();
+  });
+
   /** Req. 8 — the two axes the izvod is filtered on, and no third one. */
   it("passes the date range and the actor to the backend", async () => {
     const posServices = services();
