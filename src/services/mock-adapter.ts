@@ -84,6 +84,29 @@ const now = "2026-06-18T10:00:00Z";
  */
 const MOCK_TODAY = now.slice(0, 10);
 
+/**
+ * An instant that moves, for the two stamps whose whole contract is „the FIRST
+ * one survives“.
+ *
+ * `now` is frozen and that is right for everything a surface renders: a double
+ * whose fixtures drift makes every date assertion flaky. It is wrong for an
+ * idempotency guard. Until 09.08.2026 `revealAbsenceReason` stamped `now`, so
+ * `mock-adapter.odsustvo.test.ts`'s „keeps one disclosure per nalog rather than
+ * re-stamping“ compared two copies of one constant: deleting the `??` guard —
+ * making the double re-stamp on every call, the exact behaviour the test is
+ * named against — left it green, because both writes produced the same string.
+ * The test could only fail if the method threw. Each call here returns the next
+ * whole second after `now`, so a second stamp is observable; the Rust side pins
+ * the same behaviour with 09:20 against 09:40.
+ */
+let protekloSekundi = 0;
+function sledeciTrenutak(): string {
+  protekloSekundi += 1;
+  return new Date(Date.parse(now) + protekloSekundi * 1000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "Z");
+}
+
 /** An employee nobody has profiled yet — every čl. 87–91 input unset. */
 const prazanProfilZaposlenog: EmployeeProfile = {
   datumRodjenja: null,
@@ -2564,7 +2587,7 @@ export function createMockServices(): PosServices {
               "sa obimom i rokom (ZZPL čl. 46).",
           };
         }
-        live.startedAt = live.startedAt ?? now;
+        live.startedAt = live.startedAt ?? sledeciTrenutak();
         return { ...live };
       },
       async endSupportSession() {
@@ -2600,7 +2623,7 @@ export function createMockServices(): PosServices {
         // Idempotent, like the backend: one disclosure per nalog, and the first
         // instant survives — a second stamp would put a second čl. 48 line in the
         // log for a category that was already open.
-        live.odsustvoOtkrivenoAt = live.odsustvoOtkrivenoAt ?? now;
+        live.odsustvoOtkrivenoAt = live.odsustvoOtkrivenoAt ?? sledeciTrenutak();
         return { ...live };
       },
       async searchAudit(query) {
@@ -3671,6 +3694,28 @@ export function createMockServices(): PosServices {
         code: "entry_exists",
         message:
           "Za ovaj dan već postoji unos. Izmena se evidentira kao ispravka.",
+      };
+    }
+    // Req. 28 reaches the write path too, and the double has to say so: while the
+    // category is masked the operator cannot restate it, so an ispravka of a day
+    // that books absence would append a verzija with the category gone and the
+    // buckets at zero — `guard_ispravka_not_taken_blind` refuses instead. Asked
+    // of the minutes, never of the withheld column, exactly as the backend asks.
+    if (
+      korekcijaRazlog &&
+      live &&
+      !razlogOdsustvaDostupan() &&
+      live.minuti.ukupnoNeizvrseniMinuta +
+        live.minuti.obustavaRadaStrajkMinuta >
+        0
+    ) {
+      throw {
+        code: "ispravka_razlog_odsustva_skriven",
+        message:
+          "Ovaj dan je evidentiran kao odsustvo, a kategorija odsustva je skrivena dok " +
+          "važi nalog za pristup tehničke podrške (ZZPL čl. 46), pa ispravka ne bi mogla " +
+          "da je sačuva. Otkrijte razlog odsustva za ovaj nalog na strani Privatnost → " +
+          "Daljinska podrška, ili dan ispravite pošto se nalog završi.",
       };
     }
 

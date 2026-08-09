@@ -238,7 +238,8 @@ pub fn grant_access(
 /// podrške“: the shop's data is being made available to a third party, which is
 /// what čl. 48 st. 2's *identitet primaoca* asks about. `started_at` is stamped
 /// once; re-entering under the same nalog is the same session, and v18 keeps one
-/// column, not a history.
+/// column, not a history — which is also why the absence-reason line below is
+/// written at most once per nalog.
 pub fn request_access(state: &AppState, now: &str) -> Result<SupportSession, AppError> {
     let mut connection = state.db().open()?;
     let tx = connection.transaction()?;
@@ -279,6 +280,36 @@ pub fn request_access(state: &AppState, now: &str) -> Result<SupportSession, App
             support_session_id: Some(live.id),
         },
     )?;
+
+    // **And if the column was already opened for this nalog, the disclosure is
+    // completed here.** [`reveal_absence_reason`] decides whether its line is an
+    // authorisation or a disclosure from `started_at` at the instant of the
+    // unmask, and on this ordering — grant, unmask, then entry — it was right to
+    // call it an authorisation: nobody had received anything. The moment the
+    // obrađivač walks in, they read `kategorija_odsustva` on every `list_month`
+    // and every `export_month_csv`, so the fact the earlier line could not state
+    // becomes true and gets its own row, in the same shape that function writes
+    // on its entered branch. The čl. 48 st. 4 izvod then records one disclosure
+    // of the field class whichever order the two acts occurred in; the earlier
+    // `unos` stays where it is, because „the shop opened the column“ and „the
+    // obrađivač came in“ are two facts and v18 keeps a log, not a state.
+    if live.odsustvo_otkriveno_at.is_some() {
+        append_audit_event(
+            &tx,
+            &AuditDraft {
+                at: now.to_string(),
+                // The engineer, like the entry line above it: this row records
+                // what THEY received, not what the vlasnik decided minutes ago.
+                actor_user_id: None,
+                action: AuditAction::Otkrivanje,
+                object_type: AuditObjectType::SupportAbsenceReason,
+                object_id: live.id.to_string(),
+                reason_code: Some(AuditReason::TehnickaPodrska),
+                recipient: Some(AuditRecipient::ObradjivacTehnickePodrske),
+                support_session_id: Some(live.id),
+            },
+        )?;
+    }
 
     let session = load_session(&tx, live.id)?;
     tx.commit()?;
@@ -392,6 +423,16 @@ pub fn active_session(state: &AppState, now: &str) -> Result<Option<SupportSessi
 /// the log. Once the operator IS in, the unmask genuinely widens what they can
 /// read, and čl. 48 st. 2's razlog and primalac are answered truthfully rather
 /// than filled in to get past a CHECK.
+///
+/// **This branch decides what is true at THIS instant, and nothing later.** It
+/// was read as deciding the feature until 09.08.2026, and it does not: on the
+/// reveal-then-enter ordering the `unos` was the only line the log ever got, so
+/// a nalog under which the obrađivač demonstrably read `kategorija_odsustva`
+/// carried a čl. 48 st. 4 izvod with an empty Razlog and an empty Primalac. The
+/// other half of the record is [`request_access`]'s: when it enters a nalog that
+/// already carries this stamp it appends the `otkrivanje` this branch could not
+/// yet write. Pinned by
+/// `an_unmask_taken_before_entry_is_disclosed_when_the_operator_enters`.
 ///
 /// The stamp and its line commit together: [`append_audit_event`] on this
 /// transaction, not [`record_audit`], which owns its own.
@@ -2007,6 +2048,119 @@ mod tests {
                          obrađivač never entered"
                     );
                 }
+            },
+        );
+    }
+
+    /// **The other ordering, and the one the log used to lose.**
+    ///
+    /// [`unmasking_before_the_operator_enters_records_no_disclosure`] above is
+    /// right about the nalog nobody enters. It is right only about that nalog:
+    /// it ends in [`end_session`] taking the revoke branch, so by construction it
+    /// never exercises the continuation where somebody does arrive. Until
+    /// 09.08.2026 nothing did — every other test in this module calls
+    /// [`request_access`] BEFORE [`reveal_absence_reason`] — and the shipped code
+    /// decided the line's shape once, from `started_at` at the instant of the
+    /// unmask, so grant 09:00 → reveal 09:05 → enter 09:10 left the čl. 48 log
+    /// holding one `unos` with an empty Razlog and an empty Primalac, for a nalog
+    /// under which `razlog_odsustva_dostupan` then handed the obrađivač every
+    /// `kategorija_odsustva` in the month.
+    ///
+    /// One real-world fact — the operator read the column — must produce one
+    /// record whichever order the two acts occur in, or req. 28's „log the
+    /// unmask“ is discharged as an authorisation in one ordering and as a
+    /// disclosure in the other, with nothing in the document to tell an inspector
+    /// which happened. The earlier `unos` stands as the authorisation; the second
+    /// line is the disclosure, written when it becomes true.
+    #[test]
+    fn an_unmask_taken_before_entry_is_disclosed_when_the_operator_enters() {
+        with_state(
+            "an_unmask_taken_before_entry_is_disclosed_when_the_operator_enters",
+            |state| {
+                sign_in_admin(state);
+                seed_employee_with_an_absence(state);
+
+                let session = grant_access(state, grant_request(), "2026-08-01T09:00:00Z")
+                    .expect("nalog issues");
+                reveal_absence_reason(state, "2026-08-01T09:05:00Z")
+                    .expect("the vlasnik may open the column before the operator dials in");
+                request_access(state, "2026-08-01T09:10:00Z").expect("the support side enters");
+
+                let rows = audit_rows(state);
+                let disclosures: Vec<_> = rows
+                    .iter()
+                    .filter(|(action, object_type, ..)| {
+                        action == "otkrivanje" && object_type == "support_absence_reason"
+                    })
+                    .collect();
+                assert_eq!(
+                    disclosures.len(),
+                    1,
+                    "exactly one line must say the absence reason reached the obrađivač — \
+                     not none, and not one per entry; log was:\n{rows:?}"
+                );
+                let (_, _, object_id, reason, recipient, actor, logged_session, ..) =
+                    disclosures[0];
+                assert_eq!(
+                    object_id,
+                    &session.id.to_string(),
+                    "the object is the nalog the disclosure was made under"
+                );
+                assert_eq!(reason.as_deref(), Some("tehnicka_podrska"));
+                assert_eq!(
+                    recipient.as_deref(),
+                    Some("obradjivac_tehnicke_podrske"),
+                    "čl. 48 st. 2's identitet primaoca, now that there IS one"
+                );
+                assert_eq!(
+                    actor, &None,
+                    "the actor is the engineer who entered, like the entry line beside it — \
+                     the vlasnik's decision is already on the earlier `unos`"
+                );
+                assert_eq!(logged_session, &Some(session.id));
+
+                // The authorisation is not rewritten in place: v18 keeps a log,
+                // and „the shop opened the column at 09:05“ and „the obrađivač
+                // came in at 09:10“ are two facts.
+                assert!(
+                    rows.iter().any(|(action, object_type, ..)| action == "unos"
+                        && object_type == "support_absence_reason"),
+                    "the earlier authorisation must survive; log was:\n{rows:?}"
+                );
+
+                let connection = state.db().open().expect("database should open");
+                assert_eq!(
+                    chain_status(&connection)
+                        .expect("the chain should walk")
+                        .verdict,
+                    ChainVerdict::Intact,
+                    "the second line must chain onto the log like any other"
+                );
+                drop(connection);
+
+                // And it must be readable in the document, not only in the table:
+                // „Primalac (ZZPL čl. 48 st. 2)“ is column 8 of `IZVOD_KOLONE`,
+                // read positionally because no field rendered there carries a
+                // comma.
+                let exported = export_csv(state, &whole_log(), "2026-08-01T10:00:00Z")
+                    .expect("the izvod should render");
+                let csv = read_file_and_remove(&exported);
+                let unmask_row = csv
+                    .lines()
+                    .find(|line| {
+                        line.contains("Razlog odsustva u evidenciji radnog vremena")
+                            && line.contains("Otkrivanje (uključujući i prenos)")
+                    })
+                    .expect("the izvod must carry the absence-reason disclosure");
+                let primalac = unmask_row
+                    .split(',')
+                    .nth(7)
+                    .expect("every izvod row has the eleven columns");
+                assert!(
+                    !primalac.trim().is_empty(),
+                    "the čl. 48 st. 2 Primalac cell may not be blank on a row that reports a \
+                     disclosure; row was: {unmask_row}"
+                );
             },
         );
     }

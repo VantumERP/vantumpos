@@ -271,52 +271,80 @@ export function SupportApprovalPanel({
                 <h4 className="text-sm font-medium">
                   Razlog odsustva u evidenciji radnog vremena
                 </h4>
-                <p className="text-sm text-muted-foreground">
-                  Dok ovaj nalog važi, kategorija odsustva se ne prikazuje u
-                  pregledu i izvozu evidencije radnog vremena — podatak se za to
-                  vreme ne čita iz baze. Skriva se sama kolona: broj časova
-                  odsustva po zakonskim vrstama ostaje prikazan, pa se iz njega i
-                  dalje može zaključiti o kojoj je vrsti odsustva reč. Pregled
-                  „Moji sati“, kojim zaposleni vidi sopstvene časove, ne skriva se
-                  ni tada — pravo iz ZZPL čl. 26 pripada zaposlenom i ne
-                  ograničava se zbog sesije podrške.
-                </p>
-
+                {/*
+                  Two states, two paragraphs, and neither may be read in the
+                  other's state. Until 09.08.2026 the withholding paragraph was
+                  rendered unconditionally inside this branch, so after the
+                  vlasnik clicked „Otkrij razlog odsustva za ovaj nalog“ the panel
+                  said „kategorija odsustva se ne prikazuje … podatak se za to
+                  vreme ne čita iz baze“ directly above „Razlog odsustva je
+                  otkriven“. That sentence is **withdrawn for the revealed
+                  state**: `worktime.rs::razlog_odsustva_dostupan` returns true
+                  the moment `odsustvo_otkriveno_at` is set, so `list_month` and
+                  `export_month_csv` run `load_entries_with_reason` again and the
+                  column is back in the pregled and in the izvoz. This is the
+                  surface on which the rukovalac decides whether to widen what
+                  the obrađivač may process under čl. 46; it is the last place
+                  that may describe a mask which is no longer on.
+                */}
                 {session.odsustvoOtkrivenoAt ? (
-                  <Alert>
-                    <EyeIcon aria-hidden="true" />
-                    <AlertTitle>Razlog odsustva je otkriven</AlertTitle>
-                    <AlertDescription>
-                      Otkriveno {formatInstant(session.odsustvoOtkrivenoAt)}, za
-                      ovaj nalog. Važi do isteka ovog naloga i upisano je u
-                      evidenciju pristupa.
-                    </AlertDescription>
-                  </Alert>
-                ) : canUnmask ? (
                   <>
                     <p className="text-sm text-muted-foreground">
-                      Otkrivanje važi samo za ovaj nalog i ne može da se povuče:
-                      tehnička podrška koja je kategoriju videla više ne može da je
-                      ne vidi, pa u programu nema radnje koja je vraća pod masku.
-                      Otkrivanje se upisuje u evidenciju pristupa (ZZPL čl. 48), uz
-                      oznaku ovog naloga.
+                      Kategorija odsustva se za ovaj nalog ponovo prikazuje u
+                      pregledu i izvozu evidencije radnog vremena. Otkrivanje ne
+                      može da se povuče — u programu nema radnje koja kategoriju
+                      vraća pod masku — i vezano je za ovaj nalog: sledeći nalog
+                      ponovo počinje sa skrivenom kategorijom.
                     </p>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-fit"
-                      disabled={submitting}
-                      onClick={() => void reveal()}
-                    >
-                      {submitting ? (
-                        <Spinner data-icon="inline-start" aria-hidden="true" />
-                      ) : (
-                        <EyeIcon data-icon="inline-start" />
-                      )}
-                      Otkrij razlog odsustva za ovaj nalog
-                    </Button>
+                    <Alert>
+                      <EyeIcon aria-hidden="true" />
+                      <AlertTitle>Razlog odsustva je otkriven</AlertTitle>
+                      <AlertDescription>
+                        Otkriveno {formatInstant(session.odsustvoOtkrivenoAt)}, za
+                        ovaj nalog. Važi do isteka ovog naloga i upisano je u
+                        evidenciju pristupa.
+                      </AlertDescription>
+                    </Alert>
                   </>
-                ) : null}
+                ) : (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      Dok ovaj nalog važi, kategorija odsustva se ne prikazuje u
+                      pregledu i izvozu evidencije radnog vremena — podatak se za
+                      to vreme ne čita iz baze. Skriva se sama kolona: broj časova
+                      odsustva po zakonskim vrstama ostaje prikazan, pa se iz njega
+                      i dalje može zaključiti o kojoj je vrsti odsustva reč.
+                      Pregled „Moji sati“, kojim zaposleni vidi sopstvene časove,
+                      ne skriva se ni tada — pravo iz ZZPL čl. 26 pripada
+                      zaposlenom i ne ograničava se zbog sesije podrške.
+                    </p>
+                    {canUnmask ? (
+                      <>
+                        <p className="text-sm text-muted-foreground">
+                          Otkrivanje važi samo za ovaj nalog i ne može da se
+                          povuče: tehnička podrška koja je kategoriju videla više
+                          ne može da je ne vidi, pa u programu nema radnje koja je
+                          vraća pod masku. Otkrivanje se upisuje u evidenciju
+                          pristupa (ZZPL čl. 48), uz oznaku ovog naloga.
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="w-fit"
+                          disabled={submitting}
+                          onClick={() => void reveal()}
+                        >
+                          {submitting ? (
+                            <Spinner data-icon="inline-start" aria-hidden="true" />
+                          ) : (
+                            <EyeIcon data-icon="inline-start" />
+                          )}
+                          Otkrij razlog odsustva za ovaj nalog
+                        </Button>
+                      </>
+                    ) : null}
+                  </>
+                )}
               </div>
             </div>
           ) : (

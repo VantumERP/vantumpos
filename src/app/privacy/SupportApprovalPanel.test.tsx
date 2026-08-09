@@ -236,7 +236,31 @@ describe("SupportApprovalPanel absence-reason unmask", () => {
     render(<SupportApprovalPanel services={services(session())} currentUser={vlasnik} />);
     await screen.findByRole("button", { name: /otkrij razlog odsustva/i });
 
-    expect(screen.getByText(/moji sati/i)).toBeInTheDocument();
+    const paragraf = screen.getByText(/moji sati/i).textContent ?? "";
+    // The sentence, not the phrase. Until 09.08.2026 this test asserted only
+    // that „moji sati“ appears somewhere on the panel, which the exact inverse
+    // („Pregled „Moji sati“ se takođe skriva dok nalog važi“) satisfies just as
+    // well — the guard was blind to what the sentence says about its subject.
+    // Sentences are split on a full stop followed by a capital or an opening
+    // Serbian quote, so „čl. 26“ does not read as a boundary.
+    const recenica = paragraf
+      .split(/(?<=\.)\s+(?=[A-ZĐŠČĆŽ„])/)
+      .find((deo) => /moji sati/i.test(deo));
+    expect(recenica).toBeDefined();
+
+    // The claim itself: a withholding verb applied to „Moji sati“, negated.
+    const SAKRIVANJE = /(skriva|prikazuje|prikazuju|čita|čitaju)/i;
+    const bezNegacija = (recenica ?? "").replace(
+      /ne\s+(skriva|prikazuje|prikazuju|čita|čitaju)/gi,
+      "«negirano»",
+    );
+    expect(recenica).toMatch(/ne\s+(skriva|prikazuje|prikazuju|čita|čitaju)/i);
+    // …and nothing left over that withholds it after the negations are struck:
+    // `worktime.rs::my_hours` calls `load_month(.., true)` unconditionally, so a
+    // panel that said this screen is masked would deny a čl. 26 carve-out the
+    // backend deliberately keeps open — on the surface where the vlasnik decides
+    // whether to widen the čl. 46 processing.
+    expect(bezNegacija).not.toMatch(SAKRIVANJE);
   });
 
   it("offers no re-mask affordance, because there is no re-mask verb", async () => {
@@ -272,6 +296,14 @@ describe("SupportApprovalPanel absence-reason unmask", () => {
     });
     expect(screen.getByText(/razlog odsustva je otkriven/i)).toBeInTheDocument();
     expect(screen.queryAllByRole("button", { name: PONOVO_SAKRIJ })).toHaveLength(0);
+    // …and the panel must stop saying the category is withheld, because for THIS
+    // nalog it no longer is: `razlog_odsustva_dostupan` returns true the moment
+    // `odsustvo_otkriveno_at` is set, so `list_month` and `export_month_csv`
+    // carry `kategorija_odsustva` again. Leaving the withholding paragraph above
+    // the „otkriven“ alert makes the panel state the mask and its removal in the
+    // same breath, on the one surface where the čl. 46 decision is made.
+    expect(screen.queryByText(/ne čita iz baze/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/ponovo prikazuje u pregledu i izvozu/i)).toBeInTheDocument();
   });
 
   it("shows the refusal rather than claiming a disclosure that did not happen", async () => {

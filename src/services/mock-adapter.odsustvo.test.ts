@@ -73,6 +73,49 @@ describe("mock req. 28 — the absence reason under a support nalog", () => {
     const drugi = await services.privacy.revealAbsenceReason();
 
     expect(drugi.odsustvoOtkrivenoAt).toBe(prvi.odsustvoOtkrivenoAt);
+
+    // The line above is a claim only because the double's stamp advances. Until
+    // 09.08.2026 it stamped a frozen module constant, so deleting the `??` guard
+    // — making the mock re-stamp on every call, the exact behaviour this test is
+    // named against — left both writes equal and the test green. The entry stamp
+    // comes off the same advancing instant, so it is the cheapest witness that
+    // the clock moved between the two calls above.
+    const usla = await services.privacy.enterSupportSession();
+    expect(usla.startedAt).not.toBe(prvi.odsustvoOtkrivenoAt);
+  });
+
+  it("refuses a correction taken while the category is masked", async () => {
+    const services = createMockServices();
+    await services.worktime.saveEntry(bolovanje("2026-06-05"));
+    await services.privacy.grantSupportAccess("Pregled greške na štampi", 60);
+
+    // The correction form is the entry form and nothing prefills it from a row,
+    // so a correction taken under the mask carries no category and would append
+    // a verzija that drops 480 minutes of statutory absence from the live row
+    // and from the month's total. `guard_ispravka_not_taken_blind` refuses it.
+    await expect(
+      services.worktime.correctEntry({
+        ...bolovanje("2026-06-05"),
+        kategorijaOdsustva: null,
+        odsustvoMinuta: 0,
+        efektivnoIzvrseniMinuta: 420,
+        korekcijaRazlog: "ispravka_sati",
+      }),
+    ).rejects.toMatchObject({ code: "ispravka_razlog_odsustva_skriven" });
+
+    const posle = await services.worktime.listMonth(1, 2026, 6);
+    expect(posle.entries).toHaveLength(1);
+    expect(posle.ukupno.ukupnoNeizvrseniMinuta).toBe(480);
+
+    // …and the refusal names a way through that works.
+    await services.privacy.revealAbsenceReason();
+    await services.worktime.correctEntry({
+      ...bolovanje("2026-06-05"),
+      odsustvoMinuta: 420,
+      korekcijaRazlog: "ispravka_sati",
+    });
+    const ispravljeno = await services.worktime.listMonth(1, 2026, 6);
+    expect(ispravljeno.ukupno.ukupnoNeizvrseniMinuta).toBe(420);
   });
 
   it("refuses an unmask with no live nalog, with the backend's own code", async () => {

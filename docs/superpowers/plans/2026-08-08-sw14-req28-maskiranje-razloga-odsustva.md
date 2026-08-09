@@ -133,6 +133,8 @@ The masked read must remain **truthful**: an entry with an absence still reports
 
 **The residual, pinned rather than papered over.** Every `kategorija_odsustva` value is exactly its ZEOR čl. 24 tač. 1 bucket minus `_minuta` — that derivation is `book_absence`'s whole design — so a masked row whose `sprecenost_rfzo_minuta` is 480 still says which reason it was to anyone reading the buckets. The buckets stay: ZEOR mandates them, `ukupno_neizvrseni_minuta` is what the month's totals are read off, and zeroing one would be a **false** statement rather than a withheld one („0 časova“ is not „nije prikazano“). So req. 28 is discharged for the column and for the **rendered grid** — `WorkTimeModule` draws v) and none of the nine buckets — and **not** for the two places the buckets travel in full: the **wire** and the **exported file**. The wire was understated in the first version of this paragraph, which named only the file: `WorkTimeMinutes` derives `Serialize` with no skip and `load_entries_without_reason` selects every bucket, so a masked `list_month` response carries `„sprecenostRfzoMinuta": 480` on the very entry whose `kategorijaOdsustva` is `null`, and any client reading JSON rather than pixels recovers the category with a `find(|b| b != 0)`. That is the same architecture this plan's own opening levels at `canSeeAbsenceReason`; what the mask changes for a JSON client is the encoding, not the payload. Both halves are now asserted in `the_mask_covers_the_zzpl_column_and_not_the_zeor_letters` — the struct half for the wire, a **positional** cell read for the file — so no document can claim more. **Tasks 4 and 5 must word the čl. 23 notice and the čl. 47 register to that limit: „kategorija se ne prikazuje“, never „razlog nije dostupan tehničkoj podršci“.** Closing it properly needs the bucket columns to become `Option<i64>`, which the plan's self-review deliberately forecloses and which would reach the frozen Class A `klasifikacija_json`; refusing `export_month_csv` outright while masked was considered and rejected, because the čl. 21 offline export is a duty and the file's `RAZLOG_ODSUSTVA_SKRIVEN` note states the limit truthfully.
 
+**A second residual, added 09.08.2026 by the review pass: the mask is keyed to a LIVE nalog, and two routes end that state with no čl. 48 line naming the absence reason.** (1) `commands::audit::end_session` carries the **same** `require_admin` gate as `reveal_absence_reason`, so an operator driving the vlasnik's signed-in screen clicks „Okončaj nalog“ on the same panel and reads `kategorija_odsustva` on the next `list_month` or `export_month_csv`; the log then holds a `menjanje`/`support_session` row saying the nalog was closed and nothing saying the column became visible — the sanctioned route costs an `otkrivanje` naming `SupportAbsenceReason`, the unsanctioned one costs nothing. (2) The same lift arrives with no action at all at `expires_at` (the panel's default is 60 minutes), and nothing in the app disconnects the operator there, because SW-10 keeps the nalog a record and not an access control. Neither is a code defect — an app cannot stop someone already inside an admin session — and neither is fixed here: the two available answers (an explicit re-arm, or keying the mask on „a nalog was live at any point in this app session“) are design decisions, and a post-session mask would contradict `an_expired_nalog_withholds_nothing` head-on. Both are pinned as deliberate by `ending_the_nalog_lifts_the_mask_and_logs_no_disclosure`, recorded on `razlog_odsustva_dostupan`'s doc comment, in `docs/PROGRESS.md` §6 W-15 as item 3 beside the credential-reset chain, and in register row 12.
+
 **Deviation 1 — `now: &str` threaded through `list_month` and `export_month_csv`.** The mask is a clock decision (`is_active` on the nalog), and Global Constraint 3 forbids deciding it in SQL. The two `#[tauri::command]` wrappers read `utc_now()` and nothing below them does. Eleven existing test call sites gained the argument and a `BEZ_NALOGA` const that says in one place what the instant means; **no existing assertion was changed, weakened or removed.**
 
 **Deviation 2 — `WorkTimeMonth` gained `razlog_odsustva_skriven: bool`**, a field the plan did not name. It is a property of **the read**, stated by the read that performed it, so a surface can tell „nema odsustva“ from „razlog je skriven“ without asking a second command and hoping the two answers were about the same instant — which is the failure mode the plan's own architecture note levels at `canSeeAbsenceReason`. Task 4's masked cell needs exactly this. `src/services/types.ts` does **not** mirror it yet; TypeScript interfaces are structural so the extra JSON field breaks nothing, and Task 4 owns that file (it is now two fields behind: this one and `odsustvoOtkrivenoAt`). **Closed 09.08.2026 by Task 4:** the sentence „does **not** mirror it yet“ is withdrawn for both fields; `WorkTimeMonth.razlogOdsustvaSkriven` is what `AbsenceCell` reads.
@@ -282,6 +284,167 @@ recorded against §6 W-15 and is a question about what a credential reset must l
 forward:** constant-vs-schema drift on `KATEGORIJE_ODSUSTVA` — `7bc450b` holds the constant and v17's
 own `CHECK` to the same ten values, in both directions, which is what keeps the ten-category leak
 sweep on the čl. 48 unmask line honest as the vocabulary grows.
+
+---
+
+### Whole-branch review pass (09.08.2026) — ten findings, all closed
+
+One blocking, nine major, two of them the same defect written twice. The shape of them: two places
+where the mask changed what is TRUE without the surface beside it changing what it SAYS, one ordering
+of two shipped verbs that nothing had ever run, one write path the mask reached without anybody
+noticing, and three guards that asserted the presence of a phrase rather than the claim it carries.
+
+1. **BLOCKING — the panel told the vlasnik the category was masked after they had unmasked it.**
+`SupportApprovalPanel`'s withholding paragraph was rendered unconditionally inside the live-nalog
+branch, above the `odsustvoOtkrivenoAt ? … : canUnmask ? …` ternary rather than inside its masked arm,
+so after the click the panel read „kategorija odsustva se ne prikazuje … podatak se za to vreme ne
+čita iz baze“ directly above „Razlog odsustva je otkriven“. `razlog_odsustva_dostupan` returns **true**
+the moment the stamp is set, so both `list_month` and `export_month_csv` carry the column again — the
+sentence was false for that nalog from that moment, on the one surface where the čl. 46 decision to
+widen the processing is made. It is the same defect class T4R2 closed on this same paragraph one
+commit earlier. Fixed by splitting the block: the revealed arm now carries its own paragraph
+(„Kategorija odsustva se za ovaj nalog ponovo prikazuje u pregledu i izvozu … Otkrivanje ne može da se
+povuče … sledeći nalog ponovo počinje sa skrivenom kategorijom“), and the masked arm keeps the
+withholding sentence, the „Skriva se sama kolona“ limit and the „Moji sati“ carve-out — none of which
+is true of a nalog that is no longer masking. Two assertions added inside „reveals through the port and
+then stops offering the control“; **proven red first**, „expected document not to contain element,
+found <p>…ne čita iz baze…“.
+
+2. **An unmask taken BEFORE the operator entered was never upgraded when they did, so the čl. 48 log
+recorded no disclosure at all.** `reveal_absence_reason` computes `started_at.is_some()` once, at
+unmask time, and T2F3 was right that the pre-entry case is an authorisation — but only for the nalog
+nobody enters, which is the only continuation `unmasking_before_the_operator_enters_records_no_disclosure`
+tests, because it ends in `end_session` taking the revoke branch. On grant 09:00 → reveal 09:05 →
+`request_access` 09:10 the operator reads every `kategorija_odsustva` in the month and the log holds
+one `unos` with an empty Razlog and an empty Primalac. Every other test in the module calls
+`request_access` **before** `reveal_absence_reason`; the reverse ordering was exercised nowhere. Fixed
+in `request_access`, inside the existing transaction and after the `started_at` UPDATE: when the nalog
+already carries the stamp it appends the same line the entered branch of `reveal_absence_reason`
+writes — `otkrivanje` / `support_absence_reason` / `tehnicka_podrska` /
+`obradjivac_tehnicke_podrske` / `actor_user_id: None`, the engineer, like the entry line beside it —
+so the record is identical whichever order the two acts occur in and the earlier `unos` still stands
+as the authorisation. New test `an_unmask_taken_before_entry_is_disclosed_when_the_operator_enters`
+asserts exactly one such row, that the earlier `unos` survives, `ChainVerdict::Intact`, and that the
+izvod's „Primalac (ZZPL čl. 48 st. 2)“ cell on that row is non-empty, read positionally as column 8.
+**Proven red first** on zero matching rows. `reveal_absence_reason`'s doc comment now says the branch
+decides what is true at that instant and names `request_access` as the other half of the record.
+
+3. **An ispravka taken while the column is masked silently dropped the absence, and `close_period`
+could freeze the loss.** Task 4 checked the ispravka path and concluded it „needed nothing“; it
+checked the wrong direction. Nothing prefills the form, so a correction always restates the whole day
+— including a category the operator cannot see while masked. Nalog live, vlasnik corrects the hours of
+a `sprecenost_rfzo` day: verzija 2 lands with `kategorija_odsustva = NULL` and every bucket at zero,
+and since `load_month` accumulates `ukupno` over `!zamenjen` rows the month quietly loses 480 minutes
+of statutory absence — into the frozen Class A `klasifikacija_json` if a close follows. Option (a) was
+taken: `guard_ispravka_not_taken_blind` (`commands/worktime.rs`) refuses with
+`ispravka_razlog_odsustva_skriven` and a Serbian message naming **both** ways through (unmask for this
+nalog, or correct the day once the nalog is over). **Blunt on purpose** — any ispravka of a day that
+books absence minutes, not only one that drops them, because a rule that refused only the drop is
+satisfied by guessing a category, which is the same corruption one click later. **It never reads the
+withheld column:** the question is `ukupno_neizvrseni_minuta + obustava_rada_strajk_minuta > 0` on the
+predecessor, the same pair `AbsenceCell` renders on, so the structural guard is untouched and the
+refusal discloses nothing the masked register was not already showing. The mask question is asked
+before the transaction opens and only for a correction. New test
+`a_correction_under_a_live_nalog_may_not_silently_drop_the_absence` — refused, no verzija appended, the
+month still 480; then the unmask lets the same correction through at 420; then a worked day corrects
+freely. **Proven red first**, printing the exact defect (`kategorija_odsustva: None`,
+`sprecenost_rfzo_minuta: 0`). The double models the refusal too, with its own vitest.
+`WorkTimeModule`'s catch already renders a business message verbatim, so no frontend change was
+needed.
+
+4. **The čl. 47 register denied the obrađivač on the entry describing the very rows the mask
+withholds.** T4R3 fixed `radno_vreme.vrsta_primalaca`; its sibling `radno_vreme_radne_verzije` — Class
+B, the unclosed `work_time_entries` — still said „Ne otkrivaju se nikome van rukovaoca“, and those
+rows are exactly what `list_month`/`export_month_csv` return for an open month. Fixed in the two
+sibling entries' own words, with the „iz njih se izvodi klasifikacija“ clause kept, and
+`one_register_entry_states_the_absence_reason_mask_and_no_other_does` extended with the same two-needle
+assertion it already makes for `radno_vreme`. **Proven red first** on the shipped constant.
+
+5. **Both „Moji sati“ carve-out guards asserted a phrase, not a claim.** `cl47.rs` checked
+`mere.contains("moji sati")` and the vitest `getByText(/moji sati/i)`, so the exact inverse — „Pregled
+„Moji sati“ se takođe skriva dok nalog važi“, the falsehood T4R2 was opened to remove — kept both
+green while both surfaces denied a carve-out `my_hours` keeps open. Both now read the **sentence**
+around the subject and require a withholding verb only under a negation: the Rust half through a new
+`recenica_oko` helper that treats a full stop as a boundary only before a capital or an opening „, so
+„ZZPL čl. 26“ does not cut the clause in half; the vitest half through the same split plus a
+negation-strip. **Both proven red by pasting the inverted sentence** into `radno_vreme.mere` and into
+the panel, then reverted.
+
+6. **The mock's idempotency test could not fail on the mutation it is named for.** `mock-adapter.ts`'s
+`now` is a frozen module constant, so `revealAbsenceReason`'s `?? now` could be deleted — the double
+re-stamping on every call — and `expect(drugi.odsustvoOtkrivenoAt).toBe(prvi.odsustvoOtkrivenoAt)`
+still passed on two copies of one string. Fixed with `sledeciTrenutak()`, an instant that advances one
+second per call, used by the two `??`-guarded stamps (`revealAbsenceReason` and `enterSupportSession`);
+the assertion stands and the test now also witnesses that the clock moved. **The mutation was applied
+first to confirm the test was vacuous (6 passed), then re-applied after the fix to confirm it bites
+(„expected '…10:00:03Z' to be '…10:00:02Z“), then reverted.**
+
+7. **Two Rust doc comments still claimed the mask covers the rendered grid.** `load_entries_without_reason`
+and — worse — the doc comment of `the_mask_covers_the_zzpl_column_and_not_the_zeor_letters`, which
+register row 12 cites as the pin for the residual, so a future author reading the pin was told the grid
+is closed. It is not: the grid draws b), Efektivno izvršeni and Čekanja i zastoji as separate columns
+and `derive_totals` makes b) their sum plus `obustava_rada_strajk_minuta`, so the tenth category comes
+off the drawn register by subtraction — which `types.ts`, `PROGRESS.md` and row 12 all already said.
+Both restated in the house pattern with the withdrawn sentence quoted and dated. Comment-only; the
+assertions were always right.
+
+8. **„withholds the category from every register read“ — `my_hours` contradicts it.**
+`PROGRESS.md:340` and register row 12 both carried it; `my_hours` calls `load_month(.., true)`
+unconditionally and never asks the question, which
+`my_hours_still_shows_the_employee_their_own_absence_reason` pins. Both re-stated to name
+`worktime_list_month` and `worktime_export_csv` and to carry the čl. 26 carve-out, quoting what was
+withdrawn. `docs_guard::no_document_says_the_absence_reason_mask_is_unbuilt` gained a **third half**:
+any block naming the mask and claiming „every register read“ / „every read“ must name the exception.
+It **found a second instance the two existing halves had passed** — `PROGRESS.md`'s „What changed, in
+one sentence“ block, which now carries the carve-out too — and was **proven red on the primary target**
+by restoring the original sentence, then reverted.
+
+9 and 10. **The mask lifts when the nalog is ended or outlived, with no čl. 48 line, and that route
+was recorded nowhere.** `end_session` carries the *same* `require_admin` gate as the unmask, so an
+operator driving the vlasnik's screen closes the nalog and reads the column on the next read at the
+cost of a `menjanje` row that says only that the nalog closed; the same lift arrives at `expires_at`
+with no action at all. Strictly cheaper than the credential-reset chain the residual inventory records
+in detail, and absent from all four places that inventory lives. Not fixed — an app cannot stop
+someone already inside an admin session, the two code answers (an explicit re-arm, or keying the mask
+on „a nalog was live at any point in this app session“) are design decisions, and a post-session mask
+would contradict `an_expired_nalog_withholds_nothing` head-on. **Recorded in all four places** —
+`razlog_odsustva_dostupan`'s doc comment, this plan's Task 3 residual, `PROGRESS.md` §6 W-15 as item 3
+beside the credential-reset chain, and register row 12 — and **pinned as deliberate** by the new
+`ending_the_nalog_lifts_the_mask_and_logs_no_disclosure`, which asserts both halves: the mask lifts one
+minute after the click, and no line in the log names `support_absence_reason` on that route.
+
+**Deviation — one behaviour changed on a finding the review filed as „major“, not as a bug.** Finding 3
+offered three options and this pass took (a), the refusal, which is the only one of the three that a
+second frontend cannot route around and the only one that protects the frozen Class A record. It
+narrows what an operator may do during a live nalog: an absence day is not correctable until the nalog
+is unmasked or over. That is stated on the guard, in the refusal itself and here.
+
+**Deviation — `enterSupportSession` in the double got the advancing instant too**, though only
+`revealAbsenceReason` was named. Both carry the same `?? now` idempotency shape and the same
+untestability; leaving the sibling frozen would have left a known-vacuous assertion in place for
+whoever writes the next test against it.
+
+**Not changed, and why.** `unmasking_before_the_operator_enters_records_no_disclosure` was left exactly
+as it is — it is right about the nalog nobody enters, and the new test covers the continuation rather
+than replacing it. `an_expired_nalog_withholds_nothing` was left alone for the same reason finding 9
+names it: a post-session mask would contradict it, and no rule nobody asked for was invented here.
+
+**Nothing was deleted, weakened or skipped.** Three tests gained assertions
+(`reveals through the port and then stops offering the control`,
+`does not deny the „Moji sati“ carve-out the backend keeps open`,
+`one_register_entry_states_the_absence_reason_mask_and_no_other_does`,
+`keeps one disclosure per nalog rather than re-stamping`) and four tests are new: three cargo
+(`an_unmask_taken_before_entry_is_disclosed_when_the_operator_enters`,
+`a_correction_under_a_live_nalog_may_not_silently_drop_the_absence`,
+`ending_the_nalog_lifts_the_mask_and_logs_no_disclosure`) and one vitest
+(`refuses a correction taken while the category is masked`).
+
+**Gates after the review pass (six, run once each from the repo root, never concurrently, every command
+exit `0`):** `cargo test` **1043 passed** / 0 failed, 0 ignored, 0 measured, 0 filtered out (was 1040);
+`cargo clippy --all-targets --all-features --locked -- -D warnings` clean, zero warnings;
+`cargo fmt --check` clean, no output (rustfmt applied once, over test-body wrapping); `bun run test`
+**569 passed** / 0 failed, 36 files (was 568); `bun run build` ok, only the pre-existing chunk-size
+advisory; `git diff --check` clean. Migration head unchanged at **v23** — this pass adds none.
 
 ---
 

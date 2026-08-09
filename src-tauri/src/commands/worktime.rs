@@ -452,6 +452,33 @@ pub fn list_month(
 /// never by reading `audit_events` back. SW-10 keeps that log a record and not an
 /// access control, and a stamp on the nalog dies with the nalog, which čl. 46's
 /// one-session shape and v18's 24 h bound already take care of.
+///
+/// **Who can bring „no live nalog“ about, and what it costs — the shortest hole
+/// in this control, recorded here because it is nowhere in the code otherwise.**
+/// The mask is keyed to a LIVE nalog, and there are two ways to end that state
+/// without a čl. 48 line naming the absence reason. (1)
+/// [`crate::commands::audit::end_session`] is gated by `require_admin` — the
+/// identical gate as [`crate::commands::audit::reveal_absence_reason`] — so
+/// whoever is driving the vlasnik's signed-in screen, which is exactly the threat
+/// model [`list_month`] states, can close the nalog and read
+/// `kategorija_odsustva` unmasked on the next read; the log then holds a
+/// `menjanje`/`support_session` row saying the nalog was closed and nothing
+/// saying the column became visible. (2) The same lift arrives with no action at
+/// all at `expires_at` — the panel's default nalog is 60 minutes — and nothing in
+/// this app disconnects the remote operator at that instant, because SW-10 keeps
+/// the nalog a record and not an access control.
+///
+/// Both are pinned as deliberate by
+/// `ending_the_nalog_lifts_the_mask_and_logs_no_disclosure` and by
+/// `an_expired_nalog_withholds_nothing`, and both are recorded in
+/// `docs/PROGRESS.md` §6 W-15 beside the credential-reset chain. An app cannot
+/// stop someone who is already driving an admin session, so neither is fixed
+/// here; what would be wrong is to leave a reader believing the čl. 48 log
+/// records every route by which the obrađivač came to see the column. A
+/// re-arm after a nalog closes, or keying the mask on „a nalog was live at any
+/// point in this app session“, are the two code answers available, and both are
+/// design decisions that must not be taken silently — a post-session mask would
+/// also collide head-on with `an_expired_nalog_withholds_nothing`.
 fn razlog_odsustva_dostupan(state: &AppState, now: &str) -> Result<bool, AppError> {
     match crate::commands::audit::active_session(state, now)? {
         Some(nalog) => Ok(nalog.odsustvo_otkriveno_at.is_some()),
@@ -704,6 +731,13 @@ fn write_entry(
     let minuti = build_minutes(&request)?;
     validate_cap_override(&request)?;
 
+    // Req. 28's mask decides one thing on the WRITE path too, and the question is
+    // asked here rather than inside the transaction below so the nalog is read on
+    // its own connection: see [`guard_ispravka_not_taken_blind`] for what turns on
+    // the answer. Only an ispravka can lose a category, so only an ispravka pays
+    // for the query.
+    let razlog_dostupan = korekcija.is_none() || razlog_odsustva_dostupan(state, now)?;
+
     // One transaction over the closed-period check, the live-row lookup and the
     // INSERT — the codebase norm for every multi-statement statutory write. A save
     // that read an open month while a `close_period` was mid-flight would otherwise
@@ -721,7 +755,10 @@ fn write_entry(
 
     let live = live_entry(&tx, request.user_id, &dan)?;
     let (verzija, supersedes_id) = match (&korekcija, &live) {
-        (Some(_), Some(previous)) => (previous.verzija + 1, Some(previous.id)),
+        (Some(_), Some(previous)) => {
+            guard_ispravka_not_taken_blind(previous, razlog_dostupan)?;
+            (previous.verzija + 1, Some(previous.id))
+        }
         (Some(_), None) => {
             return Err(AppError::not_found(
                 "Za ovaj dan ne postoji unos koji bi se ispravio.",
@@ -1151,8 +1188,13 @@ fn load_entries_with_reason(
 /// [`WorkTimeMinutes`] serialises every bucket and a masked entry therefore ships
 /// `sprecenostRfzoMinuta: 480` beside a null category; and into the exported file,
 /// which carries every letter and outlives the nalog. What the mask does reach is
-/// the column and the rendered grid, which draws v) and none of the nine buckets.
-/// The residual is pinned by
+/// the ZZPL column and the nine v) buckets on screen. **The sentence „What the
+/// mask does reach is the column and the rendered grid, which draws v) and none
+/// of the nine buckets“ is withdrawn as of 09.08.2026:** the grid also draws
+/// b) Ukupno ostvareni, Efektivno izvršeni and Čekanja i zastoji as separate
+/// columns, and [`derive_totals`] makes b) the sum of those two plus
+/// `obustava_rada_strajk_minuta` — so the tenth category comes off the drawn
+/// register exactly, by subtraction. The residual is pinned by
 /// `the_mask_covers_the_zzpl_column_and_not_the_zeor_letters` and stated out loud
 /// in [`RAZLOG_ODSUSTVA_SKRIVEN`]; it is not closed here, because zeroing a
 /// statutory bucket would be a false statement rather than a withheld one.
@@ -1441,6 +1483,56 @@ fn guard_day_has_happened(dan: &str, datum: time::Date, now: &str) -> Result<(),
         ));
     }
     Ok(())
+}
+
+/// Refuses an ispravka of an absence day taken while req. 28 masks the reason.
+///
+/// **The mask has to reach the write path, or it eats the day.** The entry form
+/// is also the correction form and nothing prefills it from a row, so a
+/// correction always states the whole day afresh — including
+/// `kategorija_odsustva`, which while masked the operator cannot see and
+/// therefore cannot re-enter. The correction then appends a verzija with the
+/// category NULL and every absence bucket at zero. The predecessor survives (v17
+/// is append-only and nothing is destroyed), but the LIVE row is what
+/// [`load_month`] accumulates `ukupno` over, so the month quietly loses the
+/// statutory absence — and a `close_period` afterwards freezes the understated
+/// figure into the Class A `klasifikacija_json` that is kept `trajno`. Req. 28
+/// asks for a column to be withheld from a reader; withholding it from a WRITER
+/// who is about to restate the row is a different act, and this is where the two
+/// are told apart.
+///
+/// **Blunt on purpose.** It refuses any ispravka of a day that books absence
+/// minutes, not only one that drops them. A rule that refused only the drop would
+/// be satisfied by choosing any category at all — writing a guess over a value
+/// the operator cannot see, which is the same corruption one click further on —
+/// and it could not be stated to the operator in one true sentence. Days with no
+/// absence are untouched: there is no category to lose.
+///
+/// **It never reads the withheld column.** The question is the predecessor's
+/// minutes — v) plus the štrajk bucket, which `derive_totals` keeps outside v),
+/// the same pair `AbsenceCell` renders on — so the guard neither names
+/// `kategorija_odsustva` nor tells the operator anything the masked register in
+/// front of them was not already showing.
+///
+/// The refusal names both ways through, because both are real: the čl. 48-logged
+/// unmask for this nalog, or the same correction once the nalog is over.
+fn guard_ispravka_not_taken_blind(
+    previous: &WorkTimeEntryView,
+    razlog_dostupan: bool,
+) -> Result<(), AppError> {
+    let knjizi_odsustvo =
+        previous.minuti.ukupno_neizvrseni_minuta + previous.minuti.obustava_rada_strajk_minuta > 0;
+    if razlog_dostupan || !knjizi_odsustvo {
+        return Ok(());
+    }
+
+    Err(AppError::business(
+        "ispravka_razlog_odsustva_skriven",
+        "Ovaj dan je evidentiran kao odsustvo, a kategorija odsustva je skrivena dok važi \
+         nalog za pristup tehničke podrške (ZZPL čl. 46), pa ispravka ne bi mogla da je \
+         sačuva. Otkrijte razlog odsustva za ovaj nalog na strani Privatnost → Daljinska \
+         podrška, ili dan ispravite pošto se nalog završi.",
+    ))
 }
 
 /// Refuses a day that does not belong to the period the write was made for.
@@ -3329,6 +3421,91 @@ mod tests {
         });
     }
 
+    /// **The shortest way past the mask, pinned as the decision it is.**
+    ///
+    /// The mask is keyed to a live nalog, and `end_session` carries the same
+    /// `require_admin` gate as `reveal_absence_reason`. So whoever is driving the
+    /// vlasnik's signed-in admin screen — the threat model [`list_month`]'s doc
+    /// comment states — can click „Okončaj nalog“ and read `kategorija_odsustva`
+    /// on the very next read, at the cost of a `menjanje`/`support_session` row
+    /// that says the nalog was closed and nothing that says the čl. 17-adjacent
+    /// column became visible. The sanctioned route costs an `otkrivanje` naming
+    /// `SupportAbsenceReason`; this one costs nothing.
+    ///
+    /// It is not a code bug — an app cannot stop someone already inside an admin
+    /// session — and it is not fixed here, because the two available answers (an
+    /// explicit re-arm after a nalog closes, or keying the mask on „a nalog was
+    /// live at any point in this app session“) are design decisions, and a
+    /// post-session mask would contradict
+    /// [`an_expired_nalog_withholds_nothing`] directly. What this test buys is
+    /// that the next author meets the decision instead of discovering it, and
+    /// that neither half can drift silently: the mask lifting, and the log
+    /// staying silent about the absence reason when it does.
+    #[test]
+    fn ending_the_nalog_lifts_the_mask_and_logs_no_disclosure() {
+        with_state("worktime_ending_the_nalog_lifts_the_mask", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik_maska8", "Radnik Maska Osam");
+            save_entry(
+                state,
+                dan_odsustva(radnik, "2026-07-06", "sprecenost_rfzo", 480),
+                "2026-07-06T18:00:00Z",
+            )
+            .expect("the absence day should record");
+
+            izdaj_nalog(state, "2026-08-01T09:00:00Z");
+            crate::commands::audit::request_access(state, "2026-08-01T09:05:00Z")
+                .expect("the support side enters");
+            assert_eq!(
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:10:00Z")
+                    .expect("month lists")
+                    .entries[0]
+                    .kategorija_odsustva,
+                None,
+                "while the nalog is live the column is withheld"
+            );
+
+            crate::commands::audit::end_session(state, "2026-08-01T09:15:00Z")
+                .expect("the nalog closes");
+
+            assert_eq!(
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:16:00Z")
+                    .expect("month lists")
+                    .entries[0]
+                    .kategorija_odsustva
+                    .as_deref(),
+                Some("sprecenost_rfzo"),
+                "with no live nalog nothing is masked — one minute after the click"
+            );
+
+            // …and the čl. 48 log says the nalog was closed, not that the absence
+            // reason was disclosed. This is the half that is unrecorded elsewhere.
+            let connection = state.db().open().expect("database should open");
+            let mut statement = connection
+                .prepare("SELECT action, object_type FROM audit_events")
+                .expect("the log should be readable");
+            let linije: Vec<(String, String)> = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("the log should list")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("the log should read");
+            assert!(
+                !linije
+                    .iter()
+                    .any(|(_, object_type)| object_type == "support_absence_reason"),
+                "no line names the absence reason on this route — that is the residual, and \
+                 §6 W-15 is where it is recorded; log was:\n{linije:?}"
+            );
+            assert!(
+                linije
+                    .iter()
+                    .any(|(action, object_type)| action == "menjanje"
+                        && object_type == "support_session"),
+                "what the log does carry is the closing of the nalog; log was:\n{linije:?}"
+            );
+        });
+    }
+
     /// The shop's explicit unmask is what req. 28 makes the exception, and it
     /// holds for that nalog only.
     #[test]
@@ -3364,6 +3541,115 @@ mod tests {
                 Some("sprecenost_rfzo"),
                 "after the čl. 48-logged unmask the register carries the reason again"
             );
+        });
+    }
+
+    /// **The mask reaches the write path, because otherwise it eats the day.**
+    ///
+    /// The entry form is also the correction form and nothing prefills it from a
+    /// row — `emptyForm` sets `kategorijaOdsustva: ""` and the request builder
+    /// maps that to `null`. While a nalog masks the column the operator cannot
+    /// see the category they would have to re-enter (the cell reads „Odsutan
+    /// (razlog skriven)“ and no bucket is drawn), so an ispravka of the day's
+    /// HOURS silently appends a verzija with `kategorija_odsustva = NULL` and
+    /// every absence bucket at zero. The predecessor survives — v17 is
+    /// append-only — but the live row and `WorkTimeMonth::ukupno`, which sums
+    /// `!zamenjen` rows only, lose 480 minutes of statutory absence, and a
+    /// `close_period` afterwards freezes that understatement into the Class A
+    /// record `retention.rs` keeps `trajno`.
+    ///
+    /// **The refusal is blunt on purpose: any ispravka of a day that books
+    /// absence minutes, not only one that drops them.** A rule that refused only
+    /// the drop would be satisfied by picking any category at all — overwriting a
+    /// value the operator cannot see with a guess, which is the same corruption
+    /// one click further on. It also could not be stated to the operator in one
+    /// true sentence, and this refusal has to name the two ways through: unmask
+    /// for this nalog, or correct the day once the nalog is over.
+    ///
+    /// **The guard never reads the withheld column.** It asks the predecessor's
+    /// minutes — v) plus the štrajk bucket, the same pair `AbsenceCell` uses —
+    /// so it neither names `kategorija_odsustva` nor discloses anything the
+    /// masked screen was not already showing: „this day books 480 minutes of
+    /// absence“ is on the register in front of whoever is being refused.
+    #[test]
+    fn a_correction_under_a_live_nalog_may_not_silently_drop_the_absence() {
+        with_state("worktime_masked_correction_keeps_the_absence", |state| {
+            sign_in_admin(state);
+            let radnik = seed_employee(state, "radnik_maska7", "Radnik Maska Sedam");
+            save_entry(
+                state,
+                dan_odsustva(radnik, "2026-07-06", "sprecenost_rfzo", 480),
+                "2026-07-06T18:00:00Z",
+            )
+            .expect("the absence day should record");
+
+            izdaj_nalog(state, "2026-08-01T09:00:00Z");
+
+            // The exact sequence: the vlasnik corrects the hours of a bolovanje
+            // day while the category is masked, so the select stays on „Bez
+            // odsustva“ and the request carries no category.
+            let error = correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: radni_dan(radnik, "2026-07-06", 420, 0),
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-08-01T09:20:00Z",
+            )
+            .expect_err("a correction that cannot see the category must not overwrite it");
+            assert_eq!(error.code(), "ispravka_razlog_odsustva_skriven");
+
+            let pod_maskom =
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:25:00Z").expect("month lists");
+            assert_eq!(
+                pod_maskom.entries.len(),
+                1,
+                "the refused correction must append no verzija"
+            );
+            assert_eq!(
+                pod_maskom.ukupno.ukupno_neizvrseni_minuta, 480,
+                "and the month's statutory absence total must be exactly what it was"
+            );
+
+            // …and the refusal names a real way through, on both routes it
+            // offers. First the unmask, which is čl. 48-logged.
+            crate::commands::audit::reveal_absence_reason(state, "2026-08-01T09:30:00Z")
+                .expect("the vlasnik may unmask for this nalog");
+            correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: dan_odsustva(radnik, "2026-07-06", "sprecenost_rfzo", 420),
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-08-01T09:40:00Z",
+            )
+            .expect("with the column visible the correction may be made faithfully");
+
+            let posle =
+                list_month(state, radnik, 2026, 7, "2026-08-01T09:45:00Z").expect("month lists");
+            assert_eq!(
+                posle.ukupno.ukupno_neizvrseni_minuta, 420,
+                "the correction the operator could actually see is applied in full"
+            );
+
+            // Second route: an ordinary day is not touched by any of this. The
+            // mask is about the absence reason, not about corrections.
+            save_entry(
+                state,
+                radni_dan(radnik, "2026-07-07", 480, 0),
+                "2026-07-07T18:00:00Z",
+            )
+            .expect("the worked day should record");
+            izdaj_nalog(state, "2026-08-01T11:00:00Z");
+            correct_entry(
+                state,
+                CorrectEntryRequest {
+                    entry: radni_dan(radnik, "2026-07-07", 420, 0),
+                    korekcija_razlog: "ispravka_sati".to_string(),
+                },
+                "2026-08-01T11:20:00Z",
+            )
+            .expect("a day with no absence has no category to lose");
         });
     }
 
@@ -3621,9 +3907,20 @@ mod tests {
     /// defective without them, and because zeroing one would be a false statement
     /// rather than a withholding: „0 časova“ is not „nije prikazano“.
     ///
-    /// So req. 28 is discharged **for the column and for the rendered grid**,
-    /// which draws v) and none of the nine buckets — and **not** for the two
-    /// places the buckets travel in full. Both are asserted below, in the order
+    /// So req. 28 is discharged **for the ZZPL column and for the nine v)
+    /// buckets on screen** — and **not** for the two places the buckets travel
+    /// in full. **The sentence „So req. 28 is discharged for the column and for
+    /// the rendered grid, which draws v) and none of the nine buckets“ is
+    /// withdrawn as of 09.08.2026**, on this test's own doc comment because
+    /// register row 12 cites it as the pin for the residual and a future author
+    /// reading the pin was being told the grid is closed. It is not: the grid
+    /// draws b) Ukupno ostvareni, Efektivno izvršeni and Čekanja i zastoji as
+    /// separate columns (`WorkTimeModule.tsx:904-908/931-935`) and
+    /// [`derive_totals`] makes b) = efektivno + čekanja +
+    /// `obustava_rada_strajk_minuta`, so the tenth category is recoverable from
+    /// the drawn columns by subtraction, exactly. The assertions below were
+    /// always right; only this statement of their scope was wrong. Both are
+    /// asserted below, in the order
     /// they leak: the **wire** first (the `WorkTimeMonth` a masked `list_month`
     /// serialises still carries `sprecenostRfzoMinuta: 480` beside a null
     /// category, so any client that reads JSON rather than pixels recovers the

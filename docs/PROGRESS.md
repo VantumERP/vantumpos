@@ -338,11 +338,26 @@ a `hours > 8 ⇒ prekovremeni` rule during preraspodela, an employee-side export
   **two shipped the same afternoon** and the sentence naming them is withdrawn — *„Still owed: a surface
   that reaches the verb, a grid cell that says skriveno rather than the em dash, and the ZEOR čl. 24
   tač. 1 buckets“*. What the code does: `commands/worktime.rs::razlog_odsustva_dostupan` withholds the
-  category from every register read and every export while a čl. 46 nalog is live,
+  category from every **payroll** register read and every export — `worktime_list_month` and
+  `worktime_export_csv` — while a čl. 46 nalog is live. **Re-stated a third time 09.08.2026:** the
+  phrase *„withholds the category from every register read and every export“* is **withdrawn**, because
+  `worktime_my_hours` calls `load_month(state, user_id, godina, mesec, true)` unconditionally and never
+  asks the question at all — the carve-out is deliberate, `my_hours` is the čl. 26 discharge, and §2
+  row 12 and the čl. 23 notice both state why. Beside it,
   `support_sessions.odsustvo_otkriveno_at` (v23) is the shop's per-nalog unmask stamp,
   `commands::audit::reveal_absence_reason` writes the čl. 48 line for it carrying no category, no
   employee name and no month, `SupportApprovalPanel` is the vlasnik's admin-gated control beside
   Daljinska podrška, and `AbsenceCell` renders „Odsutan (razlog skriven)“ instead of an em dash.
+  **Two more limbs landed 09.08.2026 in the whole-branch review pass.** The mask now reaches the
+  **write** path: `commands/worktime.rs::guard_ispravka_not_taken_blind` refuses an ispravka of a day
+  that books absence minutes while the category is masked (`ispravka_razlog_odsustva_skriven`),
+  because the correction form is the entry form, nothing prefills it, and a correction taken blind
+  appended a verzija with the category NULL and every bucket at zero — 480 minutes of statutory
+  absence out of the live row and out of `WorkTimeMonth::ukupno`, and into the frozen Class A record
+  if a close followed. And `commands::audit::request_access` now completes the čl. 48 record when it
+  enters a nalog that was unmasked **before** anyone entered: without it, grant → unmask → enter left
+  the log holding one `unos` with an empty Razlog and an empty Primalac for a nalog under which the
+  obrađivač demonstrably read the column.
   **It is still a partial, for one reason rather than three:** the ZEOR čl. 24 tač. 1 buckets ride on
   the JSON payload and on the exported file, so a client reading either recovers the reason, and the
   rendered grid discloses the tenth category by subtraction. Register row 12 states the whole of it.
@@ -1587,7 +1602,9 @@ files, migration **v22**. **Migration head is now v23, and v23 is the only migra
 `kategorija_odsustva` left the backend on every read and the **screen** decided —
 `WorkTimeModule.tsx::canSeeAbsenceReason` is a role boolean drawn over data the wire had already
 carried, which is masking by CSS. After it the **backend** decides: while a ZZPL čl. 46 nalog za
-daljinsku podršku is live, the register read and the export run a statement that never names the
+daljinsku podršku is live, the payroll register read and the export — `worktime_list_month` and
+`worktime_export_csv`, never `worktime_my_hours`, which is the čl. 26 carve-out §2 row 12 and the
+čl. 23 notice both state — run a statement that never names the
 column, so the value is absent because nothing read it rather than because something read it and
 dropped it — the shape `commands::popis::read_lines` uses for the čl. 8 st. 5 withholding, and its
 reasoning is quoted into the new function's doc comment. The role gate stays, as a second layer over a
@@ -1638,8 +1655,8 @@ the table instead, and every operator string in the feature says „skriva se sa
 reviewing F-1 — whether `docs/compliance/ugovor-o-obradi-nacrt.md` names posebne vrste podataka in its
 ZZPL čl. 45 st. 3 clause, and whether the čl. 45 st. 4 tač. 7 delete-or-return duty covers support
 artefacts — and this feature is what first put čl. 17-adjacent data on the machine the vendor reaches.
-Two facts now make it demonstrable rather than theoretical, and both belong to the lawyer rather than
-to code:
+Three facts now make it demonstrable rather than theoretical, and all three belong to the lawyer rather
+than to code:
 
 1. **The vendor reaches the register.** `list_month` and `export_month_csv` are exactly what an operator
    under a čl. 46 nalog invokes, which is why `radno_vreme.vrsta_primalaca` in the čl. 47 register now
@@ -1654,23 +1671,49 @@ to code:
    claims the session bounds what the operator can reach, and it is recorded here rather than denied.
    Closing it is a decision about what a credential reset must log and whether a support operator may
    hold the vlasnik's session at all — neither of which req. 28 asks for.
+3. **The mask is keyed to a live nalog, so ending it or outlasting it lifts the mask with no čl. 48
+   line — and that is the shortest route of the three.** Added 09.08.2026; the inventory recorded the
+   longest route (item 2) and omitted this one. `commands::audit::end_session` is gated by
+   `require_admin`, the **identical** gate as `reveal_absence_reason`, so an operator driving the
+   vlasnik's signed-in screen clicks „Okončaj nalog“ on the same Privatnost → Daljinska podrška panel
+   and reads `kategorija_odsustva` unmasked on the next `worktime_list_month` or
+   `worktime_export_csv`. The log then holds a `menjanje` / `support_session` row that says the nalog
+   was closed and nothing that says the čl. 17-adjacent column became visible — so the sanctioned route
+   costs an `otkrivanje` naming `SupportAbsenceReason` and the unsanctioned one costs nothing. The same
+   lift arrives with **no action at all** at `expires_at`, whose panel default is 60 minutes, and
+   nothing in the app disconnects the operator at that instant: SW-10 deliberately keeps the nalog a
+   record and not an access control. Neither is a code defect — an application cannot stop someone who
+   is already inside an admin session — and both are pinned as deliberate rather than left to be
+   discovered, by `commands::worktime::tests::ending_the_nalog_lifts_the_mask_and_logs_no_disclosure`
+   (the mask lifts, and no line names the absence reason) and by `an_expired_nalog_withholds_nothing`.
+   The two code answers available are an explicit re-arm after a nalog closes, or keying the mask on
+   „a nalog was live at any point in this app session“; both are design decisions beyond this cycle,
+   and a post-session mask would contradict `an_expired_nalog_withholds_nothing` head-on, so neither
+   was taken silently. `razlog_odsustva_dostupan`'s doc comment carries the same paragraph, and §2
+   row 12 carries the clause.
 
 **Verification gates — all six run from the repo root, one at a time, every command exited `0`:**
 
 | Gate | Result | Exit |
 |---|---|---|
-| `bun run test` | **568 passed** / 0 failed, 36 files (was 547 / 35) | `0` |
+| `bun run test` | **569 passed** / 0 failed, 36 files (was 547 / 35; the review pass added the 569th) | `0` |
 | `bun run build` | tsc + vite, dist written; only the pre-existing chunk-size advisory | `0` |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | **1040 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 1016) | `0` |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | **1043 passed**; 0 failed, 0 ignored, 0 measured, 0 filtered out (was 1016; the review pass added three) | `0` |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | clean, no warnings | `0` |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | clean, no output | `0` |
 | `git diff --check` | clean, no output | `0` |
 
-Net **+24 cargo / +21 bun** over `e7c79a3`, and the two figures reconcile against the diff rather than
-against memory: `#[test]` attributes added per file are `commands/audit.rs` **+9**,
-`commands/worktime.rs` **+7**, `db/migrations.rs` **+3**, `audit.rs` **+2**, `docs_guard.rs` **+2**,
+Net **+27 cargo / +22 bun** over `e7c79a3` — the figures first written here were +24 / +21 and are
+superseded by the whole-branch review pass, which added `commands/audit.rs` **+1**
+(`an_unmask_taken_before_entry_is_disclosed_when_the_operator_enters`), `commands/worktime.rs` **+2**
+(`a_correction_under_a_live_nalog_may_not_silently_drop_the_absence`,
+`ending_the_nalog_lifts_the_mask_and_logs_no_disclosure`) and `mock-adapter.odsustvo.test.ts` **+1**,
+with every other review fix landing as assertions inside existing tests. The two figures reconcile
+against the diff rather than
+against memory: `#[test]` attributes added per file are `commands/audit.rs` **+10**,
+`commands/worktime.rs` **+9**, `db/migrations.rs` **+3**, `audit.rs` **+2**, `docs_guard.rs` **+2**,
 `cl47.rs` **+1**; `it(` blocks added are `SupportApprovalPanel.test.tsx` **+7**,
-`mock-adapter.odsustvo.test.ts` **+6** (a new file, which is the 36th), `WorkTimeModule.test.tsx`
+`mock-adapter.odsustvo.test.ts` **+7** (a new file, which is the 36th), `WorkTimeModule.test.tsx`
 **+5**, and one each in `App.test.tsx`, `PrivacyModule.test.tsx` and `AuditLogPanel.test.tsx`.
 `local-adapter.test.ts` gained assertions inside an existing test rather than a test of its own.
 **Nothing was deleted, weakened or skipped**, and three pins had to be *restated* rather than left

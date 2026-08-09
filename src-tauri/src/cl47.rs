@@ -198,8 +198,9 @@ const TEMPLATES: &[Template] = &[
         vrsta_lica: "Zaposleni i radno angažovana lica kod rukovaoca.",
         vrsta_podataka: "Nezaključeni dnevni unosi časova i pomoćni podaci o vremenu, u istim \
              kategorijama kao zaključena klasifikacija.",
-        vrsta_primalaca: "Ne otkrivaju se nikome van rukovaoca; iz njih se izvodi klasifikacija \
-             koja se dalje otkriva.",
+        vrsta_primalaca: "Actaer kao obrađivač samo tokom sesije daljinske podrške koju je \
+             rukovalac odobrio; van toga se ne otkrivaju nikome van rukovaoca, a iz njih se \
+             izvodi klasifikacija koja se dalje otkriva.",
         rok_osnov: "Zakon ne propisuje rok. Radne verzije se brišu tek pošto je mesec zaključen i \
              klasifikacija izvedena, jer se do tada iz njih izvodi evidencija koja se čuva \
              trajno (ZZPL čl. 5 st. 1 tač. 5).",
@@ -1565,6 +1566,37 @@ mod tests {
         });
     }
 
+    /// The sentence around a byte offset, so a guard can read what a document
+    /// SAYS about its subject instead of only that the subject is named.
+    ///
+    /// A full stop ends a sentence only when the next characters are a space and
+    /// a capital or an opening „ — otherwise „ZZPL čl. 26“ and „ZoR čl. 55“ cut
+    /// every legal citation in this file in half, and the clause that carries the
+    /// claim would fall outside the span the guard reads.
+    fn recenica_oko(text: &str, at: usize) -> &str {
+        let kraj_recenice = |idx: usize| -> bool {
+            let mut posle = text[idx + 1..].chars();
+            posle.next() == Some(' ')
+                && posle
+                    .next()
+                    .is_some_and(|znak| znak.is_uppercase() || znak == '„')
+        };
+
+        let start = text[..at]
+            .char_indices()
+            .filter(|(i, znak)| *znak == '.' && kraj_recenice(*i))
+            .map(|(i, _)| i + 1)
+            .next_back()
+            .unwrap_or(0);
+        let end = text[at..]
+            .char_indices()
+            .find(|(i, znak)| *znak == '.' && (kraj_recenice(at + *i) || at + *i + 1 == text.len()))
+            .map(|(i, _)| at + i + 1)
+            .unwrap_or(text.len());
+
+        text[start..end].trim()
+    }
+
     /// SW-14 req. 28 reaches the čl. 47 st. 1 t. 8 measures **once**, in the
     /// entry whose data it protects.
     ///
@@ -1635,6 +1667,49 @@ mod tests {
             );
         }
 
+        // **The carve-out is a claim, not a phrase.** Until 09.08.2026 the needle
+        // above was the whole of it, and the exact inverse — „Pregled „Moji
+        // sati“ se takođe skrivadok nalog važi“ — satisfies a substring check
+        // just as well as the truth does. So the sentence that names the subject
+        // is read, and it must apply a withholding verb to it only under a
+        // negation. `my_hours` (`worktime.rs:518`) masks nothing, deliberately;
+        // a register that said otherwise would deny behaviour the code has, in
+        // the document the Poverenik reads.
+        const SAKRIVANJE: [&str; 5] = ["skriva", "prikazuje", "prikazuju", "čita", "čitaju"];
+        let at = radno_vreme
+            .mere
+            .to_lowercase()
+            .find("moji sati")
+            .expect("the needle above already proved the subject is there");
+        assert!(
+            radno_vreme.mere[at..]
+                .to_lowercase()
+                .starts_with("moji sati"),
+            "the lower-cased offset must land on the same word in the original — Serbian Latin \
+             maps case within one byte width, and this assertion is what says so out loud"
+        );
+        let recenica = recenica_oko(radno_vreme.mere, at);
+        let recenica_mala = recenica.to_lowercase();
+        assert!(
+            SAKRIVANJE
+                .iter()
+                .any(|glagol| recenica_mala.contains(&format!("ne {glagol}"))),
+            "the „Moji sati“ sentence must SAY the screen is not masked, not merely mention it \
+             — „{recenica}“"
+        );
+        let mut ostatak = recenica_mala.clone();
+        for glagol in SAKRIVANJE {
+            ostatak = ostatak.replace(&format!("ne {glagol}"), "«negirano»");
+        }
+        for glagol in SAKRIVANJE {
+            assert!(
+                !ostatak.contains(glagol),
+                "the „Moji sati“ sentence withholds („{glagol}“) after its negations are struck \
+                 out — „{recenica}“. `my_hours` calls `load_month(.., true)` unconditionally, so \
+                 that would be the register denying a čl. 26 carve-out the code keeps open"
+            );
+        }
+
         // Čl. 47 st. 1 t. 5 and t. 8 have to describe the same world. The measure
         // above is entirely about what the obrađivač sees during a support
         // session, so an entry that masks a recipient it does not list is
@@ -1648,6 +1723,26 @@ mod tests {
             "radno_vreme.vrsta_primalaca must name the obrađivač its own mere describe masking \
              — found „{}“",
             radno_vreme.vrsta_primalaca
+        );
+
+        // …and so must the entry that holds the rows the mask actually withholds.
+        // `radno_vreme_radne_verzije` is Class B — the unclosed
+        // `work_time_entries` — and those are exactly what `list_month` and
+        // `export_month_csv` return for an open month. Reaching them under a
+        // čl. 46 nalog is req. 28's whole premise, so an entry saying they are
+        // „not disclosed to anyone outside the rukovalac“ contradicts its
+        // neighbour inside one generated register.
+        let radne_verzije = TEMPLATES
+            .iter()
+            .find(|template| template.kljuc == "radno_vreme_radne_verzije")
+            .expect("the draft entry must exist");
+        let primaoci_verzija = radne_verzije.vrsta_primalaca.to_lowercase();
+        assert!(
+            primaoci_verzija.contains("obrađivač") && primaoci_verzija.contains("podršk"),
+            "radno_vreme_radne_verzije.vrsta_primalaca must name the obrađivač too — the \
+             unclosed daily rows ARE what the operator reads under a nalog, and masking a \
+             column of them is what the sibling entry describes — found „{}“",
+            radne_verzije.vrsta_primalaca
         );
 
         // …and it reaches the generated artefact, not just the constant. The

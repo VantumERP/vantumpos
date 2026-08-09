@@ -2389,6 +2389,13 @@ fn no_document_says_the_absence_reason_mask_is_unbuilt() {
         "reveal_absence_reason",
     ];
 
+    /// A claim that the mask reaches EVERY read. It does not, and the exception
+    /// is deliberate.
+    const SVAKO_CITANJE: [&str; 2] = ["every register read", "every read"];
+
+    /// The exception, in the two words a document may use for it.
+    const IZUZETAK: [&str; 3] = ["my_hours", "moji sati", "„moji sati“"];
+
     // Renaming any of the three stops this file compiling rather than leaving
     // the prose above pointing at symbols nothing declares.
     let _unmask_verb = crate::commands::audit::reveal_absence_reason;
@@ -2453,6 +2460,45 @@ fn no_document_says_the_absence_reason_mask_is_unbuilt() {
              denies it — and this document said the masking was not built for a day after it \
              was. Re-state the row rather than deleting it."
         );
+
+        // **The third half: the mask does not reach every read, and a document
+        // that says it does denies a carve-out the code deliberately keeps
+        // open.** `worktime::my_hours` calls `load_month(.., true)`
+        // unconditionally — it never asks `razlog_odsustva_dostupan` at all —
+        // and `my_hours_still_shows_the_employee_their_own_absence_reason` pins
+        // that divergence under a live nalog. Both halves above passed the
+        // sentence „withholds the category from every register read and every
+        // export“ for a day: it carries no denial marker, and its block names
+        // `razlog_odsustva_dostupan` right beside it. So the universal claim is
+        // swept on its own terms, and a block that makes it must also name the
+        // exception. Quoted withdrawals are exempt, as everywhere in this file.
+        for marker in SVAKO_CITANJE {
+            for at in match_indices_ci(text, marker) {
+                if inside_a_serbian_quotation(text, at) {
+                    continue;
+                }
+                let (block_line, block) = markdown_block_around(text, at);
+                let o_maski = KOLONA
+                    .iter()
+                    .chain(["kategorija_odsustva"].iter())
+                    .any(|needle| !match_indices_ci(&block, needle).is_empty());
+                if !o_maski {
+                    continue;
+                }
+                assert!(
+                    IZUZETAK
+                        .iter()
+                        .any(|needle| !match_indices_ci(&block, needle).is_empty()),
+                    "{doc}:{block_line} says the SW-14 req. 28 mask covers „{marker}“ and names \
+                     none of {IZUZETAK:?} — „{block}“. `commands/worktime.rs::my_hours` calls \
+                     `load_month(state, user_id, godina, mesec, true)` unconditionally and never \
+                     consults `razlog_odsustva_dostupan`, so the claim is false as written. \
+                     Scope it to the payroll reads — `worktime_list_month` and \
+                     `worktime_export_csv` — and carry the čl. 26 carve-out in the same block. A \
+                     withdrawn sentence quoted inside „ “ is exempt."
+                );
+            }
+        }
     }
 }
 
